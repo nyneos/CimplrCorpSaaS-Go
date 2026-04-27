@@ -65,12 +65,25 @@ func UploadExposure(w http.ResponseWriter, r *http.Request) {
 
 // Helper: send JSON error response and log
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
+	log.Printf("[ERROR: %v] [FX] [ExposureUpload] request failed", errMsg)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
+		constants.ValueError:   clientMsg,
 	})
 }
 
@@ -323,7 +336,6 @@ func exposureHeadersHasUploadBatchID(ctx context.Context, db *sql.DB) bool {
 	return exists
 }
 
-
 func lookupExposureUploadS3Key(ctx context.Context, db *sql.DB, recordID string) (sql.NullString, error) {
 	var uploadS3Key sql.NullString
 	trimmedRecordID := strings.TrimSpace(recordID)
@@ -343,7 +355,7 @@ func lookupExposureUploadS3Key(ctx context.Context, db *sql.DB, recordID string)
 	if err != nil && err != sql.ErrNoRows {
 		return sql.NullString{}, err
 	}
-	
+
 	err = db.QueryRowContext(ctx, `
 		SELECT upload_s3_key
 		FROM exposure_headers
@@ -382,7 +394,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Get joined row
-		joinRow := db.QueryRow(`
+		joinRow := db.QueryRowContext(r.Context(), `
 			SELECT h.exposure_header_id, h.entity
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
@@ -402,7 +414,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Get columns for each table
-		headerColsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_headers'`)
+		headerColsRes, err := db.QueryContext(r.Context(), `SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_headers'`)
 		if err != nil {
 			log.Printf("[ERROR] failed to query header columns: %v", err)
 			respondWithError(w, http.StatusInternalServerError, "failed to read table metadata")
@@ -410,7 +422,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 		}
 		defer headerColsRes.Close()
 
-		lineColsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_line_items'`)
+		lineColsRes, err := db.QueryContext(r.Context(), `SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_line_items'`)
 		if err != nil {
 			log.Printf("[ERROR] failed to query line columns: %v", err)
 			respondWithError(w, http.StatusInternalServerError, "failed to read table metadata")
@@ -462,7 +474,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 				strings.Join(setParts, ", "),
 				len(values),
 			)
-			if _, err := db.Exec(query, values...); err != nil {
+			if _, err := db.ExecContext(r.Context(), query, values...); err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Header update failed: "+err.Error())
 				return
 			}
@@ -485,7 +497,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 				strings.Join(setParts, ", "),
 				len(values),
 			)
-			if _, err := db.Exec(query, values...); err != nil {
+			if _, err := db.ExecContext(r.Context(), query, values...); err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Line item update failed: "+err.Error())
 				return
 			}
@@ -493,7 +505,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 
 		// Only return the updated fields
 		// Fetch full joined row and parse fields
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(r.Context(), `
 			SELECT h.*, l.*
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
@@ -563,7 +575,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 		if len(buNames) == 0 {
 			// Fallback: Get user's business unit name from DB
 			var userBu string
-			err := db.QueryRow(constants.QuerryBusinessUnitName, req.UserID).Scan(&userBu)
+			err := db.QueryRowContext(r.Context(), constants.QuerryBusinessUnitName, req.UserID).Scan(&userBu)
 			if err != nil || userBu == "" {
 				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 				return
@@ -577,7 +589,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			}
 
 			// Recursive CTE over masterentitycash/cashentityrelationships to get descendants
-			rows, err := db.Query(`
+			rows, err := db.QueryContext(r.Context(), `
 				WITH RECURSIVE descendants AS (
 					SELECT entity_id, entity_name FROM masterentitycash WHERE entity_id = $1
 					UNION ALL
@@ -607,7 +619,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Join exposure_headers and exposure_line_items filtered by entity
-		joinRows, err := db.Query(`
+		joinRows, err := db.QueryContext(r.Context(), `
 			SELECT h.*, l.*
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
@@ -694,9 +706,9 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 		// Fetch permissions for 'exposure-upload' page for this role
 		exposureUploadPerms := map[string]interface{}{}
 		var roleId int
-		err = db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
+		err = db.QueryRowContext(r.Context(), "SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
 		if err == nil {
-			permRows, err := db.Query(`
+			permRows, err := db.QueryContext(r.Context(), `
 				SELECT p.page_name, p.tab_name, p.action, rp.allowed
 				FROM role_permissions rp
 				JOIN permissions p ON rp.permission_id = p.id
@@ -786,7 +798,7 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 		if len(buNames) == 0 {
 			// Fallback: Get user's business unit name from DB
 			var userBu string
-			err := db.QueryRow(constants.QuerryBusinessUnitName, req.UserID).Scan(&userBu)
+			err := db.QueryRowContext(r.Context(), constants.QuerryBusinessUnitName, req.UserID).Scan(&userBu)
 			if err != nil || userBu == "" {
 				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 				return
@@ -794,7 +806,7 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 
 			// Get root entity id
 			var rootEntityId string
-			err = db.QueryRow(
+			err = db.QueryRowContext(r.Context(),
 				"SELECT entity_id FROM masterEntity WHERE entity_name = $1 AND (approval_status = 'Approved' OR approval_status = 'approved') AND (is_deleted = false OR is_deleted IS NULL)",
 				userBu,
 			).Scan(&rootEntityId)
@@ -804,7 +816,7 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			}
 
 			// Recursive CTE to get all descendant entity_names
-			rows, err := db.Query(`
+			rows, err := db.QueryContext(r.Context(), `
 				WITH RECURSIVE descendants AS (
 					SELECT entity_id, entity_name FROM masterEntity WHERE entity_id = $1
 					UNION ALL
@@ -835,7 +847,7 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Join exposure_headers and exposure_line_items filtered by entity and approval_status pending
-		joinRows, err := db.Query(`
+		joinRows, err := db.QueryContext(r.Context(), `
 			SELECT h.*, l.*
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
@@ -922,9 +934,9 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 		// Fetch permissions for 'exposure-upload' page for this role
 		exposureUploadPerms := map[string]interface{}{}
 		var roleId int
-		err = db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
+		err = db.QueryRowContext(r.Context(), "SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
 		if err == nil {
-			permRows, err := db.Query(`
+			permRows, err := db.QueryContext(r.Context(), `
 				SELECT p.page_name, p.tab_name, p.action, rp.allowed
 				FROM role_permissions rp
 				JOIN permissions p ON rp.permission_id = p.id
@@ -1002,7 +1014,7 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Mark for delete approval first
-		res, err := db.Exec(
+		res, err := db.ExecContext(r.Context(),
 			`UPDATE exposure_headers SET approval_status = 'Delete-Approval', delete_comment = $1, requested_by = $2 WHERE exposure_header_id = ANY($3::uuid[])`,
 			req.DeleteComment,
 			requestedBy,
@@ -1055,7 +1067,7 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(
+		rows, err := db.QueryContext(r.Context(),
 			`UPDATE exposure_headers SET approval_status = 'Rejected', rejected_by = $1, rejection_comment = $2, rejected_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`,
 			rejectedBy,
 			req.RejectionComment,
@@ -1401,7 +1413,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 		if len(buNames) == 0 {
 			// Fallback: Get user's business unit name from DB
 			var userBu string
-			err := db.QueryRow(constants.QuerryBusinessUnitName, userID).Scan(&userBu)
+			err := db.QueryRowContext(r.Context(), constants.QuerryBusinessUnitName, userID).Scan(&userBu)
 			if err != nil || userBu == "" {
 				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 				return
@@ -1415,7 +1427,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 			}
 
 			// Recursive CTE over masterentitycash/cashentityrelationships to get descendants
-			rows, err := db.Query(`
+			rows, err := db.QueryContext(r.Context(), `
 				WITH RECURSIVE descendants AS (
 					SELECT entity_id, entity_name FROM masterentitycash WHERE entity_id = $1
 					UNION ALL
@@ -1839,7 +1851,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					log.Printf("[FX-STAGING] S3 DISABLED - file will not be uploaded to S3!")
 				}
 
-				tableColumnsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = $1`, field.TableName)
+				tableColumnsRes, err := db.QueryContext(r.Context(), `SELECT column_name FROM information_schema.columns WHERE table_name = $1`, field.TableName)
 				validColumns := make(map[string]bool)
 				if err == nil {
 					defer tableColumnsRes.Close()

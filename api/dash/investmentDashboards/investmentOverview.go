@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"sort"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -1722,14 +1723,8 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for amc := range amcSet {
 			amcNames = append(amcNames, amc)
 		}
-		// Simple sort
-		for i := 0; i < len(amcNames); i++ {
-			for j := i + 1; j < len(amcNames); j++ {
-				if amcNames[i] > amcNames[j] {
-					amcNames[i], amcNames[j] = amcNames[j], amcNames[i]
-				}
-			}
-		}
+		// standard sort replacing bubble sort
+		sort.Strings(amcNames)
 
 		// Build output rows
 		outRows := make([]map[string]interface{}, 0, len(months))

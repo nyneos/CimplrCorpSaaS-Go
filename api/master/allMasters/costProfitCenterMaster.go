@@ -1752,7 +1752,19 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Fetch relationships and compute descendants so we add audit actions for all descendants as well
 		ctx := r.Context()
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
+		// wrapped in transaction to prevent race condition
+		tx, err := pgxPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+		relRows, err := tx.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1762,7 +1774,7 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		codeToIDMap := map[string]string{}
 
 		// First get all centre_code to centre_id mappings
-		codeRows, err := pgxPool.Query(ctx, `SELECT centre_id, centre_code FROM mastercostprofitcenter`)
+		codeRows, err := tx.Query(ctx, `SELECT centre_id, centre_code FROM mastercostprofitcenter`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1817,10 +1829,15 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Bulk insert audit actions for all centre ids (roots + descendants)
 		q := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at)
 			  SELECT cid, 'DELETE', 'PENDING_DELETE_APPROVAL', $1, $2, now() FROM unnest($3::text[]) AS cid`
-		if _, err := pgxPool.Exec(ctx, q, req.Reason, requestedBy, allList); err != nil {
+		if _, err := tx.Exec(ctx, q, req.Reason, requestedBy, allList); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		committed = true
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "queued_count": len(allList)})
 	}
 }
@@ -1850,8 +1867,20 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Fetch relationships and compute descendants, then update audit rows by centre_id
 		ctx := context.Background()
+		// wrapped in transaction to prevent race condition
+		tx, err := pgxPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
 
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
+		relRows, err := tx.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1861,7 +1890,7 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		codeToIDMap := map[string]string{}
 
 		// Get centre_code to centre_id mappings
-		codeRows, err := pgxPool.Query(ctx, `SELECT centre_id, centre_code FROM mastercostprofitcenter`)
+		codeRows, err := tx.Query(ctx, `SELECT centre_id, centre_code FROM mastercostprofitcenter`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1918,7 +1947,7 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Update audit rows to REJECTED and return affected rows
 		query := `UPDATE auditactioncostprofitcenter SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE centre_id = ANY($3) RETURNING action_id, centre_id`
-		rows2, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
+		rows2, err := tx.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to reject centre actions")
 			if statusCode == http.StatusOK {
@@ -1929,7 +1958,6 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		defer rows2.Close()
 
 		var updated []map[string]interface{}
 		for rows2.Next() {
@@ -1938,6 +1966,12 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				updated = append(updated, map[string]interface{}{"action_id": actionID, "centre_id": centreID})
 			}
 		}
+		rows2.Close()
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		committed = true
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
@@ -1973,9 +2007,21 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 		ctx := context.Background()
+		// wrapped in transaction to prevent race condition
+		tx, err := pgxPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
 
 		// Fetch relationships
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
+		relRows, err := tx.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1985,7 +2031,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		codeToIDMap := map[string]string{}
 
 		// Get centre_code to centre_id mappings
-		codeRows, err := pgxPool.Query(ctx, `SELECT centre_id, centre_code FROM mastercostprofitcenter`)
+		codeRows, err := tx.Query(ctx, `SELECT centre_id, centre_code FROM mastercostprofitcenter`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -2042,7 +2088,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		// Update audit rows to APPROVED and return affected rows including action type
 		query := `UPDATE auditactioncostprofitcenter SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE centre_id = ANY($3) RETURNING action_id, centre_id, actiontype`
-		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToApprove)
+		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToApprove)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to approve centre actions")
 			if statusCode == http.StatusOK {
@@ -2053,7 +2099,6 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 			return
 		}
-		defer rows.Close()
 
 		var updated []map[string]interface{}
 		var deleteIDs []string
@@ -2066,11 +2111,12 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				}
 			}
 		}
+		rows.Close()
 
 		// Set is_deleted=true for approved DELETE actions
 		if len(deleteIDs) > 0 {
 			updQ := `UPDATE mastercostprofitcenter SET is_deleted=true WHERE centre_id = ANY($1)`
-			if _, err := pgxPool.Exec(ctx, updQ, deleteIDs); err != nil {
+			if _, err := tx.Exec(ctx, updQ, deleteIDs); err != nil {
 				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to mark centres as deleted")
 				if statusCode == http.StatusOK {
 					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -2081,6 +2127,11 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				return
 			}
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		committed = true
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0

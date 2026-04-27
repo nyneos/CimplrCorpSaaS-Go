@@ -62,15 +62,33 @@ func IsBulkSuccess(results []map[string]interface{}) bool {
 	return true
 }
 
+func stableErrorMessage(status int) string {
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		return "invalid request"
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusNotFound:
+		return "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			return "internal server error"
+		}
+		return "request failed"
+	}
+}
+
 // Error response helper
 func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
+	log.Printf("[ERROR: %v] [API] [Response] request failed", errMsg)
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
+		constants.ValueError:   stableErrorMessage(status),
+	}); err != nil {
+		log.Printf("[ERROR: %v] [API] [Response] failed to encode error response", err)
+	}
 }
 
 // RespondWithResult sends a consistent JSON response for success or error
@@ -79,20 +97,24 @@ func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
 	if success {
 		w.WriteHeader(http.StatusOK) // 200
 		log.Println("[INFO] RespondWithResult success")
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true})
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true}); err != nil {
+			log.Printf("[ERROR: %v] [API] [Response] failed to encode success result", err)
+		}
 	} else {
 		// Set appropriate error status code based on error type
+		status := http.StatusInternalServerError
 		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
-			w.WriteHeader(http.StatusBadRequest) // 400
+			status = http.StatusBadRequest
 		} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
-			w.WriteHeader(http.StatusUnprocessableEntity) // 422
+			status = http.StatusUnprocessableEntity
 		} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
-			w.WriteHeader(http.StatusUnauthorized) // 401
-		} else {
-			w.WriteHeader(http.StatusInternalServerError) // 500
+			status = http.StatusUnauthorized
 		}
-		log.Println("[ERROR] RespondWithResult", errMsg)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg})
+		w.WriteHeader(status)
+		log.Printf("[ERROR: %v] [API] [Response] request failed", errMsg)
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: stableErrorMessage(status)}); err != nil {
+			log.Printf("[ERROR: %v] [API] [Response] failed to encode error result", err)
+		}
 	}
 }
 
@@ -101,18 +123,18 @@ func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payl
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	resp := map[string]interface{}{constants.ValueSuccess: success}
 	if !success && errMsg != "" {
-		resp[constants.ValueError] = errMsg
-		log.Println("[ERROR] RespondWithPayload", errMsg)
+		status := http.StatusInternalServerError
+		log.Printf("[ERROR: %v] [API] [Response] request failed", errMsg)
 		// Set appropriate error status code
 		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
-			w.WriteHeader(http.StatusBadRequest) // 400
+			status = http.StatusBadRequest
 		} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
-			w.WriteHeader(http.StatusUnprocessableEntity) // 422
+			status = http.StatusUnprocessableEntity
 		} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
-			w.WriteHeader(http.StatusUnauthorized) // 401
-		} else {
-			w.WriteHeader(http.StatusInternalServerError) // 500
+			status = http.StatusUnauthorized
 		}
+		resp[constants.ValueError] = stableErrorMessage(status)
+		w.WriteHeader(status)
 	} else {
 		w.WriteHeader(http.StatusOK) // 200
 	}
@@ -121,7 +143,9 @@ func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payl
 		resp["rows"] = payload
 		log.Println("[INFO] RespondWithPayload payload included")
 	}
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("[ERROR: %v] [API] [Response] failed to encode payload response", err)
+	}
 }
 
 // LogInfo logs an informational message (wrapper for consistent logging)

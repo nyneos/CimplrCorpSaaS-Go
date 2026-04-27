@@ -240,8 +240,8 @@ func kpiRowsToMaps(rows []CategoryKPIRow) []map[string]interface{} {
 //
 // Parameters:
 //
-//	ctx            — request context
-//	pool           — pgx connection pool
+//	ctx              — request context
+//	pool             — pgx connection pool
 //	bankStatementIDs — slice of bank_statement_id UUIDs to fetch
 //	action         — "APPROVE", "REJECT", "DELETE", etc. (workflow action type)
 //	requestedBy    — user_id / email of the user performing the action
@@ -252,7 +252,7 @@ func kpiRowsToMaps(rows []CategoryKPIRow) []map[string]interface{} {
 //	Use this directly with TriggerNotification(ctx, pool, route, correlationID, payload)
 func BuildBankStatementNotifPayload(
 	ctx context.Context,
-	pool interface{}, // *pgxpool.Pool or *sql.DB
+	pool *pgxpool.Pool,
 	bankStatementIDs []string,
 	action string,
 	requestedBy string,
@@ -309,78 +309,39 @@ func BuildBankStatementNotifPayload(
 
 	statements := []map[string]interface{}{}
 
-	// Try pgxpool first
-	if pgxPool, ok := pool.(*pgxpool.Pool); ok {
-		rows, err := pgxPool.Query(ctx, query, pq.Array(bankStatementIDs))
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var id, entityName, acc, entityID string
-				var start, end, uploaded time.Time
-				var open, close float64
-				var actionType, processingStatus, reqBy, checkBy, checkComment sql.NullString
-				var bankName, accountNickname sql.NullString
+	rows, err := pool.Query(ctx, query, pq.Array(bankStatementIDs))
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var id, entityName, acc, entityID string
+			var start, end, uploaded time.Time
+			var open, close float64
+			var actionType, processingStatus, reqBy, checkBy, checkComment sql.NullString
+			var bankName, accountNickname sql.NullString
 
-				if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded,
-					&actionType, &processingStatus, &reqBy, &checkBy, &checkComment, &bankName, &accountNickname, &entityID); err != nil {
-					continue
-				}
-
-				statements = append(statements, map[string]interface{}{
-					"bank_statement_id":      id,
-					"entity_name":            entityName,
-					"account_number":         acc,
-					"statement_period_start": start.Format(constants.DateFormat),
-					"statement_period_end":   end.Format(constants.DateFormat),
-					"opening_balance":        open,
-					"closing_balance":        close,
-					"uploaded_at":            uploaded.Format(time.RFC3339),
-					"action_type":            actionType.String,
-					"processing_status":      processingStatus.String,
-					"requested_by":           reqBy.String,
-					"checker_by":             checkBy.String,
-					"checker_comment":        checkComment.String,
-					"bank_name":              bankName.String,
-					"account_nickname":       accountNickname.String,
-					"entity_id":              entityID,
-				})
+			if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded,
+				&actionType, &processingStatus, &reqBy, &checkBy, &checkComment, &bankName, &accountNickname, &entityID); err != nil {
+				continue
 			}
-		}
-	} else if sqlDB, ok := pool.(*sql.DB); ok {
-		rows, err := sqlDB.QueryContext(ctx, query, pq.Array(bankStatementIDs))
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var id, entityName, acc, entityID string
-				var start, end, uploaded time.Time
-				var open, close float64
-				var actionType, processingStatus, reqBy, checkBy, checkComment sql.NullString
-				var bankName, accountNickname sql.NullString
 
-				if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded,
-					&actionType, &processingStatus, &reqBy, &checkBy, &checkComment, &bankName, &accountNickname, &entityID); err != nil {
-					continue
-				}
-
-				statements = append(statements, map[string]interface{}{
-					"bank_statement_id":      id,
-					"entity_name":            entityName,
-					"account_number":         acc,
-					"statement_period_start": start.Format(constants.DateFormat),
-					"statement_period_end":   end.Format(constants.DateFormat),
-					"opening_balance":        open,
-					"closing_balance":        close,
-					"uploaded_at":            uploaded.Format(time.RFC3339),
-					"action_type":            actionType.String,
-					"processing_status":      processingStatus.String,
-					"requested_by":           reqBy.String,
-					"checker_by":             checkBy.String,
-					"checker_comment":        checkComment.String,
-					"bank_name":              bankName.String,
-					"account_nickname":       accountNickname.String,
-					"entity_id":              entityID,
-				})
-			}
+			statements = append(statements, map[string]interface{}{
+				"bank_statement_id":      id,
+				"entity_name":            entityName,
+				"account_number":         acc,
+				"statement_period_start": start.Format(constants.DateFormat),
+				"statement_period_end":   end.Format(constants.DateFormat),
+				"opening_balance":        open,
+				"closing_balance":        close,
+				"uploaded_at":            uploaded.Format(time.RFC3339),
+				"action_type":            actionType.String,
+				"processing_status":      processingStatus.String,
+				"requested_by":           reqBy.String,
+				"checker_by":             checkBy.String,
+				"checker_comment":        checkComment.String,
+				"bank_name":              bankName.String,
+				"account_nickname":       accountNickname.String,
+				"entity_id":              entityID,
+			})
 		}
 	}
 
@@ -407,18 +368,18 @@ func BuildBankStatementNotifPayload(
 
 // BuildBankStatementParams groups parameters for constructing BankStatementNotifPayload.
 type BuildBankStatementParams struct {
-	BSID string
-	AccountNumber string
-	Metadata *Metadata
+	BSID           string
+	AccountNumber  string
+	Metadata       *Metadata
 	OpeningBalance float64
 	ClosingBalance float64
-	EntityID string
-	UploadedBy string
-	FileName string
-	TXNS []RecalculateTransaction
-	KPICats []map[string]interface{}
-	CategoryRules []categoryRuleComponent
-	Status string
+	EntityID       string
+	UploadedBy     string
+	FileName       string
+	TXNS           []RecalculateTransaction
+	KPICats        []map[string]interface{}
+	CategoryRules  []categoryRuleComponent
+	Status         string
 }
 
 // BuildBankStatementPayload constructs a BankStatementNotifPayload from the

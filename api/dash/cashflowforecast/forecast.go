@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -78,12 +79,14 @@ func GetCashflowForecastHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		kpis, err := GetForecastKPIs(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("[ERROR: %v] [Dash] [CashflowForecast] failed to fetch forecast KPIs", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 		rows, err := GetForecastRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("[ERROR: %v] [Dash] [CashflowForecast] failed to fetch forecast rows", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 		resp := map[string]interface{}{
@@ -493,7 +496,8 @@ func GetForecastDailyHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastDailyRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("[ERROR: %v] [Dash] [CashflowForecast] failed to fetch daily forecast rows", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
@@ -526,7 +530,8 @@ func GetForecastKPIsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		kpis, err := GetForecastKPIs(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("[ERROR: %v] [Dash] [CashflowForecast] failed to fetch KPI forecast", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 		resp := map[string]interface{}{constants.ValueSuccess: true, "kpis": kpis}
@@ -558,7 +563,8 @@ func GetForecastRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("[ERROR: %v] [Dash] [CashflowForecast] failed to fetch row forecast", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
@@ -640,7 +646,8 @@ func GetForecastCategorySumsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		sums, err := GetForecastCategorySums(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("[ERROR: %v] [Dash] [CashflowForecast] failed to fetch category sums", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 		resp := map[string]interface{}{constants.ValueSuccess: true, "category_sums": sums}

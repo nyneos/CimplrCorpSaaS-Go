@@ -5,16 +5,195 @@ package exposures
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/lib/pq"
 )
+
+var allowedExposureHeaderFields = map[string]string{
+	"additional_header_details": "additional_header_details",
+	"amount_in_doc_curr":        "amount_in_doc_curr",
+	"amount_in_local_currency":  "amount_in_local_currency",
+	"company_code":              "company_code",
+	"counterparty_code":         "counterparty_code",
+	"counterparty_name":         "counterparty_name",
+	"counterparty_type":         "counterparty_type",
+	"currency":                  "currency",
+	"document_date":             "value_date",
+	"document_id":               "document_id",
+	"effective_due_date":        "effective_due_date",
+	"entity":                    "entity",
+	"exposure_type":             "exposure_type",
+	"net_due_date":              "net_due_date",
+	"net_value":                 "net_value",
+	"payment_to_vendor":         "payment_to_vendor",
+	"posting_date":              "posting_date",
+	"source":                    "source",
+	"status":                    "status",
+	"total_open_amount":         "total_open_amount",
+	"total_original_amount":     "total_original_amount",
+	"value_date":                "value_date",
+}
+
+var allowedExposureLineItemFields = map[string]string{
+	"additional_line_details":  "additional_line_details",
+	"amount_in_doc_curr":       "amount_in_doc_curr",
+	"amount_in_local_currency": "amount_in_local_currency",
+	"company_code":             "company_code",
+	"counterparty_code":        "counterparty_code",
+	"counterparty_name":        "counterparty_name",
+	"counterparty_type":        "counterparty_type",
+	"currency":                 "currency",
+	"document_date":            "document_date",
+	"document_id":              "document_id",
+	"effective_due_date":       "effective_due_date",
+	"line_item_amount":         "line_item_amount",
+	"net_due_date":             "net_due_date",
+	"net_value":                "net_value",
+	"payment_to_vendor":        "payment_to_vendor",
+	"posting_date":             "posting_date",
+	"quantity":                 "quantity",
+	"source":                   "source",
+	"status":                   "status",
+	"unit_price":               "unit_price",
+}
+
+var allowedExposureBucketingFields = map[string]string{
+	"comments":         "comments",
+	"month_1":          "month_1",
+	"month_2":          "month_2",
+	"month_3":          "month_3",
+	"month_4":          "month_4",
+	"month_4_6":        "month_4_6",
+	"month_6plus":      "month_6plus",
+	"old_month1":       "old_month1",
+	"old_month2":       "old_month2",
+	"old_month3":       "old_month3",
+	"old_month4":       "old_month4",
+	"old_month4to6":    "old_month4to6",
+	"old_month6plus":   "old_month6plus",
+	"status_bucketing": "status_bucketing",
+}
+
+var allowedHedgingProposalFields = map[string]string{
+	"comments":       "comments",
+	"status_hedging": "status_hedging",
+}
+
+var jsonUpdateColumns = map[string]bool{
+	"additional_header_details": true,
+	"additional_line_details":   true,
+}
+
+func normalizeExposureUpdateValue(column string, value interface{}) (interface{}, error) {
+	if !jsonUpdateColumns[column] || value == nil {
+		return value, nil
+	}
+
+	switch value.(type) {
+	case string, []byte:
+		return value, nil
+	default:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		return encoded, nil
+	}
+}
+
+func buildExposureUpdateParts(fields map[string]interface{}, allowed map[string]string) ([]string, []interface{}, error) {
+	if len(fields) == 0 {
+		return nil, nil, nil
+	}
+
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	setParts := make([]string, 0, len(keys))
+	values := make([]interface{}, 0, len(keys))
+	usedColumns := make(map[string]string, len(keys))
+
+	for index, key := range keys {
+		column, ok := allowed[key]
+		if !ok {
+			return nil, nil, fmt.Errorf("unsupported field %q", key)
+		}
+		if previousKey, exists := usedColumns[column]; exists {
+			return nil, nil, fmt.Errorf("duplicate fields %q and %q target the same column", previousKey, key)
+		}
+
+		normalizedValue, err := normalizeExposureUpdateValue(column, fields[key])
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid value for %q: %w", key, err)
+		}
+
+		setParts = append(setParts, fmt.Sprintf(constants.FormatSQLColumnArg, column, index+1))
+		values = append(values, normalizedValue)
+		usedColumns[column] = key
+	}
+
+	return setParts, values, nil
+}
+
+func queryExposureUpdateRows(ctx context.Context, db *sql.DB, table string, setParts []string, values []interface{}, exposureHeaderID string) ([]map[string]interface{}, error) {
+	if len(setParts) == 0 {
+		return nil, nil
+	}
+
+	args := append(append([]interface{}{}, values...), exposureHeaderID)
+	query := fmt.Sprintf(
+		"UPDATE %s SET %s WHERE exposure_header_id = $%d RETURNING *",
+		table,
+		strings.Join(setParts, ", "),
+		len(args),
+	)
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	results := []map[string]interface{}{}
+	for rows.Next() {
+		vals := make([]interface{}, len(cols))
+		valPtrs := make([]interface{}, len(cols))
+		for i := range vals {
+			valPtrs[i] = &vals[i]
+		}
+		if err := rows.Scan(valPtrs...); err != nil {
+			return nil, err
+		}
+		rowMap := map[string]interface{}{}
+		for i, col := range cols {
+			rowMap[col] = parseDBValue(col, vals[i])
+		}
+		results = append(results, rowMap)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
 
 // // Helper: send JSON error response
 // func respondWithError(w http.ResponseWriter, status int, errMsg string) {
@@ -44,6 +223,34 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		if len(req.BucketingFields) == 0 && len(req.Fields) > 0 {
+			req.BucketingFields = req.Fields
+		}
+
+		headerSetParts, headerValues, err := buildExposureUpdateParts(req.HeaderFields, allowedExposureHeaderFields)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		lineItemSetParts, lineItemValues, err := buildExposureUpdateParts(req.LineItemFields, allowedExposureLineItemFields)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		bucketingSetParts, bucketingValues, err := buildExposureUpdateParts(req.BucketingFields, allowedExposureBucketingFields)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		hedgingSetParts, hedgingValues, err := buildExposureUpdateParts(req.HedgingFields, allowedHedgingProposalFields)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		// // Middleware: Validate session
 		// activeSessions := auth.GetActiveSessions()
 		// found := false
@@ -68,11 +275,11 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		updated := map[string]interface{}{}
 
 		// Ensure exposure_bucketing row exists
-		if len(req.BucketingFields) > 0 {
+		if len(bucketingSetParts) > 0 {
 			var exists int
-			err := db.QueryRow("SELECT 1 FROM exposure_bucketing WHERE exposure_header_id = $1", req.ExposureHeaderID).Scan(&exists)
+			err := db.QueryRowContext(r.Context(), "SELECT 1 FROM exposure_bucketing WHERE exposure_header_id = $1", req.ExposureHeaderID).Scan(&exists)
 			if err == sql.ErrNoRows {
-				_, err := db.Exec("INSERT INTO exposure_bucketing (exposure_header_id) VALUES ($1)", req.ExposureHeaderID)
+				_, err := db.ExecContext(r.Context(), "INSERT INTO exposure_bucketing (exposure_header_id) VALUES ($1)", req.ExposureHeaderID)
 				if err != nil {
 					respondWithError(w, http.StatusInternalServerError, "Failed to create exposure_bucketing row")
 					return
@@ -81,11 +288,11 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Ensure hedging_proposal row exists
-		if len(req.HedgingFields) > 0 {
+		if len(hedgingSetParts) > 0 {
 			var exists int
-			err := db.QueryRow("SELECT 1 FROM hedging_proposal WHERE exposure_header_id = $1", req.ExposureHeaderID).Scan(&exists)
+			err := db.QueryRowContext(r.Context(), "SELECT 1 FROM hedging_proposal WHERE exposure_header_id = $1", req.ExposureHeaderID).Scan(&exists)
 			if err == sql.ErrNoRows {
-				_, err := db.Exec("INSERT INTO hedging_proposal (exposure_header_id) VALUES ($1)", req.ExposureHeaderID)
+				_, err := db.ExecContext(r.Context(), "INSERT INTO hedging_proposal (exposure_header_id) VALUES ($1)", req.ExposureHeaderID)
 				if err != nil {
 					respondWithError(w, http.StatusInternalServerError, "Failed to create hedging_proposal row")
 					return
@@ -94,145 +301,54 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Update exposure_headers
-		if len(req.HeaderFields) > 0 {
-			setParts := []string{}
-			values := []interface{}{}
-			i := 1
-			for k, v := range req.HeaderFields {
-				setParts = append(setParts, fmt.Sprintf(constants.FormatSQLColumnArg, k, i))
-				values = append(values, v)
-				i++
+		if len(headerSetParts) > 0 {
+			headerRows, err := queryExposureUpdateRows(r.Context(), db, "exposure_headers", headerSetParts, headerValues, req.ExposureHeaderID)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to update exposure_headers")
+				return
 			}
-			values = append(values, req.ExposureHeaderID)
-			query := fmt.Sprintf("UPDATE exposure_headers SET %s WHERE exposure_header_id = $%d RETURNING *", strings.Join(setParts, ", "), len(values))
-			rows, err := db.Query(query, values...)
-			if err == nil {
-				cols, _ := rows.Columns()
-				for rows.Next() {
-					vals := make([]interface{}, len(cols))
-					valPtrs := make([]interface{}, len(cols))
-					for i := range vals {
-						valPtrs[i] = &vals[i]
-					}
-					rows.Scan(valPtrs...)
-					rowMap := map[string]interface{}{}
-					for i, col := range cols {
-						rowMap[col] = parseDBValue(col, vals[i])
-					}
-					updated["header"] = rowMap
-				}
-				rows.Close()
-				db.Exec("UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID)
+			if len(headerRows) > 0 {
+				updated["header"] = headerRows[0]
+				db.ExecContext(r.Context(), "UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID)
 			}
 		}
 
 		// Update exposure_line_items
-		if len(req.LineItemFields) > 0 {
-			setParts := []string{}
-			values := []interface{}{}
-			i := 1
-			for k, v := range req.LineItemFields {
-				setParts = append(setParts, fmt.Sprintf(constants.FormatSQLColumnArg, k, i))
-				values = append(values, v)
-				i++
+		if len(lineItemSetParts) > 0 {
+			lineItemRows, err := queryExposureUpdateRows(r.Context(), db, "exposure_line_items", lineItemSetParts, lineItemValues, req.ExposureHeaderID)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to update exposure_line_items")
+				return
 			}
-			values = append(values, req.ExposureHeaderID)
-			query := fmt.Sprintf("UPDATE exposure_line_items SET %s WHERE exposure_header_id = $%d RETURNING *", strings.Join(setParts, ", "), len(values))
-			rows, err := db.Query(query, values...)
-			if err == nil {
-				cols, _ := rows.Columns()
-				lineItems := []map[string]interface{}{}
-				for rows.Next() {
-					vals := make([]interface{}, len(cols))
-					valPtrs := make([]interface{}, len(cols))
-					for i := range vals {
-						valPtrs[i] = &vals[i]
-					}
-					rows.Scan(valPtrs...)
-					rowMap := map[string]interface{}{}
-					for i, col := range cols {
-						rowMap[col] = parseDBValue(col, vals[i])
-					}
-					lineItems = append(lineItems, rowMap)
-				}
-				updated["lineItems"] = lineItems
-				rows.Close()
-				db.Exec("UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID)
+			if len(lineItemRows) > 0 {
+				updated["lineItems"] = lineItemRows
+				db.ExecContext(r.Context(), "UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID)
 			}
 		}
 
 		// Update exposure_bucketing
-		// Support legacy payloads that send bucketing data under `fields` key
-		if len(req.BucketingFields) == 0 && len(req.Fields) > 0 {
-			req.BucketingFields = req.Fields
-		}
-
-		if len(req.BucketingFields) > 0 {
-			setParts := []string{}
-			values := []interface{}{}
-			i := 1
-			for k, v := range req.BucketingFields {
-				setParts = append(setParts, fmt.Sprintf(constants.FormatSQLColumnArg, k, i))
-				values = append(values, v)
-				i++
+		if len(bucketingSetParts) > 0 {
+			bucketingRows, err := queryExposureUpdateRows(r.Context(), db, "exposure_bucketing", bucketingSetParts, bucketingValues, req.ExposureHeaderID)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to update exposure_bucketing")
+				return
 			}
-			values = append(values, req.ExposureHeaderID)
-			query := fmt.Sprintf("UPDATE exposure_bucketing SET %s WHERE exposure_header_id = $%d RETURNING *", strings.Join(setParts, ", "), len(values))
-			rows, err := db.Query(query, values...)
-			if err == nil {
-				cols, _ := rows.Columns()
-				bucketing := []map[string]interface{}{}
-				for rows.Next() {
-					vals := make([]interface{}, len(cols))
-					valPtrs := make([]interface{}, len(cols))
-					for i := range vals {
-						valPtrs[i] = &vals[i]
-					}
-					rows.Scan(valPtrs...)
-					rowMap := map[string]interface{}{}
-					for i, col := range cols {
-						rowMap[col] = parseDBValue(col, vals[i])
-					}
-					bucketing = append(bucketing, rowMap)
-				}
-				updated["bucketing"] = bucketing
-				rows.Close()
-				db.Exec("UPDATE exposure_bucketing SET status_bucketing = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID)
+			if len(bucketingRows) > 0 {
+				updated["bucketing"] = bucketingRows
+				db.ExecContext(r.Context(), "UPDATE exposure_bucketing SET status_bucketing = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID)
 			}
 		}
 
 		// Update hedging_proposal
-		if len(req.HedgingFields) > 0 {
-			setParts := []string{}
-			values := []interface{}{}
-			i := 1
-			for k, v := range req.HedgingFields {
-				setParts = append(setParts, fmt.Sprintf(constants.FormatSQLColumnArg, k, i))
-				values = append(values, v)
-				i++
+		if len(hedgingSetParts) > 0 {
+			hedgingRows, err := queryExposureUpdateRows(r.Context(), db, "hedging_proposal", hedgingSetParts, hedgingValues, req.ExposureHeaderID)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to update hedging_proposal")
+				return
 			}
-			values = append(values, req.ExposureHeaderID)
-			query := fmt.Sprintf("UPDATE hedging_proposal SET %s WHERE exposure_header_id = $%d RETURNING *", strings.Join(setParts, ", "), len(values))
-			rows, err := db.Query(query, values...)
-			if err == nil {
-				cols, _ := rows.Columns()
-				hedging := []map[string]interface{}{}
-				for rows.Next() {
-					vals := make([]interface{}, len(cols))
-					valPtrs := make([]interface{}, len(cols))
-					for i := range vals {
-						valPtrs[i] = &vals[i]
-					}
-					rows.Scan(valPtrs...)
-					rowMap := map[string]interface{}{}
-					for i, col := range cols {
-						rowMap[col] = parseDBValue(col, vals[i])
-					}
-					hedging = append(hedging, rowMap)
-				}
-				updated["hedging"] = hedging
-				rows.Close()
-				db.Exec("UPDATE hedging_proposal SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID)
+			if len(hedgingRows) > 0 {
+				updated["hedging"] = hedgingRows
+				db.ExecContext(r.Context(), "UPDATE hedging_proposal SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID)
 			}
 		}
 
@@ -281,7 +397,7 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Ensure all exposure_header_id are present in exposure_bucketing
-		_, _ = db.Exec(`INSERT INTO exposure_bucketing (exposure_header_id)
+		_, _ = db.ExecContext(r.Context(), `INSERT INTO exposure_bucketing (exposure_header_id)
 			SELECT exposure_header_id
 			FROM exposure_headers
 			WHERE entity = ANY($1)
@@ -291,7 +407,7 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			  )`, pq.Array(buNames))
 
 		// Join exposure_headers, exposure_line_items, exposure_bucketing
-		rows, err := db.Query(`SELECT h.*, l.*, b.*
+		rows, err := db.QueryContext(r.Context(), `SELECT h.*, l.*, b.*
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
 			LEFT JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id
@@ -323,9 +439,9 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		// Fetch permissions for 'exposure-bucketing' page for this role
 		exposureBucketingPerms := map[string]interface{}{}
 		var roleId int
-		err = db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
+		err = db.QueryRowContext(r.Context(), "SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
 		if err == nil {
-			permRows, err := db.Query(`
+			permRows, err := db.QueryContext(r.Context(), `
 				SELECT p.page_name, p.tab_name, p.action, rp.allowed
 				FROM role_permissions rp
 				JOIN permissions p ON rp.permission_id = p.id
@@ -401,7 +517,7 @@ func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(
+		rows, err := db.QueryContext(r.Context(),
 			`UPDATE exposure_bucketing
              SET status_bucketing = 'Approved', updated_by = $2, comments = $3, updated_at = NOW()
              WHERE exposure_header_id = ANY($1)
@@ -462,7 +578,7 @@ func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(
+		rows, err := db.QueryContext(r.Context(),
 			`UPDATE exposure_bucketing
              SET status_bucketing = 'Rejected', updated_by = $2, comments = $3, updated_at = NOW()
              WHERE exposure_header_id = ANY($1)

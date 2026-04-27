@@ -284,42 +284,41 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		ctx := r.Context()
+		userEmail := api.AuthenticatedUserNameFromCtx(ctx)
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
 		results := make([]map[string]interface{}, 0, len(req.Rows))
 
 		for _, row := range req.Rows {
 			// Validate
 			if row.FolioID == "" && row.DematID == "" {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Either folio_id or demat_id is required"})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "Either folio_id or demat_id is required")
+				return
 			}
 			if strings.TrimSpace(row.SchemeID) == "" {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "scheme_id is required"})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "scheme_id is required")
+				return
 			}
 			if row.ByAmount <= 0 && row.ByUnits <= 0 {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Either by_amount or by_units must be > 0"})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "Either by_amount or by_units must be > 0")
+				return
 			}
-
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
-				continue
-			}
-			defer tx.Rollback(ctx)
 
 			// Method will be fetched from masterscheme at query time
 
@@ -347,8 +346,8 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					LIMIT 1
 				`
 				if err := tx.QueryRow(ctx, navQuery, row.SchemeID).Scan(&latestNAV); err != nil || latestNAV == 0 {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Unable to fetch NAV: " + err.Error()})
-					continue
+					api.RespondWithError(w, http.StatusBadRequest, "Unable to fetch NAV: "+err.Error())
+					return
 				}
 				unitsToBlock = row.ByAmount / latestNAV
 			}
@@ -418,8 +417,8 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					unitsToBlock,
 					nullIfEmptyString(row.EntityName),
 				); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to block units: " + err.Error()})
-					continue
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to block units: "+err.Error())
+					return
 				}
 			}
 
@@ -432,21 +431,16 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RETURNING redemption_id
 			`, nullIfEmptyString(row.FolioID), nullIfEmptyString(row.DematID), row.SchemeID, userEmail,
 				nullIfEmptyString(row.TransactionDate), nullIfZeroFloat(row.ByAmount), nullIfZeroFloat(row.ByUnits), nullIfEmptyString(row.EntityName), nullIfZeroFloat(row.EstimatedProceeds), nullIfZeroFloat(row.GainLoss)).Scan(&redemptionID); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Insert failed: " + err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
+				return
 			}
 
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO investment.auditactionredemption (redemption_id, actiontype, processing_status, requested_by, requested_at)
 				VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 			`, redemptionID, userEmail); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
-				continue
-			}
-
-			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+				return
 			}
 
 			results = append(results, map[string]interface{}{
@@ -454,6 +448,11 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"redemption_id":        redemptionID,
 			})
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			return
+		}
+		committed = true
 
 		createdIDs := make([]string, 0, len(results))
 		for _, res := range results {
@@ -469,7 +468,7 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/create-bulk", createdIDs[0], payload.ToMap())
 			}()
 		}
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		api.RespondWithPayload(w, true, "", results)
 	}
 }
 
@@ -611,33 +610,32 @@ func UpdateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		ctx := r.Context()
+		userEmail := api.AuthenticatedUserNameFromCtx(ctx)
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
 		results := make([]map[string]interface{}, 0, len(req.Rows))
 
 		for _, row := range req.Rows {
 			if row.RedemptionID == "" {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "redemption_id missing"})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "redemption_id missing")
+				return
 			}
-
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
-				continue
-			}
-			defer tx.Rollback(ctx)
 
 			sel := `
 				SELECT folio_id, demat_id, scheme_id, requested_by, requested_date, transaction_date,
@@ -648,8 +646,8 @@ func UpdateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4], &oldVals[5],
 				&oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9],
 			); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: "fetch failed: " + err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "fetch failed: "+err.Error())
+				return
 			}
 
 			fieldPairs := map[string]int{
@@ -680,33 +678,33 @@ func UpdateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if len(sets) == 0 {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: "No valid fields"})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "No valid fields")
+				return
 			}
 
 			q := fmt.Sprintf("UPDATE investment.redemption_initiation SET %s, updated_at=now() WHERE redemption_id=$%d", strings.Join(sets, ", "), pos)
 			args = append(args, row.RedemptionID)
 
 			if _, err := tx.Exec(ctx, q, args...); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: constants.ErrUpdateFailed + err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+				return
 			}
 
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO investment.auditactionredemption (redemption_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
 			`, row.RedemptionID, row.Reason, userEmail); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
-				continue
-			}
-
-			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: constants.ErrCommitFailed + err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+				return
 			}
 
 			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "redemption_id": row.RedemptionID, "requested": userEmail})
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			return
+		}
+		committed = true
 
 		updatedIDs := make([]string, 0, len(results))
 		for _, res := range results {
@@ -722,7 +720,7 @@ func UpdateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/update-bulk", updatedIDs[0], payload.ToMap())
 			}()
 		}
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		api.RespondWithPayload(w, true, "", results)
 	}
 }
 

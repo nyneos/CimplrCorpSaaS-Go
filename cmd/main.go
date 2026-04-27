@@ -8,9 +8,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv" // Add this import
+	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 
 	"CimplrCorpSaas/api"
@@ -53,6 +54,13 @@ func main() {
 
 		log.Fatal("failed to connect to DB:", err)
 	}
+	// timeout + validation
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dbCancel()
+
+	if err := db.PingContext(dbCtx); err != nil {
+		log.Fatalf("sql.DB ping failed: %v", err)
+	}
 	appmanager.SetDB(db)
 
 	// Initialize pgx pool for better performance
@@ -73,16 +81,22 @@ func main() {
 		user, pass, host, port, name, sslMode,
 	)
 
-	ctx := context.Background()
-	pgxPool, err := pgxpool.New(ctx, pgxConnStr)
+	// pgxpool context
+	pgxCtx, pgxCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pgxCancel()
+
+	pgxPool, err := pgxpool.New(pgxCtx, pgxConnStr)
 	if err != nil {
 		log.Fatal("failed to create pgx pool:", err)
 	}
 	defer pgxPool.Close()
 
 	// Fail fast: verify the pool can actually reach the DB before starting services.
-	if pingErr := pgxPool.Ping(ctx); pingErr != nil {
-		log.Fatalf("pgx pool ping failed — check DB_HOST/DB_PORT/DB_SSLMODE in .env: %v", pingErr)
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pingCancel()
+
+	if err := pgxPool.Ping(pingCtx); err != nil {
+		log.Fatalf("pgx pool ping failed — check DB config: %v", err)
 	}
 	log.Printf("DB connected: host=%s port=%s db=%s sslmode=%s", host, port, name, sslMode)
 
@@ -95,6 +109,7 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to load service sequence:", err)
 	}
+	servicesCfg = appmanager.ExcludeServiceConfigs(servicesCfg, "cron")
 
 	// Automatically register all services
 	manager.AutoRegisterServices(servicesCfg)
@@ -120,17 +135,12 @@ func main() {
 	auth.OnLogoutHook = catalog.ClearSystemNotifications
 
 	// Graceful shutdown handling
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	<-sigs
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	<-ctx.Done()
 
 	// Stop all services
 	if err := manager.StopAll(); err != nil {
 		log.Fatal("failed to stop:", err)
-	}
-
-	// Close pgx pool if initialized
-	if appmanager.GetPgxPool() != nil {
-		appmanager.GetPgxPool().Close()
 	}
 }

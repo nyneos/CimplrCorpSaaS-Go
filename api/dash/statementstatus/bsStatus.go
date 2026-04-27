@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -39,6 +40,11 @@ type StatementMeta struct {
 	Status               string            `json:"status"`
 	UploadedAt           string            `json:"uploadedAt,omitempty"`
 	Transactions         []TransactionMeta `json:"transactions,omitempty"`
+}
+
+func writeStatementStatusError(w http.ResponseWriter, err error, message string) {
+	log.Printf("[ERROR: %v] [Dash] [StatementStatus] %s", err, message)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
 type TransactionMeta struct {
@@ -239,7 +245,7 @@ WHERE mba.is_deleted = false
 
 		rows, err := pgxPool.Query(ctx, accountsSQL, fromDate, allowedEntityIDs, allowedAccountNumbers, allowedBankNamesNorm, allowedCurrencyCodesNorm)
 		if err != nil {
-			http.Error(w, "error querying accounts: "+err.Error(), http.StatusInternalServerError)
+			writeStatementStatusError(w, err, "failed to query accounts")
 			return
 		}
 		defer rows.Close()
@@ -315,7 +321,7 @@ ORDER BY percent DESC;
 
 		bankRows, err := pgxPool.Query(ctx, bankSQL, fromDate, allowedEntityIDs, allowedAccountNumbers, allowedBankNamesNorm, allowedCurrencyCodesNorm)
 		if err != nil {
-			http.Error(w, "error querying bank compliance: "+err.Error(), http.StatusInternalServerError)
+			writeStatementStatusError(w, err, "failed to query bank compliance")
 			return
 		}
 		defer bankRows.Close()
@@ -371,7 +377,7 @@ ORDER BY percent DESC;
 
 		entityRows, err := pgxPool.Query(ctx, entitySQL, fromDate, allowedEntityIDs, allowedAccountNumbers, allowedCurrencyCodesNorm)
 		if err != nil {
-			http.Error(w, "error querying entity completeness: "+err.Error(), http.StatusInternalServerError)
+			writeStatementStatusError(w, err, "failed to query entity completeness")
 			return
 		}
 		defer entityRows.Close()
@@ -402,7 +408,7 @@ ORDER BY percent DESC;
 		enc := json.NewEncoder(w)
 		enc.SetEscapeHTML(false)
 		if err := enc.Encode(resp); err != nil {
-			http.Error(w, "error encoding response: "+err.Error(), http.StatusInternalServerError)
+			writeStatementStatusError(w, err, "failed to encode response")
 			return
 		}
 	}

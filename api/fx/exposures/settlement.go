@@ -58,7 +58,7 @@ func FilterForwardBookingsForSettlement(db *sql.DB) http.HandlerFunc {
 					OR fb.entity_level_3 = ANY($4)
 				)
 		`
-		rows, err := db.Query(query, pq.Array(req.ExposureHeaderIDs), req.Currency, req.Entity, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), query, pq.Array(req.ExposureHeaderIDs), req.Currency, req.Entity, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch forward bookings for settlement")
 			return
@@ -128,7 +128,7 @@ func GetForwardBookingsByEntityAndCurrency(db *sql.DB) http.HandlerFunc {
 					OR fb.entity_level_3 = ANY($3)
 				)
 		`
-		rows, err := db.Query(query, req.Currency, req.Entity, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), query, req.Currency, req.Entity, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch forward bookings")
 			return

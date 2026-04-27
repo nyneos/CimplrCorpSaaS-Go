@@ -39,6 +39,5 @@ func (s *DashService) Start() error {
 }
 
 func (s *DashService) Stop() error {
-	// Implement stop logic if needed
-	return nil
+	return shutdownDashService()
 }

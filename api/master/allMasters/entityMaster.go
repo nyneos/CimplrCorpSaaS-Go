@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -85,7 +86,7 @@ type EntityMasterBulkRequest struct {
 // 				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, now()
 // 			) RETURNING entity_id`
 // 			var newEntityID string
-// 			err := db.QueryRow(query,
+// 			err := db.QueryRowContext(r.Context(), query,
 // 				entityId,
 // 				entity.EntityName,
 // 				entity.ParentName,
@@ -129,9 +130,9 @@ type EntityMasterBulkRequest struct {
 // 			parentId := entityIDs[entity.ParentName]
 // 			childId := entityIDs[entity.EntityName]
 // 			var exists int
-// 			err := db.QueryRow(`SELECT 1 FROM entityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentId, childId).Scan(&exists)
+// 			err := db.QueryRowContext(r.Context(), `SELECT 1 FROM entityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentId, childId).Scan(&exists)
 // 			if err == sql.ErrNoRows {
-// 				_, err := db.Exec(`INSERT INTO entityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, $3)`, parentId, childId, "Active")
+// 				_, err := db.ExecContext(r.Context(), `INSERT INTO entityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, $3)`, parentId, childId, "Active")
 // 				if err == nil {
 // 					relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"parent_id": parentId, "child_id": childId})
 // 				}
@@ -189,7 +190,7 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 			if entity.ParentName != "" {
 				var parentExists int
 				parentCheckQ := `SELECT 1 FROM masterentity WHERE entity_name = $1 AND (approval_status = 'Approved' OR approval_status = 'approved') AND (is_deleted = false OR is_deleted IS NULL)`
-				err := db.QueryRow(parentCheckQ, entity.ParentName).Scan(&parentExists)
+				err := db.QueryRowContext(r.Context(), parentCheckQ, entity.ParentName).Scan(&parentExists)
 				if err != nil {
 					inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent entity not found or not approved: " + entity.ParentName, "entity_name": entity.EntityName})
 					continue
@@ -203,7 +204,7 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, now()
 			) RETURNING entity_id`
 			var newEntityID string
-			err := db.QueryRow(query,
+			err := db.QueryRowContext(r.Context(), query,
 				entityId,
 				entity.EntityName,
 				entity.ParentName,
@@ -252,7 +253,7 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 				parentEntityID = id
 			} else {
 				// try to find existing parent by name
-				if err := db.QueryRow(`SELECT entity_id FROM masterentity WHERE entity_name = $1 LIMIT 1`, entity.ParentName).Scan(&parentEntityID); err != nil {
+				if err := db.QueryRowContext(r.Context(), `SELECT entity_id FROM masterentity WHERE entity_name = $1 LIMIT 1`, entity.ParentName).Scan(&parentEntityID); err != nil {
 					// parent not found, skip relationship
 					continue
 				}
@@ -266,9 +267,9 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 			}
 
 			var exists int
-			err := db.QueryRow(`SELECT 1 FROM entityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentEntityID, childEntityID).Scan(&exists)
+			err := db.QueryRowContext(r.Context(), `SELECT 1 FROM entityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentEntityID, childEntityID).Scan(&exists)
 			if err == sql.ErrNoRows {
-				if _, err := db.Exec(`INSERT INTO entityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, $3)`, parentEntityID, childEntityID, "Active"); err == nil {
+				if _, err := db.ExecContext(r.Context(), `INSERT INTO entityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, $3)`, parentEntityID, childEntityID, "Active"); err == nil {
 					relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"parent_id": parentEntityID, "child_id": childEntityID})
 				}
 			}
@@ -287,7 +288,7 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Fetch all entities
-		entitiesRows, err := db.Query("SELECT * FROM masterentity")
+		entitiesRows, err := db.QueryContext(r.Context(), "SELECT * FROM masterentity")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseQueryFailed})
@@ -322,7 +323,7 @@ func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
 			entities = append(entities, e)
 		}
 		// Fetch relationships
-		relRows, err := db.Query("SELECT * FROM entityrelationships")
+		relRows, err := db.QueryContext(r.Context(), "SELECT * FROM entityrelationships")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseQueryFailed})
@@ -430,7 +431,7 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 		}
 		id := req.ID
 		var status string
-		err := db.QueryRow(`SELECT approval_status FROM masterentity WHERE entity_id = $1`, id).Scan(&status)
+		err := db.QueryRowContext(r.Context(), `SELECT approval_status FROM masterentity WHERE entity_id = $1`, id).Scan(&status)
 		if err == sql.ErrNoRows {
 			w.WriteHeader(http.StatusNotFound)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrEntityNotFound})
@@ -438,7 +439,7 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 		}
 		if status == constants.StatusCodeDeleteApproval {
 			// Get all descendants
-			relRows, _ := db.Query(`SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
+			relRows, _ := db.QueryContext(r.Context(), `SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
 			defer relRows.Close()
 			parentMap := map[string][]string{}
 			for relRows.Next() {
@@ -470,7 +471,7 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 				return result
 			}
 			allToApprove := getAllDescendants([]string{id})
-			rows, err := db.Query(`UPDATE masterentity SET approval_status = 'Delete-Approved', is_deleted = true, comments = $2 WHERE entity_id = ANY($1) RETURNING *`, pq.Array(allToApprove), req.Comments)
+			rows, err := db.QueryContext(r.Context(), `UPDATE masterentity SET approval_status = 'Delete-Approved', is_deleted = true, comments = $2 WHERE entity_id = ANY($1) RETURNING *`, pq.Array(allToApprove), req.Comments)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrEntityUpdateFailed})
@@ -493,7 +494,7 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 				return
 			}
 		} else {
-			rows, err := db.Query(`UPDATE masterentity SET approval_status = 'Approved', comments = $2 WHERE entity_id = $1 RETURNING *`, id, req.Comments)
+			rows, err := db.QueryContext(r.Context(), `UPDATE masterentity SET approval_status = 'Approved', comments = $2 WHERE entity_id = $1 RETURNING *`, id, req.Comments)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrEntityUpdateFailed})
@@ -538,7 +539,7 @@ func RejectEntitiesBulk(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "entityIds array required"})
 			return
 		}
-		relRows, _ := db.Query(`SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
+		relRows, _ := db.QueryContext(r.Context(), `SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
 		defer relRows.Close()
 		parentMap := map[string][]string{}
 		for relRows.Next() {
@@ -569,7 +570,7 @@ func RejectEntitiesBulk(db *sql.DB) http.HandlerFunc {
 			return result
 		}
 		allToReject := getAllDescendants(req.EntityIds)
-		rows, err := db.Query(`UPDATE masterentity SET approval_status = 'Rejected', comments = $2 WHERE entity_id = ANY($1) RETURNING *`, pq.Array(allToReject), req.Comments)
+		rows, err := db.QueryContext(r.Context(), `UPDATE masterentity SET approval_status = 'Rejected', comments = $2 WHERE entity_id = ANY($1) RETURNING *`, pq.Array(allToReject), req.Comments)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrEntityUpdateFailed})
@@ -618,7 +619,7 @@ func UpdateEntity(db *sql.DB) http.HandlerFunc {
 		setClause += "approval_status = 'Pending'"
 		args = append(args, req.ID)
 		query := "UPDATE masterentity SET " + setClause + " WHERE entity_id = $" + strconv.Itoa(i) + " RETURNING *"
-		rows, err := db.Query(query, args...)
+		rows, err := db.QueryContext(r.Context(), query, args...)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrEntityUpdateFailed})
@@ -653,7 +654,7 @@ func UpdateEntity(db *sql.DB) http.HandlerFunc {
 // Get all entity names (approved and not deleted)
 func GetAllEntityNames(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		rows, err := db.Query("SELECT entity_name FROM masterentity WHERE (approval_status = 'Approved' OR approval_status = 'approved') AND is_deleted = false")
+		rows, err := db.QueryContext(r.Context(), "SELECT entity_name FROM masterentity WHERE (approval_status = 'Approved' OR approval_status = 'approved') AND is_deleted = false")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrDatabaseQueryFailed})
@@ -683,7 +684,7 @@ func DeleteEntity(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Fetch all relationships
-		relRows, err := db.Query(`SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
+		relRows, err := db.QueryContext(r.Context(), `SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseQueryFailed})
@@ -721,7 +722,7 @@ func DeleteEntity(db *sql.DB) http.HandlerFunc {
 			return result
 		}
 		allToDelete := getAllDescendants([]string{req.ID})
-		rows, err := db.Query(
+		rows, err := db.QueryContext(r.Context(),
 			`UPDATE masterentity SET approval_status = 'Delete-Approval', comments = $2 WHERE entity_id = ANY($1) RETURNING *`,
 			pq.Array(allToDelete), req.Comments,
 		)
@@ -773,7 +774,7 @@ func FindParentAtLevel(db *sql.DB) http.HandlerFunc {
 		}
 		parentLevel := numericLevel - 1
 		query := `SELECT entity_name FROM masterentity WHERE (TRIM(BOTH ' ' FROM level) = $1 OR TRIM(BOTH ' ' FROM level) = $2) AND (is_deleted = false OR is_deleted IS NULL)`
-		rows, err := db.Query(query, strconv.Itoa(parentLevel), fmt.Sprintf("Level %d", parentLevel))
+		rows, err := db.QueryContext(r.Context(), query, strconv.Itoa(parentLevel), fmt.Sprintf("Level %d", parentLevel))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrDatabaseQueryFailed})
@@ -803,7 +804,7 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
 		}
 		// Get role_id from user_roles
 		var roleId int
-		errRole := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
+		errRole := db.QueryRowContext(r.Context(), "SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
 		if errRole == sql.ErrNoRows {
 			w.WriteHeader(http.StatusNotFound)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Role not found for user"})
@@ -815,7 +816,7 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
 		}
 		// Get permissions for hierarchical page
 		query := `SELECT p.page_name, p.tab_name, p.action, rp.allowed FROM role_permissions rp JOIN permissions p ON rp.permission_id = p.id WHERE rp.role_id = $1 AND (rp.status = 'Approved' OR rp.status = 'approved')`
-		rows, errPerm := db.Query(query, roleId)
+		rows, errPerm := db.QueryContext(r.Context(), query, roleId)
 		if errPerm != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseQueryFailed})
@@ -846,7 +847,7 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		// Get entity hierarchy (reuse your GetEntityHierarchy logic)
-		entitiesRows, err := db.Query("SELECT * FROM masterentity")
+		entitiesRows, err := db.QueryContext(r.Context(), "SELECT * FROM masterentity")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseQueryFailed})
@@ -880,10 +881,11 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
 			}
 			entities = append(entities, e)
 		}
-		relRows, err := db.Query("SELECT * FROM entityrelationships")
+		relRows, err := db.QueryContext(r.Context(), "SELECT * FROM entityrelationships")
 		if err != nil {
+			log.Printf("[ERROR: %v] [Master] [Entity] failed to fetch entity relationships", err)
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "internal server error"})
 			return
 		}
 		defer relRows.Close()

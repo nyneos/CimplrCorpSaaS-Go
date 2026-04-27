@@ -1,9 +1,14 @@
 package investment
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"CimplrCorpSaas/api"
 	accountingworkbench "CimplrCorpSaas/api/investment/accountingWorkbench"
@@ -18,12 +23,23 @@ import (
 	onboard "CimplrCorpSaas/api/investment/onboarding"
 	portfolio "CimplrCorpSaas/api/investment/portfolio"
 	redemption "CimplrCorpSaas/api/investment/redemption"
+	"CimplrCorpSaas/internal/telemetry"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
+
+var investmentServer *http.Server
+var investmentServerStop context.CancelFunc
+var investmentTracerShutdown func(context.Context) error
 
 func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux := http.NewServeMux()
+	tracerProvider, tracerShutdown, err := telemetry.InitTracerProvider("investment")
+	if err != nil {
+		log.Fatalf("failed to initialize OpenTelemetry tracer for investment service: %v", err)
+	}
+	investmentTracerShutdown = tracerShutdown
 
 	mux.HandleFunc("/investment/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Investment Service is active"))
@@ -179,9 +195,48 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	// mux.HandleFunc("/investment/portfolio", portfolioHandler)
 	// mux.HandleFunc("/investment/schemes", schemesHandler)
 
-	log.Printf("Investment Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
-	if err != nil {
-		log.Fatalf("Investment service failed: %v", err)
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: otelhttp.NewHandler(mux, "investment", otelhttp.WithTracerProvider(tracerProvider)),
 	}
+	investmentServer = server
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	investmentServerStop = stop
+	defer stop()
+
+	go func() {
+		log.Printf("Investment Service started on :%s", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Investment service failed: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = server.Shutdown(shutdownCtx)
+}
+
+func shutdownInvestmentService() error {
+	if investmentServerStop != nil {
+		investmentServerStop()
+	}
+	if investmentServer == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := investmentServer.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	if investmentTracerShutdown != nil {
+		if err := investmentTracerShutdown(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }

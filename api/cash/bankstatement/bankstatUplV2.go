@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shakinm/xlsReader/xls"
 	"github.com/xuri/excelize/v2"
 )
@@ -32,10 +34,10 @@ const bankStatementModule = "bankstatement"
 
 // UploadBankStatementV2WithCategorization wraps UploadBankStatementV2 and adds category intelligence and KPIs to the response.
 
-func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, file multipart.File, fileHash string, useMapping bool, mappings *ColumnMappings, accountNumberOverride string) (map[string]interface{}, error) {
+func UploadBankStatementV2WithCategorization(ctx context.Context, pgxPool *pgxpool.Pool, file multipart.File, fileHash string, useMapping bool, mappings *ColumnMappings, accountNumberOverride string) (map[string]interface{}, error) {
 	// 1. Idempotency: Check if file hash already exists
 	var exists bool
-	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1)`, fileHash).Scan(&exists)
+	err := pgxPool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1)`, fileHash).Scan(&exists)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check file hash: %w", err)
 	}
@@ -200,7 +202,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 			}
 		} else {
-			// For Excel/XLS files — match same label variants as CSV branch
+			// For Excel/XLS files match same label variants as CSV branch
 			for i := 0; i < 20 && i < len(rows); i++ {
 				for j, cell := range rows[i] {
 					nc := normalizeCell(cell)
@@ -274,7 +276,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 						}
 					}
 				}
-				// Do NOT accept arbitrary digit runs here without an explicit label –
+				// Do NOT accept arbitrary digit runs here without an explicit label “
 				// this often picks up postal codes (e.g. 411019). If the cell contains
 				// an account label we already handled same-cell / adjacent / below
 				// checks above. Any header-only digit-run fallback is handled later
@@ -347,7 +349,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 			}
 
-			// Second pass: no label found — search any header cell for >=7-digit sequences.
+			// Second pass: no label found search any header cell for >=7-digit sequences.
 			// Only scan rows 0..19 (true header area); do NOT scan transaction data rows to
 			// avoid picking up reference numbers from narrative/cheque columns.
 			if found == "" {
@@ -396,14 +398,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// Lookup entity_id and bank_name from masterbankaccount/masterbank
 	var bankName string
 	log.Printf("[BANK-UPLOAD-DEBUG] Looking up account in masterbankaccount for accountNumber=%q", accountNumber)
-	err = db.QueryRowContext(ctx, `
+	err = pgxPool.QueryRow(ctx, `
 		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
 		FROM public.masterbankaccount mba
 		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 		WHERE mba.account_number = $1 AND mba.is_deleted = false
 	`, accountNumber).Scan(&entityID, &bankName, &accountName)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			// Primary candidate not found. Try scanning header rows for other
 			// long digit runs and attempt DB verification for each candidate
 			// in order. This prevents accidentally picking transaction refs
@@ -447,7 +449,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			for _, cand := range candidates {
 				log.Printf("[BANK-UPLOAD-DEBUG] Trying candidate accountNumber=%q", cand)
 				var eID, bName, aName string
-				qErr := db.QueryRowContext(ctx, `
+				qErr := pgxPool.QueryRow(ctx, `
 					SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
 					FROM public.masterbankaccount mba
 					LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
@@ -462,7 +464,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					log.Printf("[BANK-UPLOAD-DEBUG] Candidate matched accountNumber=%q", cand)
 					break
 				}
-				if qErr != nil && !errors.Is(qErr, sql.ErrNoRows) {
+				if qErr != nil && !errors.Is(qErr, pgx.ErrNoRows) {
 					log.Printf("[BANK-UPLOAD-DEBUG] DB error while trying candidate %q: %v", cand, qErr)
 					return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, qErr)
 				}
@@ -503,7 +505,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// Currency enforcement (entity -> bank -> account -> currency)
 	var acctCurrency sql.NullString
 	if curCodes := ctxApprovedCurrencies(ctx); len(curCodes) > 0 {
-		_ = db.QueryRowContext(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
+		_ = pgxPool.QueryRow(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
 		if acctCurrency.Valid && strings.TrimSpace(acctCurrency.String) != "" {
 			if !ctxHasApprovedCurrency(ctx, acctCurrency.String) {
 				return nil, errors.New(constants.ErrCurrencyNotAllowed)
@@ -533,7 +535,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	if acctCurrency.Valid {
 		currencyCode = acctCurrency.String
 	}
-	rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID, currencyCode)
+	rules, err := loadCategoryRuleComponents(ctx, pgxPool, accountNumber, entityID, currencyCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch category rules: %w", err)
 	}
@@ -2046,7 +2048,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// Preload existing transactions for this account so we can identify which
 	// rows from the uploaded file are truly new vs already present.
 	existingTxnKeys := make(map[string]bool)
-	rowsExisting, err := db.QueryContext(ctx, `
+	rowsExisting, err := pgxPool.Query(ctx, `
 			SELECT account_number, transaction_date, description, withdrawal_amount, deposit_amount
 			FROM cimplrcorpsaas.bank_statement_transactions
 			WHERE account_number = $1
@@ -2067,14 +2069,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		existingTxnKeys[k] = true
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := pgxPool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin db transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
 	var bankStatementID string
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 		      INSERT INTO cimplrcorpsaas.bank_statements (
 			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance, upload_s3_key
 		      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -2086,7 +2088,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		      RETURNING bank_statement_id
 		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, uploadS3Key).Scan(&bankStatementID)
 	if err != nil {
-		tx.Rollback()
+		tx.Rollback(ctx)
 		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
 	}
 
@@ -2158,8 +2160,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				joinStrings(valueStrings, ",") +
 				` ON CONFLICT (account_number, transaction_date, description, withdrawal_amount, deposit_amount) DO NOTHING`
 			log.Printf("[BANK-UPLOAD-DEBUG] Attempting to insert %d new transactions", len(newTransactions))
-			if _, err := tx.ExecContext(ctx, stmt, valueArgs...); err != nil {
-				tx.Rollback()
+			if _, err := tx.Exec(ctx, stmt, valueArgs...); err != nil {
+				tx.Rollback(ctx)
 				log.Printf("[BANK-UPLOAD-DEBUG] Bulk insert FAILED. First 3 descriptions:")
 				for i := 0; i < 3 && i < len(newTransactions); i++ {
 					log.Printf("[BANK-UPLOAD-DEBUG]   txn[%d] desc=%q (sanitized=%q)", i, newTransactions[i].Description, sanitizeForPostgres(newTransactions[i].Description))
@@ -2183,16 +2185,16 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			requestedBy = s.UserID
 		}
 	}
-	_, err = tx.ExecContext(ctx, `
+	_, err = tx.Exec(ctx, `
 			       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
 				       bankstatementid, actiontype, processing_status, requested_by, requested_at
 			       ) VALUES ($1, $2, $3, $4, $5)
 		       `, bankStatementID, "CREATE", "PENDING_APPROVAL", requestedBy, time.Now())
 	if err != nil {
-		tx.Rollback()
+		tx.Rollback(ctx)
 		return nil, fmt.Errorf(constants.ErrFailedToInsertAuditAction, err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit: %w", err)
 	}
 
@@ -2377,7 +2379,7 @@ func parseFileToRows(fileBytes []byte) ([][]string, error) {
 //     builds a per-account CSV, computes idempotent `fileHash = sha256(csvBytes + account_number)`,
 //     and calls UploadBankStatementV2WithCategorization for each account.
 //   - Aggregates results per-account and isolates failures to the account level.
-func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
+func UploadMultiAccountBankStatementHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if r.Method != http.MethodPost {
@@ -2435,7 +2437,7 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		// Parse CSV / XLSX / XLS → uniform [][]string
+		// Parse CSV / XLSX / XLS â†’ uniform [][]string
 		rows, parseErr := parseFileToRows(fileBytes)
 		if parseErr != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Unable to parse file. Please upload a valid CSV, XLSX, or XLS file."})
@@ -2527,7 +2529,7 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 		if accIdx == -1 {
 			accIdx = findIdxExclude([]string{"name"}, "account")
 		}
-		// Account name column (optional — used for display / result key labeling)
+		// Account name column (optional â€” used for display / result key labeling)
 		accNameIdx := findIdxExclude([]string{"number", "no", "_no"}, "account name", "account_name", "accountname")
 		if accNameIdx == -1 {
 			accNameIdx = findIdx("account name", "account_name", "accountname")
@@ -2594,8 +2596,8 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 
 		// Group rows by account number; also track account name and bank name per group for display.
 		groups := make(map[string][][]string)
-		groupAccName := make(map[string]string)  // accountNumber → account name (display label)
-		groupBankName := make(map[string]string) // accountNumber → bank name
+		groupAccName := make(map[string]string)  // accountNumber â†’ account name (display label)
+		groupBankName := make(map[string]string) // accountNumber â†’ bank name
 		for _, row := range dataRows {
 			var accNum string
 			if accIdx == -1 {
@@ -2841,7 +2843,7 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			fileHash := fmt.Sprintf("%x", h.Sum(nil))
 
 			// Call structured ingestion
-			res, upErr := ProcessBankStatementFromStructuredInput(ctx, db, stm, fileHash)
+			res, upErr := ProcessBankStatementFromStructuredInput(ctx, pgxPool, stm, fileHash)
 			if upErr != nil {
 				results[resultKey] = map[string]interface{}{"success": false, "message": userFriendlyUploadError(upErr)}
 				continue

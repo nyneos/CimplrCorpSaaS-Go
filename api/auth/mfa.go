@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
@@ -59,10 +60,10 @@ func MFASetupHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		var email string
-		_ = db.QueryRow(`SELECT email FROM users WHERE id = $1`, req.UserID).Scan(&email)
+		_ = db.QueryRowContext(r.Context(), `SELECT email FROM users WHERE id = $1`, req.UserID).Scan(&email)
 
 		// Store secret but don't enable yet
-		_, err = db.Exec(
+		_, err = db.ExecContext(r.Context(),
 			`UPDATE users SET mfa_secret = $1, mfa_enabled = false WHERE id = $2`,
 			secret, req.UserID,
 		)
@@ -105,7 +106,7 @@ func MFAConfirmHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		secret, err := getUserMFASecret(db, req.UserID)
+		secret, err := getUserMFASecret(r.Context(), db, req.UserID)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"success": false, "error": "MFA setup not initiated. Call /auth/mfa/setup first",
@@ -121,7 +122,7 @@ func MFAConfirmHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		_, err = db.Exec(`UPDATE users SET mfa_enabled = true WHERE id = $1`, req.UserID)
+		_, err = db.ExecContext(r.Context(), `UPDATE users SET mfa_enabled = true WHERE id = $1`, req.UserID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 				"success": false, "error": "Failed to activate MFA",
@@ -156,7 +157,7 @@ func MFAVerifyHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		secret, err := getUserMFASecret(db, req.UserID)
+		secret, err := getUserMFASecret(r.Context(), db, req.UserID)
 		if err != nil {
 			LogSecurityEvent(db, req.UserID, "mfa_verify_failed", "no secret configured", extractClientIPFromRequest(r))
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
@@ -215,7 +216,7 @@ func MFADisableHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		secret, err := getUserMFASecret(db, req.UserID)
+		secret, err := getUserMFASecret(r.Context(), db, req.UserID)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"success": false, "error": "MFA is not set up for this account",
@@ -231,7 +232,7 @@ func MFADisableHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		_, err = db.Exec(`UPDATE users SET mfa_enabled = false, mfa_secret = NULL WHERE id = $1`, req.UserID)
+		_, err = db.ExecContext(r.Context(), `UPDATE users SET mfa_enabled = false, mfa_secret = NULL WHERE id = $1`, req.UserID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 				"success": false, "error": "Failed to disable MFA",
@@ -266,7 +267,7 @@ func MFAStatusHandler(db *sql.DB) http.HandlerFunc {
 
 		var mfaEnabled sql.NullBool
 		var mfaSecret sql.NullString
-		err := db.QueryRow(`SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, req.UserID).Scan(&mfaEnabled, &mfaSecret)
+		err := db.QueryRowContext(r.Context(), `SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, req.UserID).Scan(&mfaEnabled, &mfaSecret)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]interface{}{
 				"success": false, "error": "User not found",
@@ -310,9 +311,9 @@ func isSessionValid(userID string) bool {
 }
 
 // getUserMFASecret retrieves the MFA secret for a user, returning error if not set.
-func getUserMFASecret(db *sql.DB, userID string) (string, error) {
+func getUserMFASecret(ctx context.Context, db *sql.DB, userID string) (string, error) {
 	var mfaSecret sql.NullString
-	err := db.QueryRow(`SELECT mfa_secret FROM users WHERE id = $1`, userID).Scan(&mfaSecret)
+	err := db.QueryRowContext(ctx, `SELECT mfa_secret FROM users WHERE id = $1`, userID).Scan(&mfaSecret)
 	if err != nil || !mfaSecret.Valid || mfaSecret.String == "" {
 		return "", fmt.Errorf("no MFA secret")
 	}

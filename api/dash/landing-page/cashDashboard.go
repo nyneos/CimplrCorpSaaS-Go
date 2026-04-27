@@ -93,7 +93,8 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			log.Printf("[ERROR: %v] [Dash] [CashDashboard] failed to fetch opening balances", err)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "internal server error"})
 			return
 		}
 		defer rows.Close()
@@ -204,7 +205,8 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		inflowRows, err := pgxPool.Query(ctx, inflowQ, startStr, endStr)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			log.Printf("[ERROR: %v] [Dash] [CashDashboard] failed to fetch inflow data", err)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "internal server error"})
 			return
 		}
 		var actualInflowsINR float64
@@ -229,7 +231,8 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		outflowRows, err := pgxPool.Query(ctx, outflowQ, startStr, endStr)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			log.Printf("[ERROR: %v] [Dash] [CashDashboard] failed to fetch outflow data", err)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "internal server error"})
 			return
 		}
 		var actualOutflowsINR float64

@@ -142,73 +142,46 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Get pre-validated context values
-		// session := middlewares.GetSessionFromContext(r.Context())
-		// Get created_by from session
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				createdBy = s.Name
-				break
-			}
-		}
+		createdBy := api.AuthenticatedUserNameFromCtx(r.Context())
 		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
-		var results []map[string]interface{}
+		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
+		results := make([]map[string]interface{}, 0, len(req.Currency))
 		for _, cur := range req.Currency {
 			if len(cur.CurrencyCode) != 3 {
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.FormatFieldError("currency_code", "must be exactly 3 characters"),
-					"currency_code":        cur.CurrencyCode,
-				})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, constants.FormatFieldError("currency_code", "must be exactly 3 characters"))
+				return
 			}
 			if cur.CurrencyName == "" {
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.FormatMissingFieldError("currency_name"),
-					"currency_code":        cur.CurrencyCode,
-				})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, constants.FormatMissingFieldError("currency_name"))
+				return
 			}
 			if cur.Country == "" {
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.FormatMissingFieldError("country"),
-					"currency_code":        cur.CurrencyCode,
-				})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, constants.FormatMissingFieldError("country"))
+				return
 			}
 			if cur.DecimalPlaces < 0 || cur.DecimalPlaces > 4 {
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.FormatFieldError("decimal_places", "must be between 0 and 4"),
-					"currency_code":        cur.CurrencyCode,
-				})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, constants.FormatFieldError("decimal_places", "must be between 0 and 4"))
+				return
 			}
 			if cur.Status == "" {
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.FormatMissingFieldError("status"),
-					"currency_code":        cur.CurrencyCode,
-				})
-				continue
-			}
-			ctx := r.Context()
-			tx, txErr := pgxPool.Begin(ctx)
-			if txErr != nil {
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrTransactionFailed,
-					"currency_code":        cur.CurrencyCode,
-				})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, constants.FormatMissingFieldError("status"))
+				return
 			}
 			var currencyID string
 			query := `INSERT INTO mastercurrency (
@@ -223,17 +196,12 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cur.Status,
 			).Scan(&currencyID)
 			if err != nil {
-				tx.Rollback(ctx)
 				errMsg := constants.ErrCurrencyCreateFailed
 				if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
 					errMsg = constants.FormatError(constants.ErrCurrencyAlreadyExists, cur.CurrencyCode)
 				}
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   errMsg,
-					"currency_code":        cur.CurrencyCode,
-				})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
 			}
 			auditQuery := `INSERT INTO auditactioncurrency (
 				currency_id, actiontype, processing_status, reason, requested_by, requested_at
@@ -246,23 +214,8 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				createdBy,
 			)
 			if auditErr != nil {
-				tx.Rollback(ctx)
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrAuditLogFailed,
-					"currency_id":          currencyID,
-					"currency_code":        cur.CurrencyCode,
-				})
-				continue
-			}
-			if commitErr := tx.Commit(ctx); commitErr != nil {
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrTransactionCommitFailed,
-					"currency_id":          currencyID,
-					"currency_code":        cur.CurrencyCode,
-				})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditLogFailed)
+				return
 			}
 			results = append(results, map[string]interface{}{
 				constants.ValueSuccess: true,
@@ -270,10 +223,14 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"currency_code":        cur.CurrencyCode,
 			})
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionCommitFailed)
+			return
+		}
+		committed = true
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		finalSuccess := api.IsBulkSuccess(results)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: finalSuccess,
+			constants.ValueSuccess: true,
 			"results":              results,
 		})
 	}
@@ -472,147 +429,131 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Get pre-validated context values
-		// session := middlewares.GetSessionFromContext(r.Context())
-		// if session == nil {
-		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
-		// 	return
-		// }
-		// updatedBy := session.Name
-		updatedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				updatedBy = s.Name
-				break
-			}
-		}
+		updatedBy := api.AuthenticatedUserNameFromCtx(r.Context())
 		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		var results []map[string]interface{}
-		for _, cur := range req.Currency {
-			ctx := r.Context()
-			tx, txErr := pgxPool.Begin(ctx)
-			if txErr != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTransactionFailed, "currency_id": cur.CurrencyID})
-				continue
+		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
 			}
-			committed := false
-			func() {
-				defer func() {
-					if !committed {
-						tx.Rollback(ctx)
-					}
-					if p := recover(); p != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "panic: " + fmt.Sprint(p), "currency_id": cur.CurrencyID})
-					}
-				}()
+		}()
 
-				// fetch existing values (for old_* capture)
-				var exDecimal *int64
-				var exStatus *string
-				sel := `SELECT decimal_places, status FROM mastercurrency WHERE currency_id=$1 FOR UPDATE`
-				if err := tx.QueryRow(ctx, sel, cur.CurrencyID).Scan(&exDecimal, &exStatus); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCurrencyNotFound, "currency_id": cur.CurrencyID})
+		results := make([]map[string]interface{}, 0, len(req.Currency))
+		for _, cur := range req.Currency {
+			if strings.TrimSpace(cur.CurrencyID) == "" {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrCurrencyNotFound)
+				return
+			}
+			// fetch existing values (for old_* capture)
+			var exDecimal *int64
+			var exStatus *string
+			sel := `SELECT decimal_places, status FROM mastercurrency WHERE currency_id=$1 FOR UPDATE`
+			if err := tx.QueryRow(ctx, sel, cur.CurrencyID).Scan(&exDecimal, &exStatus); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrCurrencyNotFound)
+				return
+			}
+
+			// build dynamic update
+			var sets []string
+			var args []interface{}
+			pos := 1
+			for k, v := range cur.Fields {
+				switch k {
+				case "decimal_places":
+					// JSON numbers decode as float64
+					var newDec int64
+					switch t := v.(type) {
+					case float64:
+						newDec = int64(t)
+					case int:
+						newDec = int64(t)
+					case int64:
+						newDec = t
+					case string:
+						// attempt parse
+						// ignore parse errors and treat as 0
+						var tmp int64
+						fmt.Sscan(t, &tmp)
+						newDec = tmp
+					default:
+						newDec = 0
+					}
+					oldVal := int64(0)
+					if exDecimal != nil {
+						oldVal = *exDecimal
+					}
+					sets = append(sets, fmt.Sprintf("decimal_places=$%d, old_decimal_places=$%d", pos, pos+1))
+					args = append(args, newDec, oldVal)
+					pos += 2
+				case constants.KeyStatus:
+					newStatus := fmt.Sprint(v)
+					oldVal := ""
+					if exStatus != nil {
+						oldVal = *exStatus
+					}
+					sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
+					args = append(args, newStatus, oldVal)
+					pos += 2
+				case "currency_code":
+					sets = append(sets, fmt.Sprintf("currency_code=$%d", pos))
+					args = append(args, strings.ToUpper(fmt.Sprint(v)))
+					pos++
+				case "currency_name":
+					sets = append(sets, fmt.Sprintf("currency_name=$%d", pos))
+					args = append(args, fmt.Sprint(v))
+					pos++
+				case "country":
+					sets = append(sets, fmt.Sprintf("country=$%d", pos))
+					args = append(args, fmt.Sprint(v))
+					pos++
+				case "symbol":
+					sets = append(sets, fmt.Sprintf("symbol=$%d", pos))
+					args = append(args, fmt.Sprint(v))
+					pos++
+				default:
+					// ignore unknown
+				}
+			}
+
+			var currencyID, currencyCode string
+			if len(sets) > 0 {
+				q := "UPDATE mastercurrency SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE currency_id=$%d RETURNING currency_id, currency_code", pos)
+				args = append(args, cur.CurrencyID)
+				if err := tx.QueryRow(ctx, q, args...).Scan(&currencyID, &currencyCode); err != nil {
+					api.RespondWithError(w, http.StatusBadRequest, constants.ErrCurrencyUpdateFailed)
 					return
 				}
+			} else {
+				currencyID = cur.CurrencyID
+			}
 
-				// build dynamic update
-				var sets []string
-				var args []interface{}
-				pos := 1
-				for k, v := range cur.Fields {
-					switch k {
-					case "decimal_places":
-						// JSON numbers decode as float64
-						var newDec int64
-						switch t := v.(type) {
-						case float64:
-							newDec = int64(t)
-						case int:
-							newDec = int64(t)
-						case int64:
-							newDec = t
-						case string:
-							// attempt parse
-							// ignore parse errors and treat as 0
-							var tmp int64
-							fmt.Sscan(t, &tmp)
-							newDec = tmp
-						default:
-							newDec = 0
-						}
-						oldVal := int64(0)
-						if exDecimal != nil {
-							oldVal = *exDecimal
-						}
-						sets = append(sets, fmt.Sprintf("decimal_places=$%d, old_decimal_places=$%d", pos, pos+1))
-						args = append(args, newDec, oldVal)
-						pos += 2
-					case constants.KeyStatus:
-						newStatus := fmt.Sprint(v)
-						oldVal := ""
-						if exStatus != nil {
-							oldVal = *exStatus
-						}
-						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
-						args = append(args, newStatus, oldVal)
-						pos += 2
-					case "currency_code":
-						sets = append(sets, fmt.Sprintf("currency_code=$%d", pos))
-						args = append(args, strings.ToUpper(fmt.Sprint(v)))
-						pos++
-					case "currency_name":
-						sets = append(sets, fmt.Sprintf("currency_name=$%d", pos))
-						args = append(args, fmt.Sprint(v))
-						pos++
-					case "country":
-						sets = append(sets, fmt.Sprintf("country=$%d", pos))
-						args = append(args, fmt.Sprint(v))
-						pos++
-					case "symbol":
-						sets = append(sets, fmt.Sprintf("symbol=$%d", pos))
-						args = append(args, fmt.Sprint(v))
-						pos++
-					default:
-						// ignore unknown
-					}
-				}
-
-				var currencyID, currencyCode string
-				if len(sets) > 0 {
-					q := "UPDATE mastercurrency SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE currency_id=$%d RETURNING currency_id, currency_code", pos)
-					args = append(args, cur.CurrencyID)
-					if err := tx.QueryRow(ctx, q, args...).Scan(&currencyID, &currencyCode); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCurrencyUpdateFailed, "currency_id": cur.CurrencyID})
-						return
-					}
-				} else {
-					currencyID = cur.CurrencyID
-				}
-
-				auditQuery := `INSERT INTO auditactioncurrency (
+			auditQuery := `INSERT INTO auditactioncurrency (
 					currency_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
-				if _, err := tx.Exec(ctx, auditQuery, currencyID, "EDIT", "PENDING_EDIT_APPROVAL", cur.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditLogFailed, "currency_id": currencyID})
-					return
-				}
+			if _, err := tx.Exec(ctx, auditQuery, currencyID, "EDIT", "PENDING_EDIT_APPROVAL", cur.Reason, updatedBy); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditLogFailed)
+				return
+			}
 
-				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTransactionCommitFailed, "currency_id": currencyID})
-					return
-				}
-				committed = true
-				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "currency_id": currencyID, "currency_code": currencyCode})
-			}()
+			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "currency_id": currencyID, "currency_code": currencyCode})
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionCommitFailed)
+			return
+		}
+		committed = true
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		finalSuccess := api.IsBulkSuccess(results)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: finalSuccess,
+			constants.ValueSuccess: true,
 			"results":              results,
 		})
 	}

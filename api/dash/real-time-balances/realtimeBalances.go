@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,6 +24,11 @@ type AccountStatement struct {
 	ClosingBalance float64 `json:"closing_balance"`
 	Narration      string  `json:"narration,omitempty"`
 	Category       string  `json:"category,omitempty"`
+}
+
+func writeRealtimeBalancesError(w http.ResponseWriter, err error, message string) {
+	log.Printf("[ERROR: %v] [Dash] [RealtimeBalances] %s", err, message)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
 type Trend struct {
@@ -234,7 +240,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			GROUP BY mec.entity_name, bank_name
 			ORDER BY value DESC`, args...)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeRealtimeBalancesError(w, err, "failed to query summary balances")
 			return
 		}
 		for vbRows.Next() {
@@ -253,7 +259,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			GROUP BY currency_code
 			ORDER BY value DESC`, args...)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeRealtimeBalancesError(w, err, "failed to query trend balances")
 			return
 		}
 		for dRows.Next() {
@@ -335,7 +341,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 
 		aggRows, err := db.QueryContext(ctx, aggSQL, args...)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeRealtimeBalancesError(w, err, "failed to query KPI balances")
 			return
 		}
 
@@ -568,7 +574,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 
 		stmt2Rows, err := db.QueryContext(ctx, stmtSQL2, args...)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeRealtimeBalancesError(w, err, "failed to query detailed balances")
 			return
 		}
 		for stmt2Rows.Next() {

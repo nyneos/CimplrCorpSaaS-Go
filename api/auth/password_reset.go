@@ -2,6 +2,7 @@ package auth
 
 import (
 	"CimplrCorpSaas/api/constants"
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -71,18 +72,18 @@ func StartTokenCleanup(db *sql.DB) {
 	go func() {
 		for {
 			time.Sleep(tokenCleanupPeriod)
-			_, _ = db.Exec(`DELETE FROM password_reset_tokens WHERE (used = true AND created_at < NOW() - INTERVAL '24 hours') OR (expires_at < NOW() - INTERVAL '24 hours')`)
+			_, _ = db.ExecContext(context.Background(), `DELETE FROM password_reset_tokens WHERE (used = true AND created_at < NOW() - INTERVAL '24 hours') OR (expires_at < NOW() - INTERVAL '24 hours')`)
 		}
 	}()
 }
 
 // ── Email via notification outbox ─────────────────────────────────────────────
 
-func enqueueResetEmail(db *sql.DB, userID, email, name, resetLink string) {
+func enqueueResetEmail(ctx context.Context, db *sql.DB, userID, email, name, resetLink string) {
 	subject := "Password Reset Request — Cimplr"
 	body := buildResetEmailHTML(name, resetLink)
 
-	_, err := db.Exec(`
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO notification_svc.outbox (
 			correlation_id, event_id, audit_id, channel,
 			recipient_user_id, recipient_email, recipient_name,
@@ -178,7 +179,7 @@ func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 
 		// Constant-time-ish response: always return success even if email unknown
 		var userID, employeeName string
-		err := db.QueryRow(`SELECT id, COALESCE(employee_name, '') FROM users WHERE LOWER(email) = $1`, email).Scan(&userID, &employeeName)
+		err := db.QueryRowContext(r.Context(), `SELECT id, COALESCE(employee_name, '') FROM users WHERE LOWER(email) = $1`, email).Scan(&userID, &employeeName)
 		if err != nil {
 			LogSecurityEvent(db, "", "forgot_password_unknown", email, clientIP)
 			writeResetJSON(w, http.StatusOK, true, "If the email is registered, a reset link has been sent.")
@@ -195,10 +196,10 @@ func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 		expiresAt := time.Now().Add(resetTokenExpiry)
 
 		// Invalidate any existing unused tokens for this user
-		_, _ = db.Exec(`UPDATE password_reset_tokens SET used = true WHERE user_id = $1 AND used = false`, userID)
+		_, _ = db.ExecContext(r.Context(), `UPDATE password_reset_tokens SET used = true WHERE user_id = $1 AND used = false`, userID)
 
 		// Insert new token
-		_, err = db.Exec(
+		_, err = db.ExecContext(r.Context(),
 			`INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)`,
 			userID, token, expiresAt,
 		)
@@ -217,7 +218,7 @@ func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 		resetLink := frontendURL + "/reset-password?token=" + token
 
 		// Enqueue reset email via notification outbox (picked up by outbox worker)
-		go enqueueResetEmail(db, userID, email, employeeName, resetLink)
+		go enqueueResetEmail(r.Context(), db, userID, email, employeeName, resetLink)
 
 		// In dev mode, also include token + link in response for testing
 		if strings.EqualFold(os.Getenv("DEVEL_MODE"), "true") {
@@ -273,7 +274,7 @@ func ResetPasswordHandler(db *sql.DB) http.HandlerFunc {
 		var userID string
 		var expiresAt time.Time
 		var used bool
-		err := db.QueryRow(
+		err := db.QueryRowContext(r.Context(),
 			`SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token = $1`,
 			token,
 		).Scan(&userID, &expiresAt, &used)
@@ -349,7 +350,7 @@ func ValidateResetTokenHandler(db *sql.DB) http.HandlerFunc {
 		var userID string
 		var expiresAt time.Time
 		var used bool
-		err := db.QueryRow(
+		err := db.QueryRowContext(r.Context(),
 			`SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token = $1`,
 			strings.TrimSpace(req.Token),
 		).Scan(&userID, &expiresAt, &used)
@@ -370,7 +371,7 @@ func ValidateResetTokenHandler(db *sql.DB) http.HandlerFunc {
 
 		// Get email for display (masked)
 		var email string
-		_ = db.QueryRow(`SELECT email FROM users WHERE id = $1`, userID).Scan(&email)
+		_ = db.QueryRowContext(r.Context(), `SELECT email FROM users WHERE id = $1`, userID).Scan(&email)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{

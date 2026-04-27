@@ -24,18 +24,32 @@ import (
 	statementstatus "CimplrCorpSaas/api/dash/statementstatus"
 	ticker "CimplrCorpSaas/api/dash/ticker"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/internal/telemetry"
 	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
+
+var dashServer *http.Server
+var dashServerStop context.CancelFunc
+var dashTracerShutdown func(context.Context) error
 
 func StartDashService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
+	tracerProvider, tracerShutdown, err := telemetry.InitTracerProvider("dash")
+	if err != nil {
+		log.Fatalf("failed to initialize OpenTelemetry tracer for dash service: %v", err)
+	}
+	dashTracerShutdown = tracerShutdown
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
@@ -46,6 +60,7 @@ func StartDashService(db *sql.DB, port string) {
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
 	}
+	defer pgxPool.Close()
 	// Statement Status Dashboard
 	mux.Handle("/dash/statement-status", middlewares.PreValidationMiddleware(pgxPool)(statementstatus.GetStatementStatusHandler(pgxPool)))
 	mux.Handle("/dash/transaction-pool", middlewares.PreValidationMiddleware(pgxPool)(commonpool.GetTransactionPoolHandler(db)))
@@ -222,9 +237,48 @@ func StartDashService(db *sql.DB, port string) {
 	mux.Handle("/dash/notification/failure-reasons", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetFailureReasons(pgxPool)))
 	mux.Handle("/dash/notification/overview", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetOverview(pgxPool)))
 
-	log.Printf("Dashboard Service started on :%s", port)
-	err = http.ListenAndServe(":"+port, mux)
-	if err != nil {
-		log.Fatalf("Dashboard Service failed: %v", err)
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: otelhttp.NewHandler(mux, "dash", otelhttp.WithTracerProvider(tracerProvider)),
 	}
+	dashServer = server
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	dashServerStop = stop
+	defer stop()
+
+	go func() {
+		log.Printf("Dashboard Service started on :%s", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Dashboard Service failed: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = server.Shutdown(shutdownCtx)
+}
+
+func shutdownDashService() error {
+	if dashServerStop != nil {
+		dashServerStop()
+	}
+	if dashServer == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := dashServer.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	if dashTracerShutdown != nil {
+		if err := dashTracerShutdown(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }

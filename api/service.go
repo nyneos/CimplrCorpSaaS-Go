@@ -44,6 +44,5 @@ func (s *GatewayService) Start() error {
 }
 
 func (s *GatewayService) Stop() error {
-	// Implement stop logic if needed
-	return nil
+	return shutdownGatewayServer()
 }

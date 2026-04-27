@@ -35,12 +35,25 @@ var rates = map[string]float64{
 }
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
+	log.Printf("[ERROR: %v] [Dash] [FXOps] request failed", errMsg)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
+		constants.ValueError:   clientMsg,
 	})
 }
 

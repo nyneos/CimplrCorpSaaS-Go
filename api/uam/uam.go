@@ -8,18 +8,32 @@ import (
 	"CimplrCorpSaas/api/uam/permissions" // <-- Import permissions
 	"CimplrCorpSaas/api/uam/role"        // <-- Import role
 	"CimplrCorpSaas/api/uam/user"        // <-- Import user
+	"CimplrCorpSaas/internal/telemetry"
 	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
+
+var uamServer *http.Server
+var uamServerStop context.CancelFunc
+var uamTracerShutdown func(context.Context) error
 
 func StartUAMService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
+	tracerProvider, tracerShutdown, err := telemetry.InitTracerProvider("uam")
+	if err != nil {
+		log.Fatalf("failed to initialize OpenTelemetry tracer for UAM service: %v", err)
+	}
+	uamTracerShutdown = tracerShutdown
 
 	// Build pgx pool for approval matrix handlers (PreValidationMiddleware pattern)
 	pgxPool := func() *pgxpool.Pool {
@@ -88,9 +102,48 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.Handle("/uam/permissions/get-role-permissions", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolePermissionsJsonByRoleName(db))))
 	mux.Handle("/uam/permissions/sidebar", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetSidebarPermissions(db))))
 
-	log.Printf("UAM Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
-	if err != nil {
-		log.Fatalf("UAM Service failed: %v", err)
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: otelhttp.NewHandler(mux, "uam", otelhttp.WithTracerProvider(tracerProvider)),
 	}
+	uamServer = server
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	uamServerStop = stop
+	defer stop()
+
+	go func() {
+		log.Printf("UAM Service started on :%s", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("UAM Service failed: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = server.Shutdown(shutdownCtx)
+}
+
+func shutdownUAMService() error {
+	if uamServerStop != nil {
+		uamServerStop()
+	}
+	if uamServer == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := uamServer.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	if uamTracerShutdown != nil {
+		if err := uamTracerShutdown(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }

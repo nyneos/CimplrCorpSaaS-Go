@@ -95,15 +95,28 @@ const (
 
 // Helper function for consistent error responses
 func respondWithErrorTransactionV2(w http.ResponseWriter, status int, errMsg string) {
-	log.Printf("[ERROR] %s", errMsg)
+	log.Printf("[ERROR: %v] [Cash] [PayRecUploadV2] request failed", errMsg)
 	w.Header().Set(ContentTypeJSON, ApplicationJSON)
 	w.WriteHeader(status)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
 	response := map[string]interface{}{
 		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
+		constants.ValueError:   clientMsg,
 	}
 	if status == http.StatusBadRequest {
-		response["message"] = errMsg
+		response["message"] = clientMsg
 	}
 	json.NewEncoder(w).Encode(response)
 }

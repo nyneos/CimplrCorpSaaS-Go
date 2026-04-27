@@ -4,7 +4,9 @@ import (
 	"CimplrCorpSaas/internal/dashboard"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/serviceiface"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -165,11 +167,19 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 
 	var roleName, roleCode sql.NullString
 	_ = a.db.QueryRow(
-		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 LIMIT 1`,
+		`SELECT r.name, r.rolecode 
+	 FROM user_roles ur 
+	 JOIN roles r ON ur.role_id = r.id 
+	 WHERE ur.user_id = $1 
+	 ORDER BY r.id ASC 
+	 LIMIT 1`,
 		dbUserID,
 	).Scan(&roleName, &roleCode)
 
-	sessionID := generateSessionID()
+	sessionID, err := generateSessionID()
+	if err != nil {
+		return nil, false, errors.New("internal error: could not generate session")
+	}
 	session := &UserSession{
 		SessionID:     sessionID,
 		UserID:        dbUserID,
@@ -321,8 +331,12 @@ func (a *AuthService) sessionCleaner() {
 	}
 }
 
-func generateSessionID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+func generateSessionID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func (a *AuthService) LogDifferentIPRequest(userID string, clientIP string) {

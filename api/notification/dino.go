@@ -1,22 +1,37 @@
 package notification
 
 import (
+	"CimplrCorpSaas/internal/telemetry"
 	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	middlewares "CimplrCorpSaas/api/middlewares"
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	push "CimplrCorpSaas/api/notification/push"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
+
+var notificationServer *http.Server
+var notificationServerStop context.CancelFunc
+var notificationTracerShutdown func(context.Context) error
 
 func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux := http.NewServeMux()
+	ownsPool := false
+	tracerProvider, tracerShutdown, err := telemetry.InitTracerProvider("notification")
+	if err != nil {
+		log.Fatalf("failed to initialize OpenTelemetry tracer for notification service: %v", err)
+	}
+	notificationTracerShutdown = tracerShutdown
 
 	if pool == nil {
 		user := os.Getenv("DB_USER")
@@ -31,7 +46,11 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 			if err != nil {
 				log.Fatalf("failed to connect to pgxpool DB: %v", err)
 			}
+			ownsPool = true
 		}
+	}
+	if ownsPool {
+		defer pool.Close()
 	}
 
 	// Register routes for event catalog
@@ -83,8 +102,48 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	// Register browser push subscription routes (VAPID public key, register, unregister)
 	push.RegisterSubscriptionRoutes(mux, pool)
 
-	log.Printf("Notification Service started on :%s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		log.Fatalf("Notification Service failed: %v", err)
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: otelhttp.NewHandler(mux, "notification", otelhttp.WithTracerProvider(tracerProvider)),
 	}
+	notificationServer = server
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	notificationServerStop = stop
+	defer stop()
+
+	go func() {
+		log.Printf("Notification Service started on :%s", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Notification Service failed: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = server.Shutdown(shutdownCtx)
+}
+
+func shutdownNotificationService() error {
+	if notificationServerStop != nil {
+		notificationServerStop()
+	}
+	if notificationServer == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := notificationServer.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	if notificationTracerShutdown != nil {
+		if err := notificationTracerShutdown(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }

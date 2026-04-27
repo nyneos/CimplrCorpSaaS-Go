@@ -64,7 +64,7 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 		return dash.NewDashService(cfg, db) // Pass db here
 	},
 	"cash": func(cfg map[string]interface{}) serviceiface.Service {
-		return cash.NewCashService(cfg, db) // Pass db here
+		return cash.NewCashService(cfg, pgxPool)
 	},
 	"uam": func(cfg map[string]interface{}) serviceiface.Service {
 		return uam.NewUAMService(cfg, db)
@@ -153,29 +153,61 @@ func (am *AppManager) StartAll() error {
 	am.mu.Lock()
 	defer am.mu.Unlock()
 
-	// First pass: start all except Resourcemanager
-	for _, service := range am.services {
-		if service.Name() == "resourcemanager" {
-			continue
+	// One transaction for the entire startup batch
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin startup transaction: %w", err)
+	}
+
+	// Build ordered list: non-resourcemanager first, resourcemanager last
+	ordered := make([]serviceiface.Service, 0, len(am.services))
+	var rmSvc serviceiface.Service
+	for _, svc := range am.services {
+		if svc.Name() == "resourcemanager" {
+			rmSvc = svc
+		} else {
+			ordered = append(ordered, svc)
 		}
-		fmt.Println("Starting service:", service.Name())
-		if err := service.Start(); err != nil {
-			return fmt.Errorf("failed to start service %s: %w", service.Name(), err)
+	}
+	if rmSvc != nil {
+		ordered = append(ordered, rmSvc)
+	}
+
+	for _, svc := range ordered {
+		savepointName := "sp_" + svc.Name()
+
+		// Create savepoint before each service starts
+		if _, err := tx.Exec("SAVEPOINT " + savepointName); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to create savepoint for %s: %w", svc.Name(), err)
+		}
+
+		fmt.Println("Starting service:", svc.Name())
+		if err := svc.Start(); err != nil {
+			// Roll back only this service's work, not the whole batch
+			if _, spErr := tx.Exec("ROLLBACK TO SAVEPOINT " + savepointName); spErr != nil {
+				_ = tx.Rollback() // full rollback if savepoint itself fails
+				return fmt.Errorf("savepoint rollback failed for %s: %w", svc.Name(), spErr)
+			}
+			// Release the savepoint after rolling back to it
+			tx.Exec("RELEASE SAVEPOINT " + savepointName)
+			return fmt.Errorf("failed to start service %s: %w", svc.Name(), err)
+		}
+
+		// Service started cleanly — release its savepoint
+		if _, err := tx.Exec("RELEASE SAVEPOINT " + savepointName); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to release savepoint for %s: %w", svc.Name(), err)
 		}
 	}
 
-	// Now start resourcemanager (after heartbeat is wired)
-	for _, service := range am.services {
-		if service.Name() == "resourcemanager" {
-			fmt.Println("Starting service:", service.Name())
-			if err := service.Start(); err != nil {
-				return fmt.Errorf("failed to start service %s: %w", service.Name(), err)
-			}
-		}
+	// Single final commit once ALL services have started successfully
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit startup transaction: %w", err)
 	}
+
 	return nil
 }
-
 func (am *AppManager) StopAll() error {
 	am.mu.Lock()
 	defer am.mu.Unlock()
@@ -216,6 +248,40 @@ func LoadServiceSequence(path string) ([]ServiceConfig, error) {
 	})
 
 	return seq.Services, nil
+}
+
+func ExcludeServiceConfigs(configs []ServiceConfig, excludedNames ...string) []ServiceConfig {
+	excluded := make(map[string]struct{}, len(excludedNames))
+	for _, name := range excludedNames {
+		excluded[name] = struct{}{}
+	}
+
+	filtered := make([]ServiceConfig, 0, len(configs))
+	for _, cfg := range configs {
+		if _, skip := excluded[cfg.Name]; skip {
+			continue
+		}
+		filtered = append(filtered, cfg)
+	}
+
+	return filtered
+}
+
+func SelectServiceConfigs(configs []ServiceConfig, selectedNames ...string) []ServiceConfig {
+	selected := make(map[string]struct{}, len(selectedNames))
+	for _, name := range selectedNames {
+		selected[name] = struct{}{}
+	}
+
+	filtered := make([]ServiceConfig, 0, len(configs))
+	for _, cfg := range configs {
+		if _, keep := selected[cfg.Name]; !keep {
+			continue
+		}
+		filtered = append(filtered, cfg)
+	}
+
+	return filtered
 }
 
 func (am *AppManager) AutoRegisterServices(configs []ServiceConfig) {

@@ -321,14 +321,14 @@ func SSOCallbackHandler(cfg *SSOConfig, db *sql.DB) http.HandlerFunc {
 		}
 
 		// Update sso_provider/sso_subject on user row
-		_, _ = db.Exec(
+		_, _ = db.ExecContext(r.Context(),
 			`UPDATE users SET sso_provider = $1, sso_subject = $2 WHERE LOWER(email) = LOWER($3)`,
 			providerName, claims.Sub, email,
 		)
 
 		// Authenticate
 		clientIP := extractClientIPFromRequest(r)
-		session, mfaPending, err := globalAuthService.LoginViaSSO(email, clientIP)
+		session, mfaPending, err := globalAuthService.LoginViaSSO(r.Context(), email, clientIP)
 		if err != nil {
 			LogSecurityEvent(db, "", "sso_login_failed", email+": "+err.Error(), clientIP)
 			if isGET {
@@ -417,14 +417,14 @@ func SSOLogoutHandler(cfg *SSOConfig, db *sql.DB) http.HandlerFunc {
 
 // ── LoginViaSSO on AuthService ────────────────────────────────────────────────
 
-func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, bool, error) {
+func (a *AuthService) LoginViaSSO(ctx context.Context, email string, clientIP string) (*UserSession, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	var dbUserID, dbName, dbEmail string
 	var dbStatus sql.NullString
 
-	err := a.db.QueryRow(
+	err := a.db.QueryRowContext(ctx,
 		`SELECT id, employee_name, email, status FROM users WHERE LOWER(email) = LOWER($1)`,
 		email,
 	).Scan(&dbUserID, &dbName, &dbEmail, &dbStatus)
@@ -447,12 +447,15 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 	}
 
 	var roleName, roleCode sql.NullString
-	_ = a.db.QueryRow(
+	_ = a.db.QueryRowContext(ctx,
 		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 LIMIT 1`,
 		dbUserID,
 	).Scan(&roleName, &roleCode)
 
-	sessionID := generateSessionID()
+	sessionID, err := generateSessionID()
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to generate session ID: %w", err)
+	}
 	session := &UserSession{
 		SessionID:     sessionID,
 		UserID:        dbUserID,
@@ -468,7 +471,7 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 	// Check MFA — only pending if BOTH enabled AND secret is configured
 	var mfaEnabled sql.NullBool
 	var mfaSecret sql.NullString
-	_ = a.db.QueryRow(`SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, dbUserID).Scan(&mfaEnabled, &mfaSecret)
+	_ = a.db.QueryRowContext(ctx, `SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, dbUserID).Scan(&mfaEnabled, &mfaSecret)
 	if mfaEnabled.Valid && mfaEnabled.Bool && mfaSecret.Valid && mfaSecret.String != "" {
 		session.IsLoggedIn = false
 		a.users[sessionID] = session

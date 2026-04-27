@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"context"
 	"encoding/json"
+	"log"
 	"math"
 	"net/http"
 	"strings"
@@ -31,6 +32,11 @@ func ctxApprovedAccountNumbers(ctx context.Context) []string {
 		}
 	}
 	return out
+}
+
+func writeBankBalanceDashError(w http.ResponseWriter, err error, message string) {
+	log.Printf("[ERROR: %v] [Dash] [BankBalance] %s", err, message)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
 func normalizeLowerTrimSlice(in []string) []string {
@@ -77,12 +83,12 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Parse user_id from JSON body
+		// user_id may still be present in legacy payloads, but auth comes from middleware context.
 		var body struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			http.Error(w, constants.ErrMissingUserID, http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 
@@ -141,7 +147,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND upper(trim(mba.currencycode)) = ANY($4)
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankBalanceDashError(w, err, "failed to query approved bank balances")
 			return
 		}
 		defer rows.Close()
@@ -260,8 +266,8 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var body struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			http.Error(w, constants.ErrMissingUserID, http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 
@@ -312,7 +318,7 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY e.entity_name, b.bank_name, lab.account_no;
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankBalanceDashError(w, err, "failed to query currency wise balances")
 			return
 		}
 		defer rows.Close()
@@ -485,8 +491,8 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var body struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			http.Error(w, constants.ErrMissingUserID, http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 
@@ -542,7 +548,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM latest_per_account;
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankBalanceDashError(w, err, "failed to query currency wise dashboard")
 			return
 		}
 		defer rows.Close()
@@ -671,8 +677,8 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var body struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			http.Error(w, constants.ErrMissingUserID, http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 
@@ -712,7 +718,7 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			GROUP BY e.entity_short_name, mb.bank_name, mb.currency_code;
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankBalanceDashError(w, err, "failed to query approved manual balances")
 			return
 		}
 		defer rows.Close()

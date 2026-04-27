@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,6 +19,11 @@ type CategoryAgg struct {
 	Category string  `json:"category"`
 	Inflow   float64 `json:"inflow"`
 	Outflow  float64 `json:"outflow"`
+}
+
+func writeCategorywiseError(w http.ResponseWriter, err error, message string) {
+	log.Printf("[ERROR: %v] [Dash] [CategorywiseBreakdown] %s", err, message)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
 type StatementTxnRow struct {
@@ -226,7 +232,7 @@ ORDER BY inflow DESC, outflow DESC;
 
 		catRows, err := pgxPool.Query(ctx, categorySQL, args...)
 		if err != nil {
-			http.Error(w, "error querying category aggregation: "+err.Error(), http.StatusInternalServerError)
+			writeCategorywiseError(w, err, "failed to query category aggregation")
 			return
 		}
 		defer catRows.Close()
@@ -320,7 +326,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 
 		entityRows, err := pgxPool.Query(ctx, entitySQL, args...)
 		if err != nil {
-			http.Error(w, "error querying entity breakdown: "+err.Error(), http.StatusInternalServerError)
+			writeCategorywiseError(w, err, "failed to query entity breakdown")
 			return
 		}
 		defer entityRows.Close()
@@ -391,7 +397,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 
 		txnRows, err := pgxPool.Query(ctx, txnSQL, args...)
 		if err != nil {
-			http.Error(w, "error querying transactions: "+err.Error(), http.StatusInternalServerError)
+			writeCategorywiseError(w, err, "failed to query transactions")
 			return
 		}
 		defer txnRows.Close()
@@ -479,7 +485,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		var highestBank *BankBalanceKPI
 		highestRows, err := pgxPool.Query(ctx, highestSQL, kpiArgs...)
 		if err != nil {
-			http.Error(w, "error querying highest contributing bank: "+err.Error(), http.StatusInternalServerError)
+			writeCategorywiseError(w, err, "failed to query highest contributing bank")
 			return
 		}
 		defer highestRows.Close()
@@ -516,7 +522,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		var lowestAcct *LowestBalanceAccount
 		lowestRows, err := pgxPool.Query(ctx, lowestSQL, kpiArgs...)
 		if err != nil {
-			http.Error(w, "error querying lowest balance account: "+err.Error(), http.StatusInternalServerError)
+			writeCategorywiseError(w, err, "failed to query lowest balance account")
 			return
 		}
 		defer lowestRows.Close()
@@ -573,7 +579,7 @@ LIMIT 2000;
 
 		misclassifiedRows, err := pgxPool.Query(ctx, misclassifiedSQL, args...)
 		if err != nil {
-			http.Error(w, "error querying misclassified transactions: "+err.Error(), http.StatusInternalServerError)
+			writeCategorywiseError(w, err, "failed to query misclassified transactions")
 			return
 		}
 		defer misclassifiedRows.Close()

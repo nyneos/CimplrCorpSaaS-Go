@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"strings"
@@ -39,11 +40,25 @@ func generateRandomPassword(length int) (string, error) {
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
+	log.Printf("[ERROR: %v] [UAM] [User] request failed", errMsg)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": false,
-		"error":   errMsg,
+		"error":   clientMsg,
 	})
 }
 
@@ -265,7 +280,7 @@ WHERE u.business_unit_name = ANY($1::text[])`
 		query += fmt.Sprintf(" ORDER BY GREATEST(COALESCE(u.created_at, '1970-01-01'::timestamp), COALESCE(u.approved_at, '1970-01-01'::timestamp), COALESCE(u.updated_at, '1970-01-01'::timestamp), COALESCE(u.rejected_at, '1970-01-01'::timestamp)) DESC LIMIT $%d OFFSET $%d", pIdx, pIdx+1)
 		args = append(args, pagination.Limit, pagination.Offset)
 
-		rows, err := db.Query(query, args...)
+		rows, err := db.QueryContext(r.Context(), query, args...)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -312,7 +327,7 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Query for user by ID, restrict to accessible business units
-		rows, err := db.Query("SELECT * FROM users WHERE id = $1 AND business_unit_name = ANY($2::text[])", req.UserID, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), "SELECT * FROM users WHERE id = $1 AND business_unit_name = ANY($2::text[])", req.UserID, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -368,7 +383,7 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 		var rows *sql.Rows
 		var err error
 		if req.EntityName != "" {
-			rows, err = db.Query(`
+			rows, err = db.QueryContext(r.Context(), `
 				SELECT * FROM users
 				WHERE business_unit_name = ANY($1::text[])
 				  AND business_unit_name = $2
@@ -376,7 +391,7 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 				ORDER BY id DESC
 			`, pq.Array(buNames), req.EntityName)
 		} else {
-			rows, err = db.Query(`
+			rows, err = db.QueryContext(r.Context(), `
 				SELECT * FROM users
 				WHERE business_unit_name = ANY($1::text[])
 				  AND LOWER(TRIM(status)) = 'approved'
@@ -517,7 +532,7 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 			setClause, len(keys)+1, len(keys)+2,
 		)
 		values = append(values, id, pq.Array(buNames))
-		rows, err := db.Query(query, values...)
+		rows, err := db.QueryContext(r.Context(), query, values...)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -592,7 +607,7 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 			targetIds = []string{req.ID}
 		}
 
-		rows, err := db.Query(
+		rows, err := db.QueryContext(r.Context(),
 			"UPDATE users SET status = 'Delete-Approval', updated_by = $1, updated_at = NOW() WHERE id = ANY($2) AND business_unit_name = ANY($3::text[]) RETURNING *",
 			deleter, pq.Array(targetIds), pq.Array(buNames),
 		)
@@ -643,7 +658,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Get existing users and their status
-		rows, err := db.Query(
+		rows, err := db.QueryContext(r.Context(),
 			"SELECT id, status FROM users WHERE id = ANY($1) AND business_unit_name = ANY($2::text[])",
 			pq.Array(req.Ids), pq.Array(buNames),
 		)
@@ -670,7 +685,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 		// Delete users and their user_roles
 		if len(toDelete) > 0 {
 			// Delete user_roles first for referential integrity
-			_, err := db.Exec(
+			_, err := db.ExecContext(r.Context(),
 				"DELETE FROM user_roles WHERE user_id = ANY($1)",
 				pq.Array(toDelete),
 			)
@@ -678,7 +693,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 				respondWithError(w, http.StatusInternalServerError, "Failed to delete user_roles: "+err.Error())
 				return
 			}
-			delRows, err := db.Query(
+			delRows, err := db.QueryContext(r.Context(),
 				"DELETE FROM users WHERE id = ANY($1) AND business_unit_name = ANY($2::text[]) RETURNING *",
 				pq.Array(toDelete), pq.Array(buNames),
 			)
@@ -715,7 +730,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 		}
 		// Approve users
 		if len(toApprove) > 0 {
-			appRows, err := db.Query(
+			appRows, err := db.QueryContext(r.Context(),
 				"UPDATE users SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) AND business_unit_name = ANY($4::text[]) RETURNING *",
 				approvedBy, req.ApprovalComment, pq.Array(toApprove), pq.Array(buNames),
 			)
@@ -773,7 +788,7 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		rows, err := db.Query(
+		rows, err := db.QueryContext(r.Context(),
 			"UPDATE users SET status = 'Rejected', rejected_by = $1, rejected_at = NOW(), approval_comment = $2 WHERE id = ANY($3) AND business_unit_name = ANY($4::text[]) RETURNING *",
 			rejectedBy, req.RejectionComment, pq.Array(req.Ids), pq.Array(buNames),
 		)

@@ -266,7 +266,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 
 			// Get user's business unit name
 			var userBu string
-			err := db.QueryRow(constants.QuerryBusinessUnitName, userID).Scan(&userBu)
+			err := db.QueryRowContext(r.Context(), constants.QuerryBusinessUnitName, userID).Scan(&userBu)
 			if err != nil || userBu == "" {
 				log.Printf("[BUMiddleware] BLOCKED %s %s — no business unit for user_id=%s err=%v", r.Method, r.URL.Path, userID, err)
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -286,7 +286,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			WHERE entity_name = $1 
 			AND (is_deleted = false OR is_deleted IS NULL) 
 			AND (is_top_level_entity = TRUE OR LOWER(active_status) = 'active')`
-			err = db.QueryRow(query, userBu).Scan(&rootEntityId)
+			err = db.QueryRowContext(r.Context(), query, userBu).Scan(&rootEntityId)
 
 			// Try 2: Case-insensitive match in masterentitycash
 			if err != nil {
@@ -295,7 +295,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				AND (is_deleted = false OR is_deleted IS NULL) 
 				AND (is_top_level_entity = TRUE OR LOWER(active_status) = 'active')
 				LIMIT 1`
-				err = db.QueryRow(query, userBu).Scan(&rootEntityId)
+				err = db.QueryRowContext(r.Context(), query, userBu).Scan(&rootEntityId)
 			}
 
 			// Try 3: Exact match in masterentity (fallback)
@@ -304,7 +304,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				WHERE entity_name = $1 
 				AND (is_deleted = false OR is_deleted IS NULL) 
 				AND (is_top_level_entity = TRUE OR approval_status ILIKE 'approved')`
-				err = db.QueryRow(query, userBu).Scan(&rootEntityId)
+				err = db.QueryRowContext(r.Context(), query, userBu).Scan(&rootEntityId)
 			}
 
 			// Try 4: Case-insensitive match in masterentity (final fallback)
@@ -314,7 +314,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				AND (is_deleted = false OR is_deleted IS NULL) 
 				AND (is_top_level_entity = TRUE OR approval_status ILIKE 'approved')
 				LIMIT 1`
-				err = db.QueryRow(query, userBu).Scan(&rootEntityId)
+				err = db.QueryRowContext(r.Context(), query, userBu).Scan(&rootEntityId)
 			}
 
 			if err != nil {
@@ -328,7 +328,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			}
 
 			// Try FIRST query: masterentitycash with cashentityrelationships
-			rows1, err1 := db.Query(`
+			rows1, err1 := db.QueryContext(r.Context(), `
                WITH RECURSIVE descendants AS (
                     SELECT entity_id, entity_name 
                     FROM masterentitycash 
@@ -364,7 +364,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			}
 
 			// Try SECOND query: masterentity with entityRelationships
-			rows2, err2 := db.Query(`
+			rows2, err2 := db.QueryContext(r.Context(), `
                WITH RECURSIVE descendants AS (
                     SELECT entity_id, entity_name 
                     FROM masterEntity 

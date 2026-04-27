@@ -38,6 +38,5 @@ func (s *MasterService) Start() error {
 }
 
 func (s *MasterService) Stop() error {
-	// Implement stop logic if needed
-	return nil
+	return shutdownMasterService()
 }

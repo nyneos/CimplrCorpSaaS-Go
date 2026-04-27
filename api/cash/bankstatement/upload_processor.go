@@ -12,11 +12,14 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ProcessBankStatementFromJSON reads bank.json and processes it like Excel upload.
 // This is a placeholder for future PDF OCR integration.
-func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]interface{}, error) {
+func ProcessBankStatementFromJSON(ctx context.Context, pgxPool *pgxpool.Pool) (map[string]interface{}, error) {
 	log.Println("[PDF_PROCESSOR] Reading bank.json file")
 
 	possiblePaths := []string{
@@ -71,21 +74,21 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 	}
 	hash := sha256.Sum256(jsonBytes)
 	fileHash := fmt.Sprintf("%x", hash[:])
-	return ProcessBankStatementFromStructuredInput(ctx, db, structured, fileHash)
+	return ProcessBankStatementFromStructuredInput(ctx, pgxPool, structured, fileHash)
 }
 
 // ProcessBankStatementFromStructuredInput performs ingestion, categorization,
 // dedup and KPI computation for structured input (no file I/O or header detection).
-func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, input StructuredBankStatement, fileHash string) (map[string]interface{}, error) {
+func ProcessBankStatementFromStructuredInput(ctx context.Context, pgxPool *pgxpool.Pool, input StructuredBankStatement, fileHash string) (map[string]interface{}, error) {
 	var entityID, accountName, bankName string
-	err := db.QueryRowContext(ctx, `
+	err := pgxPool.QueryRow(ctx, `
 		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
 		FROM public.masterbankaccount mba
 		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 		WHERE mba.account_number = $1 AND mba.is_deleted = false
 	`, input.AccountNumber).Scan(&entityID, &bankName, &accountName)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("account %s not found in master data", input.AccountNumber)
 		}
 		return nil, fmt.Errorf("failed to lookup account: %w", err)
@@ -102,13 +105,13 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 	}
 
 	var acctCurrency sql.NullString
-	db.QueryRowContext(ctx, `SELECT currency FROM public.masterbankaccount WHERE account_number = $1`, input.AccountNumber).Scan(&acctCurrency)
+	pgxPool.QueryRow(ctx, `SELECT currency FROM public.masterbankaccount WHERE account_number = $1`, input.AccountNumber).Scan(&acctCurrency)
 
 	var currencyCode string
 	if acctCurrency.Valid {
 		currencyCode = acctCurrency.String
 	}
-	rules, err := loadCategoryRuleComponents(ctx, db, input.AccountNumber, entityID, currencyCode)
+	rules, err := loadCategoryRuleComponents(ctx, pgxPool, input.AccountNumber, entityID, currencyCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load category rules: %w", err)
 	}
@@ -192,7 +195,7 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 	}
 
 	existingTxnKeys := make(map[string]bool)
-	rowsExisting, err := db.QueryContext(ctx, `
+	rowsExisting, err := pgxPool.Query(ctx, `
 		SELECT account_number, transaction_date, description, withdrawal_amount, deposit_amount
 		FROM cimplrcorpsaas.bank_statement_transactions
 		WHERE account_number = $1
@@ -210,14 +213,14 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 		}
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := pgxPool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
 	var bankStatementID string
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO cimplrcorpsaas.bank_statements (
 			entity_id, account_number, statement_period_start, statement_period_end,
 			file_hash, opening_balance, closing_balance, upload_s3_key
@@ -275,7 +278,7 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 			ON CONFLICT ON CONSTRAINT uniq_transaction DO NOTHING
 		`, strings.Join(valueStrings, ","))
 
-		if _, err := tx.Exec(insertQuery, valueArgs...); err != nil {
+		if _, err := tx.Exec(ctx, insertQuery, valueArgs...); err != nil {
 			return nil, fmt.Errorf("failed to insert transactions: %w", err)
 		}
 	}
@@ -287,7 +290,7 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 		}
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	_, err = tx.Exec(ctx, `
 		INSERT INTO cimplrcorpsaas.auditactionbankstatement (
 			bankstatementid, actiontype, processing_status, requested_by, requested_at
 		) VALUES ($1, $2, $3, $4, $5)
@@ -296,7 +299,7 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 		return nil, fmt.Errorf(constants.ErrFailedToInsertAuditAction, err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 

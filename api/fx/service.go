@@ -38,6 +38,5 @@ func (s *FXService) Start() error {
 }
 
 func (s *FXService) Stop() error {
-	// Implement stop logic if needed
-	return nil
+	return shutdownFXService()
 }

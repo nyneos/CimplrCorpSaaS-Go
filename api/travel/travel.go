@@ -1,16 +1,18 @@
 package travel
 
 import (
-	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // CreatePackageHandler accepts a JSON body for a travel package and
 // inserts it into the `travel.packages` table. If a package with the same
 // id already exists it will be updated.
-func CreatePackageHandler(db *sql.DB) http.HandlerFunc {
+func CreatePackageHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -40,7 +42,7 @@ func CreatePackageHandler(db *sql.DB) http.HandlerFunc {
 		stmt := `INSERT INTO travel.packages (id, package_json) VALUES ($1, $2)
                  ON CONFLICT (id) DO UPDATE SET package_json = EXCLUDED.package_json, updated_at = now()`
 
-		if _, err := db.Exec(stmt, idVal, pkgBytes); err != nil {
+		if _, err := pgxPool.Exec(r.Context(), stmt, idVal, pkgBytes); err != nil {
 			log.Printf("failed to upsert package %s: %v", idVal, err)
 			http.Error(w, "failed to save package", http.StatusInternalServerError)
 			return
@@ -55,7 +57,7 @@ func CreatePackageHandler(db *sql.DB) http.HandlerFunc {
 // GetPackageHandler supports two modes:
 // - GET /...?id=<id>   -> returns JSON for the package with given id
 // - GET /              -> returns a list of packages (recent first, up to 100)
-func GetPackageHandler(db *sql.DB) http.HandlerFunc {
+func GetPackageHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -67,8 +69,8 @@ func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 
 		if id != "" {
 			var pkgBytes []byte
-			err := db.QueryRow(`SELECT package_json FROM travel.packages WHERE id = $1`, id).Scan(&pkgBytes)
-			if err == sql.ErrNoRows {
+			err := pgxPool.QueryRow(r.Context(), `SELECT package_json FROM travel.packages WHERE id = $1`, id).Scan(&pkgBytes)
+			if err == pgx.ErrNoRows {
 				http.NotFound(w, r)
 				return
 			}
@@ -81,7 +83,7 @@ func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`SELECT id, package_json FROM travel.packages ORDER BY created_at DESC LIMIT 100`)
+		rows, err := pgxPool.Query(r.Context(), `SELECT id, package_json FROM travel.packages ORDER BY created_at DESC LIMIT 100`)
 		if err != nil {
 			log.Printf("failed to list packages: %v", err)
 			http.Error(w, "failed to list packages", http.StatusInternalServerError)
@@ -121,7 +123,7 @@ func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 // DeletePackageHandler deletes a package by id. Supports:
 // - DELETE /...?id=<id>
 // - POST /cash/package/delete with JSON body {"id":"..."} (for clients that can't send DELETE)
-func DeletePackageHandler(db *sql.DB) http.HandlerFunc {
+func DeletePackageHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// accept DELETE or POST (for compatibility)
 		if r.Method != http.MethodDelete && r.Method != http.MethodPost {
@@ -147,13 +149,13 @@ func DeletePackageHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		res, err := db.Exec(`DELETE FROM travel.packages WHERE id = $1`, id)
+		res, err := pgxPool.Exec(r.Context(), `DELETE FROM travel.packages WHERE id = $1`, id)
 		if err != nil {
 			log.Printf("failed to delete package %s: %v", id, err)
 			http.Error(w, "failed to delete", http.StatusInternalServerError)
 			return
 		}
-		rows, _ := res.RowsAffected()
+		rows := res.RowsAffected()
 		if rows == 0 {
 			http.NotFound(w, r)
 			return

@@ -212,30 +212,36 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		ctx := r.Context()
+		userEmail := api.AuthenticatedUserNameFromCtx(ctx)
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
 		results := make([]map[string]interface{}, 0, len(req.Rows))
 
 		for _, row := range req.Rows {
 			// Validate
 			if strings.TrimSpace(row.RedemptionID) == "" {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "redemption_id is required"})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "redemption_id is required")
+				return
 			}
 			if row.ActualNAV <= 0 || row.ActualUnits <= 0 || row.GrossProceeds <= 0 {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "actual_nav, actual_units, and gross_proceeds must be > 0"})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "actual_nav, actual_units, and gross_proceeds must be > 0")
+				return
 			}
 
 			// Calculate net_credited if not provided
@@ -245,13 +251,6 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					row.NetCredited = 0
 				}
 			}
-
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
-				continue
-			}
-			defer tx.Rollback(ctx)
 
 			// Validate: sum of confirmed units for this redemption_id shouldn't exceed initiation units
 			var initiationUnits float64
@@ -266,14 +265,13 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE ri.redemption_id = $1
 				GROUP BY ri.redemption_id, ri.by_units
 			`, row.RedemptionID).Scan(&initiationUnits, &existingConfirmedUnits); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "Failed to validate redemption: " + err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to validate redemption: "+err.Error())
+				return
 			}
 
 			if existingConfirmedUnits+row.ActualUnits > initiationUnits {
-				results = append(results, map[string]interface{}{"success": false, "error": fmt.Sprintf("Cannot confirm %.2f units. Initiation has %.2f units, already confirmed %.2f units.",
-					row.ActualUnits, initiationUnits, existingConfirmedUnits)})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot confirm %.2f units. Initiation has %.2f units, already confirmed %.2f units.", row.ActualUnits, initiationUnits, existingConfirmedUnits))
+				return
 			}
 
 			status := "PENDING_CONFIRMATION"
@@ -291,21 +289,16 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RETURNING redemption_confirm_id
 			`, row.RedemptionID, row.ActualNAV, row.ActualUnits, row.GrossProceeds,
 				row.ExitLoad, row.TDS, row.NetCredited, nullIfZeroFloat(row.STTCharges), row.ResolutionVariance, row.ResolutionComment, nullIfZeroFloat(row.VarianceProceeds), nullIfZeroFloat(row.FinalRealisedCapitalGainLoss), status).Scan(&confirmID); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Insert failed: " + err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
+				return
 			}
 
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, requested_by, requested_at)
 				VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 			`, confirmID, userEmail); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
-				continue
-			}
-
-			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+				return
 			}
 
 			results = append(results, map[string]interface{}{
@@ -314,6 +307,11 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"redemption_id":         row.RedemptionID,
 			})
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			return
+		}
+		committed = true
 
 		createdConfirmIDs := make([]string, 0, len(results))
 		for _, res := range results {
@@ -329,7 +327,7 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/create-bulk", createdConfirmIDs[0], payload.ToMap())
 			}()
 		}
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		api.RespondWithPayload(w, true, "", results)
 	}
 }
 
@@ -478,33 +476,32 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		ctx := r.Context()
+		userEmail := api.AuthenticatedUserNameFromCtx(ctx)
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
 		results := make([]map[string]interface{}, 0, len(req.Rows))
 
 		for _, row := range req.Rows {
 			if row.RedemptionConfirmID == "" {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "redemption_confirm_id missing"})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "redemption_confirm_id missing")
+				return
 			}
-
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
-				continue
-			}
-			defer tx.Rollback(ctx)
 
 			sel := `
 				SELECT redemption_id, actual_nav, actual_units, gross_proceeds,
@@ -516,8 +513,8 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
 				&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12],
 			); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: "fetch failed: " + err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "fetch failed: "+err.Error())
+				return
 			}
 
 			fieldPairs := map[string]int{
@@ -551,33 +548,33 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if len(sets) == 0 {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: "No valid fields"})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "No valid fields")
+				return
 			}
 
 			q := fmt.Sprintf("UPDATE investment.redemption_confirmation SET %s, updated_at=now() WHERE redemption_confirm_id=$%d", strings.Join(sets, ", "), pos)
 			args = append(args, row.RedemptionConfirmID)
 
 			if _, err := tx.Exec(ctx, q, args...); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrUpdateFailed + err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+				return
 			}
 
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
 			`, row.RedemptionConfirmID, row.Reason, userEmail); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
-				continue
-			}
-
-			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrCommitFailed + err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+				return
 			}
 
 			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "redemption_confirm_id": row.RedemptionConfirmID, "requested": userEmail})
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			return
+		}
+		committed = true
 
 		updatedConfirmIDs := make([]string, 0, len(results))
 		for _, res := range results {
@@ -593,7 +590,7 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/update-bulk", updatedConfirmIDs[0], payload.ToMap())
 			}()
 		}
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		api.RespondWithPayload(w, true, "", results)
 	}
 }
 

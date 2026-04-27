@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -52,7 +53,8 @@ func GetTransactionPoolHandler(db *sql.DB) http.HandlerFunc {
 		ctx := r.Context()
 		transactions, err := FetchConsolidatedTransactionPool(ctx, db)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("[ERROR: %v] [Dash] [TransactionPool] failed to fetch consolidated transaction pool", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

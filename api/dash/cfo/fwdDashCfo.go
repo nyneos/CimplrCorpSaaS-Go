@@ -17,13 +17,28 @@ import (
 )
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
+	log.Printf("[ERROR: %v] [Dash] [CFOForward] request failed", errMsg)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
+		constants.ValueError:   clientMsg,
+	}); err != nil {
+		log.Printf("[ERROR: %v] [Dash] [CFOForward] failed to encode error response", err)
+	}
 }
 
 func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
@@ -31,8 +46,8 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
@@ -40,7 +55,7 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(r.Context(), `
     SELECT 
         fb.system_transaction_id AS booking_id,
         fb.base_currency,
@@ -73,6 +88,7 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
 			var amount float64
 
 			if err := rows.Scan(&bookingID, &currency, &maturityDate, &daysToMaturity, &amount); err != nil {
+				log.Printf("[ERROR: %v] [Dash] [CFOForward] failed to scan average maturity row", err)
 				continue
 			}
 
@@ -90,12 +106,17 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
 			weightedSum += usdAmount * float64(daysToMaturity)
 			totalAmount += usdAmount
 		}
+		if err := rows.Err(); err != nil {
+			log.Printf("[ERROR: %v] [Dash] [CFOForward] average maturity row iteration failed", err)
+		}
 		avgMaturity := 0
 		if totalAmount > 0 {
 			avgMaturity = int(weightedSum/totalAmount + 0.5)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"avgForwardMaturity": avgMaturity})
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{"avgForwardMaturity": avgMaturity}); err != nil {
+			log.Printf("[ERROR: %v] [Dash] [CFOForward] failed to encode average maturity response", err)
+		}
 	}
 }
 
@@ -104,8 +125,8 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -115,7 +136,7 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(r.Context(), `
 			SELECT 
 				fb.system_transaction_id AS booking_id,
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
@@ -147,6 +168,7 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 			var currency, orderType string
 
 			if err := rows.Scan(&bookingID, &amount, &currency, &orderType); err != nil {
+				log.Printf("[ERROR: %v] [Dash] [CFOForward] failed to scan buy/sell total row", err)
 				continue
 			}
 			// enforce prevalidated currency scope
@@ -167,12 +189,17 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 				sellTotal += usdAmount
 			}
 		}
+		if err := rows.Err(); err != nil {
+			log.Printf("[ERROR: %v] [Dash] [CFOForward] buy/sell total row iteration failed", err)
+		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"buyForwardsUSD":  format2f(buyTotal),
 			"sellForwardsUSD": format2f(sellTotal),
-		})
+		}); err != nil {
+			log.Printf("[ERROR: %v] [Dash] [CFOForward] failed to encode buy/sell totals response", err)
+		}
 	}
 }
 
@@ -182,21 +209,22 @@ func GetUserCurrency(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		var buName string
-		if err := db.QueryRow("SELECT business_unit_name FROM users WHERE id = $1  AND (status = 'Approved' OR status = 'approved')", req.UserID).Scan(&buName); err != nil {
-			respondWithError(w, http.StatusNotFound, "User not found")
+		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
+		if !ok || len(buNames) == 0 {
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
+		buName := buNames[0]
 		if buName == "" {
 			respondWithError(w, http.StatusNotFound, "User has no business unit assigned")
 			return
 		}
 		var defaultCurrency string
-		if err := db.QueryRow("SELECT base_operating_currency FROM masterentitycash WHERE entity_name = $1", buName).Scan(&defaultCurrency); err != nil {
+		if err := db.QueryRowContext(r.Context(), "SELECT base_operating_currency FROM masterentitycash WHERE entity_name = $1", buName).Scan(&defaultCurrency); err != nil {
 			respondWithError(w, http.StatusNotFound, "No entity found for given business unit")
 			return
 		}
@@ -212,8 +240,8 @@ func GetActiveForwardsCount(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 			// Route: dash/cfo/fwd/bu-maturity-currency-summary
 		}
@@ -224,7 +252,7 @@ func GetActiveForwardsCount(db *sql.DB) http.HandlerFunc {
 		}
 		now := time.Now().Format(constants.DateFormat)
 		var count int
-		err := db.QueryRow("SELECT COUNT(*) FROM forward_bookings WHERE maturity_date > $1 AND entity_level_0 = ANY($2)  AND (processing_status = 'Approved' OR processing_status = 'approved')", now, pq.Array(buNames)).Scan(&count)
+		err := db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM forward_bookings WHERE maturity_date > $1 AND entity_level_0 = ANY($2)  AND LOWER(processing_status) = 'approved'", now, pq.Array(buNames)).Scan(&count)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Error fetching active forwards count")
 			return
@@ -240,8 +268,8 @@ func GetRecentTradesDashboard(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -255,7 +283,7 @@ func GetRecentTradesDashboard(db *sql.DB) http.HandlerFunc {
 		sevenDaysAgo := now.AddDate(0, 0, -7).Format(constants.DateFormat)
 		nowStr := now.Format(constants.DateFormat)
 
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(r.Context(), `
 			SELECT 
 				fb.system_transaction_id AS booking_id,
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
@@ -391,8 +419,8 @@ func GetTotalUsdSumDashboard(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -402,7 +430,7 @@ func GetTotalUsdSumDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.quote_currency
@@ -456,8 +484,8 @@ func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -468,7 +496,7 @@ func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		// -------- OPEN AMOUNT ----------
-		openRows, err := db.Query(`
+		openRows, err := db.QueryContext(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.quote_currency
@@ -507,7 +535,7 @@ func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		// -------- TOTAL BOOKED AMOUNT ----------
-		totalRows, err := db.Query(`
+		totalRows, err := db.QueryContext(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.quote_currency
@@ -564,8 +592,8 @@ func GetTotalUsdSumByCurrencyDashboard(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -575,7 +603,7 @@ func GetTotalUsdSumByCurrencyDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.quote_currency
@@ -639,8 +667,8 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -650,7 +678,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.quote_currency,
@@ -771,8 +799,8 @@ func GetRolloverCountsByCurrency(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
@@ -780,7 +808,7 @@ func GetRolloverCountsByCurrency(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		rows, err := db.Query(`SELECT fb.quote_currency, COUNT(fr.rollover_id) AS rollover_count FROM forward_bookings fb LEFT JOIN forward_rollovers fr ON fr.booking_id = fb.system_transaction_id WHERE fb.entity_level_0 = ANY($1)  AND (fb.processing_status = 'Approved' OR fb.processing_status = 'approved') GROUP BY fb.quote_currency`, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), `SELECT fb.quote_currency, COUNT(fr.rollover_id) AS rollover_count FROM forward_bookings fb LEFT JOIN forward_rollovers fr ON fr.booking_id = fb.system_transaction_id WHERE fb.entity_level_0 = ANY($1)  AND LOWER(fb.processing_status) = 'approved' GROUP BY fb.quote_currency`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Error fetching rollover counts")
 			return
@@ -820,8 +848,8 @@ func GetBankTradesData(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -832,7 +860,7 @@ func GetBankTradesData(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Ledger-aware query: prefer latest ledger.running_open_amount, fallback to booking_amount
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(r.Context(), `
 			SELECT 
 				fb.counterparty,
 				fb.order_type,
@@ -932,7 +960,7 @@ func GetMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Ledger-aware query
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.quote_currency,
@@ -1038,7 +1066,13 @@ func GetTotalBankMarginFromForwardBookings(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		rows, err := db.Query(`SELECT bank_margin, quote_currency FROM forward_bookings WHERE entity_level_0 = ANY($1) AND bank_margin IS NOT NULL AND (processing_status = 'Approved' OR processing_status = 'approved')`, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), `
+    SELECT bank_margin, quote_currency 
+    FROM forward_bookings 
+    WHERE entity_level_0 = ANY($1) 
+      AND bank_margin IS NOT NULL 
+      AND LOWER(processing_status) = 'approved'`,
+			pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
@@ -1079,7 +1113,7 @@ func GetOpenAmountToBookingRatioSimple(db *sql.DB) http.HandlerFunc {
 
 		var totalOpen, totalBooking float64
 
-		err := db.QueryRow(`
+		err := db.QueryRowContext(r.Context(), `
 			WITH booking_totals AS (
 				SELECT 
 					COALESCE(SUM(ABS(eh.total_open_amount)), 0) AS total_open

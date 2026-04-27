@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
@@ -23,9 +24,23 @@ import (
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
+	log.Printf("[ERROR: %v] [Notification] [EventCatalog] request failed", errMsg)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errMsg})
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": clientMsg})
 }
 
 func getRequesterEmail() string {

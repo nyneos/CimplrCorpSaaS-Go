@@ -2,17 +2,18 @@ package cash
 
 import (
 	"CimplrCorpSaas/internal/serviceiface"
-	"database/sql"
 	"fmt"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type CashService struct {
 	config map[string]interface{}
-	db     *sql.DB
+	pool   *pgxpool.Pool
 }
 
-func NewCashService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
-	return &CashService{config: cfg, db: db}
+func NewCashService(cfg map[string]interface{}, pool *pgxpool.Pool) serviceiface.Service {
+	return &CashService{config: cfg, pool: pool}
 }
 
 func (s *CashService) Name() string {
@@ -33,11 +34,10 @@ func (s *CashService) Start() error {
 			}
 		}
 	}
-	go StartCashService(s.db, port)
+	go StartCashService(s.pool, port)
 	return nil
 }
 
 func (s *CashService) Stop() error {
-	// Implement stop logic if needed
-	return nil
+	return shutdownCashService()
 }

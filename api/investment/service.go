@@ -43,6 +43,5 @@ func (s *InvestmentService) Start() error {
 }
 
 func (s *InvestmentService) Stop() error {
-	// Implement stop logic if needed in the future
-	return nil
+	return shutdownInvestmentService()
 }

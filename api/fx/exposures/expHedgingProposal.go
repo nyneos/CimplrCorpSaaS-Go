@@ -40,7 +40,7 @@ func GetHedgingProposalsAggregated(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Ensure all exposure_header_id are present in hedging_proposal
-		_, _ = db.Exec(`INSERT INTO hedging_proposal (exposure_header_id)
+		_, _ = db.ExecContext(r.Context(), `INSERT INTO hedging_proposal (exposure_header_id)
 			SELECT exposure_header_id
 			FROM exposure_headers
 			WHERE entity = ANY($1)
@@ -76,7 +76,7 @@ func GetHedgingProposalsAggregated(db *sql.DB) http.HandlerFunc {
 			WHERE h.entity = ANY($1)
 			GROUP BY h.entity, h.currency, h.exposure_type
 		`
-		rows, err := db.Query(query, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to aggregate proposals")
 			return

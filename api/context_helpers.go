@@ -27,6 +27,75 @@ func RequestedByFromCtx(ctx context.Context, userID string) string {
 	return ""
 }
 
+func AuthenticatedUserIDFromCtx(ctx context.Context) string {
+	if v := ctx.Value("session"); v != nil {
+		if s, ok := v.(*auth.UserSession); ok && s != nil {
+			if strings.TrimSpace(s.UserID) != "" {
+				return strings.TrimSpace(s.UserID)
+			}
+		}
+	}
+	if userID, ok := ctx.Value("user_id").(string); ok {
+		return strings.TrimSpace(userID)
+	}
+	return ""
+}
+
+func AuthenticatedUserNameFromCtx(ctx context.Context) string {
+	if v := ctx.Value("session"); v != nil {
+		if s, ok := v.(*auth.UserSession); ok && s != nil {
+			if strings.TrimSpace(s.Name) != "" {
+				return strings.TrimSpace(s.Name)
+			}
+			if strings.TrimSpace(s.UserID) != "" {
+				return strings.TrimSpace(s.UserID)
+			}
+		}
+	}
+	return AuthenticatedUserIDFromCtx(ctx)
+}
+
+func IntersectAllowedValues(requested, allowed []string) []string {
+	if len(requested) == 0 {
+		out := make([]string, 0, len(allowed))
+		for _, value := range allowed {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out
+	}
+
+	allowedSet := make(map[string]string, len(allowed))
+	for _, value := range allowed {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		allowedSet[strings.ToUpper(trimmed)] = trimmed
+	}
+
+	out := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	for _, value := range requested {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToUpper(trimmed)
+		canonical, ok := allowedSet[key]
+		if !ok {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, canonical)
+	}
+	return out
+}
+
 func CtxApprovedAccountNumbers(ctx context.Context) []string {
 	v := ctx.Value("ApprovedBankAccounts")
 	if v == nil {

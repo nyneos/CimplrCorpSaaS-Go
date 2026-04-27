@@ -8,7 +8,6 @@ import (
 func NewRouter() *mux.Router {
     router := mux.NewRouter()
 
-    // Define your API routes here
     router.HandleFunc("/api/resource", ResourceHandler).Methods("GET", "POST")
     router.HandleFunc("/api/notification", NotificationHandler).Methods("GET", "POST")
     router.HandleFunc("/api/session", SessionHandler).Methods("POST")

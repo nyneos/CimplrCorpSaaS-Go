@@ -41,5 +41,5 @@ func (s *NotificationService) Start() error {
 }
 
 func (s *NotificationService) Stop() error {
-	return nil
+	return shutdownNotificationService()
 }

@@ -32,8 +32,8 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 			// Add filter fields here if needed (entity, department, status, etc.)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			api.RespondWithResult(w, false, constants.ErrInvalidRequestBody)
 			return
 		}
 
@@ -159,8 +159,8 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var body struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			api.RespondWithResult(w, false, constants.ErrInvalidRequestBody)
 			return
 		}
 
@@ -277,8 +277,8 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var body struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			api.RespondWithResult(w, false, constants.ErrInvalidRequestBody)
 			return
 		}
 

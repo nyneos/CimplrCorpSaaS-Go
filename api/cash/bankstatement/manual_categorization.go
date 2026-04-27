@@ -24,7 +24,7 @@ func ManualCategorizationTriggerHandler(pgxPool *pgxpool.Pool) http.Handler {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, constants.ErrInvalidJSONPrefix+err.Error(), http.StatusBadRequest)
+			writeBankStatementHTTPError(w, http.StatusBadRequest, err, "invalid request body")
 			return
 		}
 
@@ -67,3 +67,4 @@ func ManualCategorizationTriggerHandler(pgxPool *pgxpool.Pool) http.Handler {
 		})
 	})
 }
+

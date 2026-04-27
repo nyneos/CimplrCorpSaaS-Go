@@ -9,6 +9,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,6 +25,29 @@ import (
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 )
+
+func writeForwardJSONError(w http.ResponseWriter, status int, err error, message string, includeSuccess bool) {
+	log.Printf("[ERROR: %v] [FX] [Forwards] %s", err, message)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
+	resp := map[string]interface{}{constants.ValueError: clientMsg}
+	if includeSuccess {
+		resp[constants.ValueSuccess] = false
+	}
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(resp)
+}
 
 func NormalizeDate(dateStr string) string {
 	dateStr = strings.TrimSpace(dateStr)
@@ -207,7 +231,7 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 			req.TransactionTimestamp,
 			"pending",
 		}
-		row := db.QueryRow(query, values...)
+		row := db.QueryRowContext(r.Context(), query, values...)
 		cols := []string{"internal_reference_id", "entity_level_0", "entity_level_1", "entity_level_2", "entity_level_3", "local_currency", "order_type", "transaction_type", "counterparty", "mode_of_delivery", "delivery_period", "add_date", "settlement_date", "maturity_date", "delivery_date", "currency_pair", "base_currency", "quote_currency", "booking_amount", "value_type", "actual_value_base_currency", "spot_rate", "forward_points", "bank_margin", "total_rate", "value_quote_currency", "intervening_rate_quote_to_local", "value_local_currency", "internal_dealer", "counterparty_dealer", "remarks", "narration", "transaction_timestamp", "processing_status"}
 		vals := make([]interface{}, len(cols))
 		valPtrs := make([]interface{}, len(cols))
@@ -215,8 +239,7 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 			valPtrs[i] = &vals[i]
 		}
 		if err := row.Scan(valPtrs...); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			writeForwardJSONError(w, http.StatusInternalServerError, err, "failed to scan created forward booking", true)
 			return
 		}
 		result := make(map[string]interface{})
@@ -246,10 +269,9 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
-		rows, err := db.Query(`SELECT * FROM forward_bookings WHERE entity_level_0 = ANY($1)`, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), `SELECT * FROM forward_bookings WHERE entity_level_0 = ANY($1)`, pq.Array(buNames))
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			writeForwardJSONError(w, http.StatusInternalServerError, err, "failed to fetch entity relevant forward bookings", true)
 			return
 		}
 		cols, _ := rows.Columns()
@@ -306,8 +328,7 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
+			writeForwardJSONError(w, http.StatusBadRequest, err, "failed to parse forward bookings upload form", false)
 			return
 		}
 		files := r.MultipartForm.File["files"]
@@ -326,8 +347,7 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 		ctx := r.Context()
 		results, err := processUploadForwardBookings(ctx, db, r, buNames)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			writeForwardJSONError(w, http.StatusInternalServerError, err, "failed to process forward bookings upload", true)
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -584,8 +604,7 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
+			writeForwardJSONError(w, http.StatusBadRequest, err, "failed to parse forward confirmations upload form", false)
 			return
 		}
 		files := r.MultipartForm.File["files"]
@@ -604,8 +623,7 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 		ctx := r.Context()
 		results, err := processUploadForwardConfirmations(ctx, db, r, buNames)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			writeForwardJSONError(w, http.StatusInternalServerError, err, "failed to process forward confirmations upload", true)
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -839,8 +857,7 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
+			writeForwardJSONError(w, http.StatusBadRequest, err, "failed to parse bank forward bookings upload form", false)
 			return
 		}
 		// Validate user_id
@@ -853,8 +870,7 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 		ctx := r.Context()
 		results, batchID, err := processUploadBankForwardBookings(ctx, db, r)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			writeForwardJSONError(w, http.StatusInternalServerError, err, "failed to process bank forward bookings upload", true)
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -1156,7 +1172,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 	uploadBatchID := uuid.New().String()
 	// Get staging table columns
 	stagingCols := []string{}
-	colRows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'staging_bank_forward'`)
+	colRows, err := db.QueryContext(r.Context(), `SELECT column_name FROM information_schema.columns WHERE table_name = 'staging_bank_forward'`)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to fetch staging table columns: %w", err)
 	}
@@ -1256,7 +1272,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 			}
 			// Get all mappings for this bank before S3/upload persistence work.
 			mappings := []map[string]interface{}{}
-			mapRows, err := db.Query(`SELECT * FROM fwd_mapping_bank_forward WHERE bank_identifier = $1 AND is_active = true`, bankIdentifier)
+			mapRows, err := db.QueryContext(r.Context(), `SELECT * FROM fwd_mapping_bank_forward WHERE bank_identifier = $1 AND is_active = true`, bankIdentifier)
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"filename":          fileHeader.Filename,

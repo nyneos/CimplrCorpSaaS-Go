@@ -2,6 +2,7 @@ package forwards
 
 import (
 	"CimplrCorpSaas/api"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -35,7 +36,7 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 		for bid, amtCancelled := range req.BookingAmounts {
 			// Only approve if status is currently Pending Cancellation
 			var currentStatus string
-			err := db.QueryRow(`SELECT status FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&currentStatus)
+			err := db.QueryRowContext(r.Context(), `SELECT status FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&currentStatus)
 			if err != nil || currentStatus != "Pending Cancellation" {
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Booking not in pending cancellation state"})
@@ -44,9 +45,9 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 			// Perform the actual cancellation logic (ledger, cancellation record, etc.)
 			var openAmount float64
 			var ledgerSeq int
-			err = db.QueryRow(`SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bid).Scan(&openAmount, &ledgerSeq)
+			err = db.QueryRowContext(r.Context(), `SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bid).Scan(&openAmount, &ledgerSeq)
 			if err == sql.ErrNoRows {
-				err = db.QueryRow(`SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&openAmount)
+				err = db.QueryRowContext(r.Context(), `SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&openAmount)
 				if err != nil {
 					continue
 				}
@@ -61,22 +62,22 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 				newOpenAmount = 0
 				actionType = "Cancellation"
 			}
-			_, err = db.Exec(`INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			_, err = db.ExecContext(r.Context(), `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 				bid, ledgerSeq, actionType, bid, req.CancellationDate, -amtCancelled, newOpenAmount)
 			if err != nil {
 				continue // skip on error
 			}
 			// Update cancellation record to Approved
-			_, err = db.Exec(`UPDATE forward_cancellations SET status = 'Approved' WHERE booking_id = $1 AND cancellation_date = $2`, bid, req.CancellationDate)
+			_, err = db.ExecContext(r.Context(), `UPDATE forward_cancellations SET status = 'Approved' WHERE booking_id = $1 AND cancellation_date = $2`, bid, req.CancellationDate)
 			// If fully cancelled, update booking status to Cancelled and processing_status to Approved
 			if newOpenAmount == 0 {
-				_, err = db.Exec(`UPDATE forward_bookings SET status = 'Cancelled' WHERE system_transaction_id = $1`, bid)
+				_, err = db.ExecContext(r.Context(), `UPDATE forward_bookings SET status = 'Cancelled' WHERE system_transaction_id = $1`, bid)
 				if err == nil {
-					_ = DeactivateExposureHedgeLinks(db, []string{bid})
+					_ = DeactivateExposureHedgeLinks(r.Context(), db, []string{bid})
 				}
 			} else {
 				// If partial, just update processing_status
-				_, _ = db.Exec(`UPDATE forward_bookings SET status = 'Partiallu Cancelled' WHERE system_transaction_id = $1`, bid)
+				_, _ = db.ExecContext(r.Context(), `UPDATE forward_bookings SET status = 'Partiallu Cancelled' WHERE system_transaction_id = $1`, bid)
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -111,7 +112,7 @@ func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
 			LEFT JOIN forward_bookings fb ON fc.booking_id = fb.system_transaction_id
 			WHERE fc.status = 'Pending' AND fb.entity_level_0 = ANY($1)
 		`
-		rows, err := db.Query(getQuery, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), getQuery, pq.Array(buNames))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve pending cancellations"})
@@ -220,7 +221,7 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 
 		for bid, amtCancelled := range req.BookingAmounts {
 			// Save rollover request as pending, including new forward details
-			_, err := db.Exec(`INSERT INTO forward_rollovers (
+			_, err := db.ExecContext(r.Context(), `INSERT INTO forward_rollovers (
 				   booking_id, amount_rolled_over, rollover_date, original_maturity_date, new_maturity_date, rollover_cost, status,
 				   fx_pair, order_type, new_forward_amount, new_forward_spot_rate, new_forward_premium_discount, new_forward_margin_rate, new_forward_net_rate
 			   ) VALUES (
@@ -235,7 +236,7 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			// Set booking status to Pending Rollover
-			_, err = db.Exec(`UPDATE forward_bookings SET status = 'Pending Rollover', processing_status = 'Pending' WHERE system_transaction_id = $1`, bid)
+			_, err = db.ExecContext(r.Context(), `UPDATE forward_bookings SET status = 'Pending Rollover', processing_status = 'Pending' WHERE system_transaction_id = $1`, bid)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Failed to update booking status for rollover")
 				return
@@ -283,7 +284,7 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 				AND status NOT IN ('Cancelled', 'Pending Confirmation')
 				AND processing_status = 'Approved'
 		`
-		rows, err := db.Query(query, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch forward booking list")
 			return
@@ -381,7 +382,7 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 			var openAmount float64
 			var found bool
 			if bookingID != "" {
-				err := db.QueryRow(`SELECT running_open_amount FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bookingID).Scan(&openAmount)
+				err := db.QueryRowContext(r.Context(), `SELECT running_open_amount FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bookingID).Scan(&openAmount)
 				if err == nil {
 					found = true
 				}
@@ -430,7 +431,7 @@ func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
 				AND (ehl.is_active = true OR ehl.is_active IS NULL)
 				AND eh.entity = ANY($2)
 		`
-		rows, err := db.Query(query, pq.Array(req.SystemTransactionIDs), pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), query, pq.Array(req.SystemTransactionIDs), pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposures by booking ids")
 			return
@@ -492,11 +493,11 @@ func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
 }
 
 // Helper: DeactivateExposureHedgeLinks
-func DeactivateExposureHedgeLinks(db *sql.DB, bookingIDs []string) error {
+func DeactivateExposureHedgeLinks(ctx context.Context, db *sql.DB, bookingIDs []string) error {
 	if len(bookingIDs) == 0 {
 		return nil
 	}
-	_, err := db.Exec(`UPDATE exposure_hedge_links SET is_active = false WHERE booking_id = ANY($1)`, pq.Array(bookingIDs))
+	_, err := db.ExecContext(ctx, `UPDATE exposure_hedge_links SET is_active = false WHERE booking_id = ANY($1)`, pq.Array(bookingIDs))
 	return err
 }
 
@@ -517,14 +518,14 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 		}
 		// Save cancellation request as pending
 		for bid, amtCancelled := range req.BookingAmounts {
-			_, err := db.Exec(`INSERT INTO forward_cancellations (booking_id, amount_cancelled, cancellation_date, cancellation_rate, realized_gain_loss, cancellation_reason, status) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			_, err := db.ExecContext(r.Context(), `INSERT INTO forward_cancellations (booking_id, amount_cancelled, cancellation_date, cancellation_rate, realized_gain_loss, cancellation_reason, status) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 				bid, amtCancelled, req.CancellationDate, req.CancellationRate, req.RealizedGainLoss, req.CancellationReason, "Pending")
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Failed to save cancellation request")
 				return
 			}
 			// Set booking status to Pending Cancellation
-			_, err = db.Exec(`UPDATE forward_bookings SET status = 'Pending Cancellation', processing_status = 'Pending' WHERE system_transaction_id = $1`, bid)
+			_, err = db.ExecContext(r.Context(), `UPDATE forward_bookings SET status = 'Pending Cancellation', processing_status = 'Pending' WHERE system_transaction_id = $1`, bid)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Failed to update booking status to pending cancellation")
 				return
@@ -552,23 +553,23 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 			// Fetch rollover details (including new forward) from DB
 			var cancellationDate, origMaturityDate, newMaturityDate, fxPair, orderType, amount, spotRate, premiumDiscount, marginRate, netRate string
 			var realizedGainLoss sql.NullFloat64
-			err := db.QueryRow(`SELECT rollover_date, original_maturity_date, new_maturity_date, fx_pair, order_type, new_forward_amount, new_forward_spot_rate, new_forward_premium_discount, new_forward_margin_rate, new_forward_net_rate, rollover_cost FROM forward_rollovers WHERE booking_id = $1 AND status = 'Pending'`, bid).
+			err := db.QueryRowContext(r.Context(), `SELECT rollover_date, original_maturity_date, new_maturity_date, fx_pair, order_type, new_forward_amount, new_forward_spot_rate, new_forward_premium_discount, new_forward_margin_rate, new_forward_net_rate, rollover_cost FROM forward_rollovers WHERE booking_id = $1 AND status = 'Pending'`, bid).
 				Scan(&cancellationDate, &origMaturityDate, &newMaturityDate, &fxPair, &orderType, &amount, &spotRate, &premiumDiscount, &marginRate, &netRate, &realizedGainLoss)
 			if err != nil {
 				return
 			}
 			// Only approve if status is currently Pending Rollover
 			var currentStatus string
-			err = db.QueryRow(`SELECT status FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&currentStatus)
+			err = db.QueryRowContext(r.Context(), `SELECT status FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&currentStatus)
 			if err != nil || currentStatus != "Pending Rollover" {
 				continue // skip if not pending
 			}
 			// Ledger logic
 			var openAmount float64
 			var ledgerSeq int
-			err = db.QueryRow(`SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bid).Scan(&openAmount, &ledgerSeq)
+			err = db.QueryRowContext(r.Context(), `SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bid).Scan(&openAmount, &ledgerSeq)
 			if err == sql.ErrNoRows {
-				err = db.QueryRow(`SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&openAmount)
+				err = db.QueryRowContext(r.Context(), `SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&openAmount)
 				if err != nil {
 					continue
 				}
@@ -583,25 +584,25 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 				newOpenAmount = 0
 				actionType = "Rollover"
 			}
-			_, err = db.Exec(`INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			_, err = db.ExecContext(r.Context(), `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 				bid, ledgerSeq, actionType, bid, cancellationDate, -amtCancelled, newOpenAmount)
 			if err != nil {
 				continue
 			}
 			// Update rollover record to Approved
-			_, err = db.Exec(`UPDATE forward_rollovers SET status = 'Approved' WHERE booking_id = $1 AND rollover_date = $2`, bid, cancellationDate)
+			_, err = db.ExecContext(r.Context(), `UPDATE forward_rollovers SET status = 'Approved' WHERE booking_id = $1 AND rollover_date = $2`, bid, cancellationDate)
 			// If fully rolled over, update booking status to Rolled Over and processing_status to Approved
 			if newOpenAmount == 0 {
-				_, _ = db.Exec(`UPDATE forward_bookings SET status = 'Rolled Over' WHERE system_transaction_id = $1`, bid)
+				_, _ = db.ExecContext(r.Context(), `UPDATE forward_bookings SET status = 'Rolled Over' WHERE system_transaction_id = $1`, bid)
 			} else {
 				// If partial, just update processing_status
-				_, _ = db.Exec(`UPDATE forward_bookings SET processing_status = 'Partially Rollovered' WHERE system_transaction_id = $1`, bid)
+				_, _ = db.ExecContext(r.Context(), `UPDATE forward_bookings SET processing_status = 'Partially Rollovered' WHERE system_transaction_id = $1`, bid)
 			}
 			// Insert new forward booking for the rollover using fetched details
 			randomRef := GenerateFXRef()
 			var entityLevel0, localCurrency, counterparty string
 			var entityLevel1, entityLevel2, entityLevel3 sql.NullString
-			err = db.QueryRow(`SELECT entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, counterparty FROM forward_bookings WHERE system_transaction_id::text = $1`, bid).Scan(&entityLevel0, &entityLevel1, &entityLevel2, &entityLevel3, &localCurrency, &counterparty)
+			err = db.QueryRowContext(r.Context(), `SELECT entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, counterparty FROM forward_bookings WHERE system_transaction_id::text = $1`, bid).Scan(&entityLevel0, &entityLevel1, &entityLevel2, &entityLevel3, &localCurrency, &counterparty)
 			if err != nil {
 				continue
 			}
@@ -616,7 +617,7 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 				entityLevel3Val = &entityLevel3.String
 			}
 			var newBookingID string
-			err = db.QueryRow(`INSERT INTO forward_bookings (
+			err = db.QueryRowContext(r.Context(), `INSERT INTO forward_bookings (
 					internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, status, processing_status
 				) VALUES (
 					$1,$2,$3,$4,$5,$6,$7,NULL,$8,NULL,NULL,$9,$10,$11,NULL,$12,NULL,$13,$14,NULL,NULL,$15,$16,$17,$18,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'Pending Confirmation','pending'
@@ -627,9 +628,9 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 			var newLedgerSeq int
-			_ = db.QueryRow(`SELECT COALESCE(MAX(ledger_sequence),0) FROM forward_booking_ledger WHERE booking_id = $1`, newBookingID).Scan(&newLedgerSeq)
+			_ = db.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(ledger_sequence),0) FROM forward_booking_ledger WHERE booking_id = $1`, newBookingID).Scan(&newLedgerSeq)
 			newLedgerSeq++
-			_, err = db.Exec(`INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			_, err = db.ExecContext(r.Context(), `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 				newBookingID, newLedgerSeq, "Rollover", newBookingID, cancellationDate, amount, amount)
 			if err != nil {
 				continue
@@ -666,7 +667,7 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 		       LEFT JOIN forward_bookings fb ON fr.booking_id = fb.system_transaction_id
 		       WHERE fr.status = 'Pending' AND fb.entity_level_0 = ANY($1)
 	       `
-		rows, err := db.Query(getQuery, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), getQuery, pq.Array(buNames))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve pending rollovers"})

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"database/sql"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 func LogSecurityEvent(db *sql.DB, userID, eventType, detail, clientIP string) {
 	// DB insert (best-effort)
 	if db != nil {
-		_, err := db.Exec(
+		_, err := db.ExecContext(context.Background(),
 			`INSERT INTO audit_logs (user_id, event_type, detail, ip_address, created_at)
 			 VALUES ($1, $2, $3, $4, $5)`,
 			nullIfEmpty(userID), eventType, detail, clientIP, time.Now(),

@@ -20,9 +20,9 @@ func GetBuMaturityCurrencySummaryJoinedFromHeaders(db *sql.DB) http.HandlerFunc 
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrInvalidRequestBody})
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
@@ -31,7 +31,7 @@ func GetBuMaturityCurrencySummaryJoinedFromHeaders(db *sql.DB) http.HandlerFunc 
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
-		rows, err := db.Query(`SELECT h.entity AS business_unit, h.currency, h.exposure_type, h.total_open_amount, b.month_1, b.month_2, b.month_3, b.month_4, b.month_4_6, b.month_6plus FROM exposure_headers h JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id WHERE h.entity = ANY($1) AND (h.approval_status = 'Approved' OR h.approval_status = 'approved') AND (b.status_bucketing = 'Approved' OR b.status_bucketing = 'approved')`, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), `SELECT h.entity AS business_unit, h.currency, h.exposure_type, h.total_open_amount, b.month_1, b.month_2, b.month_3, b.month_4, b.month_4_6, b.month_6plus FROM exposure_headers h JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id WHERE h.entity = ANY($1) AND (h.approval_status = 'Approved' OR h.approval_status = 'approved') AND (b.status_bucketing = 'Approved' OR b.status_bucketing = 'approved')`, pq.Array(buNames))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrDB})
@@ -127,9 +127,9 @@ func GetExposureRowsDashboard(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrInvalidRequestBody})
 			return
 		}
 
@@ -140,7 +140,7 @@ func GetExposureRowsDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(r.Context(), `
 			SELECT 
 				entity, currency, exposure_type, document_id, counterparty_name, 
 				total_open_amount, value_date

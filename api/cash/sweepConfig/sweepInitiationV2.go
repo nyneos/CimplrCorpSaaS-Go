@@ -10,12 +10,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
-	"sort"
-
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -189,20 +187,19 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			defer tx.Rollback(ctx)
 
-			// Create sweep configuration
-			sweepID = uuid.New().String()
+			// Safe to rely on DB-generated sweep_id here because sweepConfigV2 uses the same table with RETURNING sweep_id.
 			insSweep := `INSERT INTO cimplrcorpsaas.sweepconfiguration (
-				sweep_id, entity_name, source_bank_name, source_bank_account,
+				entity_name, source_bank_name, source_bank_account,
 				target_bank_name, target_bank_account, sweep_type, frequency,
 				effective_date, execution_time, buffer_amount, sweep_amount,
 				is_deleted, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, false, now())`
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false, now()) RETURNING sweep_id`
 
-			_, err = tx.Exec(ctx, insSweep,
-				sweepID, req.EntityName, req.SourceBankName, req.SourceBankAccount,
+			err = tx.QueryRow(ctx, insSweep,
+				req.EntityName, req.SourceBankName, req.SourceBankAccount,
 				req.TargetBankName, req.TargetBankAccount, sweepType, frequency,
 				nullifyEmpty(effectiveDate), executionTime,
-				nullifyFloat(req.BufferAmount), nullifyFloat(req.SweepAmount))
+				nullifyFloat(req.BufferAmount), nullifyFloat(req.SweepAmount)).Scan(&sweepID)
 
 			if err != nil {
 				api.RespondWithResult(w, false, "failed to auto-create sweep: "+err.Error())
@@ -1361,20 +1358,19 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					executionTime = "10:00"
 				}
 
-				// Create sweep configuration
-				sweepID = uuid.New().String()
+				// Safe to rely on DB-generated sweep_id here because sweepConfigV2 uses the same table with RETURNING sweep_id.
 				insSweep := `INSERT INTO cimplrcorpsaas.sweepconfiguration (
-					sweep_id, entity_name, source_bank_name, source_bank_account,
+					entity_name, source_bank_name, source_bank_account,
 					target_bank_name, target_bank_account, sweep_type, frequency,
 					effective_date, execution_time, buffer_amount, sweep_amount,
 					is_deleted, created_at
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, false, now())`
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false, now()) RETURNING sweep_id`
 
-				_, err := tx.Exec(ctx, insSweep,
-					sweepID, init.EntityName, init.SourceBankName, init.SourceBankAccount,
+				err := tx.QueryRow(ctx, insSweep,
+					init.EntityName, init.SourceBankName, init.SourceBankAccount,
 					init.TargetBankName, init.TargetBankAccount, sweepType, frequency,
 					nullifyEmpty(effectiveDate), executionTime,
-					nullifyFloat(init.BufferAmount), nullifyFloat(init.SweepAmount))
+					nullifyFloat(init.BufferAmount), nullifyFloat(init.SweepAmount)).Scan(&sweepID)
 
 				if err != nil {
 					tx.Rollback(ctx)

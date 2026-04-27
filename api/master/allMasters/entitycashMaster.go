@@ -388,7 +388,8 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, entityQuery, accessibleEntityIDs)
 		if err != nil {
-			http.Error(w, constants.ErrQueryFailed+err.Error(), 500)
+			log.Printf("[ERROR: %v] [Master] [EntityCash] failed to query cash entities", err)
+			http.Error(w, "internal server error", 500)
 			return
 		}
 		defer rows.Close()
@@ -573,7 +574,8 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// === 3️⃣ Fetch hierarchy relationships
 		relRows, err := pgxPool.Query(ctx, "SELECT parent_entity_name, child_entity_name FROM cashentityrelationships")
 		if err != nil {
-			http.Error(w, err.Error(), 500)
+			log.Printf("[ERROR: %v] [Master] [EntityCash] failed to query cash entity relationships", err)
+			http.Error(w, "internal server error", 500)
 			return
 		}
 		defer relRows.Close()
@@ -720,7 +722,8 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer gz.Close()
 
 		if err := json.NewEncoder(gz).Encode(top); err != nil {
-			http.Error(w, "encode failed: "+err.Error(), 500)
+			log.Printf("[ERROR: %v] [Master] [EntityCash] failed to encode hierarchy response", err)
+			http.Error(w, "internal server error", 500)
 			return
 		}
 
@@ -1593,8 +1596,26 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+		// wrapped in transaction to prevent race condition
+		tx, err := pgxPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
 		// Fetch all relationships
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_entity_name, child_entity_name FROM cashentityrelationships`)
+		relRows, err := tx.Query(ctx, `SELECT parent_entity_name, child_entity_name FROM cashentityrelationships`)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity relationships for bulk approve")
 			if statusCode == http.StatusOK {
@@ -1641,7 +1662,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var anyError error
 		for _, eid := range req.EntityIDs {
 			var status string
-			err := pgxPool.QueryRow(ctx, `SELECT processing_status FROM auditactionentity WHERE entity_id = $1 ORDER BY requested_at DESC LIMIT 1`, eid).Scan(&status)
+			err := tx.QueryRow(ctx, `SELECT processing_status FROM auditactionentity WHERE entity_id = $1 ORDER BY requested_at DESC LIMIT 1`, eid).Scan(&status)
 			if err == pgx.ErrNoRows {
 				continue
 			} else if err != nil {
@@ -1651,7 +1672,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if status == "PENDING_DELETE_APPROVAL" {
 				// Mark all descendants as deleted (do not approve them)
 				descendants := getAllDescendants([]string{eid})
-				rows, err := pgxPool.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, descendants)
+				rows, err := tx.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, descendants)
 				if err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to mark entities as deleted")
 					if statusCode == http.StatusOK {
@@ -1662,7 +1683,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					return
 				}
-				defer rows.Close()
 				for rows.Next() {
 					var entityID string
 					if err := rows.Scan(&entityID); err == nil {
@@ -1672,9 +1692,10 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						})
 					}
 				}
+				rows.Close()
 
 				// Also update the audit rows for these descendants: mark their delete actions as APPROVED
-				auditRows, aerr := pgxPool.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, descendants)
+				auditRows, aerr := tx.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, descendants)
 				if aerr != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(aerr, "Failed to approve delete actions")
 					if statusCode == http.StatusOK {
@@ -1685,7 +1706,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					return
 				}
-				defer auditRows.Close()
 				for auditRows.Next() {
 					var actionID, entityID string
 					if err := auditRows.Scan(&actionID, &entityID); err == nil {
@@ -1696,9 +1716,10 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						})
 					}
 				}
+				auditRows.Close()
 			} else {
 				// Approve only this entity: update auditactionentity processing_status
-				rows, err := pgxPool.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = $3 AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, eid)
+				rows, err := tx.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = $3 AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, eid)
 				if err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to approve entity action")
 					if statusCode == http.StatusOK {
@@ -1709,7 +1730,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					return
 				}
-				defer rows.Close()
 				for rows.Next() {
 					var actionID, entityID string
 					if err := rows.Scan(&actionID, &entityID); err == nil {
@@ -1720,6 +1740,14 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						})
 					}
 				}
+				rows.Close()
+			}
+		}
+		if anyError == nil {
+			if err := tx.Commit(ctx); err != nil {
+				anyError = err
+			} else {
+				committed = true
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

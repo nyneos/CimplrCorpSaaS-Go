@@ -244,15 +244,9 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		createdBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				createdBy = s.Name
-				break
-			}
-		}
+		createdBy := api.AuthenticatedUserNameFromCtx(r.Context())
 		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -275,8 +269,9 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
+		committed := false
 		defer func() {
-			if tx != nil {
+			if !committed {
 				tx.Rollback(ctx)
 			}
 		}()
@@ -292,16 +287,16 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		inserted := make([]insertInfo, 0, len(req.Rows))
 
-		for i, rrow := range req.Rows {
+		for _, rrow := range req.Rows {
 			if strings.TrimSpace(rrow.GLAccountCode) == "" || strings.TrimSpace(rrow.GLAccountName) == "" || strings.TrimSpace(rrow.GLAccountType) == "" || strings.TrimSpace(rrow.Source) == "" {
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing required fields", "gl_account_code": rrow.GLAccountCode})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "missing required fields")
+				return
 			}
 
 			// Validate currency
 			if rrow.DefaultCurrency != "" && !api.IsCurrencyAllowed(ctx, rrow.DefaultCurrency) {
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized default_currency: " + rrow.DefaultCurrency, "gl_account_code": rrow.GLAccountCode})
-				continue
+				api.RespondWithError(w, http.StatusForbidden, "invalid or unauthorized default_currency: "+rrow.DefaultCurrency)
+				return
 			}
 
 			// Validate parent GL account exists in approved GL accounts
@@ -319,22 +314,9 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					AND UPPER(m.status) = 'ACTIVE'
 				)`
 				if err := tx.QueryRow(ctx, parentCheckQ, rrow.ParentGLAccountCode).Scan(&parentExists); err != nil || !parentExists {
-					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent_gl_code not found or not approved: " + rrow.ParentGLAccountCode, "gl_account_code": rrow.GLAccountCode})
-					continue
+					api.RespondWithError(w, http.StatusBadRequest, "parent_gl_code not found or not approved: "+rrow.ParentGLAccountCode)
+					return
 				}
-			}
-
-			sp := fmt.Sprintf("sp_%d", i)
-			if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
-				tx.Rollback(ctx)
-				errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to create savepoint")
-				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-				} else {
-					api.RespondWithError(w, statusCode, errMsg)
-				}
-				return
 			}
 			var effectiveFrom interface{}
 			var effectiveTo interface{}
@@ -398,27 +380,19 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rrow.IsDeleted,
 				nil,
 			).Scan(&id); err != nil {
-				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "gl_account_code": rrow.GLAccountCode})
-				continue
-			}
-
-			auditQ := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
-			if _, err := tx.Exec(ctx, auditQ, id, nil, createdBy); err != nil {
-				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "gl_account_id": id})
-				continue
-			}
-
-			if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+sp); err != nil {
-				tx.Rollback(ctx)
-				errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to release savepoint")
+				errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to create GL account")
 				if statusCode == http.StatusOK {
 					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
+				return
+			}
+
+			auditQ := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
+			if _, err := tx.Exec(ctx, auditQ, id, nil, createdBy); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 				return
 			}
 
@@ -436,21 +410,28 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				parentID = pid
 			} else {
 				if err := tx.QueryRow(ctx, `SELECT gl_account_id FROM masterglaccount WHERE gl_account_code=$1`, info.Parent).Scan(&parentID); err != nil {
-					continue
+					api.RespondWithError(w, http.StatusBadRequest, "parent gl account not found: "+info.Parent)
+					return
 				}
 			}
 
 			relQ := `INSERT INTO glaccountrelationships (parent_gl_account_id, child_gl_account_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`
 			if _, err := tx.Exec(ctx, relQ, parentID, info.ID); err != nil {
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrBulkRelationshipInsertFailed + err.Error(), "gl_account_id": info.ID})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrBulkRelationshipInsertFailed+err.Error())
+				return
 			}
 
 			var parentLevel int
 			if err := tx.QueryRow(ctx, `SELECT gl_account_level FROM masterglaccount WHERE gl_account_id=$1`, parentID).Scan(&parentLevel); err == nil {
-				_, _ = tx.Exec(ctx, `UPDATE masterglaccount SET parent_gl_code=$1, gl_account_level=$2, is_top_level_gl_account=false WHERE gl_account_id=$3`, info.Parent, parentLevel+1, info.ID)
+				if _, err := tx.Exec(ctx, `UPDATE masterglaccount SET parent_gl_code=$1, gl_account_level=$2, is_top_level_gl_account=false WHERE gl_account_id=$3`, info.Parent, parentLevel+1, info.ID); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+					return
+				}
 			} else {
-				_, _ = tx.Exec(ctx, `UPDATE masterglaccount SET parent_gl_code=$1 WHERE gl_account_id=$2`, info.Parent, info.ID)
+				if _, err := tx.Exec(ctx, `UPDATE masterglaccount SET parent_gl_code=$1 WHERE gl_account_id=$2`, info.Parent, info.ID); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+					return
+				}
 			}
 		}
 
@@ -464,7 +445,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		tx = nil
+		committed = true
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": created})
@@ -885,69 +866,63 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		updatedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				updatedBy = s.Name
-				break
-			}
-		}
+		updatedBy := api.AuthenticatedUserNameFromCtx(r.Context())
 		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
 		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "begin failed: "+err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
 		results := []map[string]interface{}{}
 		for _, row := range req.Rows {
 			if strings.TrimSpace(row.GLAccountID) == "" {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing gl_account_id", "gl_account_id": row.GLAccountID})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "missing gl_account_id")
+				return
 			}
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error(), "gl_account_id": row.GLAccountID})
-				continue
+
+			var existingCode, existingName, existingType, existingParentCode, existingStatus, existingSource interface{}
+			var existingLevel interface{}
+			var existingIsTop interface{}
+			var existingDefaultCurrency, existingTags, existingExtCode, existingSegment interface{}
+			var existingSapBukrs, existingSapKtopl, existingSapSaknr, existingSapKtoks interface{}
+			var existingOracleLedger, existingOracleCoa, existingOracleBal, existingOracleNat interface{}
+			var existingTallyName, existingTallyGroup interface{}
+			var existingSageDept, existingSageCost interface{}
+			var existingEffFrom, existingEffTo interface{}
+
+			sel := `SELECT gl_account_code, gl_account_name, gl_account_type, parent_gl_code, status, source, gl_account_level, is_top_level_gl_account, default_currency, tags, external_code, segment, sap_bukrs, sap_ktopl, sap_saknr, sap_ktoks, oracle_ledger, oracle_coa, oracle_balancing_seg, oracle_natural_account, tally_ledger_name, tally_ledger_group, sage_department, sage_cost_centre, effective_from, effective_to FROM masterglaccount WHERE gl_account_id=$1 FOR UPDATE`
+
+			if err := tx.QueryRow(ctx, sel, row.GLAccountID).Scan(&existingCode, &existingName, &existingType, &existingParentCode, &existingStatus, &existingSource, &existingLevel, &existingIsTop, &existingDefaultCurrency, &existingTags, &existingExtCode, &existingSegment, &existingSapBukrs, &existingSapKtopl, &existingSapSaknr, &existingSapKtoks, &existingOracleLedger, &existingOracleCoa, &existingOracleBal, &existingOracleNat, &existingTallyName, &existingTallyGroup, &existingSageDept, &existingSageCost, &existingEffFrom, &existingEffTo); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "fetch failed: "+err.Error())
+				return
 			}
-			committed := false
-			func() {
-				defer func() {
-					if !committed {
-						tx.Rollback(ctx)
-					}
-				}()
 
-				var existingCode, existingName, existingType, existingParentCode, existingStatus, existingSource interface{}
-				var existingLevel interface{}
-				var existingIsTop interface{}
-				var existingDefaultCurrency, existingTags, existingExtCode, existingSegment interface{}
-				var existingSapBukrs, existingSapKtopl, existingSapSaknr, existingSapKtoks interface{}
-				var existingOracleLedger, existingOracleCoa, existingOracleBal, existingOracleNat interface{}
-				var existingTallyName, existingTallyGroup interface{}
-				var existingSageDept, existingSageCost interface{}
-				var existingEffFrom, existingEffTo interface{}
-
-				sel := `SELECT gl_account_code, gl_account_name, gl_account_type, parent_gl_code, status, source, gl_account_level, is_top_level_gl_account, default_currency, tags, external_code, segment, sap_bukrs, sap_ktopl, sap_saknr, sap_ktoks, oracle_ledger, oracle_coa, oracle_balancing_seg, oracle_natural_account, tally_ledger_name, tally_ledger_group, sage_department, sage_cost_centre, effective_from, effective_to FROM masterglaccount WHERE gl_account_id=$1 FOR UPDATE`
-
-				if err := tx.QueryRow(ctx, sel, row.GLAccountID).Scan(&existingCode, &existingName, &existingType, &existingParentCode, &existingStatus, &existingSource, &existingLevel, &existingIsTop, &existingDefaultCurrency, &existingTags, &existingExtCode, &existingSegment, &existingSapBukrs, &existingSapKtopl, &existingSapSaknr, &existingSapKtoks, &existingOracleLedger, &existingOracleCoa, &existingOracleBal, &existingOracleNat, &existingTallyName, &existingTallyGroup, &existingSageDept, &existingSageCost, &existingEffFrom, &existingEffTo); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "gl_account_id": row.GLAccountID})
+			// Validate currency if being updated
+			if val, ok := row.Fields["default_currency"]; ok {
+				if valStr := fmt.Sprint(val); valStr != "" && !api.IsCurrencyAllowed(ctx, valStr) {
+					api.RespondWithError(w, http.StatusForbidden, "invalid or unauthorized default_currency: "+valStr)
 					return
 				}
+			}
 
-				// Validate currency if being updated
-				if val, ok := row.Fields["default_currency"]; ok {
-					if valStr := fmt.Sprint(val); valStr != "" && !api.IsCurrencyAllowed(ctx, valStr) {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized default_currency: " + valStr, "gl_account_id": row.GLAccountID})
-						return
-					}
-				}
-
-				// Validate parent GL code if being updated
-				if val, ok := row.Fields["parent_gl_account_code"]; ok {
-					parentCode := strings.TrimSpace(fmt.Sprint(val))
-					if parentCode != "" {
-						var parentExists bool
-						parentCheckQ := `SELECT EXISTS(
+			// Validate parent GL code if being updated
+			if val, ok := row.Fields["parent_gl_account_code"]; ok {
+				parentCode := strings.TrimSpace(fmt.Sprint(val))
+				if parentCode != "" {
+					var parentExists bool
+					parentCheckQ := `SELECT EXISTS(
 							SELECT 1 FROM masterglaccount m
 							LEFT JOIN LATERAL (
 								SELECT processing_status FROM auditactionglaccount
@@ -958,217 +933,198 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							AND UPPER(a.processing_status) = 'APPROVED'
 							AND UPPER(m.status) = 'ACTIVE'
 						)`
-						if err := tx.QueryRow(ctx, parentCheckQ, parentCode).Scan(&parentExists); err != nil || !parentExists {
-							results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent_gl_code not found or not approved: " + parentCode, "gl_account_id": row.GLAccountID})
+					if err := tx.QueryRow(ctx, parentCheckQ, parentCode).Scan(&parentExists); err != nil || !parentExists {
+						api.RespondWithError(w, http.StatusBadRequest, "parent_gl_code not found or not approved: "+parentCode)
+						return
+					}
+				}
+			}
+
+			var sets []string
+			var args []interface{}
+			pos := 1
+			var newParentID interface{}
+			var computedLevel interface{}
+			var computedIsTop interface{}
+
+			for k, v := range row.Fields {
+				switch k {
+				case "gl_account_code":
+					sets = append(sets, fmt.Sprintf("gl_account_code=$%d, old_gl_account_code=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingCode))
+					pos += 2
+				case "gl_account_name":
+					sets = append(sets, fmt.Sprintf("gl_account_name=$%d, old_gl_account_name=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingName))
+					pos += 2
+				case "gl_account_type":
+					sets = append(sets, fmt.Sprintf("gl_account_type=$%d, old_gl_account_type=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingType))
+					pos += 2
+				case constants.KeyStatus:
+					sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingStatus))
+					pos += 2
+				case "source":
+					sets = append(sets, fmt.Sprintf("source=$%d, old_source=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingSource))
+					pos += 2
+				case "erp_ref", "erp_type":
+					sets = append(sets, fmt.Sprintf("erp_type=$%d, old_erp_type=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingSource))
+					pos += 2
+				case "gl_account_level":
+					sets = append(sets, fmt.Sprintf("gl_account_level=$%d, old_gl_account_level=$%d", pos, pos+1))
+					args = append(args, v, existingLevel)
+					pos += 2
+				case "is_top_level_gl_account":
+					sets = append(sets, fmt.Sprintf("is_top_level_gl_account=$%d", pos))
+					args = append(args, v)
+					pos += 1
+				case "parent_gl_account_code":
+					pcode := strings.TrimSpace(fmt.Sprint(v))
+					if pcode == "" {
+						newParentID = nil
+						computedLevel = 0
+						computedIsTop = true
+					} else {
+						var pid string
+						var plevel int
+						if err := tx.QueryRow(ctx, `SELECT gl_account_id, gl_account_level FROM masterglaccount WHERE gl_account_code=$1`, pcode).Scan(&pid, &plevel); err != nil {
+							api.RespondWithError(w, http.StatusBadRequest, "parent gl account not found: "+pcode)
 							return
 						}
+						newParentID = pid
+						computedLevel = plevel + 1
+						computedIsTop = false
 					}
-				}
+					sets = append(sets, fmt.Sprintf("parent_gl_code=$%d, old_parent_gl_code=$%d, gl_account_level=$%d, old_gl_account_level=$%d, is_top_level_gl_account=$%d", pos, pos+1, pos+2, pos+3, pos+4))
+					args = append(args, newParentID, ifaceToString(existingParentCode), computedLevel, existingLevel, computedIsTop)
+					pos += 5
 
-				var sets []string
-				var args []interface{}
-				pos := 1
-				var newParentID interface{}
-				var computedLevel interface{}
-				var computedIsTop interface{}
-
-				for k, v := range row.Fields {
-					switch k {
-					case "gl_account_code":
-						sets = append(sets, fmt.Sprintf("gl_account_code=$%d, old_gl_account_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingCode))
-						pos += 2
-					case "gl_account_name":
-						sets = append(sets, fmt.Sprintf("gl_account_name=$%d, old_gl_account_name=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingName))
-						pos += 2
-					case "gl_account_type":
-						sets = append(sets, fmt.Sprintf("gl_account_type=$%d, old_gl_account_type=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingType))
-						pos += 2
-					case constants.KeyStatus:
-						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingStatus))
-						pos += 2
-					case "source":
-						sets = append(sets, fmt.Sprintf("source=$%d, old_source=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSource))
-						pos += 2
-					case "erp_ref", "erp_type":
-						sets = append(sets, fmt.Sprintf("erp_type=$%d, old_erp_type=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSource))
-						pos += 2
-					case "gl_account_level":
-						sets = append(sets, fmt.Sprintf("gl_account_level=$%d, old_gl_account_level=$%d", pos, pos+1))
-						args = append(args, v, existingLevel)
-						pos += 2
-					case "is_top_level_gl_account":
-						sets = append(sets, fmt.Sprintf("is_top_level_gl_account=$%d", pos))
-						args = append(args, v)
-						pos += 1
-					case "parent_gl_account_code":
-						pcode := strings.TrimSpace(fmt.Sprint(v))
-						if pcode == "" {
-							newParentID = nil
-							computedLevel = 0
-							computedIsTop = true
-						} else {
-							var pid string
-							var plevel int
-							if err := pgxPool.QueryRow(ctx, `SELECT gl_account_id, gl_account_level FROM masterglaccount WHERE gl_account_code=$1`, pcode).Scan(&pid, &plevel); err != nil {
-								results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent gl account not found: " + pcode, "gl_account_id": row.GLAccountID})
-								return
-							}
-							newParentID = pid
-							computedLevel = plevel + 1
-							computedIsTop = false
+				case "default_currency":
+					sets = append(sets, fmt.Sprintf("default_currency=$%d, old_default_currency=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingDefaultCurrency))
+					pos += 2
+				case "effective_from":
+					dateStr := strings.TrimSpace(fmt.Sprint(v))
+					var dateVal interface{}
+					if dateStr != "" {
+						if date, err := time.Parse(constants.DateFormat, dateStr); err == nil {
+							dateVal = date
 						}
-						sets = append(sets, fmt.Sprintf("parent_gl_code=$%d, old_parent_gl_code=$%d, gl_account_level=$%d, old_gl_account_level=$%d, is_top_level_gl_account=$%d", pos, pos+1, pos+2, pos+3, pos+4))
-						args = append(args, newParentID, ifaceToString(existingParentCode), computedLevel, existingLevel, computedIsTop)
-						pos += 5
-
-					case "default_currency":
-						sets = append(sets, fmt.Sprintf("default_currency=$%d, old_default_currency=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingDefaultCurrency))
-						pos += 2
-					case "effective_from":
-						dateStr := strings.TrimSpace(fmt.Sprint(v))
-						var dateVal interface{}
-						if dateStr != "" {
-							if date, err := time.Parse(constants.DateFormat, dateStr); err == nil {
-								dateVal = date
-							}
+					}
+					sets = append(sets, fmt.Sprintf("effective_from=$%d, old_effective_from=$%d", pos, pos+1))
+					args = append(args, dateVal, existingEffFrom)
+					pos += 2
+				case "effective_to":
+					dateStr := strings.TrimSpace(fmt.Sprint(v))
+					var dateVal interface{}
+					if dateStr != "" {
+						if date, err := time.Parse(constants.DateFormat, dateStr); err == nil {
+							dateVal = date
 						}
-						sets = append(sets, fmt.Sprintf("effective_from=$%d, old_effective_from=$%d", pos, pos+1))
-						args = append(args, dateVal, existingEffFrom)
-						pos += 2
-					case "effective_to":
-						dateStr := strings.TrimSpace(fmt.Sprint(v))
-						var dateVal interface{}
-						if dateStr != "" {
-							if date, err := time.Parse(constants.DateFormat, dateStr); err == nil {
-								dateVal = date
-							}
-						}
-						sets = append(sets, fmt.Sprintf("effective_to=$%d, old_effective_to=$%d", pos, pos+1))
-						args = append(args, dateVal, existingEffTo)
-						pos += 2
-					case "tags":
-						sets = append(sets, fmt.Sprintf("tags=$%d, old_tags=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTags))
-						pos += 2
-					case "external_code":
-						sets = append(sets, fmt.Sprintf("external_code=$%d, old_external_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingExtCode))
-						pos += 2
-					case "segment":
-						sets = append(sets, fmt.Sprintf("segment=$%d, old_segment=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSegment))
-						pos += 2
-					case "sap_bukrs":
-						sets = append(sets, fmt.Sprintf("sap_bukrs=$%d, old_sap_bukrs=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSapBukrs))
-						pos += 2
-					case "sap_ktopl":
-						sets = append(sets, fmt.Sprintf("sap_ktopl=$%d, old_sap_ktopl=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSapKtopl))
-						pos += 2
-					case "sap_saknr":
-						sets = append(sets, fmt.Sprintf("sap_saknr=$%d, old_sap_saknr=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSapSaknr))
-						pos += 2
-					case "sap_ktoks":
-						sets = append(sets, fmt.Sprintf("sap_ktoks=$%d, old_sap_ktoks=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSapKtoks))
-						pos += 2
-					case "oracle_ledger":
-						sets = append(sets, fmt.Sprintf("oracle_ledger=$%d, old_oracle_ledger=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleLedger))
-						pos += 2
-					case "oracle_coa":
-						sets = append(sets, fmt.Sprintf("oracle_coa=$%d, old_oracle_coa=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleCoa))
-						pos += 2
-					case "oracle_balancing_seg":
-						sets = append(sets, fmt.Sprintf("oracle_balancing_seg=$%d, old_oracle_balancing_seg=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleBal))
-						pos += 2
-					case "oracle_natural_account":
-						sets = append(sets, fmt.Sprintf("oracle_natural_account=$%d, old_oracle_natural_account=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleNat))
-						pos += 2
-					case "tally_ledger_name":
-						sets = append(sets, fmt.Sprintf("tally_ledger_name=$%d, old_tally_ledger_name=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTallyName))
-						pos += 2
-					case "tally_ledger_group":
-						sets = append(sets, fmt.Sprintf("tally_ledger_group=$%d, old_tally_ledger_group=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTallyGroup))
-						pos += 2
-					case "sage_department":
-						sets = append(sets, fmt.Sprintf("sage_department=$%d, old_sage_department=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSageDept))
-						pos += 2
-					case "sage_cost_centre":
-						sets = append(sets, fmt.Sprintf("sage_cost_centre=$%d, old_sage_cost_centre=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSageCost))
-						pos += 2
-					default:
-
 					}
-				}
+					sets = append(sets, fmt.Sprintf("effective_to=$%d, old_effective_to=$%d", pos, pos+1))
+					args = append(args, dateVal, existingEffTo)
+					pos += 2
+				case "tags":
+					sets = append(sets, fmt.Sprintf("tags=$%d, old_tags=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingTags))
+					pos += 2
+				case "external_code":
+					sets = append(sets, fmt.Sprintf("external_code=$%d, old_external_code=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingExtCode))
+					pos += 2
+				case "segment":
+					sets = append(sets, fmt.Sprintf("segment=$%d, old_segment=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingSegment))
+					pos += 2
+				case "sap_bukrs":
+					sets = append(sets, fmt.Sprintf("sap_bukrs=$%d, old_sap_bukrs=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingSapBukrs))
+					pos += 2
+				case "sap_ktopl":
+					sets = append(sets, fmt.Sprintf("sap_ktopl=$%d, old_sap_ktopl=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingSapKtopl))
+					pos += 2
+				case "sap_saknr":
+					sets = append(sets, fmt.Sprintf("sap_saknr=$%d, old_sap_saknr=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingSapSaknr))
+					pos += 2
+				case "sap_ktoks":
+					sets = append(sets, fmt.Sprintf("sap_ktoks=$%d, old_sap_ktoks=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingSapKtoks))
+					pos += 2
+				case "oracle_ledger":
+					sets = append(sets, fmt.Sprintf("oracle_ledger=$%d, old_oracle_ledger=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingOracleLedger))
+					pos += 2
+				case "oracle_coa":
+					sets = append(sets, fmt.Sprintf("oracle_coa=$%d, old_oracle_coa=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingOracleCoa))
+					pos += 2
+				case "oracle_balancing_seg":
+					sets = append(sets, fmt.Sprintf("oracle_balancing_seg=$%d, old_oracle_balancing_seg=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingOracleBal))
+					pos += 2
+				case "oracle_natural_account":
+					sets = append(sets, fmt.Sprintf("oracle_natural_account=$%d, old_oracle_natural_account=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingOracleNat))
+					pos += 2
+				case "tally_ledger_name":
+					sets = append(sets, fmt.Sprintf("tally_ledger_name=$%d, old_tally_ledger_name=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingTallyName))
+					pos += 2
+				case "tally_ledger_group":
+					sets = append(sets, fmt.Sprintf("tally_ledger_group=$%d, old_tally_ledger_group=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingTallyGroup))
+					pos += 2
+				case "sage_department":
+					sets = append(sets, fmt.Sprintf("sage_department=$%d, old_sage_department=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingSageDept))
+					pos += 2
+				case "sage_cost_centre":
+					sets = append(sets, fmt.Sprintf("sage_cost_centre=$%d, old_sage_cost_centre=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingSageCost))
+					pos += 2
+				default:
 
-				updatedID := row.GLAccountID
-				if len(sets) > 0 {
-					q := "UPDATE masterglaccount SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE gl_account_id=$%d RETURNING gl_account_id", pos)
-					args = append(args, row.GLAccountID)
-					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + err.Error(), "gl_account_id": row.GLAccountID})
-						return
-					}
 				}
-
-				if newParentID != nil {
-					relQ := `INSERT INTO glaccountrelationships (parent_gl_account_id, child_gl_account_id) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM glaccountrelationships WHERE parent_gl_account_id=$1 AND child_gl_account_id=$2)`
-					if _, err := tx.Exec(ctx, relQ, newParentID, updatedID); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrBulkRelationshipInsertFailed + err.Error(), "gl_account_id": updatedID})
-						return
-					}
-				}
-
-				auditQ := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
-				if _, err := tx.Exec(ctx, auditQ, updatedID, row.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "audit failed: " + err.Error(), "gl_account_id": updatedID})
-					return
-				}
-
-				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "gl_account_id": updatedID})
-					return
-				}
-				committed = true
-				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "gl_account_id": updatedID})
-			}()
-		}
-		overall := true
-		for _, r := range results {
-			if ok, exists := r[constants.ValueSuccess]; exists {
-				if b, okb := ok.(bool); okb {
-					if !b {
-						overall = false
-						break
-					}
-				} else {
-					overall = false
-					break
-				}
-			} else {
-				overall = false
-				break
 			}
+
+			updatedID := row.GLAccountID
+			if len(sets) > 0 {
+				q := "UPDATE masterglaccount SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE gl_account_id=$%d RETURNING gl_account_id", pos)
+				args = append(args, row.GLAccountID)
+				if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+					return
+				}
+			}
+
+			if newParentID != nil {
+				relQ := `INSERT INTO glaccountrelationships (parent_gl_account_id, child_gl_account_id) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM glaccountrelationships WHERE parent_gl_account_id=$1 AND child_gl_account_id=$2)`
+				if _, err := tx.Exec(ctx, relQ, newParentID, updatedID); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrBulkRelationshipInsertFailed+err.Error())
+					return
+				}
+			}
+
+			auditQ := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
+			if _, err := tx.Exec(ctx, auditQ, updatedID, row.Reason, updatedBy); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "audit failed: "+err.Error())
+				return
+			}
+			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "gl_account_id": updatedID})
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			return
+		}
+		committed = true
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: overall, "rows": results})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": results})
 	}
 }
 
@@ -1282,8 +1238,20 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := context.Background()
+		// wrapped in transaction to prevent race condition
+		tx, err := pgxPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
 
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
+		relRows, err := tx.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1327,7 +1295,7 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		query := `UPDATE auditactionglaccount SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE gl_account_id = ANY($3) RETURNING action_id, gl_account_id`
-		rows2, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
+		rows2, err := tx.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to reject GL account actions")
 			if statusCode == http.StatusOK {
@@ -1338,7 +1306,6 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		defer rows2.Close()
 
 		var updated []map[string]interface{}
 		for rows2.Next() {
@@ -1347,6 +1314,12 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				updated = append(updated, map[string]interface{}{"action_id": actionID, "gl_account_id": gid})
 			}
 		}
+		rows2.Close()
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		committed = true
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
@@ -1381,8 +1354,20 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := context.Background()
+		// wrapped in transaction to prevent race condition
+		tx, err := pgxPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
 
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
+		relRows, err := tx.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1425,7 +1410,7 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		query := `UPDATE auditactionglaccount SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE gl_account_id = ANY($3) RETURNING action_id, gl_account_id, actiontype`
-		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToApprove)
+		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToApprove)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to approve GL account actions")
 			if statusCode == http.StatusOK {
@@ -1436,7 +1421,6 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		defer rows.Close()
 
 		var updated []map[string]interface{}
 		var deleteIDs []string
@@ -1449,14 +1433,20 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
+		rows.Close()
 
 		if len(deleteIDs) > 0 {
 			updQ := `UPDATE masterglaccount SET is_deleted=true WHERE gl_account_id = ANY($1)`
-			if _, err := pgxPool.Exec(ctx, updQ, deleteIDs); err != nil {
+			if _, err := tx.Exec(ctx, updQ, deleteIDs); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to set is_deleted: "+err.Error())
 				return
 			}
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		committed = true
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0

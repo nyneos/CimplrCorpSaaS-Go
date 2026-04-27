@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // GetUncategorizedTransactionsHandler returns all uncategorized transactions across all bank statements
 // Supports pagination with limit/offset, if no limit provided returns all data
-func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
+func GetUncategorizedTransactionsHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -23,7 +25,7 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidJSONPrefix+err.Error(), http.StatusBadRequest)
+			writeBankStatementHTTPError(w, http.StatusBadRequest, err, "invalid request body")
 			return
 		}
 
@@ -76,9 +78,9 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			args = append(args, *req.Limit, offset)
 		}
 
-		rows, err := db.Query(query, args...)
+		rows, err := pgxPool.Query(r.Context(), query, args...)
 		if err != nil {
-			http.Error(w, "Database query failed: "+err.Error(), http.StatusInternalServerError)
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database query failed")
 			return
 		}
 		defer rows.Close()
@@ -196,7 +198,7 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			FROM cimplrcorpsaas.bank_statement_transactions t
 			WHERE (t.category_id IS NULL OR t.category_id = '')
 		`
-		db.QueryRow(countQuery).Scan(&totalCount)
+		pgxPool.QueryRow(r.Context(), countQuery).Scan(&totalCount)
 
 		response := map[string]interface{}{
 			"success":      true,
@@ -214,3 +216,4 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		json.NewEncoder(w).Encode(response)
 	})
 }
+

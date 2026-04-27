@@ -4,18 +4,32 @@ import (
 	allMaster "CimplrCorpSaas/api/master/allMasters"
 	investmentMasters "CimplrCorpSaas/api/master/investmentMasters"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/internal/telemetry"
 	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
+
+var masterServer *http.Server
+var masterServerStop context.CancelFunc
+var masterTracerShutdown func(context.Context) error
 
 func StartMasterService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
+	tracerProvider, tracerShutdown, err := telemetry.InitTracerProvider("master")
+	if err != nil {
+		log.Fatalf("failed to initialize OpenTelemetry tracer for master service: %v", err)
+	}
+	masterTracerShutdown = tracerShutdown
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
@@ -342,9 +356,48 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/bank-rate-card/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadBankRateCardSimple(pgxPool)))
 	mux.Handle("/master/bank-rate-card/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankRateCard(pgxPool)))
 
-	log.Printf("Master Service started on :%s", port)
-	err = http.ListenAndServe(":"+port, mux)
-	if err != nil {
-		log.Fatalf("Master Service failed: %v", err)
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: otelhttp.NewHandler(mux, "master", otelhttp.WithTracerProvider(tracerProvider)),
 	}
+	masterServer = server
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	masterServerStop = stop
+	defer stop()
+
+	go func() {
+		log.Printf("Master Service started on :%s", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Master Service failed: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = server.Shutdown(shutdownCtx)
+}
+
+func shutdownMasterService() error {
+	if masterServerStop != nil {
+		masterServerStop()
+	}
+	if masterServer == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := masterServer.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	if masterTracerShutdown != nil {
+		if err := masterTracerShutdown(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }

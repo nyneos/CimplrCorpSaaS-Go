@@ -83,13 +83,18 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Use entities from request if provided, otherwise get all data (no entity filter)
-		entities := req.Entities
+		allowedEntities := api.GetEntityNamesFromCtx(r.Context())
+		if len(allowedEntities) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
+			return
+		}
+		entities := api.IntersectAllowedValues(req.Entities, allowedEntities)
+		currencies := api.IntersectAllowedValues(req.Currencies, api.GetCurrencyCodesFromCtx(r.Context()))
 
 		// Log for debugging
 		log.Printf("Entities from request: %v", entities)
 		if len(entities) == 0 {
-			log.Printf("No entities filter provided - fetching all data")
+			log.Printf("No entity filter provided - using middleware scoped entities")
 		} else {
 			log.Printf("Using entity filter: %v", entities)
 		}
@@ -104,7 +109,7 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 		alerts := []Alert{}
 
 		// Alert 1: Maturing in 3 days
-		maturingAlert := getMaturingExposuresAlert(r.Context(), db, entities, req.Currencies)
+		maturingAlert := getMaturingExposuresAlert(r.Context(), db, entities, currencies)
 		alerts = append(alerts, maturingAlert)
 
 		// Alert 2: Settlement Failed
@@ -112,12 +117,12 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 		alerts = append(alerts, settlementAlert)
 
 		// Alert 3: High Unhedged Exposure (always show)
-		highExposureAlert := getHighUnhedgedAlert(r.Context(), db, entities, req.Currencies)
+		highExposureAlert := getHighUnhedgedAlert(r.Context(), db, entities, currencies)
 		alerts = append(alerts, highExposureAlert)
 
 		// 2. KPI CARDS SECTION
 		// KPI 1: Exposures Requiring Attention (Unhedged & Approaching)
-		unhedgedCount, unhedgedAmount := getUnhedgedExposures(r.Context(), db, entities, req.Currencies, days)
+		unhedgedCount, unhedgedAmount := getUnhedgedExposures(r.Context(), db, entities, currencies, days)
 
 		kpis := []KPICard{
 			{
@@ -128,7 +133,7 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		// KPI 2: Trades Maturing Today
-		tradesCount := getTradesMaturingToday(r.Context(), db, entities, req.Currencies)
+		tradesCount := getTradesMaturingToday(r.Context(), db, entities, currencies)
 		kpis = append(kpis, KPICard{
 			Title:    "Trades Maturing Today",
 			Value:    tradesCount,
@@ -136,7 +141,7 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 		})
 
 		// KPI 3: Overall Unhedged (Spot exposure)
-		_, overallUnhedgedUSD := getUnhedgedExposures(r.Context(), db, entities, req.Currencies, 0) // All time
+		_, overallUnhedgedUSD := getUnhedgedExposures(r.Context(), db, entities, currencies, 0) // All time
 		kpis = append(kpis, KPICard{
 			Title:    "Overall Unhedged",
 			Value:    formatAmount(overallUnhedgedUSD),
@@ -152,7 +157,7 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 		})
 
 		// 3. EXPOSURE MATURITIES
-		exposures := getExposureMaturities(r.Context(), db, entities, req.Currencies)
+		exposures := getExposureMaturities(r.Context(), db, entities, currencies)
 
 		// 4. SETTLEMENT PERFORMANCE (Daily)
 		settlementSummary := getSettlementPerformance(r.Context(), db, entities)

@@ -42,7 +42,8 @@ func CreateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req SettingRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+			log.Printf("[ERROR: %v] [Investment] [Settings] failed to decode create setting request", err)
+			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
 
@@ -100,8 +101,8 @@ func CreateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 				http.Error(w, "Setting with this key already exists", http.StatusConflict)
 				return
 			}
-			log.Printf("Error creating setting: %v", err)
-			http.Error(w, "Failed to create setting: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("[ERROR: %v] [Investment] [Settings] failed to create setting", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 
@@ -144,7 +145,8 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 
 		var req SettingRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+			log.Printf("[ERROR: %v] [Investment] [Settings] failed to decode update setting request", err)
+			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
 
@@ -226,8 +228,8 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			log.Printf("Error updating setting: %v", err)
-			http.Error(w, "Failed to update setting: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("[ERROR: %v] [Investment] [Settings] failed to update setting", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 

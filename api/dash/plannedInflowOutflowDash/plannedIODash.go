@@ -60,9 +60,11 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		var body reqBody
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrMissingUserID})
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidRequestBody}); err != nil {
+				log.Printf("[ERROR: %v] [Dash] [PlannedInflowOutflow] failed to encode invalid request response", err)
+			}
 			return
 		}
 		ctx := context.Background()
@@ -75,8 +77,9 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			End   time.Time
 		}{
 			{"Next 30 Days", today, today.AddDate(0, 0, 30)},
-			{"Next 60 Days", today, today.AddDate(0, 30, 60)},
-			{"This Quarter", qStart, today.AddDate(0, 60, 90)},
+			// FIX: Corrected AddDate usage (was adding months instead of days)
+			{"Next 60 Days", today, today.AddDate(0, 0, 60)},
+			{"This Quarter", qStart, qStart.AddDate(0, 3, 0)},
 		}
 		out := make([]PlannedInflowOutflowData, 0, len(ranges))
 		for _, dr := range ranges {
@@ -100,7 +103,10 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err := pgxPool.Query(ctx, entityQ, dr.Start, dr.End)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				log.Printf("[ERROR: %v] [Dash] [PlannedInflowOutflow] failed to fetch planned inflow/outflow rows", err)
+				if err := json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "internal server error"}); err != nil {
+					log.Printf("[ERROR: %v] [Dash] [PlannedInflowOutflow] failed to encode planned inflow/outflow error response", err)
+				}
 				return
 			}
 
@@ -110,6 +116,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var entity, currency string
 				var inflow, outflow float64
 				if err := rows.Scan(&entity, &currency, &inflow, &outflow); err != nil {
+					log.Printf("[ERROR: %v] [Dash] [PlannedInflowOutflow] failed to scan entity inflow/outflow row", err)
 					continue
 				}
 
@@ -129,6 +136,9 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				entityMap[entity].Inflow += inflowUSD
 				entityMap[entity].Outflow += outflowUSD
+			}
+			if err := rows.Err(); err != nil {
+				log.Printf("[ERROR: %v] [Dash] [PlannedInflowOutflow] entity inflow/outflow row iteration failed", err)
 			}
 			rows.Close()
 
@@ -157,7 +167,10 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows2, err := pgxPool.Query(ctx, cashflowQ, dr.Start, dr.End)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				log.Printf("[ERROR: %v] [Dash] [PlannedInflowOutflow] failed to fetch planned inflow/outflow totals", err)
+				if err := json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "internal server error"}); err != nil {
+					log.Printf("[ERROR: %v] [Dash] [PlannedInflowOutflow] failed to encode planned inflow/outflow totals error response", err)
+				}
 				return
 			}
 
@@ -167,6 +180,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var nature, currency string
 				var inflow, outflow float64
 				if err := rows2.Scan(&nature, &currency, &inflow, &outflow); err != nil {
+					log.Printf("[ERROR: %v] [Dash] [PlannedInflowOutflow] failed to scan cashflow inflow/outflow row", err)
 					continue
 				}
 
@@ -187,6 +201,9 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cashflowMap[nature].Inflow += inflowUSD
 				cashflowMap[nature].Outflow += outflowUSD
 			}
+			if err := rows2.Err(); err != nil {
+				log.Printf("[ERROR: %v] [Dash] [PlannedInflowOutflow] cashflow inflow/outflow row iteration failed", err)
+			}
 			rows2.Close()
 
 			// Convert map to slice
@@ -201,7 +218,9 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": out})
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": out}); err != nil {
+			log.Printf("[ERROR: %v] [Dash] [PlannedInflowOutflow] failed to encode success response", err)
+		}
 	}
 }
 

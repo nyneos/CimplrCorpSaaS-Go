@@ -49,8 +49,8 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var body struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			api.RespondWithResult(w, false, constants.ErrInvalidRequestBody)
 			return
 		}
 
@@ -161,8 +161,8 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var body struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			api.RespondWithResult(w, false, constants.ErrInvalidRequestBody)
 			return
 		}
 

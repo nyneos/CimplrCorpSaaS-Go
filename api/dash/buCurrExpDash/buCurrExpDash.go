@@ -10,12 +10,25 @@ import (
 )
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
+	log.Printf("[ERROR: %v] [Dash] [BusinessUnitCurrencyExposure] request failed", errMsg)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
+		constants.ValueError:   clientMsg,
 	})
 }
 
@@ -61,8 +74,8 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 		    es.total_payable_exposure,
 		    cs.cover_taken_export,
 		    cs.cover_taken_import,
-		    (es.total_payable_exposure - cs.cover_taken_export) AS outstanding_cover_export,
-		    (es.total_payable_exposure - cs.cover_taken_import) AS outstanding_cover_import
+		    (es.debitors - cs.cover_taken_export) AS outstanding_cover_export,
+		    ((es.creditors + es.lc + es.grn) - cs.cover_taken_import) AS outstanding_cover_import
 		FROM exposure_summary es
 		LEFT JOIN cover_summary cs 
 		    ON es.bu = cs.bu AND es.currency = cs.currency;
@@ -70,9 +83,9 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrInvalidRequestBody})
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
@@ -80,7 +93,7 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "Business units not found in context")
 			return
 		}
-		rows, err := db.Query(query)
+		rows, err := db.QueryContext(r.Context(), query)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Server error"})

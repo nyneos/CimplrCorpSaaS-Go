@@ -38,6 +38,5 @@ func (s *UAMService) Start() error {
 }
 
 func (s *UAMService) Stop() error {
-	// Implement stop logic if needed
-	return nil
+	return shutdownUAMService()
 }

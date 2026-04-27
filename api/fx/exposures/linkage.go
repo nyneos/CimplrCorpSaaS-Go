@@ -46,7 +46,7 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		rows, err := db.Query(`SELECT l.*, h.document_id, f.internal_reference_id FROM exposure_hedge_links l LEFT JOIN exposure_headers h ON l.exposure_header_id = h.exposure_header_id LEFT JOIN forward_bookings f ON l.booking_id = f.system_transaction_id WHERE h.entity = ANY($1) AND l.is_active = TRUE`, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), `SELECT l.*, h.document_id, f.internal_reference_id FROM exposure_hedge_links l LEFT JOIN exposure_headers h ON l.exposure_header_id = h.exposure_header_id LEFT JOIN forward_bookings f ON l.booking_id = f.system_transaction_id WHERE h.entity = ANY($1) AND l.is_active = TRUE`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch hedge links details")
 			return
@@ -104,7 +104,7 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		bookRows, err := db.Query(`SELECT system_transaction_id, entity_level_0, order_type, currency_pair, maturity_date, booking_amount, counterparty, total_rate, value_local_currency FROM forward_bookings WHERE processing_status = 'approved' OR processing_status = 'Approved'`)
+		bookRows, err := db.QueryContext(r.Context(), `SELECT system_transaction_id, entity_level_0, order_type, currency_pair, maturity_date, booking_amount, counterparty, total_rate, value_local_currency FROM forward_bookings WHERE processing_status = 'approved' OR processing_status = 'Approved'`)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch bookings")
 			return
@@ -147,7 +147,7 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 		}
 		hedgeMap := map[interface{}]float64{}
 		if len(bookingIds) > 0 {
-			hedgeRows, err := db.Query(`SELECT booking_id, SUM(hedged_amount) AS linked_amount FROM exposure_hedge_links WHERE booking_id = ANY($1) GROUP BY booking_id`, pq.Array(bookingIds))
+			hedgeRows, err := db.QueryContext(r.Context(), `SELECT booking_id, SUM(hedged_amount) AS linked_amount FROM exposure_hedge_links WHERE booking_id = ANY($1) GROUP BY booking_id`, pq.Array(bookingIds))
 			if err == nil {
 				for hedgeRows.Next() {
 					var bookingId interface{}
@@ -283,7 +283,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		headRows, err := db.Query(`SELECT exposure_header_id, entity, exposure_type, currency, value_date, total_open_amount, counterparty_name FROM exposure_headers WHERE approval_status = 'Approved' OR approval_status = 'approved'`)
+		headRows, err := db.QueryContext(r.Context(), `SELECT exposure_header_id, entity, exposure_type, currency, value_date, total_open_amount, counterparty_name FROM exposure_headers WHERE approval_status = 'Approved' OR approval_status = 'approved'`)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure headers")
 			return
@@ -333,7 +333,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 		}
 		hedgeMap := map[string]float64{}
 		if len(headerIds) > 0 {
-			hedgeRows, err := db.Query(`SELECT exposure_header_id, SUM(hedged_amount) AS hedge_amount FROM exposure_hedge_links WHERE exposure_header_id = ANY($1) GROUP BY exposure_header_id`, pq.Array(headerIds))
+			hedgeRows, err := db.QueryContext(r.Context(), `SELECT exposure_header_id, SUM(hedged_amount) AS hedge_amount FROM exposure_hedge_links WHERE exposure_header_id = ANY($1) GROUP BY exposure_header_id`, pq.Array(headerIds))
 			if err == nil {
 				for hedgeRows.Next() {
 					var exposureHeaderId interface{}
@@ -458,7 +458,7 @@ func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 			HedgedAmount     float64
 			IsActive         bool
 		}
-		err := db.QueryRow(upsertQuery, req.ExposureHeaderID, req.BookingID, req.HedgedAmount).Scan(
+		err := db.QueryRowContext(r.Context(), upsertQuery, req.ExposureHeaderID, req.BookingID, req.HedgedAmount).Scan(
 			&link.ExposureHeaderID,
 			&link.BookingID,
 			&link.HedgedAmount,
@@ -476,15 +476,15 @@ func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 		}
 		// Get booking amount
 		var bookingAmount float64
-		_ = db.QueryRow("SELECT Booking_Amount FROM forward_bookings WHERE system_transaction_id = $1", req.BookingID).Scan(&bookingAmount)
+		_ = db.QueryRowContext(r.Context(), "SELECT Booking_Amount FROM forward_bookings WHERE system_transaction_id = $1", req.BookingID).Scan(&bookingAmount)
 		// Sum previous actions
 		var totalUtilized float64
 		sumQuery := `SELECT COALESCE(SUM(amount_changed), 0) FROM forward_booking_ledger WHERE booking_id = $1 AND action_type IN ('UTILIZATION', 'CANCELLATION', 'ROLLOVER')`
-		_ = db.QueryRow(sumQuery, req.BookingID).Scan(&totalUtilized)
+		_ = db.QueryRowContext(r.Context(), sumQuery, req.BookingID).Scan(&totalUtilized)
 		newOpenAmount := math.Abs(math.Abs(bookingAmount) - math.Abs(totalUtilized))
 		// Log to forward_booking_ledger
 		ledgerQuery := `INSERT INTO forward_booking_ledger (booking_id, action_type, action_id, action_date, amount_changed, running_open_amount, user_id) VALUES ($1, 'UTILIZATION', $2, CURRENT_DATE, $3, $4, $5)`
-		_, _ = db.Exec(ledgerQuery, req.BookingID, req.ExposureHeaderID, req.HedgedAmount, newOpenAmount, req.UserID)
+		_, _ = db.ExecContext(r.Context(), ledgerQuery, req.BookingID, req.ExposureHeaderID, req.HedgedAmount, newOpenAmount, req.UserID)
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "link": linkMap})
 	}

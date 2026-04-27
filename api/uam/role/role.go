@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -18,11 +19,25 @@ import (
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
+	log.Printf("[ERROR: %v] [UAM] [Role] request failed", errMsg)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": false,
-		"error":   errMsg,
+		"error":   clientMsg,
 	})
 }
 
@@ -62,7 +77,7 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 		// Uniqueness checks: ensure role name and role code are unique
 		var existingID string
 		// check name uniqueness (case-insensitive)
-		if err := db.QueryRow("SELECT id FROM roles WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) LIMIT 1", req.Name).Scan(&existingID); err == nil {
+		if err := db.QueryRowContext(r.Context(), "SELECT id FROM roles WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) LIMIT 1", req.Name).Scan(&existingID); err == nil {
 			respondWithError(w, http.StatusBadRequest, fmt.Sprintf("role name '%s' already exists (id=%s)", req.Name, existingID))
 			return
 		} else if err != sql.ErrNoRows {
@@ -71,7 +86,7 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 		}
 		// check role code uniqueness if supplied
 		if strings.TrimSpace(req.RoleCode) != "" {
-			if err := db.QueryRow("SELECT id FROM roles WHERE rolecode = $1 OR role_code = $1 LIMIT 1", req.RoleCode).Scan(&existingID); err == nil {
+			if err := db.QueryRowContext(r.Context(), "SELECT id FROM roles WHERE rolecode = $1 OR role_code = $1 LIMIT 1", req.RoleCode).Scan(&existingID); err == nil {
 				respondWithError(w, http.StatusBadRequest, fmt.Sprintf("role code '%s' already exists (id=%s)", req.RoleCode, existingID))
 				return
 			} else if err != sql.ErrNoRows {
@@ -80,7 +95,7 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		// Insert role and return the inserted row (set created_at)
-		rows, err := db.Query(
+		rows, err := db.QueryContext(r.Context(),
 			`INSERT INTO roles (name, rolecode, description, office_start_time_ist, office_end_time_ist, status, created_by, created_at)
 			 VALUES ($1, $2, $3, $4, $5, 'pending', $6, NOW()) RETURNING *`,
 			req.Name,
@@ -164,9 +179,9 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 		// Get role_id from user_roles for user_id
 		rolesPerms := map[string]interface{}{}
 		var roleId int
-		err := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
+		err := db.QueryRowContext(r.Context(), "SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
 		if err == nil {
-			permRows, err := db.Query(`
+			permRows, err := db.QueryContext(r.Context(), `
                 SELECT p.page_name, p.tab_name, p.action, rp.allowed
                 FROM role_permissions rp
                 JOIN permissions p ON rp.permission_id = p.id
@@ -211,7 +226,7 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 		// Get roles with pagination
 		// Order by the latest of created_at, approved_at or edited_at (whichever is greatest)
 		// so the most recently created/approved/edited roles appear first.
-		rows, err := db.Query(
+		rows, err := db.QueryContext(r.Context(),
 			`SELECT * FROM roles
 								 ORDER BY GREATEST(
 									 COALESCE(created_at, '1970-01-01'::timestamp),
@@ -302,7 +317,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 		// }
 
 		// Fetch current statuses
-		rows, err := db.Query(`SELECT id, status FROM roles WHERE id = ANY($1)`, pq.Array(req.RoleIds))
+		rows, err := db.QueryContext(r.Context(), `SELECT id, status FROM roles WHERE id = ANY($1)`, pq.Array(req.RoleIds))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -326,7 +341,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 		}
 		// Delete roles
 		if len(toDelete) > 0 {
-			delRows, err := db.Query(`DELETE FROM roles WHERE id = ANY($1) RETURNING *`, pq.Array(toDelete))
+			delRows, err := db.QueryContext(r.Context(), `DELETE FROM roles WHERE id = ANY($1) RETURNING *`, pq.Array(toDelete))
 			if err == nil {
 				defer delRows.Close()
 				cols, _ := delRows.Columns()
@@ -360,7 +375,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 		}
 		// Approve roles
 		if len(toApprove) > 0 {
-			appRows, err := db.Query(`UPDATE roles SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
+			appRows, err := db.QueryContext(r.Context(), `UPDATE roles SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
 			if err == nil {
 				defer appRows.Close()
 				cols, _ := appRows.Columns()
@@ -421,7 +436,7 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 			targetIds = []string{req.ID}
 		}
 
-		rows, err := db.Query(
+		rows, err := db.QueryContext(r.Context(),
 			"UPDATE roles SET status = 'Delete-Approval', edited_by = $1, edited_at = NOW() WHERE id = ANY($2) RETURNING *",
 			editor, pq.Array(targetIds),
 		)
@@ -482,7 +497,7 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		rows, err := db.Query(
+		rows, err := db.QueryContext(r.Context(),
 			`UPDATE roles SET status = 'Rejected', rejected_by = $1, rejected_at = NOW(), rejection_comment = $2 WHERE id = ANY($3) RETURNING *`,
 			rejectedBy, req.RejectionComment, pq.Array(req.RoleIds),
 		)
@@ -525,7 +540,7 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 		var rows *sql.Rows
 		var err error
 		if req.EntityName != "" {
-			rows, err = db.Query(`
+			rows, err = db.QueryContext(r.Context(), `
 				SELECT DISTINCT r.name
 				FROM roles r
 				WHERE (r.status = 'approved' OR r.status = 'Approved')
@@ -538,7 +553,7 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 				)
 			`, req.EntityName)
 		} else {
-			rows, err = db.Query("SELECT DISTINCT name FROM roles WHERE status = 'approved' OR status = 'Approved'")
+			rows, err = db.QueryContext(r.Context(), "SELECT DISTINCT name FROM roles WHERE status = 'approved' OR status = 'Approved'")
 		}
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -563,7 +578,7 @@ func GetJustRolesPERMISSIONapproved(db *sql.DB) http.HandlerFunc {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req) // Not required for this query
 
-		rows, err := db.Query("SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND (roles_permission_status = 'approved' OR roles_permission_status = 'Approved')")
+		rows, err := db.QueryContext(r.Context(), "SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND (roles_permission_status = 'approved' OR roles_permission_status = 'Approved')")
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -593,9 +608,9 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 		// Get role_id from user_roles for user_id
 		rolesPerms := map[string]interface{}{}
 		var roleId int
-		err := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
+		err := db.QueryRowContext(r.Context(), "SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
 		if err == nil {
-			permRows, err := db.Query(`
+			permRows, err := db.QueryContext(r.Context(), `
                 SELECT p.page_name, p.tab_name, p.action, rp.allowed
                 FROM role_permissions rp
                 JOIN permissions p ON rp.permission_id = p.id
@@ -637,7 +652,7 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 		pagination.SetPaginationStats(totalPending)
 
 		// Fetch paginated pending roles
-		rows, err := db.Query("SELECT * FROM roles WHERE status IN ($1, $2, $3) ORDER BY id LIMIT $4 OFFSET $5", "pending", constants.StatusCodeAwaitingApproval, constants.StatusCodeDeleteApproval, pagination.Limit, pagination.Offset)
+		rows, err := db.QueryContext(r.Context(), "SELECT * FROM roles WHERE status IN ($1, $2, $3) ORDER BY id LIMIT $4 OFFSET $5", "pending", constants.StatusCodeAwaitingApproval, constants.StatusCodeDeleteApproval, pagination.Limit, pagination.Offset)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -788,7 +803,7 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 		)
 		values = append(values, id)
 		// Execute query and fetch row(s)
-		rows, err := db.Query(query, values...)
+		rows, err := db.QueryContext(r.Context(), query, values...)
 		if err != nil {
 			respondWithError(w, http.StatusBadRequest, err.Error())
 			return

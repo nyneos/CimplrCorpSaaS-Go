@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"CimplrCorpSaas/api/constants"
@@ -20,7 +22,8 @@ import (
 )
 
 var (
-	schemaCache struct {
+	schemaCacheMu sync.RWMutex
+	schemaCache   struct {
 		hasCpiCounterparty bool
 		hasCpCounterparty  bool
 		hasCpiDept         bool
@@ -182,21 +185,29 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.IncludeProjections {
 			var hasCpiCounterparty, hasCpCounterparty, hasCpiDept bool
-			if time.Now().Before(schemaCache.expires) {
+			schemaCacheMu.RLock()
+			cacheValid := time.Now().Before(schemaCache.expires)
+			if cacheValid {
 				hasCpiCounterparty = schemaCache.hasCpiCounterparty
 				hasCpCounterparty = schemaCache.hasCpCounterparty
 				hasCpiDept = schemaCache.hasCpiDept
-			} else {
+			}
+			schemaCacheMu.RUnlock()
+			if !cacheValid {
 				row := pgxPool.QueryRow(ctx, `SELECT
 					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='counterparty_name') as has_cpi_counterparty,
 					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal' AND column_name='counterparty_name') as has_cp_counterparty,
 					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='department_id') as has_cpi_dept
 				`)
-				_ = row.Scan(&hasCpiCounterparty, &hasCpCounterparty, &hasCpiDept)
+				if err := row.Scan(&hasCpiCounterparty, &hasCpCounterparty, &hasCpiDept); err != nil {
+					log.Printf("[ERROR: %v] [Cash] [FundPlanning] failed to scan projection schema metadata", err)
+				}
+				schemaCacheMu.Lock()
 				schemaCache.hasCpiCounterparty = hasCpiCounterparty
 				schemaCache.hasCpCounterparty = hasCpCounterparty
 				schemaCache.hasCpiDept = hasCpiDept
 				schemaCache.expires = time.Now().Add(5 * time.Minute)
+				schemaCacheMu.Unlock()
 			}
 			primaryField := constants.QuerryGeneric
 			joinCounterparty := false
@@ -301,6 +312,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var dir, curr, primary, costProfitCenter, sourceRef string
 			var amt float64
 			if err := rows.Scan(&dt, &dir, &curr, &primary, &amt, &costProfitCenter, &sourceRef); err != nil {
+				log.Printf("[ERROR: %v] [Cash] [FundPlanning] failed to scan fund planning row", err)
 				continue
 			}
 			if strings.TrimSpace(costProfitCenter) == "" && strings.TrimSpace(req.CostProfitCenter) != "" {
@@ -315,6 +327,9 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				CostProfitCenter: costProfitCenter,
 				SourceRef:        sourceRef,
 			})
+		}
+		if err := rows.Err(); err != nil {
+			log.Printf("[ERROR: %v] [Cash] [FundPlanning] fund planning row iteration failed", err)
 		}
 
 		api.RespondWithPayload(w, true, "", res)
@@ -526,21 +541,29 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.IncludeProjections {
 			var hasCpiCounterparty, hasCpCounterparty, hasCpiDept bool
-			if time.Now().Before(schemaCache.expires) {
+			schemaCacheMu.RLock()
+			cacheValid := time.Now().Before(schemaCache.expires)
+			if cacheValid {
 				hasCpiCounterparty = schemaCache.hasCpiCounterparty
 				hasCpCounterparty = schemaCache.hasCpCounterparty
 				hasCpiDept = schemaCache.hasCpiDept
-			} else {
+			}
+			schemaCacheMu.RUnlock()
+			if !cacheValid {
 				row := pgxPool.QueryRow(ctx, `SELECT
 					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='counterparty_name') as has_cpi_counterparty,
 					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal' AND column_name='counterparty_name') as has_cp_counterparty,
 					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='department_id') as has_cpi_dept
 				`)
-				_ = row.Scan(&hasCpiCounterparty, &hasCpCounterparty, &hasCpiDept)
+				if err := row.Scan(&hasCpiCounterparty, &hasCpCounterparty, &hasCpiDept); err != nil {
+					log.Printf("[ERROR: %v] [Cash] [FundPlanning] failed to scan grouped projection schema metadata", err)
+				}
+				schemaCacheMu.Lock()
 				schemaCache.hasCpiCounterparty = hasCpiCounterparty
 				schemaCache.hasCpCounterparty = hasCpCounterparty
 				schemaCache.hasCpiDept = hasCpiDept
 				schemaCache.expires = time.Now().Add(5 * time.Minute)
+				schemaCacheMu.Unlock()
 			}
 			primaryField := constants.QuerryGeneric
 			joinCounterparty := false
@@ -714,8 +737,15 @@ func groupFundPlanningData(rawData []RawRow, includeCounterparty, includeType bo
 				direction = strings.ToUpper(direction[:1]) + direction[1:]
 			}
 			group = &FundPlanningGroup{
-				GroupID:       fmt.Sprintf("G-%d-%s-%s-%s", len(groupMap)+1, row.Date.Format("20061010"), row.Currency, strings.ReplaceAll(primaryValue, " ", "")),
-				GroupLabel:    fmt.Sprintf("%s · %s · %s · %s: %s", row.Date.Format("2006-10-10"), direction, row.Currency, primaryKey, primaryValue),
+				GroupID: fmt.Sprintf("G-%d-%s-%s-%s-%s-%s",
+					len(groupMap)+1,
+					row.Date.Format("20060102"),
+					row.Direction,
+					row.Currency,
+					strings.ReplaceAll(primaryKey, " ", ""),
+					strings.ReplaceAll(primaryValue, " ", ""),
+				),
+				GroupLabel:    fmt.Sprintf("%s · %s · %s · %s: %s", row.Date.Format("2006-01-02"), direction, row.Currency, primaryKey, primaryValue),
 				Direction:     row.Direction,
 				Currency:      row.Currency,
 				PrimaryKey:    primaryKey,
@@ -1281,25 +1311,19 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityN
 	return result
 }
 
-// parseGroupID extracts metadata from group_id pattern: G-{number}-{date}-{currency}-{entity/counterparty}
+// parseGroupID extracts metadata from group_id pattern: G-{n}-{date}-{direction}-{currency}-{primaryKey}-{primaryValue...}
 func parseGroupID(groupID string) (direction, currency, primaryKey, primaryValue string, err error) {
-	// Expected pattern: G-1-202510100-USD-ACMELtd or G-2-202510100-USD-ACMELtd
+	// Expected pattern: G-1-20060102-outflow-USD-Counterparty-ACMELtd
 	parts := strings.Split(groupID, "-")
-	if len(parts) < 5 {
-		err = errors.New("invalid group_id format, expected: G-{number}-{date}-{currency}-{entity}")
+	if len(parts) < 7 {
+		err = errors.New("invalid group_id format, expected: G-{n}-{date}-{direction}-{currency}-{primaryKey}-{value}")
 		return
 	}
 
-	// Extract currency (4th part)
-	currency = parts[3]
-
-	// Extract entity/counterparty name (5th part onwards, joined by -)
-	primaryValue = strings.Join(parts[4:], "-")
-
-	// For this implementation, we'll default to outflow direction and counterparty type
-	// In a real scenario, you might want to derive this from other data or make it explicit in the request
-	direction = "outflow"
-	primaryKey = "Counterparty"
+	direction = parts[3]
+	currency = parts[4]
+	primaryKey = parts[5]
+	primaryValue = strings.Join(parts[6:], "-")
 
 	return
 }

@@ -33,12 +33,25 @@ var rates = map[string]float64{
 }
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
+	log.Printf("[ERROR: %v] [Dash] [HedgingProposal] request failed", errMsg)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
+		constants.ValueError:   clientMsg,
 	})
 }
 
@@ -65,8 +78,8 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 
@@ -76,7 +89,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.base_currency,
@@ -204,7 +217,7 @@ func GetForwardBookingsDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(r.Context(), `
 			SELECT 
 				internal_reference_id, counterparty, entity_level_0, base_currency, local_currency,
 				value_quote_currency, spot_rate, total_rate, bank_margin, value_local_currency,

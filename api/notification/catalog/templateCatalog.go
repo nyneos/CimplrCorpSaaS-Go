@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -20,9 +21,23 @@ import (
 
 // simple error responder
 func respondWithErrorTemplate(w http.ResponseWriter, status int, errMsg string) {
+	log.Printf("[ERROR: %v] [Notification] [TemplateCatalog] request failed", errMsg)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errMsg})
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": clientMsg})
 }
 
 func getRequesterEmailTemplate() string {

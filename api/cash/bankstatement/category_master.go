@@ -8,10 +8,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 )
 
@@ -45,6 +48,24 @@ type CategoryRule struct {
 	EffectiveDate *time.Time `json:"effective_date,omitempty"`
 }
 
+func writeBankStatementHTTPError(w http.ResponseWriter, status int, err error, message string) {
+	log.Printf("[ERROR: %v] [Cash] [BankStatement] %s", err, message)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
+	http.Error(w, clientMsg, status)
+}
+
 // CategoryRuleComponent represents a rule component
 type CategoryRuleComponent struct {
 	ComponentID    int64    `json:"component_id"`
@@ -59,9 +80,9 @@ type CategoryRuleComponent struct {
 	IsActive       bool     `json:"is_active"`
 }
 
-// ruleQueryerLocal abstracts QueryContext for both *sql.DB and *sql.Tx within this file.
+// ruleQueryerLocal abstracts Query for both *pgxpool.Pool and pgx.Tx within this file.
 type ruleQueryerLocal interface {
-	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+	Query(context.Context, string, ...interface{}) (pgx.Rows, error)
 }
 
 func isFKViolation(err error) bool {
@@ -194,7 +215,7 @@ func loadCategoryRuleComponentsLocal(ctx context.Context, db ruleQueryerLocal, a
 		acctCurrencyParam = nil
 	}
 
-	rows, err := db.QueryContext(ctx, q, accountNumber, entityID, acctCurrencyParam)
+	rows, err := db.Query(ctx, q, accountNumber, entityID, acctCurrencyParam)
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +236,7 @@ func loadCategoryRuleComponentsLocal(ctx context.Context, db ruleQueryerLocal, a
 }
 
 // ListCategoriesForUserHandler returns minimal category id/name list (POST expects user_id, currently unused for filtering).
-func ListCategoriesForUserHandler(db *sql.DB) http.Handler {
+func ListCategoriesForUserHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -227,9 +248,9 @@ func ListCategoriesForUserHandler(db *sql.DB) http.Handler {
 		// best-effort parse; no filter yet
 		_ = json.NewDecoder(r.Body).Decode(&body)
 
-		rows, err := db.Query(`SELECT category_id, category_name FROM public.mastercashflowcategory ORDER BY category_name`)
+		rows, err := pgxPool.Query(r.Context(), `SELECT category_id, category_name FROM public.mastercashflowcategory ORDER BY category_name`)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		defer rows.Close()
@@ -251,7 +272,7 @@ func ListCategoriesForUserHandler(db *sql.DB) http.Handler {
 }
 
 // MapTransactionsToCategoryHandler assigns a category to transactions and raises pending edit approval per bank statement.
-func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
+func MapTransactionsToCategoryHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -274,20 +295,20 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				tx.Rollback()
+				tx.Rollback(ctx)
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
 
 		// Ensure all provided transaction IDs are within user's accessible entity/account scope
-		scopeRows, err := tx.QueryContext(ctx, `
+		scopeRows, err := tx.Query(ctx, `
 	SELECT DISTINCT bs.entity_id, bs.account_number, m.currency
 	FROM cimplrcorpsaas.bank_statement_transactions t
 	JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
@@ -295,7 +316,7 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 	WHERE t.transaction_id = ANY($1) AND t.bank_statement_id IS NOT NULL
 	`, pq.Array(body.TransactionIDs))
 		if err != nil {
-			tx.Rollback()
+			tx.Rollback(r.Context())
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
@@ -334,33 +355,33 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 		}
 		scopeRows.Close()
 		if unauthorizedEntity {
-			tx.Rollback()
+			tx.Rollback(r.Context())
 			http.Error(w, constants.ErrUnauthorizedEntity, http.StatusForbidden)
 			return
 		}
 		if unauthorizedAccount {
-			tx.Rollback()
+			tx.Rollback(r.Context())
 			http.Error(w, constants.ErrInvalidAccount, http.StatusForbidden)
 			return
 		}
 		if unauthorizedCurrency {
-			tx.Rollback()
+			tx.Rollback(r.Context())
 			http.Error(w, constants.ErrCurrencyNotAllowed, http.StatusForbidden)
 			return
 		}
 
 		// Update category for given transactions
-		if _, err := tx.Exec(`UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = ANY($2)`, body.CategoryID, pq.Array(body.TransactionIDs)); err != nil {
-			tx.Rollback()
+		if _, err := tx.Exec(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = ANY($2)`, body.CategoryID, pq.Array(body.TransactionIDs)); err != nil {
+			tx.Rollback(r.Context())
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
 
 		// Collect affected bank_statement_ids
-		bsRows, err := tx.Query(`SELECT DISTINCT bank_statement_id FROM cimplrcorpsaas.bank_statement_transactions WHERE transaction_id = ANY($1) AND bank_statement_id IS NOT NULL`, pq.Array(body.TransactionIDs))
+		bsRows, err := tx.Query(ctx, `SELECT DISTINCT bank_statement_id FROM cimplrcorpsaas.bank_statement_transactions WHERE transaction_id = ANY($1) AND bank_statement_id IS NOT NULL`, pq.Array(body.TransactionIDs))
 		if err != nil {
-			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			tx.Rollback(r.Context())
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		var bsIDs []string
@@ -374,16 +395,16 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 
 		// Insert pending edit approval for each affected statement
 		for _, bsID := range bsIDs {
-			_, err = tx.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
+			_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
 			if err != nil {
-				tx.Rollback()
+				tx.Rollback(r.Context())
 				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
 		}
 
-		if err := tx.Commit(); err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+		if err := tx.Commit(ctx); err != nil {
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 
@@ -397,7 +418,7 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 
 // CategorizeUncategorizedTransactionsHandler assigns the given category to all transactions with NULL category
 // and raises pending edit approval for their bank statements.
-func CategorizeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
+func CategorizeUncategorizedTransactionsHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -418,19 +439,19 @@ func CategorizeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			http.Error(w, constants.ErrNoAccessibleEntitiesForRequest, http.StatusForbidden)
 			return
 		}
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				tx.Rollback()
+				tx.Rollback(ctx)
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
 
-		rows, err := tx.QueryContext(ctx, `
+		rows, err := tx.Query(ctx, `
 SELECT t.transaction_id,
 			 t.bank_statement_id,
 			 bs.account_number,
@@ -448,7 +469,7 @@ WHERE t.category_id IS NULL
 	AND bs.entity_id = ANY($1);
 `, pq.Array(entityIDs))
 		if err != nil {
-			tx.Rollback()
+			tx.Rollback(r.Context())
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
@@ -481,8 +502,8 @@ WHERE t.category_id IS NULL
 			}
 		}
 		if err := rows.Err(); err != nil {
-			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			tx.Rollback(r.Context())
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 
@@ -508,7 +529,7 @@ WHERE t.category_id IS NULL
 					s := tr.currency.String
 					acctCurPtr = &s
 				}
-				rules, err = loadCategoryRuleComponentsLocal(ctx, db, tr.acct, tr.entity, acctCurPtr)
+				rules, err = loadCategoryRuleComponentsLocal(ctx, pgxPool, tr.acct, tr.entity, acctCurPtr)
 				if err != nil {
 					continue
 				}
@@ -527,8 +548,8 @@ WHERE t.category_id IS NULL
 			if len(txnIDs) == 0 {
 				continue
 			}
-			if _, err := tx.ExecContext(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = ANY($2)`, catID, pq.Array(txnIDs)); err != nil {
-				tx.Rollback()
+			if _, err := tx.Exec(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = ANY($2)`, catID, pq.Array(txnIDs)); err != nil {
+				tx.Rollback(r.Context())
 				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
@@ -536,16 +557,16 @@ WHERE t.category_id IS NULL
 		}
 
 		for bsID := range bsSet {
-			_, err = tx.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
+			_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
 			if err != nil {
-				tx.Rollback()
+				tx.Rollback(r.Context())
 				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
 		}
 
-		if err := tx.Commit(); err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+		if err := tx.Commit(ctx); err != nil {
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 
@@ -559,7 +580,7 @@ WHERE t.category_id IS NULL
 }
 
 // RecomputeUncategorizedTransactionsHandler applies rules to uncategorized transactions and raises pending edit approvals.
-func RecomputeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
+func RecomputeUncategorizedTransactionsHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -576,19 +597,19 @@ func RecomputeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			http.Error(w, constants.ErrNoAccessibleEntitiesForRequest, http.StatusForbidden)
 			return
 		}
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				tx.Rollback()
+				tx.Rollback(ctx)
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
 
-		rows, err := tx.QueryContext(ctx, `
+		rows, err := tx.Query(ctx, `
 SELECT t.transaction_id,
 			 t.bank_statement_id,
 			 bs.account_number,
@@ -606,7 +627,7 @@ WHERE t.category_id IS NULL
 	AND bs.entity_id = ANY($1);
 `, pq.Array(entityIDs))
 		if err != nil {
-			tx.Rollback()
+			tx.Rollback(r.Context())
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
@@ -632,8 +653,8 @@ WHERE t.category_id IS NULL
 			}
 		}
 		if err := rows.Err(); err != nil {
-			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			tx.Rollback(r.Context())
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 
@@ -659,7 +680,7 @@ WHERE t.category_id IS NULL
 					s := tr.currency.String
 					acctCurPtr = &s
 				}
-				rules, err = loadCategoryRuleComponentsLocal(ctx, db, tr.acct, tr.entity, acctCurPtr)
+				rules, err = loadCategoryRuleComponentsLocal(ctx, pgxPool, tr.acct, tr.entity, acctCurPtr)
 				if err != nil {
 					continue
 				}
@@ -668,7 +689,7 @@ WHERE t.category_id IS NULL
 
 			matched := matchCategoryForTransaction(rules, tr.desc, tr.wd, tr.dep, tr.valueDate)
 			if matched.Valid {
-				if _, err := tx.ExecContext(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = $2`, matched.String, tr.id); err == nil {
+				if _, err := tx.Exec(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = $2`, matched.String, tr.id); err == nil {
 					updated++
 					bsSet[tr.bsID] = struct{}{}
 				}
@@ -676,16 +697,16 @@ WHERE t.category_id IS NULL
 		}
 
 		for bsID := range bsSet {
-			_, err = tx.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
+			_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
 			if err != nil {
-				tx.Rollback()
+				tx.Rollback(r.Context())
 				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
 		}
 
-		if err := tx.Commit(); err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+		if err := tx.Commit(ctx); err != nil {
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 
@@ -699,7 +720,7 @@ WHERE t.category_id IS NULL
 }
 
 // DeleteMultipleTransactionCategoriesHandler deletes multiple categories and cascades deletes for rules, rule scopes, and rule components
-func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
+func DeleteMultipleTransactionCategoriesHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -713,36 +734,36 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		tx, err := db.Begin()
+		tx, err := pgxPool.Begin(r.Context())
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				tx.Rollback()
+				tx.Rollback(r.Context())
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
 		ctx := r.Context()
 		// Safety check: abort if any transactions currently reference these categories
 		var txnCount int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs)).Scan(&txnCount); err != nil {
-			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs)).Scan(&txnCount); err != nil {
+			tx.Rollback(r.Context())
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		if txnCount > 0 {
-			tx.Rollback()
+			tx.Rollback(r.Context())
 			http.Error(w, "Cannot delete rules: some transactions currently reference these categories. Unassign transactions first.", http.StatusBadRequest)
 			return
 		}
 
 		// 1. Get all rules and scope_ids for these categories
-		ruleRows, err := tx.Query(`SELECT rule_id, scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
+		ruleRows, err := tx.Query(ctx, `SELECT rule_id, scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
 		if err != nil {
-			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			tx.Rollback(r.Context())
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		var ruleIDs []int64
@@ -758,38 +779,38 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 
 		// 2. Delete all rule components for these rules
 		if len(ruleIDs) > 0 {
-			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
+			_, err = tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
 			if err != nil {
 				if isFKViolation(err) {
-					tx.Rollback()
+					tx.Rollback(r.Context())
 					writeFKConflict(w)
 					return
 				}
-				tx.Rollback()
-				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				tx.Rollback(r.Context())
+				writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 				return
 			}
 		}
 
 		// 3. Delete all rules for these categories
-		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
+		_, err = tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
 		if err != nil {
 			if isFKViolation(err) {
-				tx.Rollback()
+				tx.Rollback(r.Context())
 				writeFKConflict(w)
 				return
 			}
-			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			tx.Rollback(r.Context())
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 
 		// 4. Delete all rule scopes for these rules (if not used elsewhere)
 		for _, scopeID := range scopeIDs {
 			var count int
-			err = tx.QueryRow(`SELECT COUNT(*) FROM cimplrcorpsaas.category_rules WHERE scope_id = $1`, scopeID).Scan(&count)
+			err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.category_rules WHERE scope_id = $1`, scopeID).Scan(&count)
 			if err == nil && count == 0 {
-				_, _ = tx.Exec(`DELETE FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, scopeID)
+				_, _ = tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, scopeID)
 			}
 		}
 
@@ -799,8 +820,8 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		// rules, components, and orphaned scopes. The caller is expected to
 		// unassign transactions first if they intend to delete the category.
 
-		if err := tx.Commit(); err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+		if err := tx.Commit(ctx); err != nil {
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 
@@ -813,7 +834,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 }
 
 // --- Category CRUD ---
-func CreateTransactionCategoryHandler(db *sql.DB) http.Handler {
+func CreateTransactionCategoryHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -832,9 +853,9 @@ func CreateTransactionCategoryHandler(db *sql.DB) http.Handler {
 			body.CategoryType = "BOTH"
 		}
 		var id string
-		err := db.QueryRow(`INSERT INTO public.mastercashflowcategory (category_name, category_type, description) VALUES ($1, $2, $3) RETURNING category_id`, body.CategoryName, body.CategoryType, body.Description).Scan(&id)
+		err := pgxPool.QueryRow(r.Context(), `INSERT INTO public.mastercashflowcategory (category_name, category_type, description) VALUES ($1, $2, $3) RETURNING category_id`, body.CategoryName, body.CategoryType, body.Description).Scan(&id)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -845,15 +866,15 @@ func CreateTransactionCategoryHandler(db *sql.DB) http.Handler {
 	})
 }
 
-func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
+func ListTransactionCategoriesHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
-		catRows, err := db.Query(`SELECT category_id, category_name, category_type, description FROM public.mastercashflowcategory`)
+		catRows, err := pgxPool.Query(r.Context(), `SELECT category_id, category_name, category_type, description FROM public.mastercashflowcategory`)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		defer catRows.Close()
@@ -894,9 +915,9 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		}
 
 		// Fetch all rules for these categories in one query (include effective_date)
-		ruleRows, err := db.Query(`SELECT rule_id, rule_name, category_id, scope_id, priority, is_active, created_at, effective_date FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1) ORDER BY rule_id DESC`, pq.Array(catIDs))
+		ruleRows, err := pgxPool.Query(r.Context(), `SELECT rule_id, rule_name, category_id, scope_id, priority, is_active, created_at, effective_date FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1) ORDER BY rule_id DESC`, pq.Array(catIDs))
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		defer ruleRows.Close()
@@ -922,7 +943,7 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		// Fetch scopes in batch
 		scopeMap := make(map[int64]RuleScope)
 		if len(scopeIDs) > 0 {
-			scopeRows, err := db.Query(`SELECT scope_id, scope_type, entity_id, bank_code, account_number, currency FROM cimplrcorpsaas.rule_scope WHERE scope_id = ANY($1)`, pq.Array(scopeIDs))
+			scopeRows, err := pgxPool.Query(r.Context(), `SELECT scope_id, scope_type, entity_id, bank_code, account_number, currency FROM cimplrcorpsaas.rule_scope WHERE scope_id = ANY($1)`, pq.Array(scopeIDs))
 			if err == nil {
 				for scopeRows.Next() {
 					var s RuleScope
@@ -937,7 +958,7 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		// Fetch components in batch
 		compsByRule := make(map[int64][]CategoryRuleComponent)
 		if len(ruleIDs) > 0 {
-			compRows, err := db.Query(`SELECT component_id, rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
+			compRows, err := pgxPool.Query(r.Context(), `SELECT component_id, rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
 			if err == nil {
 				for compRows.Next() {
 					var comp CategoryRuleComponent
@@ -976,7 +997,7 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 }
 
 // --- Rule Scope CRUD ---
-func CreateRuleScopeHandler(db *sql.DB) http.Handler {
+func CreateRuleScopeHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -992,7 +1013,7 @@ func CreateRuleScopeHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var id int64
-		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.rule_scope (scope_type, entity_id, bank_code, account_number, currency) VALUES ($1, $2, $3, $4, $5) RETURNING scope_id`, body.ScopeType, body.EntityID, body.BankCode, body.AccountNumber, body.Currency).Scan(&id)
+		err := pgxPool.QueryRow(r.Context(), `INSERT INTO cimplrcorpsaas.rule_scope (scope_type, entity_id, bank_code, account_number, currency) VALUES ($1, $2, $3, $4, $5) RETURNING scope_id`, body.ScopeType, body.EntityID, body.BankCode, body.AccountNumber, body.Currency).Scan(&id)
 		if err != nil {
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
@@ -1006,7 +1027,7 @@ func CreateRuleScopeHandler(db *sql.DB) http.Handler {
 }
 
 // --- Category Rule CRUD ---
-func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
+func CreateCategoryRuleHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -1033,7 +1054,7 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 		var st string
 		var entID, bankCode, acctNo sql.NullString
 		var currency sql.NullString
-		err := db.QueryRowContext(r.Context(), `SELECT scope_type, entity_id, bank_code, account_number, currency FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, body.ScopeID).Scan(&st, &entID, &bankCode, &acctNo, &currency)
+		err := pgxPool.QueryRow(r.Context(), `SELECT scope_type, entity_id, bank_code, account_number, currency FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, body.ScopeID).Scan(&st, &entID, &bankCode, &acctNo, &currency)
 		if err != nil {
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusBadRequest)
 			return
@@ -1073,7 +1094,7 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 		}
 
 		var id int64
-		err = db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active, effective_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING rule_id`, body.RuleName, body.CategoryID, body.ScopeID, body.Priority, isActive, eff).Scan(&id)
+		err = pgxPool.QueryRow(r.Context(), `INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active, effective_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING rule_id`, body.RuleName, body.CategoryID, body.ScopeID, body.Priority, isActive, eff).Scan(&id)
 		if err != nil {
 			if pqErr, ok := err.(*pq.Error); ok {
 				if strings.EqualFold(pqErr.Constraint, "uniq_rule_name_per_category") {
@@ -1093,7 +1114,7 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 }
 
 // --- Category Rule Component CRUD ---
-func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
+func CreateCategoryRuleComponentHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -1126,14 +1147,14 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 				}
 			}
 
-			tx, err := db.Begin()
+			tx, err := pgxPool.Begin(r.Context())
 			if err != nil {
-				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 				return
 			}
 			defer func() {
 				if p := recover(); p != nil {
-					tx.Rollback()
+					tx.Rollback(r.Context())
 					http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 				}
 			}()
@@ -1155,38 +1176,38 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 					args = append(args, comp.RuleID, comp.ComponentType, comp.MatchType, comp.MatchValue, comp.AmountOperator, comp.AmountValue, comp.TxnFlow, comp.CurrencyCode, comp.IsActive)
 				}
 				query := "INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES " + strings.Join(placeholders, ",") + " RETURNING component_id"
-				rows, err := tx.Query(query, args...)
+				rows, err := tx.Query(r.Context(), query, args...)
 				if err != nil {
-					tx.Rollback()
+					tx.Rollback(r.Context())
 					if pqErr, ok := err.(*pq.Error); ok {
 						if strings.EqualFold(pqErr.Constraint, "uniq_active_components_per_rule") {
 							http.Error(w, "One or more active components in the request duplicate an existing active component for the same rule. Please remove duplicates and try again.", http.StatusBadRequest)
 							return
 						}
 					}
-					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+					writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 					return
 				}
 				for rows.Next() {
 					var id int64
 					if err := rows.Scan(&id); err != nil {
 						rows.Close()
-						tx.Rollback()
-						http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+						tx.Rollback(r.Context())
+						writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 						return
 					}
 					componentIDs = append(componentIDs, id)
 				}
 				if err := rows.Err(); err != nil {
 					rows.Close()
-					tx.Rollback()
-					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+					tx.Rollback(r.Context())
+					writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 					return
 				}
 				rows.Close()
 			}
-			if err := tx.Commit(); err != nil {
-				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			if err := tx.Commit(r.Context()); err != nil {
+				writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 				return
 			}
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -1209,7 +1230,7 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 			}
 		}
 		var id int64
-		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING component_id`, requestBody.RuleID, requestBody.ComponentType, requestBody.MatchType, requestBody.MatchValue, requestBody.AmountOperator, requestBody.AmountValue, requestBody.TxnFlow, requestBody.CurrencyCode, requestBody.IsActive).Scan(&id)
+		err := pgxPool.QueryRow(r.Context(), `INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING component_id`, requestBody.RuleID, requestBody.ComponentType, requestBody.MatchType, requestBody.MatchValue, requestBody.AmountOperator, requestBody.AmountValue, requestBody.TxnFlow, requestBody.CurrencyCode, requestBody.IsActive).Scan(&id)
 		if err != nil {
 			if pqErr, ok := err.(*pq.Error); ok {
 				if strings.EqualFold(pqErr.Constraint, "uniq_active_components_per_rule") {
@@ -1231,7 +1252,7 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 // CreateCategoryRuleMasterHandler creates a rule scope, a category rule, and multiple
 // components in a single transactional operation. If any step fails, the entire
 // operation is rolled back and a friendly error message is returned.
-func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
+func CreateCategoryRuleMasterHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -1277,23 +1298,23 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 			}
 		}
 
-		tx, err := db.Begin()
+		tx, err := pgxPool.Begin(r.Context())
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				tx.Rollback()
+				tx.Rollback(r.Context())
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
 
 		// 1) Insert scope
 		var scopeID int64
-		err = tx.QueryRowContext(r.Context(), `INSERT INTO cimplrcorpsaas.rule_scope (scope_type, entity_id, bank_code, account_number, currency) VALUES ($1,$2,$3,$4,$5) RETURNING scope_id`, body.Scope.ScopeType, body.Scope.EntityID, body.Scope.BankCode, body.Scope.AccountNumber, body.Scope.Currency).Scan(&scopeID)
+		err = tx.QueryRow(r.Context(), `INSERT INTO cimplrcorpsaas.rule_scope (scope_type, entity_id, bank_code, account_number, currency) VALUES ($1,$2,$3,$4,$5) RETURNING scope_id`, body.Scope.ScopeType, body.Scope.EntityID, body.Scope.BankCode, body.Scope.AccountNumber, body.Scope.Currency).Scan(&scopeID)
 		if err != nil {
-			tx.Rollback()
+			tx.Rollback(r.Context())
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
@@ -1307,7 +1328,7 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 		if body.Rule.EffectiveDate != nil && strings.TrimSpace(*body.Rule.EffectiveDate) != "" {
 			t, err := parseDate(*body.Rule.EffectiveDate)
 			if err != nil {
-				tx.Rollback()
+				tx.Rollback(r.Context())
 				http.Error(w, "invalid effective_date format", http.StatusBadRequest)
 				return
 			}
@@ -1315,9 +1336,9 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 		}
 
 		var ruleID int64
-		err = tx.QueryRowContext(r.Context(), `INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active, effective_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING rule_id`, body.Rule.RuleName, body.Rule.CategoryID, scopeID, body.Rule.Priority, isActive, eff).Scan(&ruleID)
+		err = tx.QueryRow(r.Context(), `INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active, effective_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING rule_id`, body.Rule.RuleName, body.Rule.CategoryID, scopeID, body.Rule.Priority, isActive, eff).Scan(&ruleID)
 		if err != nil {
-			tx.Rollback()
+			tx.Rollback(r.Context())
 			if pqErr, ok := err.(*pq.Error); ok {
 				if strings.EqualFold(pqErr.Constraint, "uniq_rule_name_per_category") {
 					http.Error(w, fmt.Sprintf("A rule named '%s' already exists for this category. Please choose a different rule name.", body.Rule.RuleName), http.StatusBadRequest)
@@ -1346,40 +1367,40 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 					args = append(args, ruleID, comp.ComponentType, comp.MatchType, comp.MatchValue, comp.AmountOperator, comp.AmountValue, comp.TxnFlow, comp.CurrencyCode, comp.IsActive)
 				}
 				query := "INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES " + strings.Join(placeholders, ",") + " RETURNING component_id"
-				rows, err := tx.QueryContext(r.Context(), query, args...)
+				rows, err := tx.Query(r.Context(), query, args...)
 				if err != nil {
-					tx.Rollback()
+					tx.Rollback(r.Context())
 					if pqErr, ok := err.(*pq.Error); ok {
 						if strings.EqualFold(pqErr.Constraint, "uniq_active_components_per_rule") {
 							http.Error(w, "One or more active components duplicate an existing active component for this rule. Please remove duplicates and try again.", http.StatusBadRequest)
 							return
 						}
 					}
-					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+					writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 					return
 				}
 				for rows.Next() {
 					var cid int64
 					if err := rows.Scan(&cid); err != nil {
 						rows.Close()
-						tx.Rollback()
-						http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+						tx.Rollback(r.Context())
+						writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 						return
 					}
 					createdComponentIDs = append(createdComponentIDs, cid)
 				}
 				if err := rows.Err(); err != nil {
 					rows.Close()
-					tx.Rollback()
-					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+					tx.Rollback(r.Context())
+					writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 					return
 				}
 				rows.Close()
 			}
 		}
 
-		if err := tx.Commit(); err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+		if err := tx.Commit(r.Context()); err != nil {
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 
@@ -1396,7 +1417,7 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 }
 
 // DeleteTransactionCategoryHandler deletes a category and cascades deletes for rules, rule scopes, and rule components
-func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
+func DeleteTransactionCategoryHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -1410,23 +1431,23 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		tx, err := db.Begin()
+		tx, err := pgxPool.Begin(r.Context())
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				tx.Rollback()
+				tx.Rollback(r.Context())
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
 
 		// 1. Get all rules for this category
-		ruleRows, err := tx.Query(`SELECT rule_id, scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, body.CategoryID)
+		ruleRows, err := tx.Query(r.Context(), `SELECT rule_id, scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
-			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			tx.Rollback(r.Context())
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 		var ruleIDs []int64
@@ -1442,56 +1463,56 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 
 		// 2. Delete all rule components for these rules
 		if len(ruleIDs) > 0 {
-			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
+			_, err = tx.Exec(r.Context(), `DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
 			if err != nil {
 				if isFKViolation(err) {
-					tx.Rollback()
+					tx.Rollback(r.Context())
 					http.Error(w, constants.ErrBankStatementAlreadyExists, http.StatusBadRequest)
 					return
 				}
-				tx.Rollback()
-				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				tx.Rollback(r.Context())
+				writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 				return
 			}
 		}
 
 		// 3. Delete all rules for this category
-		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, body.CategoryID)
+		_, err = tx.Exec(r.Context(), `DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
 			if isFKViolation(err) {
-				tx.Rollback()
+				tx.Rollback(r.Context())
 				http.Error(w, constants.ErrBankStatementAlreadyExists, http.StatusBadRequest)
 				return
 			}
-			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			tx.Rollback(r.Context())
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 
 		// 4. Delete all rule scopes for these rules (if not used elsewhere)
 		for _, scopeID := range scopeIDs {
 			var count int
-			err = tx.QueryRow(`SELECT COUNT(*) FROM cimplrcorpsaas.category_rules WHERE scope_id = $1`, scopeID).Scan(&count)
+			err = tx.QueryRow(r.Context(), `SELECT COUNT(*) FROM cimplrcorpsaas.category_rules WHERE scope_id = $1`, scopeID).Scan(&count)
 			if err == nil && count == 0 {
-				_, _ = tx.Exec(`DELETE FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, scopeID)
+				_, _ = tx.Exec(r.Context(), `DELETE FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, scopeID)
 			}
 		}
 
 		// 5. Delete the category itself
-		_, err = tx.Exec(`DELETE FROM public.mastercashflowcategory WHERE category_id = $1`, body.CategoryID)
+		_, err = tx.Exec(r.Context(), `DELETE FROM public.mastercashflowcategory WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
 			if isFKViolation(err) {
-				tx.Rollback()
+				tx.Rollback(r.Context())
 				http.Error(w, constants.ErrBankStatementAlreadyExists, http.StatusBadRequest)
 				return
 			}
-			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			tx.Rollback(r.Context())
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 
-		if err := tx.Commit(); err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+		if err := tx.Commit(r.Context()); err != nil {
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "database operation failed")
 			return
 		}
 

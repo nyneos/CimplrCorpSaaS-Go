@@ -19,6 +19,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -37,7 +38,21 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 }
 
 func errResp(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]interface{}{"success": false, "error": msg})
+	log.Printf("[ERROR: %v] [Dash] [Notification] request failed", msg)
+	clientMsg := "request failed"
+	switch code {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if code >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
+	writeJSON(w, code, map[string]interface{}{"success": false, "error": clientMsg})
 }
 
 // filterRequest is the common filter body shared by all endpoints.

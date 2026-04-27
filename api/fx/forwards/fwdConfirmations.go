@@ -27,14 +27,14 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 		}
 		// Check if booking exists
 		var exists bool
-		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM forward_bookings WHERE system_transaction_id = $1)", req.SystemTransactionID).Scan(&exists)
+		err := db.QueryRowContext(r.Context(), "SELECT EXISTS(SELECT 1 FROM forward_bookings WHERE system_transaction_id = $1)", req.SystemTransactionID).Scan(&exists)
 		if err != nil || !exists {
 			w.WriteHeader(http.StatusNotFound)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "No matching forward booking found"})
 			return
 		}
 		// Get valid columns for forward_bookings
-		colRows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'forward_bookings'`)
+		colRows, err := db.QueryContext(r.Context(), `SELECT column_name FROM information_schema.columns WHERE table_name = 'forward_bookings'`)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch columns"})
@@ -75,9 +75,9 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 		}
 		values = append(values, req.SystemTransactionID)
 		updateQuery := fmt.Sprintf("UPDATE forward_bookings SET %s WHERE system_transaction_id = $%d RETURNING *", strings.Join(setClause, ", "), len(values))
-		row := db.QueryRow(updateQuery, values...)
+		row := db.QueryRowContext(r.Context(), updateQuery, values...)
 		// Return all columns
-		colRows2, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'forward_bookings'`)
+		colRows2, err := db.QueryContext(r.Context(), `SELECT column_name FROM information_schema.columns WHERE table_name = 'forward_bookings'`)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch columns"})
@@ -136,10 +136,9 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Find which records are delete-approval and accessible
-		delRows, err := db.Query(`SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1) AND processing_status = 'Delete-approval'`, pq.Array(req.SystemTransactionIDs))
+		delRows, err := db.QueryContext(r.Context(), `SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1) AND processing_status = 'Delete-approval'`, pq.Array(req.SystemTransactionIDs))
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			writeForwardJSONError(w, http.StatusInternalServerError, err, "failed to fetch delete-approval forward bookings", true)
 			return
 		}
 		var deletedIds []string
@@ -157,10 +156,9 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 		delRows.Close()
 		// Delete them
 		if len(deletedIds) > 0 {
-			_, err := db.Exec(`DELETE FROM forward_bookings WHERE system_transaction_id = ANY($1) AND processing_status = 'Delete-approval'`, pq.Array(deletedIds))
+			_, err := db.ExecContext(r.Context(), `DELETE FROM forward_bookings WHERE system_transaction_id = ANY($1) AND processing_status = 'Delete-approval'`, pq.Array(deletedIds))
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				writeForwardJSONError(w, http.StatusInternalServerError, err, "failed to delete forward bookings pending delete approval", true)
 				return
 			}
 		}
@@ -181,10 +179,9 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 		var updatedRows []map[string]interface{}
 		if len(updateIds) > 0 {
 			// Only update those belonging to accessible business units
-			rows, err := db.Query(`SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, pq.Array(updateIds))
+			rows, err := db.QueryContext(r.Context(), `SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, pq.Array(updateIds))
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				writeForwardJSONError(w, http.StatusInternalServerError, err, "failed to fetch eligible forward bookings", true)
 				return
 			}
 			var eligibleIds []string
@@ -205,9 +202,9 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			if len(eligibleIds) > 0 {
 				var resultRows *sql.Rows
 				if req.ProcessingStatus == "Approved" {
-					resultRows, err = db.Query(`UPDATE forward_bookings SET processing_status = $1, status = 'Confirmed' WHERE system_transaction_id = ANY($2) RETURNING *`, req.ProcessingStatus, pq.Array(eligibleIds))
+					resultRows, err = db.QueryContext(r.Context(), `UPDATE forward_bookings SET processing_status = $1, status = 'Confirmed' WHERE system_transaction_id = ANY($2) RETURNING *`, req.ProcessingStatus, pq.Array(eligibleIds))
 				} else {
-					resultRows, err = db.Query(`UPDATE forward_bookings SET processing_status = $1 WHERE system_transaction_id = ANY($2) RETURNING *`, req.ProcessingStatus, pq.Array(eligibleIds))
+					resultRows, err = db.QueryContext(r.Context(), `UPDATE forward_bookings SET processing_status = $1 WHERE system_transaction_id = ANY($2) RETURNING *`, req.ProcessingStatus, pq.Array(eligibleIds))
 				}
 				if err == nil {
 					cols, _ := resultRows.Columns()
@@ -264,10 +261,9 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Only update those belonging to accessible business units
-		rows, err := db.Query(`SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, pq.Array(req.SystemTransactionIDs))
+		rows, err := db.QueryContext(r.Context(), `SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, pq.Array(req.SystemTransactionIDs))
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			writeForwardJSONError(w, http.StatusInternalServerError, err, "failed to fetch forward bookings for delete", true)
 			return
 		}
 		var eligibleIds []string
@@ -289,10 +285,9 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		updateQuery := `UPDATE forward_bookings SET processing_status = 'Delete-approval' WHERE system_transaction_id = ANY($1) RETURNING *`
-		resultRows, err := db.Query(updateQuery, pq.Array(eligibleIds))
+		resultRows, err := db.QueryContext(r.Context(), updateQuery, pq.Array(eligibleIds))
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			writeForwardJSONError(w, http.StatusInternalServerError, err, "failed to mark forward bookings for delete approval", true)
 			return
 		}
 		cols, _ := resultRows.Columns()
@@ -378,7 +373,7 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 			req.InternalReferenceID,
 			req.EntityLevel0,
 		}
-		row := db.QueryRow(updateQuery, updateValues...)
+		row := db.QueryRowContext(r.Context(), updateQuery, updateValues...)
 		cols := []string{"internal_reference_id", "entity_level_0", "bank_transaction_id", "swift_unique_id", "bank_confirmation_date", constants.KeyStatus, "processing_status"}
 		vals := make([]interface{}, len(cols))
 		valPtrs := make([]interface{}, len(cols))

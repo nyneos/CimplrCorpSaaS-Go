@@ -164,6 +164,24 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, constants.ErrTxStartFailed)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
 		created := make([]map[string]interface{}, 0)
 
 		for _, rrow := range req.Rows {
@@ -184,49 +202,34 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				missing = append(missing, "default_currency")
 			}
 			if len(missing) > 0 {
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: fmt.Sprintf("missing required fields: %s", strings.Join(missing, ", "))})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("missing required fields: %s", strings.Join(missing, ", ")))
+				return
 			}
 
 			// Validate business_unit_division (entity)
 			if !api.IsEntityAllowed(ctx, rrow.BusinessUnitDivision) {
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized business_unit_division (entity)", "type_name": rrow.TypeName})
-				continue
+				api.RespondWithError(w, http.StatusForbidden, "invalid or unauthorized business_unit_division (entity)")
+				return
 			}
 
 			// Validate default_currency
 			if !api.IsCurrencyAllowed(ctx, rrow.DefaultCurrency) {
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized currency", "type_name": rrow.TypeName})
-				continue
+				api.RespondWithError(w, http.StatusForbidden, "invalid or unauthorized currency")
+				return
 			}
 
 			// Validate cash_flow_category if provided
 			if strings.TrimSpace(rrow.CashFlowCategory) != "" {
 				if len(categories) > 0 && !api.IsCashFlowCategoryAllowed(ctx, rrow.CashFlowCategory) {
-					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized cash_flow_category", "type_name": rrow.TypeName})
-					continue
+					api.RespondWithError(w, http.StatusForbidden, "invalid or unauthorized cash_flow_category")
+					return
 				}
 			}
 
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to start tx: " + err.Error()})
-				continue
-			}
-
 			var id string
-			sp := "sp_" + strings.ReplaceAll(uuid.New().String(), "-", "_")
-			if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
-				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to create savepoint: " + err.Error()})
-				continue
-			}
-
 			if err := tx.QueryRow(ctx, `SELECT 'TYP-' || LPAD(nextval('payable_receivable_seq')::text, 6, '0')`).Scan(&id); err != nil {
-				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to generate type_id: " + err.Error(), "type_name": rrow.TypeName})
-				tx.Commit(ctx)
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to generate type_id: "+err.Error())
+				return
 			}
 			var effFrom, effTo interface{}
 			if strings.TrimSpace(rrow.EffectiveFrom) != "" {
@@ -295,36 +298,37 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rrow.ExternalCode,
 				rrow.Segment,
 			).Scan(&id); err != nil {
-				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "type_name": rrow.TypeName})
-				tx.Commit(ctx)
-				continue
+				errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to create payable/receivable type")
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
+				return
 			}
 
 			auditQ := `INSERT INTO auditactionpayablereceivable (type_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
 			if _, err := tx.Exec(ctx, auditQ, id, nil, createdBy); err != nil {
-				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "id": id})
-				continue
-			}
-
-			if err := tx.Commit(ctx); err != nil {
-				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "id": id})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+				return
 			}
 			created = append(created, map[string]interface{}{constants.ValueSuccess: true, "type_id": id, "type_name": rrow.TypeName})
 		}
 
-		overall := true
-		for _, r := range created {
-			if ok, found := r[constants.ValueSuccess].(bool); !found || !ok {
-				overall = false
-				break
+		if err := tx.Commit(ctx); err != nil {
+			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to save payable/receivable types")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
 			}
+			return
 		}
+		committed = true
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: overall, "rows": created})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": created})
 	}
 }
 
@@ -793,214 +797,195 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "begin failed: "+err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
 		results := []map[string]interface{}{}
 		for _, row := range req.Rows {
 			if row.TypeID == "" {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing type_id"})
-				continue
+				api.RespondWithError(w, http.StatusBadRequest, "missing type_id")
+				return
 			}
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error()})
-				continue
-			}
-			committed := false
-			func() {
-				defer func() {
-					if !committed {
-						tx.Rollback(ctx)
-					}
-				}()
 
-				var (
-					existingTypeCode                  interface{}
-					existingTypeName                  interface{}
-					existingDirection                 interface{}
-					existingBusinessUnitDivision      interface{}
-					existingDefaultCurrency           interface{}
-					existingDefaultDueDays            interface{}
-					existingPaymentTermsName          interface{}
-					existingAllowNetting              interface{}
-					existingSettlementDiscount        interface{}
-					existingSettlementDiscountPercent interface{}
-					existingTaxApplicable             interface{}
-					existingTaxCode                   interface{}
-					existingDefaultReconGL            interface{}
-					existingOffsetRevenueExpenseGL    interface{}
-					existingCashFlowCategory          interface{}
-					existingCategory                  interface{}
-					existingEffectiveFrom             interface{}
-					existingEffectiveTo               interface{}
-					existingTags                      interface{}
-					existingErpType                   interface{}
-					existingSapCompanyCode            interface{}
-					existingSapFiDocType              interface{}
-					existingSapPostingKeyDebit        interface{}
-					existingSapPostingKeyCredit       interface{}
-					existingSapReconciliationGL       interface{}
-					existingSapTaxCode                interface{}
-					existingOracleLedger              interface{}
-					existingOracleTransactionType     interface{}
-					existingOracleDistributionSet     interface{}
-					existingOracleSource              interface{}
-					existingTallyVoucherType          interface{}
-					existingTallyTaxClass             interface{}
-					existingTallyLedgerGroup          interface{}
-					existingSageNominalControl        interface{}
-					existingSageAnalysisCode          interface{}
-					existingExternalCode              interface{}
-					existingSegment                   interface{}
-					existingStatus                    interface{}
-				)
+			var (
+				existingTypeCode                  interface{}
+				existingTypeName                  interface{}
+				existingDirection                 interface{}
+				existingBusinessUnitDivision      interface{}
+				existingDefaultCurrency           interface{}
+				existingDefaultDueDays            interface{}
+				existingPaymentTermsName          interface{}
+				existingAllowNetting              interface{}
+				existingSettlementDiscount        interface{}
+				existingSettlementDiscountPercent interface{}
+				existingTaxApplicable             interface{}
+				existingTaxCode                   interface{}
+				existingDefaultReconGL            interface{}
+				existingOffsetRevenueExpenseGL    interface{}
+				existingCashFlowCategory          interface{}
+				existingCategory                  interface{}
+				existingEffectiveFrom             interface{}
+				existingEffectiveTo               interface{}
+				existingTags                      interface{}
+				existingErpType                   interface{}
+				existingSapCompanyCode            interface{}
+				existingSapFiDocType              interface{}
+				existingSapPostingKeyDebit        interface{}
+				existingSapPostingKeyCredit       interface{}
+				existingSapReconciliationGL       interface{}
+				existingSapTaxCode                interface{}
+				existingOracleLedger              interface{}
+				existingOracleTransactionType     interface{}
+				existingOracleDistributionSet     interface{}
+				existingOracleSource              interface{}
+				existingTallyVoucherType          interface{}
+				existingTallyTaxClass             interface{}
+				existingTallyLedgerGroup          interface{}
+				existingSageNominalControl        interface{}
+				existingSageAnalysisCode          interface{}
+				existingExternalCode              interface{}
+				existingSegment                   interface{}
+				existingStatus                    interface{}
+			)
 
-				sel := `SELECT type_code, type_name, direction, business_unit_division, default_currency, default_due_days, payment_terms_name,
+			sel := `SELECT type_code, type_name, direction, business_unit_division, default_currency, default_due_days, payment_terms_name,
 								allow_netting, settlement_discount, settlement_discount_percent, tax_applicable, tax_code,
 								default_recon_gl, offset_revenue_expense_gl, cash_flow_category, category, effective_from, effective_to, tags,
 						erp_type, sap_company_code, sap_fi_doc_type, sap_posting_key_debit, sap_posting_key_credit, sap_reconciliation_gl,
 						sap_tax_code, oracle_ledger, oracle_transaction_type, oracle_distribution_set, oracle_source,
 						tally_voucher_type, tally_tax_class, tally_ledger_group, sage_nominal_control, sage_analysis_code, external_code, segment, status
 					FROM masterpayablereceivabletype WHERE type_id=$1 FOR UPDATE`
-				if err := tx.QueryRow(ctx, sel, row.TypeID).Scan(
-					&existingTypeCode, &existingTypeName, &existingDirection, &existingBusinessUnitDivision, &existingDefaultCurrency, &existingDefaultDueDays, &existingPaymentTermsName,
-					&existingAllowNetting, &existingSettlementDiscount, &existingSettlementDiscountPercent, &existingTaxApplicable, &existingTaxCode,
-					&existingDefaultReconGL, &existingOffsetRevenueExpenseGL, &existingCashFlowCategory, &existingCategory, &existingEffectiveFrom, &existingEffectiveTo, &existingTags,
-					&existingErpType, &existingSapCompanyCode, &existingSapFiDocType, &existingSapPostingKeyDebit, &existingSapPostingKeyCredit, &existingSapReconciliationGL,
-					&existingSapTaxCode, &existingOracleLedger, &existingOracleTransactionType, &existingOracleDistributionSet, &existingOracleSource,
-					&existingTallyVoucherType, &existingTallyTaxClass, &existingTallyLedgerGroup, &existingSageNominalControl, &existingSageAnalysisCode, &existingExternalCode, &existingSegment, &existingStatus,
-				); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "type_id": row.TypeID})
-					return
-				}
-
-				var sets []string
-				var args []interface{}
-				pos := 1
-
-				// map of existing values keyed by the incoming field name
-				existingMap := map[string]interface{}{
-					"type_code":                   existingTypeCode,
-					"type_name":                   existingTypeName,
-					"direction":                   existingDirection,
-					"business_unit_division":      existingBusinessUnitDivision,
-					"default_currency":            existingDefaultCurrency,
-					"default_due_days":            existingDefaultDueDays,
-					"payment_terms_name":          existingPaymentTermsName,
-					"allow_netting":               existingAllowNetting,
-					"settlement_discount":         existingSettlementDiscount,
-					"settlement_discount_percent": existingSettlementDiscountPercent,
-					"tax_applicable":              existingTaxApplicable,
-					"tax_code":                    existingTaxCode,
-					"default_recon_gl":            existingDefaultReconGL,
-					"offset_revenue_expense_gl":   existingOffsetRevenueExpenseGL,
-					"cash_flow_category":          existingCashFlowCategory,
-					"category":                    existingCategory,
-					"effective_from":              existingEffectiveFrom,
-					"effective_to":                existingEffectiveTo,
-					"tags":                        existingTags,
-					"erp_type":                    existingErpType,
-					"sap_company_code":            existingSapCompanyCode,
-					"sap_fi_doc_type":             existingSapFiDocType,
-					"sap_posting_key_debit":       existingSapPostingKeyDebit,
-					"sap_posting_key_credit":      existingSapPostingKeyCredit,
-					"sap_reconciliation_gl":       existingSapReconciliationGL,
-					"sap_tax_code":                existingSapTaxCode,
-					"oracle_ledger":               existingOracleLedger,
-					"oracle_transaction_type":     existingOracleTransactionType,
-					"oracle_distribution_set":     existingOracleDistributionSet,
-					"oracle_source":               existingOracleSource,
-					"tally_voucher_type":          existingTallyVoucherType,
-					"tally_tax_class":             existingTallyTaxClass,
-					"tally_ledger_group":          existingTallyLedgerGroup,
-					"sage_nominal_control":        existingSageNominalControl,
-					"sage_analysis_code":          existingSageAnalysisCode,
-					"external_code":               existingExternalCode,
-					"segment":                     existingSegment,
-				}
-
-				// Validate entity, currency, category if being updated
-				if val, ok := row.Fields["business_unit_division"]; ok {
-					if valStr := fmt.Sprint(val); !api.IsEntityAllowed(ctx, valStr) {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized business_unit_division: " + valStr, "type_id": row.TypeID})
-						return
-					}
-				}
-				if val, ok := row.Fields["default_currency"]; ok {
-					if valStr := fmt.Sprint(val); !api.IsCurrencyAllowed(ctx, valStr) {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized default_currency: " + valStr, "type_id": row.TypeID})
-						return
-					}
-				}
-				if val, ok := row.Fields["cash_flow_category"]; ok {
-					if valStr := fmt.Sprint(val); valStr != "" && !api.IsCashFlowCategoryAllowed(ctx, valStr) {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized cash_flow_category: " + valStr, "type_id": row.TypeID})
-						return
-					}
-				}
-
-				for k, v := range row.Fields {
-					if oldVal, ok := existingMap[k]; ok {
-						// generic two-column update: <col>=$n, old_<col>=$n+1
-						sets = append(sets, fmt.Sprintf("%s=$%d, old_%s=$%d", k, pos, k, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(oldVal))
-						pos += 2
-						continue
-					}
-
-					switch k {
-					case constants.KeyStatus:
-						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingStatus))
-						pos += 2
-					default:
-						// unknown or intentionally ignored field
-					}
-				}
-
-				updatedID := row.TypeID
-				if len(sets) > 0 {
-					q := "UPDATE masterpayablereceivabletype SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE type_id=$%d RETURNING type_id", pos)
-					args = append(args, row.TypeID)
-					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + err.Error(), "type_id": row.TypeID})
-						return
-					}
-				}
-
-				// audit
-				auditQ := `INSERT INTO auditactionpayablereceivable (type_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
-				if _, err := tx.Exec(ctx, auditQ, updatedID, row.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "audit failed: " + err.Error(), "type_id": updatedID})
-					return
-				}
-
-				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "type_id": updatedID})
-					return
-				}
-				committed = true
-				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "type_id": updatedID})
-			}()
-		}
-
-		overall := true
-		for _, r := range results {
-			if ok, exists := r[constants.ValueSuccess]; exists {
-				if b, okb := ok.(bool); okb {
-					if !b {
-						overall = false
-						break
-					}
-				} else {
-					overall = false
-					break
-				}
-			} else {
-				overall = false
-				break
+			if err := tx.QueryRow(ctx, sel, row.TypeID).Scan(
+				&existingTypeCode, &existingTypeName, &existingDirection, &existingBusinessUnitDivision, &existingDefaultCurrency, &existingDefaultDueDays, &existingPaymentTermsName,
+				&existingAllowNetting, &existingSettlementDiscount, &existingSettlementDiscountPercent, &existingTaxApplicable, &existingTaxCode,
+				&existingDefaultReconGL, &existingOffsetRevenueExpenseGL, &existingCashFlowCategory, &existingCategory, &existingEffectiveFrom, &existingEffectiveTo, &existingTags,
+				&existingErpType, &existingSapCompanyCode, &existingSapFiDocType, &existingSapPostingKeyDebit, &existingSapPostingKeyCredit, &existingSapReconciliationGL,
+				&existingSapTaxCode, &existingOracleLedger, &existingOracleTransactionType, &existingOracleDistributionSet, &existingOracleSource,
+				&existingTallyVoucherType, &existingTallyTaxClass, &existingTallyLedgerGroup, &existingSageNominalControl, &existingSageAnalysisCode, &existingExternalCode, &existingSegment, &existingStatus,
+			); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "fetch failed: "+err.Error())
+				return
 			}
+
+			var sets []string
+			var args []interface{}
+			pos := 1
+
+			// map of existing values keyed by the incoming field name
+			existingMap := map[string]interface{}{
+				"type_code":                   existingTypeCode,
+				"type_name":                   existingTypeName,
+				"direction":                   existingDirection,
+				"business_unit_division":      existingBusinessUnitDivision,
+				"default_currency":            existingDefaultCurrency,
+				"default_due_days":            existingDefaultDueDays,
+				"payment_terms_name":          existingPaymentTermsName,
+				"allow_netting":               existingAllowNetting,
+				"settlement_discount":         existingSettlementDiscount,
+				"settlement_discount_percent": existingSettlementDiscountPercent,
+				"tax_applicable":              existingTaxApplicable,
+				"tax_code":                    existingTaxCode,
+				"default_recon_gl":            existingDefaultReconGL,
+				"offset_revenue_expense_gl":   existingOffsetRevenueExpenseGL,
+				"cash_flow_category":          existingCashFlowCategory,
+				"category":                    existingCategory,
+				"effective_from":              existingEffectiveFrom,
+				"effective_to":                existingEffectiveTo,
+				"tags":                        existingTags,
+				"erp_type":                    existingErpType,
+				"sap_company_code":            existingSapCompanyCode,
+				"sap_fi_doc_type":             existingSapFiDocType,
+				"sap_posting_key_debit":       existingSapPostingKeyDebit,
+				"sap_posting_key_credit":      existingSapPostingKeyCredit,
+				"sap_reconciliation_gl":       existingSapReconciliationGL,
+				"sap_tax_code":                existingSapTaxCode,
+				"oracle_ledger":               existingOracleLedger,
+				"oracle_transaction_type":     existingOracleTransactionType,
+				"oracle_distribution_set":     existingOracleDistributionSet,
+				"oracle_source":               existingOracleSource,
+				"tally_voucher_type":          existingTallyVoucherType,
+				"tally_tax_class":             existingTallyTaxClass,
+				"tally_ledger_group":          existingTallyLedgerGroup,
+				"sage_nominal_control":        existingSageNominalControl,
+				"sage_analysis_code":          existingSageAnalysisCode,
+				"external_code":               existingExternalCode,
+				"segment":                     existingSegment,
+			}
+
+			// Validate entity, currency, category if being updated
+			if val, ok := row.Fields["business_unit_division"]; ok {
+				if valStr := fmt.Sprint(val); !api.IsEntityAllowed(ctx, valStr) {
+					api.RespondWithError(w, http.StatusForbidden, "invalid or unauthorized business_unit_division: "+valStr)
+					return
+				}
+			}
+			if val, ok := row.Fields["default_currency"]; ok {
+				if valStr := fmt.Sprint(val); !api.IsCurrencyAllowed(ctx, valStr) {
+					api.RespondWithError(w, http.StatusForbidden, "invalid or unauthorized default_currency: "+valStr)
+					return
+				}
+			}
+			if val, ok := row.Fields["cash_flow_category"]; ok {
+				if valStr := fmt.Sprint(val); valStr != "" && !api.IsCashFlowCategoryAllowed(ctx, valStr) {
+					api.RespondWithError(w, http.StatusForbidden, "invalid or unauthorized cash_flow_category: "+valStr)
+					return
+				}
+			}
+
+			for k, v := range row.Fields {
+				if oldVal, ok := existingMap[k]; ok {
+					// generic two-column update: <col>=$n, old_<col>=$n+1
+					sets = append(sets, fmt.Sprintf("%s=$%d, old_%s=$%d", k, pos, k, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(oldVal))
+					pos += 2
+					continue
+				}
+
+				switch k {
+				case constants.KeyStatus:
+					sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
+					args = append(args, fmt.Sprint(v), ifaceToString(existingStatus))
+					pos += 2
+				default:
+					// unknown or intentionally ignored field
+				}
+			}
+
+			updatedID := row.TypeID
+			if len(sets) > 0 {
+				q := "UPDATE masterpayablereceivabletype SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE type_id=$%d RETURNING type_id", pos)
+				args = append(args, row.TypeID)
+				if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+					return
+				}
+			}
+
+			// audit
+			auditQ := `INSERT INTO auditactionpayablereceivable (type_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
+			if _, err := tx.Exec(ctx, auditQ, updatedID, row.Reason, updatedBy); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "audit failed: "+err.Error())
+				return
+			}
+			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "type_id": updatedID})
 		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			return
+		}
+		committed = true
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: overall, "rows": results})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": results})
 	}
 }
 

@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shakinm/xlsReader/xls"
 	"github.com/xuri/excelize/v2"
 )
@@ -26,7 +28,7 @@ import (
 // PreviewBankStatementHandler parses uploaded file(s), categorizes transactions, returns FLAT transaction list WITHOUT DB insertion
 // Uses EXACT same parsing logic as UploadBankStatementV2WithCategorization but NO database writes
 // Supports: XLSX, XLS, CSV, multi-account CSV (multi=true), PDF/DOCX (external AI), ZIP (containing any of above)
-func PreviewBankStatementHandler(db *sql.DB) http.Handler {
+func PreviewBankStatementHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -38,13 +40,13 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 		// Parse multipart form
 		err := r.ParseMultipartForm(100 << 20) // 100MB max
 		if err != nil {
-			http.Error(w, "Failed to parse multipart form: "+err.Error(), http.StatusBadRequest)
+			writeBankStatementHTTPError(w, http.StatusBadRequest, err, "failed to parse multipart form")
 			return
 		}
 
 		file, header, err := r.FormFile("file")
 		if err != nil {
-			http.Error(w, "Missing 'file' field: "+err.Error(), http.StatusBadRequest)
+			writeBankStatementHTTPError(w, http.StatusBadRequest, err, "missing file field")
 			return
 		}
 		defer file.Close()
@@ -57,7 +59,7 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 			if mappingsJSON != "" {
 				mappings = &ColumnMappings{}
 				if err := json.Unmarshal([]byte(mappingsJSON), mappings); err != nil {
-					http.Error(w, "Invalid mappings JSON: "+err.Error(), http.StatusBadRequest)
+					writeBankStatementHTTPError(w, http.StatusBadRequest, err, "invalid mappings json")
 					return
 				}
 			}
@@ -69,7 +71,7 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 		// Read file into memory
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
+			writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "failed to read file")
 			return
 		}
 
@@ -80,30 +82,30 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 		// Route based on file type
 		if ext == ".zip" {
 			// ZIP with multiple files
-			allTransactions, err = processZipPreviewFlat(ctx, db, fileBytes, useMapping, mappings)
+			allTransactions, err = processZipPreviewFlat(ctx, pgxPool, fileBytes, useMapping, mappings)
 			if err != nil {
-				http.Error(w, "ZIP processing failed: "+err.Error(), http.StatusInternalServerError)
+				writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "zip processing failed")
 				return
 			}
 		} else if ext == ".pdf" || ext == ".docx" {
 			// PDF/DOCX - call external AI parser (NO DB writes)
-			allTransactions, err = processPDFPreviewFlat(ctx, db, fileBytes, header.Filename)
+			allTransactions, err = processPDFPreviewFlat(ctx, pgxPool, fileBytes, header.Filename)
 			if err != nil {
-				http.Error(w, "PDF/DOCX processing failed: "+err.Error(), http.StatusInternalServerError)
+				writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "pdf/docx processing failed")
 				return
 			}
 		} else if ext == ".csv" && isMultiAccount {
 			// Multi-account CSV
-			allTransactions, err = processMultiAccountCSVPreviewFlat(ctx, db, fileBytes)
+			allTransactions, err = processMultiAccountCSVPreviewFlat(ctx, pgxPool, fileBytes)
 			if err != nil {
-				http.Error(w, "Multi-account CSV processing failed: "+err.Error(), http.StatusInternalServerError)
+				writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "multi-account csv processing failed")
 				return
 			}
 		} else {
 			// Single file processing (XLSX, XLS, CSV)
-			transactions, err := processSingleFilePreviewFlat(ctx, db, fileBytes, header.Filename, useMapping, mappings)
+			transactions, err := processSingleFilePreviewFlat(ctx, pgxPool, fileBytes, header.Filename, useMapping, mappings)
 			if err != nil {
-				http.Error(w, "File processing failed: "+err.Error(), http.StatusInternalServerError)
+				writeBankStatementHTTPError(w, http.StatusInternalServerError, err, "file processing failed")
 				return
 			}
 			allTransactions = transactions
@@ -121,7 +123,7 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 }
 
 // processZipPreviewFlat extracts all files from ZIP and returns flat transaction list
-func processZipPreviewFlat(ctx context.Context, db *sql.DB, zipBytes []byte, useMapping bool, mappings *ColumnMappings) ([]map[string]interface{}, error) {
+func processZipPreviewFlat(ctx context.Context, pgxPool *pgxpool.Pool, zipBytes []byte, useMapping bool, mappings *ColumnMappings) ([]map[string]interface{}, error) {
 	zipReader, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
 		return nil, fmt.Errorf("invalid ZIP file: %w", err)
@@ -155,7 +157,7 @@ func processZipPreviewFlat(ctx context.Context, db *sql.DB, zipBytes []byte, use
 			continue
 		}
 
-		transactions, err := processSingleFilePreviewFlat(ctx, db, fileBytes, f.Name, useMapping, mappings)
+		transactions, err := processSingleFilePreviewFlat(ctx, pgxPool, fileBytes, f.Name, useMapping, mappings)
 		if err != nil {
 			// Skip files with errors, continue processing others
 			continue
@@ -169,7 +171,7 @@ func processZipPreviewFlat(ctx context.Context, db *sql.DB, zipBytes []byte, use
 
 // processSingleFilePreviewFlat parses file and categorizes WITHOUT any DB writes
 // Uses EXACT same parsing logic as UploadBankStatementV2WithCategorization but ONLY reads DB for account lookup and rules
-func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings) ([]map[string]interface{}, error) {
+func processSingleFilePreviewFlat(ctx context.Context, pgxPool *pgxpool.Pool, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings) ([]map[string]interface{}, error) {
 
 	ext := strings.ToLower(filepath.Ext(filename))
 	var rows [][]string
@@ -322,7 +324,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 
 	// DB READ ONLY: Lookup account metadata
 	var entityID, bankName, currency string
-	err := db.QueryRowContext(ctx, `
+	err := pgxPool.QueryRow(ctx, `
 		SELECT mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
 		FROM public.masterbankaccount mba
 		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
@@ -330,7 +332,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 	`, accountNumber).Scan(&entityID, &bankName, &currency)
 
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == pgx.ErrNoRows {
 			// Try candidate verification like upload does
 			candidates := []string{}
 			seen := map[string]bool{}
@@ -350,7 +352,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 
 			matched := false
 			for _, cand := range candidates {
-				qErr := db.QueryRowContext(ctx, `
+				qErr := pgxPool.QueryRow(ctx, `
 					SELECT mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
 					FROM public.masterbankaccount mba
 					LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
@@ -371,7 +373,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 	}
 
 	// DB READ ONLY: Load category rules
-	rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID, currency)
+	rules, err := loadCategoryRuleComponents(ctx, pgxPool, accountNumber, entityID, currency)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load category rules: %w", err)
 	}
@@ -841,7 +843,7 @@ func isEmptyRow(row []string) bool {
 
 // processMultiAccountCSVPreviewFlat processes CSV with multiple account numbers (multi=true)
 // Each row can have different account number in the account column
-func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte) ([]map[string]interface{}, error) {
+func processMultiAccountCSVPreviewFlat(ctx context.Context, pgxPool *pgxpool.Pool, fileBytes []byte) ([]map[string]interface{}, error) {
 	// Parse CSV
 	rdr := csv.NewReader(bytes.NewReader(fileBytes))
 	rdr.FieldsPerRecord = -1
@@ -900,7 +902,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 
 	// Use background context for initial load (not tied to HTTP request timeout)
 	loadCtx := context.Background()
-	accountRows, err := db.QueryContext(loadCtx, `
+	accountRows, err := pgxPool.Query(loadCtx, `
 		SELECT mba.account_number, mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
 		FROM public.masterbankaccount mba
 		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
@@ -918,7 +920,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 		}
 
 		// Also pre-load rules for this account
-		rules, err := loadCategoryRuleComponents(loadCtx, db, accNum, entityID, currency)
+		rules, err := loadCategoryRuleComponents(loadCtx, pgxPool, accNum, entityID, currency)
 		if err != nil {
 			rules = []categoryRuleComponent{}
 		}
@@ -1071,7 +1073,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 // processPDFPreviewFlat calls external AI parser for PDF/DOCX files
 // Returns parsed transactions WITHOUT any database writes
 // Uses the EXACT same logic as UploadBankStatementV3Handler
-func processPDFPreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, filename string) ([]map[string]interface{}, error) {
+func processPDFPreviewFlat(ctx context.Context, pgxPool *pgxpool.Pool, fileBytes []byte, filename string) ([]map[string]interface{}, error) {
 	// Get external parser URL using the EXACT same logic as upload handler
 	v := q8()
 	v = attachStreamKey(v)
@@ -1148,21 +1150,21 @@ func processPDFPreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, fi
 
 		// DB READ: Lookup account metadata if we have account number
 		if accountNumber != "" {
-			err := db.QueryRowContext(ctx, `
+			err := pgxPool.QueryRow(ctx, `
 				SELECT mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
 				FROM public.masterbankaccount mba
 				LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 				WHERE mba.account_number = $1 AND COALESCE(mba.is_deleted, false) = false
 			`, accountNumber).Scan(&entityID, &bankName, &currency)
 
-			if err != nil && err != sql.ErrNoRows {
+			if err != nil && err != pgx.ErrNoRows {
 				return nil, fmt.Errorf("failed to lookup account: %w", err)
 			}
 
 			// DB READ: Load category rules if account found
 			var rules []categoryRuleComponent
 			if entityID != "" {
-				rules, _ = loadCategoryRuleComponents(ctx, db, accountNumber, entityID, currency)
+				rules, _ = loadCategoryRuleComponents(ctx, pgxPool, accountNumber, entityID, currency)
 			}
 
 			// Process each transaction from AI
@@ -1303,3 +1305,4 @@ func getMapKeys(m map[string]interface{}) []string {
 
 // Note: Helper functions z4(), q8(), and attachStreamKey() are defined in stream_handlers.go
 // They are already available in this package, so we don't redefine them here
+

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"sort"
@@ -27,6 +28,11 @@ var rates = map[string]float64{
 	"JPY": 0.0067,
 	"SEK": 0.095,
 	"INR": 0.0117,
+}
+
+func writeForecastVsActualError(w http.ResponseWriter, err error, message string) {
+	log.Printf("[ERROR: %v] [Dash] [ForecastVsActual] %s", err, message)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
 type CatRow struct {
@@ -75,7 +81,7 @@ func GetForecastVsActualRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastVsActualRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeForecastVsActualError(w, err, "failed to fetch forecast vs actual rows")
 			return
 		}
 		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
@@ -106,7 +112,7 @@ func GetForecastVsActualKPIHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		k, err := GetForecastVsActualKPIs(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeForecastVsActualError(w, err, "failed to fetch forecast vs actual KPI")
 			return
 		}
 		resp := map[string]interface{}{constants.ValueSuccess: true, "kpis": k}
@@ -136,7 +142,7 @@ func GetForecastVsActualByDateHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastVsActualByDateRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeForecastVsActualError(w, err, "failed to fetch forecast vs actual by date")
 			return
 		}
 		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
@@ -168,7 +174,7 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastVsActualByMonthRows(pgxPool, req.Horizon, req.EntityName, req.Currency, req.AccountID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeForecastVsActualError(w, err, "failed to fetch forecast vs actual by month")
 			return
 		}
 		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}

@@ -27,11 +27,25 @@ import (
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
+	log.Printf("[ERROR: %v] [FX] [MTMRates] request failed", errMsg)
+	clientMsg := "request failed"
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		clientMsg = "invalid request"
+	case http.StatusUnauthorized:
+		clientMsg = "unauthorized"
+	case http.StatusNotFound:
+		clientMsg = "not found"
+	default:
+		if status >= http.StatusInternalServerError {
+			clientMsg = "internal server error"
+		}
+	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
+		constants.ValueError:   clientMsg,
 	})
 }
 
@@ -108,8 +122,11 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 			continue
 		}
 
-		fileBytes, err := io.ReadAll(file)
-		file.Close()
+		fileBytes, err := func() ([]byte, error) {
+			defer file.Close()
+			return io.ReadAll(file)
+		}()
+
 		if err != nil {
 			results = append(results, map[string]interface{}{
 				"filename":           fileHeader.Filename,
@@ -207,7 +224,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 		bookingIdList := []string{}
 		if len(refIds) > 0 {
 			query := `SELECT system_transaction_id, internal_reference_id, order_type, booking_amount, maturity_date, total_rate, currency_pair FROM forward_bookings WHERE internal_reference_id = ANY($1)`
-			rows, err := db.Query(query, pq.Array(refIds))
+			rows, err := db.QueryContext(r.Context(), query, pq.Array(refIds))
 			if err == nil {
 				for rows.Next() {
 					var systemTransactionId, internal_reference_id, order_type, currency_pair string
@@ -229,7 +246,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 		}
 		existingMTMRefs := map[string]struct{}{}
 		if len(refIds) > 0 {
-			rows, err := db.Query(`SELECT internal_reference_id FROM forward_mtm WHERE internal_reference_id = ANY($1)`, pq.Array(refIds))
+			rows, err := db.QueryContext(r.Context(), `SELECT internal_reference_id FROM forward_mtm WHERE internal_reference_id = ANY($1)`, pq.Array(refIds))
 			if err == nil {
 				for rows.Next() {
 					var internalReferenceID string
@@ -243,7 +260,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 		ledgerMap := map[string]map[string]interface{}{}
 		if len(bookingIdList) > 0 {
 			query := `SELECT booking_id, running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = ANY($1)`
-			rows, err := db.Query(query, pq.Array(bookingIdList))
+			rows, err := db.QueryContext(r.Context(), query, pq.Array(bookingIdList))
 			if err == nil {
 				for rows.Next() {
 					var bookingId string
@@ -613,7 +630,7 @@ func GetMTMData(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Fetch MTM data for allowed business units
-		rows, err := db.Query(`SELECT * FROM forward_mtm WHERE entity = ANY($1)`, pq.Array(buNames))
+		rows, err := db.QueryContext(r.Context(), `SELECT * FROM forward_mtm WHERE entity = ANY($1)`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch MTM data")
 			return

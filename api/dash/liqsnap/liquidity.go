@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -15,6 +16,11 @@ import (
 // Handler for /dash/liquidity/total-cash-balance-by-entity
 type UserRequest struct {
 	UserID string `json:"user_id"`
+}
+
+func writeLiquidityError(w http.ResponseWriter, err error, message string) {
+	log.Printf("[ERROR: %v] [Dash] [LiquiditySnapshot] %s", err, message)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
 func TotalCashBalanceByEntityHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -31,7 +37,7 @@ func TotalCashBalanceByEntityHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// You can use req.UserID for filtering if needed
 		balances, err := TotalCashBalanceByEntity(pgxPool)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeLiquidityError(w, err, "failed to fetch total cash balance by entity")
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -54,7 +60,7 @@ func LiquidityCoverageRatioHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// You can use req.UserID for filtering if needed
 		ratio, err := LiquidityCoverageRatio(pgxPool)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeLiquidityError(w, err, "failed to fetch liquidity coverage ratio")
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -81,7 +87,7 @@ func EntityCurrencyWiseCashHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// You can use req.UserID for session/middleware; now accept optional filters
 		data, err := entitycurrencywiseCash(pgxPool, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeLiquidityError(w, err, "failed to fetch entity currency wise cash")
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -293,7 +299,7 @@ func KpiCardsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		kpi, err := GetKpiCards(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeLiquidityError(w, err, "failed to fetch liquidity KPIs")
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -323,7 +329,7 @@ func DetailedDailyCashFlowHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := DetailedDailyCashFlowRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeLiquidityError(w, err, "failed to fetch detailed daily cash flow")
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
