@@ -135,7 +135,13 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			},
 		}
 
-		api.RespondWithPayload(w, true, "", response)
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"fund_availability": response,
+			},
+		})
 	}
 }
 
@@ -171,7 +177,7 @@ func fetchActuals(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endDate 
 			JOIN cimplrcorpsaas.auditactionbankstatement a 
 				ON a.bankstatementid = bs.bank_statement_id
 			WHERE a.processing_status = 'APPROVED'
-			ORDER BY bs.bank_statement_id, a.requested_at DESC
+			ORDER BY bs.bank_statement_id, a.requested_at DESC, a.action_id DESC
 		)
 		SELECT 
 			mba.entity_id,
@@ -339,7 +345,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 			FROM cimplrcorpsaas.cashflow_proposal p
 			JOIN cimplrcorpsaas.audit_action_cashflow_proposal a ON a.proposal_id = p.proposal_id
 			WHERE a.processing_status = 'APPROVED'
-			ORDER BY p.proposal_id, a.requested_at DESC
+			ORDER BY p.proposal_id, a.requested_at DESC, a.action_id DESC
 		) ap ON ap.proposal_id = i.proposal_id
 		WHERE (
 			pm.year > EXTRACT(YEAR FROM $1::timestamp)::int 
@@ -375,7 +381,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 			JOIN cimplrcorpsaas.audit_action_cashflow_proposal a 
 				ON a.proposal_id = p.proposal_id
 			WHERE a.processing_status = 'APPROVED'
-			ORDER BY p.proposal_id, a.requested_at DESC
+			ORDER BY p.proposal_id, a.requested_at DESC, a.action_id DESC
 		)
 		SELECT 
 			COALESCE(me.entity_id, i.entity_name, '') AS entity_id,
