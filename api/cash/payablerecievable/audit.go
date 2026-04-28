@@ -1,7 +1,6 @@
 package payablerecievable
 
 import (
-	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"context"
@@ -83,31 +82,17 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"entity_id":    entityID,
-				"action":       action,
-				"status":       status,
-				"performed_by": performedBy,
-				"performed_at": performedAt,
-				"checker_by":   stringPointerValue(checkerBy),
-				"checker_at":   timePointerValue(checkerAt),
-				"comment":      stringPointerValue(checkerComment),
-				"reason":       stringPointerValue(reason),
+				"entity_id":      entityID,
+				"action":         action,
+				"status":         status,
+				"performed_by":   performedBy,
+				"performed_at":   performedAt,
+				"checker_by":     stringPointerValue(checkerBy),
+				"checker_at":     timePointerValue(checkerAt),
+				"comment":        stringPointerValue(checkerComment),
+				"reason":         stringPointerValue(reason),
 				"change_summary": buildTransactionChangeSummary(ctx, pgxPool, txType, req.TransactionID, action),
 			})
-
-			if decisionAction := transactionDecisionAction(action, status, checkerAt); decisionAction != "" {
-				payload = append(payload, map[string]interface{}{
-					"entity_id":    entityID,
-					"action":       decisionAction,
-					"status":       status,
-					"performed_by": transactionFirstNonEmpty(stringPointerValue(checkerBy), performedBy),
-					"performed_at": timePointerValue(checkerAt),
-					"checker_by":   stringPointerValue(checkerBy),
-					"checker_at":   timePointerValue(checkerAt),
-					"comment":      stringPointerValue(checkerComment),
-					"reason":       stringPointerValue(reason),
-				})
-			}
 		}
 		if err := rows.Err(); err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction audit history"})
@@ -136,18 +121,18 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"entity_id":    entityID,
-				"action":       "DOWNLOAD",
-				"status":       "COMPLETED",
-				"performed_by": strings.TrimSpace(requestedBy),
-				"performed_at": timePointerValue(&requestedAt.Time),
-				"checker_by":   "",
-				"checker_at":   nil,
-				"comment":      "",
-				"reason":       "",
-				"file_name":    fileName.String,
+				"entity_id":     entityID,
+				"action":        "DOWNLOAD",
+				"status":        "COMPLETED",
+				"performed_by":  strings.TrimSpace(requestedBy),
+				"performed_at":  timePointerValue(&requestedAt.Time),
+				"checker_by":    "",
+				"checker_at":    nil,
+				"comment":       "",
+				"reason":        "",
+				"file_name":     fileName.String,
 				"upload_s3_key": uploadKey.String,
-				"source":       txType,
+				"source":        txType,
 			})
 		}
 		if err := downloadRows.Err(); err != nil {
@@ -155,7 +140,11 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", payload)
+		// Standardize: always return 'rows' as the array field
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"rows":    payload,
+		})
 	}
 }
 
@@ -176,13 +165,13 @@ func buildTransactionChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, t
 
 func buildPayableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, payableID string) []map[string]interface{} {
 	var (
-		entityName, oldEntityName                   string
-		counterpartyName, oldCounterpartyName       string
-		invoiceNumber, oldInvoiceNumber             string
-		invoiceDate, oldInvoiceDate                 string
-		dueDate, oldDueDate                         string
-		amount, oldAmount                           string
-		currencyCode, oldCurrencyCode               string
+		entityName, oldEntityName             string
+		counterpartyName, oldCounterpartyName string
+		invoiceNumber, oldInvoiceNumber       string
+		invoiceDate, oldInvoiceDate           string
+		dueDate, oldDueDate                   string
+		amount, oldAmount                     string
+		currencyCode, oldCurrencyCode         string
 	)
 
 	err := pgxPool.QueryRow(ctx, `
@@ -229,13 +218,13 @@ func buildPayableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, payab
 
 func buildReceivableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, receivableID string) []map[string]interface{} {
 	var (
-		entityName, oldEntityName                   string
-		counterpartyName, oldCounterpartyName       string
-		invoiceNumber, oldInvoiceNumber             string
-		invoiceDate, oldInvoiceDate                 string
-		dueDate, oldDueDate                         string
-		amount, oldAmount                           string
-		currencyCode, oldCurrencyCode               string
+		entityName, oldEntityName             string
+		counterpartyName, oldCounterpartyName string
+		invoiceNumber, oldInvoiceNumber       string
+		invoiceDate, oldInvoiceDate           string
+		dueDate, oldDueDate                   string
+		amount, oldAmount                     string
+		currencyCode, oldCurrencyCode         string
 	)
 
 	err := pgxPool.QueryRow(ctx, `
@@ -304,33 +293,6 @@ func timePointerValue(value *time.Time) interface{} {
 		return nil
 	}
 	return *value
-}
-
-func transactionDecisionAction(action, status string, checkerAt *time.Time) string {
-	if checkerAt == nil {
-		return ""
-	}
-	switch strings.ToUpper(strings.TrimSpace(action)) {
-	case "APPROVE", "REJECT":
-		return ""
-	}
-	switch strings.ToUpper(strings.TrimSpace(status)) {
-	case "APPROVED":
-		return "APPROVE"
-	case "REJECTED":
-		return "REJECT"
-	default:
-		return ""
-	}
-}
-
-func transactionFirstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
 }
 
 func transactionRequestedBy(userID string) string {

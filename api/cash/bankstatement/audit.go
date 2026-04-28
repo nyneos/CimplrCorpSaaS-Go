@@ -97,7 +97,11 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		respondAuditPayload(w, payload)
+		// Standardize: always return 'rows' as the array field
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"rows":    payload,
+		})
 	})
 }
 
@@ -160,7 +164,11 @@ func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		respondAuditPayload(w, payload)
+		// Standardize: always return 'rows' as the array field
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"rows":    payload,
+		})
 	})
 }
 
@@ -224,7 +232,11 @@ func GetBankStatementBalanceImpactAuditHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		respondAuditPayload(w, payload)
+		// Standardize: always return 'rows' as the array field
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"rows":    payload,
+		})
 	})
 }
 
@@ -288,7 +300,11 @@ func GetBankStatementTransactionAuditHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		respondAuditPayload(w, payload)
+		// Standardize: always return 'rows' as the array field
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"rows":    payload,
+		})
 	})
 }
 
@@ -347,22 +363,22 @@ func respondAuditPayload(w http.ResponseWriter, payload interface{}) {
 
 func buildBankStatementChangeSummary(ctx context.Context, db *sql.DB, bankStatementID string) []map[string]interface{} {
 	var (
-		entityID, oldEntityID                         string
-		accountNumber, oldAccountNumber               string
-		statementDate, oldStatementDate               string
-		openingBalance, oldOpeningBalance             string
-		closingBalance, oldClosingBalance             string
-		transactionDate, oldTransactionDate           string
-		description, oldDescription                   string
-		status, oldStatus                             string
-		accountHolderName, oldAccountHolderName       string
-		branchName, oldBranchName                     string
-		ifscCode, oldIFSCCode                         string
-		statementPeriod, oldStatementPeriod           string
-		chequeRefNo, oldChequeRefNo                   string
-		withdrawalAmount, oldWithdrawalAmount         string
-		depositAmount, oldDepositAmount               string
-		modeOfTransaction, oldModeOfTransaction       string
+		entityID, oldEntityID                   string
+		accountNumber, oldAccountNumber         string
+		statementDate, oldStatementDate         string
+		openingBalance, oldOpeningBalance       string
+		closingBalance, oldClosingBalance       string
+		transactionDate, oldTransactionDate     string
+		description, oldDescription             string
+		status, oldStatus                       string
+		accountHolderName, oldAccountHolderName string
+		branchName, oldBranchName               string
+		ifscCode, oldIFSCCode                   string
+		statementPeriod, oldStatementPeriod     string
+		chequeRefNo, oldChequeRefNo             string
+		withdrawalAmount, oldWithdrawalAmount   string
+		depositAmount, oldDepositAmount         string
+		modeOfTransaction, oldModeOfTransaction string
 	)
 
 	err := db.QueryRowContext(ctx, `
