@@ -1,4 +1,4 @@
-package allMaster
+﻿package allMaster
 
 import (
 	"CimplrCorpSaas/api"
@@ -39,7 +39,7 @@ func parseMasterDate(s string) (string, error) {
 		}
 	}
 	layouts := []string{
-		// dd/mm/yyyy variants (Indian/European) — MUST be before mm/dd
+		// dd/mm/yyyy variants (Indian/European) â€” MUST be before mm/dd
 		"02/01/2006", "02/01/06", "2/1/2006", "2/1/06",
 		// mm/dd/yyyy variants (American)
 		"01/02/2006", "01/02/06", "1/2/2006", "1/2/06",
@@ -75,7 +75,7 @@ func parseMasterDate(s string) (string, error) {
 			return t.Format(constants.DateFormat), nil
 		}
 	}
-	return "", fmt.Errorf("cannot parse date %q — use YYYY-MM-DD or DD/MM/YYYY", s)
+	return "", fmt.Errorf("cannot parse date %q â€” use YYYY-MM-DD or DD/MM/YYYY", s)
 }
 
 func logBankConfigDBError(err error, context string) {
@@ -121,7 +121,7 @@ func getUserFriendlyBankConfigError(err error, context string) (string, int) {
 // --- Request / input types ---
 
 // BankConfigInput holds all fields for creating/uploading a bank config record.
-// effective_from / effective_to are DATE columns — always scan via TO_CHAR, pass as ::date.
+// effective_from / effective_to are DATE columns â€” always scan via TO_CHAR, pass as ::date.
 type BankConfigInput struct {
 	BankCode                     string   `json:"bank_code"`
 	ProductType                  *string  `json:"product_type"`
@@ -146,8 +146,8 @@ type BankConfigInput struct {
 	MinimumCompoundingPeriodDays *int     `json:"minimum_compounding_period_days"`
 	QuarterDefinition            *string  `json:"quarter_definition"`
 	TdsDeductionTiming           string   `json:"tds_deduction_timing"`
-	EffectiveFrom                string   `json:"effective_from"` // YYYY-MM-DD → DATE
-	EffectiveTo                  *string  `json:"effective_to"`   // nullable YYYY-MM-DD → DATE
+	EffectiveFrom                string   `json:"effective_from"` // YYYY-MM-DD â†’ DATE
+	EffectiveTo                  *string  `json:"effective_to"`   // nullable YYYY-MM-DD â†’ DATE
 	ConfigNotes                  *string  `json:"config_notes"`
 	IsActive                     *bool    `json:"is_active"`
 }
@@ -169,7 +169,7 @@ type UpdateBankConfigRequest struct {
 	Reason   string                 `json:"reason"`
 }
 
-// bankConfigFieldPairs maps JSON field names → scan position indices (0-based, mirrors SELECT order after config_id)
+// bankConfigFieldPairs maps JSON field names â†’ scan position indices (0-based, mirrors SELECT order after config_id)
 var bankConfigFieldPairs = map[string]int{
 	"bank_code":                       0,
 	"product_type":                    1,
@@ -369,9 +369,9 @@ func bankConfigRowPlaceholder(base int) string {
 	)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// UploadBankConfigSimple  — CSV / XLSX upload
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// UploadBankConfigSimple  â€” CSV / XLSX upload
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -486,8 +486,8 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				TdsDeductionTiming:           strings.TrimSpace(get("tds_deduction_timing")),
 			}
 
-			// ── Date sanitisation ────────────────────────────────────────────
-			// Parse effective_from — accepts any common format, normalises to YYYY-MM-DD
+			// â”€â”€ Date sanitisation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+			// Parse effective_from â€” accepts any common format, normalises to YYYY-MM-DD
 			efFrom, dateErr := parseMasterDate(get("effective_from"))
 			if dateErr != nil {
 				sendFail(i+2, "effective_from: "+dateErr.Error())
@@ -669,9 +669,9 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CreateBankConfigSingle — single record
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// CreateBankConfigSingle â€” single record
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func CreateBankConfigSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -761,9 +761,9 @@ func CreateBankConfigSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CreateBankConfig — bulk creation
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// CreateBankConfig â€” bulk creation
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func CreateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -888,9 +888,9 @@ func CreateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// UpdateBankConfig — single record update
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// UpdateBankConfig â€” single record update
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func UpdateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1054,9 +1054,9 @@ func UpdateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// UpdateBankConfigBulk — bulk update
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// UpdateBankConfigBulk â€” bulk update
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func UpdateBankConfigBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1135,7 +1135,7 @@ func UpdateBankConfigBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// Fetch old values — TO_CHAR for DATE fields
+		// Fetch old values â€” TO_CHAR for DATE fields
 		oldRows, err := tx.Query(ctx, `
 			SELECT
 				config_id, bank_code, product_type, minimum_amount, maximum_amount, day_count_code,
@@ -1210,10 +1210,10 @@ func UpdateBankConfigBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, update := range validUpdates {
 			old, exists := oldMap[update.ConfigID]
 			if !exists {
-				// This record was not found in the DB — abort the whole transaction
+				// This record was not found in the DB â€” abort the whole transaction
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
-					"Record not found: config_id=%s — the entire bulk update has been rolled back", update.ConfigID))
+					"Record not found: config_id=%s â€” the entire bulk update has been rolled back", update.ConfigID))
 				return
 			}
 
@@ -1242,7 +1242,7 @@ func UpdateBankConfigBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					tx.Rollback(ctx)
 					msg, status := getUserFriendlyBankConfigError(err, "Update failed")
 					api.RespondWithError(w, status, fmt.Sprintf(
-						"Update failed for config_id=%s: %s — the entire bulk update has been rolled back",
+						"Update failed for config_id=%s: %s â€” the entire bulk update has been rolled back",
 						update.ConfigID, msg))
 					return
 				}
@@ -1268,7 +1268,7 @@ func UpdateBankConfigBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 				msg, status := getUserFriendlyBankConfigError(err, constants.ErrAuditInsertFailed)
 				api.RespondWithError(w, status, fmt.Sprintf(
-					"Audit insert failed for config_id=%s: %s — the entire bulk update has been rolled back",
+					"Audit insert failed for config_id=%s: %s â€” the entire bulk update has been rolled back",
 					update.ConfigID, msg))
 				return
 			}
@@ -1293,9 +1293,9 @@ func UpdateBankConfigBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DeleteBankConfig — create delete request (pending approval)
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// DeleteBankConfig â€” create delete request (pending approval)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func DeleteBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1396,9 +1396,9 @@ func DeleteBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // BulkApproveBankConfig
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func BulkApproveBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1481,9 +1481,9 @@ func BulkApproveBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // BulkRejectBankConfig
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func BulkRejectBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1548,9 +1548,9 @@ func BulkRejectBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GetBankConfigsApprovedActive — approved + active + not deleted
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// GetBankConfigsApprovedActive â€” approved + active + not deleted
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func GetBankConfigsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1659,9 +1659,9 @@ func GetBankConfigsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GetBankConfigsWithAudit — all non-deleted with latest audit (FieldDescriptions pattern)
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// GetBankConfigsWithAudit â€” all non-deleted with latest audit (FieldDescriptions pattern)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func GetBankConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1849,264 +1849,9 @@ func GetBankConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GetBankConfigAuditHistory — typed scan with full old_ values
-// ─────────────────────────────────────────────────────────────────────────────
-
-func GetBankConfigAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		configID := r.URL.Query().Get("config_id")
-
-		baseSelect := `
-			SELECT
-				a.audit_id,
-				a.config_id,
-				a.action_type,
-				a.processing_status,
-				COALESCE(a.reason,'')          AS reason,
-				COALESCE(a.requested_by,'')    AS requested_by,
-				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				COALESCE(a.checker_by,'')      AS checker_by,
-				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS')   AS checker_at,
-				COALESCE(a.checker_comment,'') AS checker_comment,
-
-				-- Current values from master
-				COALESCE(m.bank_code,'')                             AS bank_code,
-				COALESCE(mb.bank_name,'')                            AS bank_name,
-				COALESCE(mb.bank_short_name,'')                      AS bank_short_name,
-				COALESCE(m.product_type,'')                          AS product_type,
-				m.minimum_amount,
-				m.maximum_amount,
-				COALESCE(m.day_count_code,'')                        AS day_count_code,
-				COALESCE(m.capitalization_schedule_type,'')          AS capitalization_schedule_type,
-				COALESCE(m.capitalization_date_adjustment,'')        AS capitalization_date_adjustment,
-				COALESCE(m.accrual_start_convention,'')              AS accrual_start_convention,
-				COALESCE(m.accrual_end_convention,'')                AS accrual_end_convention,
-				COALESCE(m.period_boundary_definition,'')            AS period_boundary_definition,
-				COALESCE(m.weekend_accrual,false)                    AS weekend_accrual,
-				COALESCE(m.holiday_accrual,false)                    AS holiday_accrual,
-				COALESCE(m.holiday_calendar_code,'')                 AS holiday_calendar_code,
-				COALESCE(m.broken_period_method,'')                  AS broken_period_method,
-				COALESCE(m.broken_period_location,'')                AS broken_period_location,
-				COALESCE(m.interest_rounding_decimals,2)             AS interest_rounding_decimals,
-				COALESCE(m.rounding_method,'')                       AS rounding_method,
-				COALESCE(m.rounding_frequency,'')                    AS rounding_frequency,
-				m.grace_period_days,
-				COALESCE(m.grace_period_rate_type,'')                AS grace_period_rate_type,
-				m.minimum_compounding_period_days,
-				COALESCE(m.quarter_definition,'')                    AS quarter_definition,
-				COALESCE(m.tds_deduction_timing,'')                  AS tds_deduction_timing,
-				TO_CHAR(m.effective_from,'YYYY-MM-DD')               AS effective_from,
-				TO_CHAR(m.effective_to,'YYYY-MM-DD')                 AS effective_to,
-				COALESCE(m.config_notes,'')                          AS config_notes,
-				COALESCE(m.is_active,false)                          AS is_active,
-				COALESCE(m.is_deleted,false)                         AS is_deleted,
-
-				-- Old values from audit
-				COALESCE(a.old_bank_code,'')                             AS old_bank_code,
-				COALESCE(a.old_product_type,'')                          AS old_product_type,
-				a.old_minimum_amount,
-				a.old_maximum_amount,
-				COALESCE(a.old_day_count_code,'')                        AS old_day_count_code,
-				COALESCE(a.old_capitalization_schedule_type,'')          AS old_capitalization_schedule_type,
-				COALESCE(a.old_capitalization_date_adjustment,'')        AS old_capitalization_date_adjustment,
-				COALESCE(a.old_accrual_start_convention,'')              AS old_accrual_start_convention,
-				COALESCE(a.old_accrual_end_convention,'')                AS old_accrual_end_convention,
-				COALESCE(a.old_period_boundary_definition,'')            AS old_period_boundary_definition,
-				COALESCE(a.old_weekend_accrual,false)                    AS old_weekend_accrual,
-				COALESCE(a.old_holiday_accrual,false)                    AS old_holiday_accrual,
-				COALESCE(a.old_holiday_calendar_code,'')                 AS old_holiday_calendar_code,
-				COALESCE(a.old_broken_period_method,'')                  AS old_broken_period_method,
-				COALESCE(a.old_broken_period_location,'')                AS old_broken_period_location,
-				COALESCE(a.old_interest_rounding_decimals,2)             AS old_interest_rounding_decimals,
-				COALESCE(a.old_rounding_method,'')                       AS old_rounding_method,
-				COALESCE(a.old_rounding_frequency,'')                    AS old_rounding_frequency,
-				a.old_grace_period_days,
-				COALESCE(a.old_grace_period_rate_type,'')                AS old_grace_period_rate_type,
-				a.old_minimum_compounding_period_days,
-				COALESCE(a.old_quarter_definition,'')                    AS old_quarter_definition,
-				COALESCE(a.old_tds_deduction_timing,'')                  AS old_tds_deduction_timing,
-				TO_CHAR(a.old_effective_from,'YYYY-MM-DD')               AS old_effective_from,
-				TO_CHAR(a.old_effective_to,'YYYY-MM-DD')                 AS old_effective_to,
-				COALESCE(a.old_config_notes,'')                          AS old_config_notes,
-				COALESCE(a.old_is_active,false)                          AS old_is_active
-
-			FROM investment.fd_audit_bank_config a
-			LEFT JOIN investment.fd_bank_config_master m ON m.config_id = a.config_id
-			LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code`
-
-		var q string
-		var args []interface{}
-		if configID != "" {
-			q = baseSelect + `
-			WHERE a.config_id = $1
-			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`
-			args = append(args, configID)
-		} else {
-			q = baseSelect + `
-			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
-			LIMIT 1000`
-		}
-
-		rows, err := pgxPool.Query(ctx, q, args...)
-		if err != nil {
-			msg, status := getUserFriendlyBankConfigError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
-			return
-		}
-		defer rows.Close()
-
-		out := make([]map[string]interface{}, 0)
-
-		for rows.Next() {
-			var auditID, cfgID, actionType, processStatus, reason, reqBy, reqAt, checkerBy, checkerAt, checkerComment string
-
-			// Current values
-			var curBankCode, curBankName, curBankShortName, curProductType, curDayCountCode, curCapSchedType, curCapDateAdj string
-			var curAccrualStart, curAccrualEnd, curPeriodBoundary, curHolidayCalCode string
-			var curBrokenMethod, curBrokenLoc, curRoundingMethod, curRoundingFreq string
-			var curGracePeriodRateType, curQuarterDef, curTdsDeduction string
-			var curEffectiveFrom, curConfigNotes string
-			var curEffectiveTo *string
-			var curMinAmt, curMaxAmt *float64
-			var curWeekendAccrual, curHolidayAccrual, curIsActive, curIsDeleted bool
-			var curRoundingDecimals int
-			var curGracePeriodDays, curMinCompoundingPeriodDays *int
-
-			// Old values
-			var oldBankCode, oldProductType, oldDayCountCode, oldCapSchedType, oldCapDateAdj string
-			var oldAccrualStart, oldAccrualEnd, oldPeriodBoundary, oldHolidayCalCode string
-			var oldBrokenMethod, oldBrokenLoc, oldRoundingMethod, oldRoundingFreq string
-			var oldGracePeriodRateType, oldQuarterDef, oldTdsDeduction string
-			var oldEffectiveFrom, oldConfigNotes string
-			var oldEffectiveTo *string
-			var oldMinAmt, oldMaxAmt *float64
-			var oldWeekendAccrual, oldHolidayAccrual, oldIsActive bool
-			var oldRoundingDecimals int
-			var oldGracePeriodDays, oldMinCompoundingPeriodDays *int
-
-			if err := rows.Scan(
-				&auditID, &cfgID, &actionType, &processStatus, &reason, &reqBy, &reqAt, &checkerBy, &checkerAt, &checkerComment,
-				// current
-				&curBankCode, &curBankName, &curBankShortName, &curProductType, &curMinAmt, &curMaxAmt, &curDayCountCode,
-				&curCapSchedType, &curCapDateAdj,
-				&curAccrualStart, &curAccrualEnd, &curPeriodBoundary,
-				&curWeekendAccrual, &curHolidayAccrual, &curHolidayCalCode,
-				&curBrokenMethod, &curBrokenLoc,
-				&curRoundingDecimals, &curRoundingMethod, &curRoundingFreq,
-				&curGracePeriodDays, &curGracePeriodRateType,
-				&curMinCompoundingPeriodDays, &curQuarterDef,
-				&curTdsDeduction,
-				&curEffectiveFrom, &curEffectiveTo,
-				&curConfigNotes, &curIsActive, &curIsDeleted,
-				// old
-				&oldBankCode, &oldProductType, &oldMinAmt, &oldMaxAmt, &oldDayCountCode,
-				&oldCapSchedType, &oldCapDateAdj,
-				&oldAccrualStart, &oldAccrualEnd, &oldPeriodBoundary,
-				&oldWeekendAccrual, &oldHolidayAccrual, &oldHolidayCalCode,
-				&oldBrokenMethod, &oldBrokenLoc,
-				&oldRoundingDecimals, &oldRoundingMethod, &oldRoundingFreq,
-				&oldGracePeriodDays, &oldGracePeriodRateType,
-				&oldMinCompoundingPeriodDays, &oldQuarterDef,
-				&oldTdsDeduction,
-				&oldEffectiveFrom, &oldEffectiveTo,
-				&oldConfigNotes, &oldIsActive,
-			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
-				return
-			}
-
-			out = append(out, map[string]interface{}{
-				"audit_id":          auditID,
-				"config_id":         cfgID,
-				"action_type":       actionType,
-				"processing_status": processStatus,
-				"reason":            reason,
-				"requested_by":      reqBy,
-				"requested_at":      reqAt,
-				"checker_by":        checkerBy,
-				"checker_at":        checkerAt,
-				"checker_comment":   checkerComment,
-
-				"bank_code":                       curBankCode,
-				"bank_name":                       curBankName,
-				"bank_short_name":                 curBankShortName,
-				"product_type":                    curProductType,
-				"minimum_amount":                  curMinAmt,
-				"maximum_amount":                  curMaxAmt,
-				"day_count_code":                  curDayCountCode,
-				"capitalization_schedule_type":    curCapSchedType,
-				"capitalization_date_adjustment":  curCapDateAdj,
-				"accrual_start_convention":        curAccrualStart,
-				"accrual_end_convention":          curAccrualEnd,
-				"period_boundary_definition":      curPeriodBoundary,
-				"weekend_accrual":                 curWeekendAccrual,
-				"holiday_accrual":                 curHolidayAccrual,
-				"holiday_calendar_code":           curHolidayCalCode,
-				"broken_period_method":            curBrokenMethod,
-				"broken_period_location":          curBrokenLoc,
-				"interest_rounding_decimals":      curRoundingDecimals,
-				"rounding_method":                 curRoundingMethod,
-				"rounding_frequency":              curRoundingFreq,
-				"grace_period_days":               curGracePeriodDays,
-				"grace_period_rate_type":          curGracePeriodRateType,
-				"minimum_compounding_period_days": curMinCompoundingPeriodDays,
-				"quarter_definition":              curQuarterDef,
-				"tds_deduction_timing":            curTdsDeduction,
-				"effective_from":                  curEffectiveFrom,
-				"effective_to":                    curEffectiveTo,
-				"config_notes":                    curConfigNotes,
-				"is_active":                       curIsActive,
-				"is_deleted":                      curIsDeleted,
-
-				"old_bank_code":                       oldBankCode,
-				"old_product_type":                    oldProductType,
-				"old_minimum_amount":                  oldMinAmt,
-				"old_maximum_amount":                  oldMaxAmt,
-				"old_day_count_code":                  oldDayCountCode,
-				"old_capitalization_schedule_type":    oldCapSchedType,
-				"old_capitalization_date_adjustment":  oldCapDateAdj,
-				"old_accrual_start_convention":        oldAccrualStart,
-				"old_accrual_end_convention":          oldAccrualEnd,
-				"old_period_boundary_definition":      oldPeriodBoundary,
-				"old_weekend_accrual":                 oldWeekendAccrual,
-				"old_holiday_accrual":                 oldHolidayAccrual,
-				"old_holiday_calendar_code":           oldHolidayCalCode,
-				"old_broken_period_method":            oldBrokenMethod,
-				"old_broken_period_location":          oldBrokenLoc,
-				"old_interest_rounding_decimals":      oldRoundingDecimals,
-				"old_rounding_method":                 oldRoundingMethod,
-				"old_rounding_frequency":              oldRoundingFreq,
-				"old_grace_period_days":               oldGracePeriodDays,
-				"old_grace_period_rate_type":          oldGracePeriodRateType,
-				"old_minimum_compounding_period_days": oldMinCompoundingPeriodDays,
-				"old_quarter_definition":              oldQuarterDef,
-				"old_tds_deduction_timing":            oldTdsDeduction,
-				"old_effective_from":                  oldEffectiveFrom,
-				"old_effective_to":                    oldEffectiveTo,
-				"old_config_notes":                    oldConfigNotes,
-				"old_is_active":                       oldIsActive,
-			})
-		}
-
-		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+rows.Err().Error())
-			return
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"audit_logs":           out,
-		})
-		api.LogInfo("BankConfig AuditHistory: returned %d records", len(out))
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GetBankConfig — single record by config_id
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// GetBankConfig â€” single record by config_id
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func GetBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
