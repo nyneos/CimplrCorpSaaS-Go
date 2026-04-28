@@ -247,10 +247,10 @@ func insertPaymentNetworkInTx(ctx context.Context, pool *pgxpool.Pool, inp Payme
 func UpdatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID            string                 `json:"user_id"`
-			PaymentNetworkID  string                 `json:"payment_network_id"`
-			Fields            map[string]interface{} `json:"fields"`
-			Reason            string                 `json:"reason"`
+			UserID           string                 `json:"user_id"`
+			PaymentNetworkID string                 `json:"payment_network_id"`
+			Fields           map[string]interface{} `json:"fields"`
+			Reason           string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -374,7 +374,7 @@ func BulkApprovePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.PaymentNetworkIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No payment_network_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPaymentNetworkIDsProvided)
 			return
 		}
 
@@ -457,7 +457,7 @@ func BulkRejectPaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.PaymentNetworkIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No payment_network_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPaymentNetworkIDsProvided)
 			return
 		}
 
@@ -514,7 +514,7 @@ func BulkDeletePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.PaymentNetworkIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No payment_network_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPaymentNetworkIDsProvided)
 			return
 		}
 

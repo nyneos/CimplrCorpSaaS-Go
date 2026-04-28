@@ -381,7 +381,7 @@ func BulkApproveBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.BankIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No bank_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoBankIDsProvided)
 			return
 		}
 
@@ -464,7 +464,7 @@ func BulkRejectBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.BankIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No bank_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoBankIDsProvided)
 			return
 		}
 
@@ -521,7 +521,7 @@ func BulkDeleteBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.BankIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No bank_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoBankIDsProvided)
 			return
 		}
 

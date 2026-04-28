@@ -174,7 +174,7 @@ func resolveFDBookingAccountExpression(ctx context.Context, exec fdSchemaQueryEx
 		return "", err
 	}
 	if columnName == "" {
-		return "''::text", nil
+		return constants.ErrEmptyString, nil
 	}
 	return fmt.Sprintf("COALESCE(%s.%s,'')", tableAlias, columnName), nil
 }

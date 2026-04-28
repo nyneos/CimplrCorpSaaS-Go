@@ -1,6 +1,7 @@
 package s3storage
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -119,10 +120,7 @@ func sanitizeFilenameComponent(s string) string {
 	lastUnderscore := false
 	for _, r := range s {
 		switch {
-		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
-			builder.WriteRune(r)
-			lastUnderscore = false
-		case r == '-' || r == '_':
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_':
 			builder.WriteRune(r)
 			lastUnderscore = false
 		default:
@@ -331,7 +329,7 @@ func contentTypeFromExtension(key string, detected string) string {
 	case ".xls":
 		return "application/vnd.ms-excel"
 	case ".json":
-		return "application/json"
+		return constants.ContentTypeJSON
 	case ".txt":
 		return "text/plain"
 	case ".pdf":

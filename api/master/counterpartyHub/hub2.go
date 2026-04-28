@@ -124,7 +124,7 @@ func validateHubCreateRequest(req HubCreateRequest) error {
 	if req.EffectiveFrom == "" {
 		return fmt.Errorf("effective_from is required")
 	}
-	if _, err := time.Parse("2006-01-02", req.EffectiveFrom); err != nil {
+	if _, err := time.Parse(constants.DateFormat, req.EffectiveFrom); err != nil {
 		return fmt.Errorf("effective_from must be YYYY-MM-DD")
 	}
 	if req.LEI != "" {
@@ -386,8 +386,8 @@ func CreateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ModuleCode:       "COUNTERPARTY_HUB",
 				TransactionType:  "COUNTERPARTY_CREATE",
 				RecordID:         cpID,
-				RecordTable:      "apibox_svc.counterparty",
-				AuditTable:       "apibox_svc.audit_counterparty",
+				RecordTable:      constants.ErrCounterpartyServiceTable,
+				AuditTable:       constants.ErrAuditCounterpartyServiceTable,
 				AuditIDColumn:    "counterparty_id",
 				ActionType:       "CREATE",
 				SubmittedBy:      uID,
@@ -435,7 +435,7 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.CounterpartyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "counterparty_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrCounterpartyIDsRequired)
 			return
 		}
 
@@ -456,11 +456,11 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errs []string
 
 		for _, cpID := range req.CounterpartyIDs {
-		// Fetch type and current status
-		var cpType, currentStatus string
-		if err := pgxPool.QueryRow(ctx,
-			`SELECT counterparty_type, status FROM apibox_svc.counterparty WHERE counterparty_id=$1`,
-			cpID).Scan(&cpType, &currentStatus); err != nil {
+			// Fetch type and current status
+			var cpType, currentStatus string
+			if err := pgxPool.QueryRow(ctx,
+				`SELECT counterparty_type, status FROM apibox_svc.counterparty WHERE counterparty_id=$1`,
+				cpID).Scan(&cpType, &currentStatus); err != nil {
 				errs = append(errs, cpID+": not found")
 				continue
 			}
@@ -469,9 +469,9 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-		// Maker / checker guard
-		var requestedBy string
-		_ = pgxPool.QueryRow(ctx, `
+			// Maker / checker guard
+			var requestedBy string
+			_ = pgxPool.QueryRow(ctx, `
 			SELECT requested_by FROM apibox_svc.audit_counterparty
 			WHERE counterparty_id=$1 AND processing_status LIKE 'PENDING%'
 			ORDER BY requested_at DESC LIMIT 1`, cpID).Scan(&requestedBy)
@@ -539,16 +539,16 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 
-			tag, err1 := tx.Exec(ctx, `
+				tag, err1 := tx.Exec(ctx, `
 				UPDATE apibox_svc.audit_counterparty
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
 				WHERE counterparty_id=$3 AND processing_status LIKE 'PENDING%'`,
-				userEmail, req.Comment, cpID)
+					userEmail, req.Comment, cpID)
 
-			_, err2 := tx.Exec(ctx, `
+				_, err2 := tx.Exec(ctx, `
 				UPDATE apibox_svc.counterparty SET status='ACTIVE', updated_by=$1, updated_at=now()
 				WHERE counterparty_id=$2 AND status IN ('DRAFT','PENDING_APPROVAL')`,
-				userEmail, cpID)
+					userEmail, cpID)
 
 				// Stamp typed audit as well
 				auditTbl := typedAuditTable(cpType)
@@ -631,8 +631,9 @@ func activateCounterparty(ctx context.Context, pool *pgxpool.Pool,
 
 // GetCounterpartyAll handles GET /master/v2/counterparty-hub/all
 // Query params:
-//   ?type=BANK|EXCHANGE|DATA_PROVIDER|CCP_CSD|PAYMENT_NETWORK|ERP_SYSTEM  (optional — omit for all)
-//   ?status=PENDING_APPROVAL  (optional)
+//
+//	?type=BANK|EXCHANGE|DATA_PROVIDER|CCP_CSD|PAYMENT_NETWORK|ERP_SYSTEM  (optional — omit for all)
+//	?status=PENDING_APPROVAL  (optional)
 func GetCounterpartyAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cpType := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("type")))
@@ -729,7 +730,8 @@ func GetCounterpartyAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // GetCounterpartyApprovedActive handles GET /master/v2/counterparty-hub/approved-active
 // Query params:
-//   ?type=BANK|EXCHANGE|DATA_PROVIDER|CCP_CSD|PAYMENT_NETWORK|ERP_SYSTEM
+//
+//	?type=BANK|EXCHANGE|DATA_PROVIDER|CCP_CSD|PAYMENT_NETWORK|ERP_SYSTEM
 //
 // Without ?type= → returns all ACTIVE counterparties with parent fields only (dropdown use).
 // With    ?type= → returns the full typed JOIN including all typed-master columns.
@@ -1014,12 +1016,12 @@ func CreateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				defer func() { recover() }()
 				bgCtx := context.Background()
 				_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", id, uEmail)
-		_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_CREATE",
-				RecordID: id, RecordTable: "apibox_svc.counterparty",
-				AuditTable: "apibox_svc.audit_counterparty", AuditIDColumn: "counterparty_id",
-				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail,
-			})
+				_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+					ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_CREATE",
+					RecordID: id, RecordTable: constants.ErrCounterpartyServiceTable,
+					AuditTable: constants.ErrAuditCounterpartyServiceTable, AuditIDColumn: "counterparty_id",
+					ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail,
+				})
 			}(cpID, req.UserID, userEmail, row.CounterpartyType)
 		}
 
@@ -1038,10 +1040,10 @@ func CreateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func UpdateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID          string                 `json:"user_id"`
-			CounterpartyID  string                 `json:"counterparty_id"`
-			Fields          map[string]interface{} `json:"fields"`
-			Reason          string                 `json:"reason"`
+			UserID         string                 `json:"user_id"`
+			CounterpartyID string                 `json:"counterparty_id"`
+			Fields         map[string]interface{} `json:"fields"`
+			Reason         string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -1086,7 +1088,7 @@ func UpdateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FOR UPDATE`, req.CounterpartyID,
 		).Scan(&cpType, &oldStatus, &oldName, &oldCountry, &oldCurrency,
 			&oldLEI, &oldRMEmail, &oldNotes, &oldShortName); err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "counterparty not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrCounterpartyNotFound1)
 			return
 		}
 
@@ -1234,8 +1236,8 @@ func UpdateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_EDIT",
-				RecordID: cpID, RecordTable: "apibox_svc.counterparty",
-				AuditTable: "apibox_svc.audit_counterparty", AuditIDColumn: "counterparty_id",
+				RecordID: cpID, RecordTable: constants.ErrCounterpartyServiceTable,
+				AuditTable: constants.ErrAuditCounterpartyServiceTable, AuditIDColumn: "counterparty_id",
 				ActionType: "EDIT", SubmittedBy: uID, SubmittedByEmail: uEmail,
 			})
 		}(req.CounterpartyID, req.UserID, userEmail)
@@ -1272,7 +1274,7 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.CounterpartyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "counterparty_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrCounterpartyIDsRequired)
 			return
 		}
 
@@ -1292,9 +1294,9 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var rejected, errList []map[string]interface{}
 
 		for _, cpID := range req.CounterpartyIDs {
-		// Self-reject guard: skip if requester == checker
-		var requestedBy string
-		_ = pgxPool.QueryRow(ctx, `
+			// Self-reject guard: skip if requester == checker
+			var requestedBy string
+			_ = pgxPool.QueryRow(ctx, `
 			SELECT requested_by FROM apibox_svc.audit_counterparty
 			WHERE counterparty_id=$1 AND processing_status LIKE 'PENDING%'
 			ORDER BY requested_at DESC LIMIT 1`, cpID).Scan(&requestedBy)
@@ -1400,7 +1402,7 @@ func BulkDeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.CounterpartyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "counterparty_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrCounterpartyIDsRequired)
 			return
 		}
 
@@ -1420,11 +1422,11 @@ func BulkDeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var submitted, errList []map[string]interface{}
 
 		for _, cpID := range req.CounterpartyIDs {
-		// Verify record exists and is not already deleted
-		var cpType string
-		if err := pgxPool.QueryRow(ctx,
-			`SELECT counterparty_type FROM apibox_svc.counterparty WHERE counterparty_id=$1 AND is_deleted=FALSE`,
-			cpID).Scan(&cpType); err != nil {
+			// Verify record exists and is not already deleted
+			var cpType string
+			if err := pgxPool.QueryRow(ctx,
+				`SELECT counterparty_type FROM apibox_svc.counterparty WHERE counterparty_id=$1 AND is_deleted=FALSE`,
+				cpID).Scan(&cpType); err != nil {
 				errList = append(errList, map[string]interface{}{
 					"counterparty_id": cpID, "success": false, "error": "not found or already deleted",
 				})
@@ -1538,7 +1540,7 @@ func GetCounterpartyDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer prows.Close()
 
 		if !prows.Next() {
-			api.RespondWithError(w, http.StatusNotFound, "counterparty not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrCounterpartyNotFound1)
 			return
 		}
 		pFds := prows.FieldDescriptions()
@@ -1671,11 +1673,11 @@ func GetCounterpartyAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 
-	// Fetch type first
-	var cpType string
-	if err := pgxPool.QueryRow(ctx,
-		`SELECT counterparty_type FROM apibox_svc.counterparty WHERE counterparty_id=$1`, cpID).Scan(&cpType); err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "counterparty not found")
+		// Fetch type first
+		var cpType string
+		if err := pgxPool.QueryRow(ctx,
+			`SELECT counterparty_type FROM apibox_svc.counterparty WHERE counterparty_id=$1`, cpID).Scan(&cpType); err != nil {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrCounterpartyNotFound1)
 			return
 		}
 

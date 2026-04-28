@@ -70,7 +70,7 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.Handle("/uam/instance/detail", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetInstanceDetail(pgxPool)))
 	/*users*/
 	mux.Handle("/uam/users/create-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.CreateUser(db, pgxPool))))
-	mux.Handle("/uam/users/get-users", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetUsers(db))))
+	mux.Handle("/uam/users/get-users", middlewares.PreValidationMiddleware(pgxPool)(http.HandlerFunc(user.GetUsers(db))))
 	mux.Handle("/uam/users/get-approved-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetApprovedUser(db))))
 	mux.Handle("/uam/users/get-user-by-id", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetUserById(db))))
 	mux.Handle("/uam/users/update-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.UpdateUser(db))))

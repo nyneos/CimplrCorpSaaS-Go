@@ -33,6 +33,11 @@ func parseDate(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, nil
 	}
+	// Normalize unicode dash variants often present in downloaded bank statements
+	// (e.g. "01–02–2026" with en-dash).
+	s = strings.ReplaceAll(s, "–", "-")
+	s = strings.ReplaceAll(s, "—", "-")
+	s = strings.ReplaceAll(s, "−", "-")
 	// Prefer dd/mm/yyyy for bank statements before falling back to the broader parser set.
 	if t, err := time.Parse("02/01/2006", s); err == nil {
 		return t, nil

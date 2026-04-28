@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"regexp"
 	"strings"
 	"time"
@@ -28,7 +29,7 @@ func pqUserFriendlyMessage(err error) string {
 	case "23505":
 		switch pqErr.Constraint {
 		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
-			return "This bank statement file was already uploaded earlier. Please upload a different file."
+			return constants.ErrBankStatementFileAlreadyUploaded
 		case "uniq_stmt":
 			return "A statement for this period is already uploaded for this account."
 		default:
@@ -155,8 +156,30 @@ func allEmptyRow(row []string) bool {
 }
 
 func cleanAmount(s string) string {
+	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, ",", "")
-	return strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "₹", "")
+	s = strings.ReplaceAll(s, "$", "")
+	s = strings.TrimSpace(s)
+	// Strip trailing Cr/Dr indicator used by some banks (e.g. ICICI: "53,90,593.75 Cr").
+	// For balance columns: "Dr" means overdraft (caller handles sign if needed).
+	// For debit/credit amount columns: the indicator is redundant — value is already positive.
+	lc := strings.ToLower(s)
+	switch {
+	case strings.HasSuffix(lc, " cr"):
+		s = strings.TrimSpace(s[:len(s)-3])
+	case strings.HasSuffix(lc, " dr"):
+		s = strings.TrimSpace(s[:len(s)-3])
+	case len(s) > 2 && strings.HasSuffix(lc, "cr") && (lc[len(lc)-3] >= '0' && lc[len(lc)-3] <= '9'):
+		s = strings.TrimSpace(s[:len(s)-2])
+	case len(s) > 2 && strings.HasSuffix(lc, "dr") && (lc[len(lc)-3] >= '0' && lc[len(lc)-3] <= '9'):
+		s = strings.TrimSpace(s[:len(s)-2])
+	}
+	return s
+}
+
+func isFiniteNumber(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 // buildTxnKey creates a stable key used to detect whether a transaction from
@@ -186,7 +209,7 @@ func userFriendlyUploadError(err error) string {
 	}
 
 	if errors.Is(err, ErrFileAlreadyUploaded) {
-		return "This bank statement file was already uploaded earlier. Please upload a different file."
+		return constants.ErrBankStatementFileAlreadyUploaded
 	}
 	if errors.Is(err, ErrAccountNumberMissing) {
 		return "Could not find the bank account number in the uploaded statement. Please upload the original bank statement downloaded from the bank."
@@ -225,7 +248,7 @@ func userFriendlyUploadError(err error) string {
 		case "uniq_stmt":
 			return "A statement for this account and period is already uploaded. Use force_override=true to re-upload."
 		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
-			return "This bank statement file was already uploaded earlier. Please upload a different file."
+			return constants.ErrBankStatementFileAlreadyUploaded
 		}
 	}
 	log.Println("Debug raw mesage", msg)

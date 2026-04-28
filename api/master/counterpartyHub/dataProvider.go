@@ -373,7 +373,7 @@ func BulkApproveDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ProviderIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No provider_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoProviderIDsProvided)
 			return
 		}
 
@@ -461,7 +461,7 @@ func BulkRejectDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ProviderIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No provider_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoProviderIDsProvided)
 			return
 		}
 
@@ -521,7 +521,7 @@ func BulkDeleteDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ProviderIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No provider_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoProviderIDsProvided)
 			return
 		}
 

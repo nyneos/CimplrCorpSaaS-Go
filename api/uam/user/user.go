@@ -279,9 +279,11 @@ func GetUsers(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
 			return
 		}
-		// Get entity IDs from context (set by middleware via user_entity_mappings)
+		// Get entity IDs from context (set by middleware via user_entity_mappings).
+		// Admin override sessions are allowed even if entity list is unexpectedly empty.
 		entityIDs, _ := r.Context().Value(api.EntityIDsKey).([]string)
-		if len(entityIDs) == 0 {
+		isAdminOverride, _ := r.Context().Value("is_admin_override").(bool)
+		if len(entityIDs) == 0 && !isAdminOverride {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}

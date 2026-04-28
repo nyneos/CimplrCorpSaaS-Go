@@ -38,7 +38,7 @@ func ExtractUserID(r *http.Request) (string, error) {
 	r.Body = io.NopCloser(bytes.NewBuffer(body))
 	ct := r.Header.Get(constants.ContentTypeText)
 	// If multipart, explicitly call ParseMultipartForm with a reasonable maxMemory
-	if strings.Contains(strings.ToLower(ct), "multipart/form-data") {
+	if strings.Contains(strings.ToLower(ct), constants.ContentTypeMultipart) {
 		if err := r.ParseMultipartForm(32 << 20); err == nil {
 			if userID := r.FormValue("user_id"); userID != "" {
 				// restore body for caller

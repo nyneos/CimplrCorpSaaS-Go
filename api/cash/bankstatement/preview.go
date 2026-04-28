@@ -573,14 +573,17 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			row = append(row, "")
 		}
 
-	// Skip non-transaction rows — check first cell AND the description column.
-	// Note: "balance brought forward" / "balance carried forward" are real transactions, NOT skipped.
-	nonTxnKeywords := []string{
-		"call 1800", "write to us", "closing balance", "opening balance",
-		"toll free", "balance b/f", "balance c/f",
-		"new balance", "new val",
-		"avl", "avil", "available balance",
-	}
+		// Skip non-transaction rows — check first cell AND the description column.
+		// "balance brought forward", "balance carried forward", "b/f", "balance b/f", "balance c/f"
+		// are real transactions and must NOT be skipped — they establish the period opening balance.
+		nonTxnKeywords := []string{
+			"call 1800", "write to us", "closing balance", "opening balance",
+			"toll free",
+			"new balance", "new val",
+			"avl", "avil", constants.QuerryAvailableBalance,
+			"page total", "statement total", "grand total",
+			"total debit", "total credit", "total withdrawals", "total deposits",
+		}
 		skipRow := false
 		// Build candidate cells: always include row[0]; also include description column if mapped
 		candidateCells := []string{strings.ToLower(strings.TrimSpace(row[0]))}
@@ -614,11 +617,11 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			"misclassified_flag": false,
 		}
 
-	// Extract tran_id — prefer explicit column; fall back to batchID+seq synthetic ID
-	tranIDStr := ""
-	if idx, ok := colIdx[constants.TranID]; ok && idx < len(row) {
-		tranIDStr = strings.TrimSpace(row[idx])
-	}
+		// Extract tran_id — prefer explicit column; fall back to batchID+seq synthetic ID
+		tranIDStr := ""
+		if idx, ok := colIdx[constants.TranID]; ok && idx < len(row) {
+			tranIDStr = strings.TrimSpace(row[idx])
+		}
 
 		// Parse dates
 		var transactionDate, valueDate time.Time
@@ -664,22 +667,22 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		}
 		txn["description"] = description
 
-	// Resolve tran_id: file column → cheque/ref → date+timestamp+seq synthetic ID
-	if tranIDStr == "" {
-		// Cheque/ref column fallback
-		for _, hdr := range []string{"Cheque", "Chq", "Reference", "Ref No"} {
-			if idx, ok := colIdx[hdr]; ok && idx < len(row) {
-				if v := strings.TrimSpace(row[idx]); v != "" {
-					tranIDStr = v
-					break
+		// Resolve tran_id: file column → cheque/ref → date+timestamp+seq synthetic ID
+		if tranIDStr == "" {
+			// Cheque/ref column fallback
+			for _, hdr := range []string{"Cheque", "Chq", "Reference", "Ref No"} {
+				if idx, ok := colIdx[hdr]; ok && idx < len(row) {
+					if v := strings.TrimSpace(row[idx]); v != "" {
+						tranIDStr = v
+						break
+					}
 				}
 			}
 		}
-	}
-	if tranIDStr == "" {
-		tranIDStr = buildSyntheticTranID(previewBatchID, previewRowNum)
-	}
-	txn["tran_id"] = tranIDStr
+		if tranIDStr == "" {
+			tranIDStr = buildSyntheticTranID(previewBatchID, previewRowNum)
+		}
+		txn["tran_id"] = tranIDStr
 
 		// Amounts
 		var withdrawal, deposit sql.NullFloat64
@@ -860,12 +863,23 @@ func parseAmount(s string) (float64, error) {
 	if s == "" || s == "-" {
 		return 0, nil
 	}
-
 	s = strings.ReplaceAll(s, ",", "")
 	s = strings.ReplaceAll(s, "₹", "")
 	s = strings.ReplaceAll(s, "$", "")
 	s = strings.TrimSpace(s)
-
+	// Strip trailing Cr/Dr indicator (e.g. ICICI: "53,90,593.75 Cr")
+	lc := strings.ToLower(s)
+	switch {
+	case strings.HasSuffix(lc, " cr"):
+		s = strings.TrimSpace(s[:len(s)-3])
+	case strings.HasSuffix(lc, " dr"):
+		s = strings.TrimSpace(s[:len(s)-3])
+	case len(s) > 2 && strings.HasSuffix(lc, "cr") && lc[len(lc)-3] >= '0' && lc[len(lc)-3] <= '9':
+		s = strings.TrimSpace(s[:len(s)-2])
+	case len(s) > 2 && strings.HasSuffix(lc, "dr") && lc[len(lc)-3] >= '0' && lc[len(lc)-3] <= '9':
+		s = strings.TrimSpace(s[:len(s)-2])
+	}
+	s = strings.TrimSpace(s)
 	return strconv.ParseFloat(s, 64)
 }
 
@@ -917,7 +931,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 	descIdx := findIdx("description", "transaction description", "remarks", "narration", "particulars")
 	debitIdx := findIdx("debit", "withdrawal", "debit amount", "withdrawal amount")
 	creditIdx := findIdx("credit", "deposit", "credit amount", "deposit amount")
-	balanceIdx := findIdx("balance", "available balance", "closing balance", "current / closing")
+	balanceIdx := findIdx("balance", constants.QuerryAvailableBalance, "closing balance", "current / closing")
 	tranIDIdx := findIdx("transaction id", "tran id", "txn id", "reference", "ref no", "bank reference")
 
 	fmt.Printf("[PREVIEW-MULTI] Column indices - acc:%d date:%d desc:%d debit:%d credit:%d balance:%d\n",

@@ -268,7 +268,7 @@ func GetNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pos++
 		}
 
-		whereClause := "WHERE COALESCE(e.is_deleted, false) = false"
+		whereClause := "WHERE COALESCE(e.is_deleted, false) = false" + sqlFilterMasterEntityLiveORGlobalE
 		if len(whereParts) > 0 {
 			whereClause += " AND " + strings.Join(whereParts, " AND ")
 		}
@@ -306,27 +306,30 @@ func GetNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					  AND COALESCE(at.is_deleted, false) = false
 				) AS has_template
 			FROM notification_svc.notification_config nc
-			LEFT JOIN notification_svc.event e ON e.event_id = nc.event_id
+			INNER JOIN notification_svc.event e ON e.event_id = nc.event_id
 			-- exclude configs whose parent event has been soft-deleted
-			LEFT JOIN LATERAL (
-				SELECT GREATEST(
-					COALESCE(MAX(a.requested_at), '1970-01-01'::timestamp),
-					COALESCE(MAX(a.checker_at),   '1970-01-01'::timestamp)
-				) AS latest_ts
-				FROM notification_svc.audit_event a
-				WHERE a.event_id = nc.event_id
-			) la ON true
-			-- latest audit row for the config itself
+			-- latest config audit row by last activity (maker request vs checker action)
 			LEFT JOIN LATERAL (
 				SELECT ac.processing_status, ac.action_type, ac.requested_by,
 				       ac.requested_at, ac.checker_by, ac.checker_at, ac.checker_comment
 				FROM notification_svc.audit_notification_config ac
 				WHERE ac.config_id = nc.config_id
-				ORDER BY ac.requested_at DESC NULLS LAST
+				ORDER BY GREATEST(
+					ac.requested_at,
+					COALESCE(ac.checker_at, ac.requested_at)
+				) DESC NULLS LAST, ac.requested_at DESC
 				LIMIT 1
 			) la_cfg ON true
 		` + whereClause + `
-			ORDER BY la.latest_ts DESC, e.event_display_name, nc.channel
+			ORDER BY COALESCE(
+				GREATEST(
+					la_cfg.requested_at,
+					COALESCE(la_cfg.checker_at, la_cfg.requested_at)
+				),
+				nc.updated_at
+			) DESC NULLS LAST,
+			e.event_display_name,
+			nc.channel
 		`
 
 		rows, err := pgxPool.Query(ctx, q, args...)

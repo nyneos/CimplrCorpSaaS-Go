@@ -474,7 +474,7 @@ func BulkApproveExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ExchangeIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No exchange_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoExchangeIDsProvided)
 			return
 		}
 
@@ -562,7 +562,7 @@ func BulkRejectExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ExchangeIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No exchange_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoExchangeIDsProvided)
 			return
 		}
 
@@ -622,7 +622,7 @@ func BulkDeleteExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ExchangeIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No exchange_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoExchangeIDsProvided)
 			return
 		}
 

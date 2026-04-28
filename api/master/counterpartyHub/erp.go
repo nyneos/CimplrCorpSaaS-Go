@@ -515,7 +515,7 @@ func BulkApproveERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ERPSystemIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No erp_system_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoErpSystemIDsProvided)
 			return
 		}
 
@@ -598,7 +598,7 @@ func BulkRejectERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ERPSystemIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No erp_system_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoErpSystemIDsProvided)
 			return
 		}
 
@@ -655,7 +655,7 @@ func BulkDeleteERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ERPSystemIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No erp_system_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoErpSystemIDsProvided)
 			return
 		}
 

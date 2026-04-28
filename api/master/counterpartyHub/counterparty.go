@@ -51,10 +51,10 @@ type CreateCounterpartyBulkRequest struct {
 }
 
 type UpdateCounterpartyRequest struct {
-	UserID          string                 `json:"user_id"`
-	CounterpartyID  string                 `json:"counterparty_id"`
-	Fields          map[string]interface{} `json:"fields"`
-	Reason          string                 `json:"reason"`
+	UserID         string                 `json:"user_id"`
+	CounterpartyID string                 `json:"counterparty_id"`
+	Fields         map[string]interface{} `json:"fields"`
+	Reason         string                 `json:"reason"`
 }
 
 type BulkApproveCounterpartyRequest struct {
@@ -283,8 +283,8 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_MASTER_CREATE",
-				RecordID: cpID, RecordTable: "apibox.counterparty_master",
-				AuditTable: "apibox.audit_counterparty_master", AuditIDColumn: "counterparty_id",
+				RecordID: cpID, RecordTable: constants.ErrCounterpartyMasterTable,
+				AuditTable: constants.ErrAuditCounterpartyMasterTable, AuditIDColumn: "counterparty_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail,
 			})
 		}(counterpartyID, req.UserID, userEmail)
@@ -298,12 +298,12 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}(counterpartyID, userEmail)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess:  true,
-			"counterparty_id":       counterpartyID,
-			"child_id":              childID,
-			"counterparty_type":     cpType,
-			"counterparty_code":     strings.ToUpper(req.CounterpartyCode),
-			"requested":             userEmail,
+			constants.ValueSuccess: true,
+			"counterparty_id":      counterpartyID,
+			"child_id":             childID,
+			"counterparty_type":    cpType,
+			"counterparty_code":    strings.ToUpper(req.CounterpartyCode),
+			"requested":            userEmail,
 		})
 		api.LogInfo("Counterparty+child created: ID=%s type=%s childID=%s by=%s", counterpartyID, cpType, childID, userEmail)
 	}
@@ -427,8 +427,8 @@ func CreateCounterpartyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				bgCtx := context.Background()
 				_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_MASTER_CREATE",
-					RecordID: id, RecordTable: "apibox.counterparty_master",
-					AuditTable: "apibox.audit_counterparty_master", AuditIDColumn: "counterparty_id",
+					RecordID: id, RecordTable: constants.ErrCounterpartyMasterTable,
+					AuditTable: constants.ErrAuditCounterpartyMasterTable, AuditIDColumn: "counterparty_id",
 					ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail,
 				})
 			}(cpID, req.UserID, userEmail)
@@ -606,8 +606,8 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_MASTER_EDIT",
-				RecordID: cpID, RecordTable: "apibox.counterparty_master",
-				AuditTable: "apibox.audit_counterparty_master", AuditIDColumn: "counterparty_id",
+				RecordID: cpID, RecordTable: constants.ErrCounterpartyMasterTable,
+				AuditTable: constants.ErrAuditCounterpartyMasterTable, AuditIDColumn: "counterparty_id",
 				ActionType: "EDIT", SubmittedBy: uID, SubmittedByEmail: uEmail,
 			})
 		}(req.CounterpartyID, req.UserID, userEmail)
@@ -637,7 +637,7 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.CounterpartyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No counterparty_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCounterpartyIDsProvided)
 			return
 		}
 
@@ -806,7 +806,7 @@ func BulkRejectCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.CounterpartyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No counterparty_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCounterpartyIDsProvided)
 			return
 		}
 
@@ -900,7 +900,7 @@ func BulkDeleteCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.CounterpartyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No counterparty_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCounterpartyIDsProvided)
 			return
 		}
 
@@ -1277,7 +1277,7 @@ func GetCounterpartyMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer prows.Close()
 
 		if !prows.Next() {
-			api.RespondWithError(w, http.StatusNotFound, "Counterparty not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrCounterpartyNotFound1)
 			return
 		}
 		pFields := prows.FieldDescriptions()

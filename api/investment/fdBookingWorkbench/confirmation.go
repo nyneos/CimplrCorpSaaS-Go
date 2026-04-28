@@ -47,8 +47,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			PenaltyID                string           `json:"penalty_id"`
 			PayoutDates              *json.RawMessage `json:"payout_dates"`
 			CompoundingDates         *json.RawMessage `json:"compounding_dates"`
-			FirstPayoutDate          string           `json:"first_payout_date"`          // YYYY-MM-DD; actual first interest credit date
-			FirstCapitalizationDate  string           `json:"first_capitalization_date"`  // YYYY-MM-DD; actual first capitalization date
+			FirstPayoutDate          string           `json:"first_payout_date"`         // YYYY-MM-DD; actual first interest credit date
+			FirstCapitalizationDate  string           `json:"first_capitalization_date"` // YYYY-MM-DD; actual first capitalization date
 			Notes                    string           `json:"notes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -707,8 +707,6 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-
-
 		if err = tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrCommitFailedCapitalized)
 			api.RespondWithError(w, status, msg)
@@ -787,7 +785,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ConfirmationID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmationIDsRequired)
 			return
 		}
 		if len(req.Fields) == 0 {
@@ -1143,7 +1141,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ConfirmationID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmationIDsRequired)
 			return
 		}
 
@@ -1975,7 +1973,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, status, msg)
 			return
 		}
-		currencyExpr := "''::text"
+		currencyExpr := constants.ErrEmptyString
 		switch {
 		case confCols["currency"]:
 			currencyExpr = "COALESCE(c.currency, '')"
@@ -1986,11 +1984,11 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		case bookingCols["currency_code"]:
 			currencyExpr = "COALESCE(b.currency_code, '')"
 		}
-		fpDateExpr := "''::text"
+		fpDateExpr := constants.ErrEmptyString
 		if confCols["first_payout_date"] {
 			fpDateExpr = "COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')"
 		}
-		fcDateExpr := "''::text"
+		fcDateExpr := constants.ErrEmptyString
 		if confCols["first_capitalization_date"] {
 			fcDateExpr = "COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')"
 		}
@@ -2087,7 +2085,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		confirmationID := r.URL.Query().Get("confirmation_id")
 		if confirmationID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmationIDsRequired)
 			return
 		}
 		viewerUserID := r.URL.Query().Get("user_id")

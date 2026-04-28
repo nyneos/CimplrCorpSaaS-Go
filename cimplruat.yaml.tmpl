@@ -52,6 +52,136 @@ spec:
                 secretKeyRef:
                   name: cimplruat-secrets
                   key: DB_NAME
+            - name: ENABLE_ADMIN_OVERRIDE
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: ENABLE_ADMIN_OVERRIDE
+            - name: ADMIN_USER_IDS
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: ADMIN_USER_IDS
+            - name: ADMIN_ROLES
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: ADMIN_ROLES
+            - name: UPLOAD_TO_STORAGE
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: UPLOAD_TO_STORAGE
+            - name: BANK_STMT_S3_ENABLED
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: BANK_STMT_S3_ENABLED
+            - name: DEVEL_MODE
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: DEVEL_MODE
+            - name: PAYLOAD_ENC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: PAYLOAD_ENC_KEY
+            - name: RESPONSE_ENC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: RESPONSE_ENC_KEY
+            - name: CATEGORIZATION_BATCH_SIZE
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: CATEGORIZATION_BATCH_SIZE
+            - name: VAPID_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: VAPID_PUBLIC_KEY
+            - name: VAPID_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: VAPID_PRIVATE_KEY
+            - name: VAPID_SUBJECT
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: VAPID_SUBJECT
+            - name: BROWSER_PUSH_ENABLED
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: BROWSER_PUSH_ENABLED
+            - name: BROWSER_PUSH_POLL_SECS
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: BROWSER_PUSH_POLL_SECS
+            - name: BROWSER_PUSH_BATCH_SIZE
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: BROWSER_PUSH_BATCH_SIZE
+            - name: BROWSER_PUSH_DIGEST_MINS
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: BROWSER_PUSH_DIGEST_MINS
+            - name: BROWSER_PUSH_DIGEST_THROTTLE
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: BROWSER_PUSH_DIGEST_THROTTLE
+            - name: BROWSER_PUSH_DIGEST_TOP_N
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: BROWSER_PUSH_DIGEST_TOP_N
+            - name: OUTBOX_WORKER_TIMEOUT_SECS
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: OUTBOX_WORKER_TIMEOUT_SECS
+            - name: OUTBOX_WORKER_BATCH_SIZE
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: OUTBOX_WORKER_BATCH_SIZE
+            - name: OUTBOX_WORKER_POLL_SECS
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: OUTBOX_WORKER_POLL_SECS
+            - name: OUTBOX_WORKER_ENABLED
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: OUTBOX_WORKER_ENABLED
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: BANK_STMT_S3_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: BANK_STMT_S3_BUCKET
+            - name: BANK_STMT_S3_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: BANK_STMT_S3_REGION
           # Optional: set runtime environment name or port if needed
             - name: ENV
               value: "uat"

@@ -146,39 +146,163 @@ func IsEntityAllowed(ctx context.Context, entityIdentifier string) bool {
 	return false
 }
 
-func IsCurrencyAllowed(ctx context.Context, currency string) bool {
-	currencies := GetCurrencyCodesFromCtx(ctx)
-	if len(currencies) == 0 {
-		return false
+// GetApprovedBanksFromCtx returns approved bank rows from prevalidation (bank_id, bank_name, bank_short_name).
+func GetApprovedBanksFromCtx(ctx context.Context) []map[string]string {
+	if banks, ok := ctx.Value("BankInfo").([]map[string]string); ok {
+		return banks
 	}
-	currUpper := strings.ToUpper(strings.TrimSpace(currency))
-	for _, c := range currencies {
-		if strings.ToUpper(strings.TrimSpace(c)) == currUpper {
-			return true
-		}
-	}
-	return false
+	return nil
 }
 
-func IsBankAllowed(ctx context.Context, bankName string) bool {
-	banks := GetBankNamesFromCtx(ctx)
-	if len(banks) == 0 {
-		// Check single bank info
-		bankInfo := GetBankInfoFromCtx(ctx)
-		if bankInfo != nil {
-			if name, exists := bankInfo["bank_name"]; exists {
-				return strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(bankName))
+// ResolveBankNameNormForFilter maps bank_id, bank short name, or display name to lower(trim(bank_name)) for SQL filters.
+func ResolveBankNameNormForFilter(ctx context.Context, bankIdentifier string) (norm string, ok bool) {
+	bankIdentifier = strings.TrimSpace(bankIdentifier)
+	if bankIdentifier == "" {
+		return "", false
+	}
+	for _, b := range GetApprovedBanksFromCtx(ctx) {
+		if b == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(b["bank_id"]), bankIdentifier) ||
+			strings.EqualFold(strings.TrimSpace(b["bank_name"]), bankIdentifier) ||
+			strings.EqualFold(strings.TrimSpace(b["bank_short_name"]), bankIdentifier) {
+			n := strings.TrimSpace(b["bank_name"])
+			if n == "" {
+				continue
+			}
+			return strings.ToLower(n), true
+		}
+	}
+	for _, n := range GetBankNamesFromCtx(ctx) {
+		if strings.EqualFold(strings.TrimSpace(n), bankIdentifier) {
+			return strings.ToLower(strings.TrimSpace(n)), true
+		}
+	}
+	if bankInfo := GetBankInfoFromCtx(ctx); bankInfo != nil {
+		if strings.EqualFold(strings.TrimSpace(bankInfo["bank_name"]), bankIdentifier) {
+			return strings.ToLower(strings.TrimSpace(bankInfo["bank_name"])), true
+		}
+		if strings.EqualFold(strings.TrimSpace(bankInfo["bank_id"]), bankIdentifier) ||
+			strings.EqualFold(strings.TrimSpace(bankInfo["bank_short_name"]), bankIdentifier) {
+			n := strings.TrimSpace(bankInfo["bank_name"])
+			if n != "" {
+				return strings.ToLower(n), true
 			}
 		}
-		return false
 	}
-	bankUpper := strings.ToUpper(strings.TrimSpace(bankName))
+	return "", false
+}
+
+// ResolveBankIDForFilter returns master bank_id when the identifier is an exact approved bank_id
+// (e.g. BANK-…) or when it matches exactly one approved bank by name or short_name.
+// Use this for SQL filters that must not collapse distinct banks sharing the same display name.
+func ResolveBankIDForFilter(ctx context.Context, bankIdentifier string) (bankID string, ok bool) {
+	bankIdentifier = strings.TrimSpace(bankIdentifier)
+	if bankIdentifier == "" {
+		return "", false
+	}
+	banks := GetApprovedBanksFromCtx(ctx)
 	for _, b := range banks {
-		if strings.ToUpper(strings.TrimSpace(b)) == bankUpper {
-			return true
+		if b == nil {
+			continue
+		}
+		id := strings.TrimSpace(b["bank_id"])
+		if id != "" && strings.EqualFold(id, bankIdentifier) {
+			return id, true
 		}
 	}
-	return false
+	var hits []string
+	seen := make(map[string]bool)
+	for _, b := range banks {
+		if b == nil {
+			continue
+		}
+		id := strings.TrimSpace(b["bank_id"])
+		if id == "" || seen[id] {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(b["bank_name"]), bankIdentifier) ||
+			strings.EqualFold(strings.TrimSpace(b["bank_short_name"]), bankIdentifier) {
+			hits = append(hits, id)
+			seen[id] = true
+		}
+	}
+	if len(hits) == 1 {
+		return hits[0], true
+	}
+	return "", false
+}
+
+// ResolveCurrencyCodeUpperForFilter maps currency_id, code, or name to upper(trim(currency_code)).
+func ResolveCurrencyCodeUpperForFilter(ctx context.Context, currencyIdentifier string) (code string, ok bool) {
+	currencyIdentifier = strings.TrimSpace(currencyIdentifier)
+	if currencyIdentifier == "" {
+		return "", false
+	}
+	for _, c := range GetCurrenciesFromCtx(ctx) {
+		if c == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(c["currency_id"]), currencyIdentifier) ||
+			strings.EqualFold(strings.TrimSpace(c["currency_code"]), currencyIdentifier) ||
+			strings.EqualFold(strings.TrimSpace(c["currency_name"]), currencyIdentifier) {
+			cc := strings.TrimSpace(c["currency_code"])
+			if cc == "" {
+				continue
+			}
+			return strings.ToUpper(cc), true
+		}
+	}
+	for _, c := range GetCurrencyCodesFromCtx(ctx) {
+		if strings.EqualFold(strings.TrimSpace(c), currencyIdentifier) {
+			return strings.ToUpper(strings.TrimSpace(c)), true
+		}
+	}
+	return "", false
+}
+
+// ResolveEntityIDForFilter maps entity_id or entity_name (paired with IDs from prevalidation) to entity_id.
+func ResolveEntityIDForFilter(ctx context.Context, entityIdentifier string) (entityID string, ok bool) {
+	entityIdentifier = strings.TrimSpace(entityIdentifier)
+	if entityIdentifier == "" {
+		return "", false
+	}
+	ids := GetEntityIDsFromCtx(ctx)
+	names := GetEntityNamesFromCtx(ctx)
+	up := strings.ToUpper(entityIdentifier)
+	for _, id := range ids {
+		if strings.ToUpper(strings.TrimSpace(id)) == up {
+			return strings.TrimSpace(id), true
+		}
+	}
+	for i, name := range names {
+		if strings.EqualFold(strings.TrimSpace(name), entityIdentifier) {
+			if i < len(ids) {
+				return strings.TrimSpace(ids[i]), true
+			}
+			return "", false
+		}
+	}
+	return "", false
+}
+
+func IsCurrencyAllowed(ctx context.Context, currency string) bool {
+	currency = strings.TrimSpace(currency)
+	if currency == "" {
+		return false
+	}
+	_, ok := ResolveCurrencyCodeUpperForFilter(ctx, currency)
+	return ok
+}
+
+func IsBankAllowed(ctx context.Context, bankIdentifier string) bool {
+	bankIdentifier = strings.TrimSpace(bankIdentifier)
+	if bankIdentifier == "" {
+		return false
+	}
+	_, ok := ResolveBankNameNormForFilter(ctx, bankIdentifier)
+	return ok
 }
 
 func IsCashFlowCategoryAllowed(ctx context.Context, categoryName string) bool {

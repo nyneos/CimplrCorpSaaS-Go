@@ -6,7 +6,7 @@
 // Endpoints registered in dash.go:
 //
 //	POST /dash/notification/kpi               → aggregate counts + delivery rates
-//	POST /dash/notification/logs              → paginated outbox log rows
+//	POST /dash/notification/logs              → outbox log rows (all matches; filters only)
 //	POST /dash/notification/channel-breakdown → sent/failed counts per channel
 //	POST /dash/notification/hourly-trend      → hourly delivery volume
 //	POST /dash/notification/top-events        → most-fired events with success rate
@@ -96,12 +96,7 @@ func decodeFilter(r *http.Request) (filterRequest, error) {
 			return f, err
 		}
 	}
-	if f.Limit <= 0 {
-		f.Limit = 50
-	}
-	if f.Page <= 0 {
-		f.Page = 1
-	}
+	// No default page/limit — list endpoints return full matching rows (filters only).
 	if f.MaxRetry == 0 {
 		f.MaxRetry = 999
 	}
@@ -145,32 +140,34 @@ func GetKPI(pool *pgxpool.Pool) http.HandlerFunc {
 		q := `
 SELECT
     COUNT(*)                                                                        AS total_dispatched,
-    COUNT(*) FILTER (WHERE processing_status = 'SENT')                             AS total_sent,
-    COUNT(*) FILTER (WHERE processing_status = 'FAILED')                           AS total_failed,
-    COUNT(*) FILTER (WHERE processing_status = 'DEAD')                             AS total_dead,
-    COUNT(*) FILTER (WHERE processing_status IN ('PENDING','PROCESSING'))           AS total_pending,
-    COUNT(*) FILTER (WHERE retry_count > 0
-                       AND processing_status NOT IN ('SENT','DEAD'))               AS total_retrying,
-    COUNT(*) FILTER (WHERE channel = 'EMAIL')                                      AS ch_email,
-    COUNT(*) FILTER (WHERE channel = 'SMS')                                        AS ch_sms,
-    COUNT(*) FILTER (WHERE channel = 'PUSH')                                       AS ch_push,
-    COUNT(*) FILTER (WHERE channel = 'WHATSAPP')                                   AS ch_wa,
-    COALESCE(AVG(retry_count), 0)                                                  AS avg_retry,
+    COUNT(*) FILTER (WHERE o.processing_status = 'SENT')                             AS total_sent,
+    COUNT(*) FILTER (WHERE o.processing_status = 'FAILED')                           AS total_failed,
+    COUNT(*) FILTER (WHERE o.processing_status = 'DEAD')                             AS total_dead,
+    COUNT(*) FILTER (WHERE o.processing_status IN ('PENDING','PROCESSING'))           AS total_pending,
+    COUNT(*) FILTER (WHERE o.retry_count > 0
+                       AND o.processing_status NOT IN ('SENT','DEAD'))               AS total_retrying,
+    COUNT(*) FILTER (WHERE o.channel = 'EMAIL')                                      AS ch_email,
+    COUNT(*) FILTER (WHERE o.channel = 'SMS')                                        AS ch_sms,
+    COUNT(*) FILTER (WHERE o.channel = 'PUSH')                                       AS ch_push,
+    COUNT(*) FILTER (WHERE o.channel = 'WHATSAPP')                                   AS ch_wa,
+    COALESCE(AVG(o.retry_count), 0)                                                  AS avg_retry,
     COALESCE(
-        AVG(EXTRACT(EPOCH FROM (sent_at - scheduled_at)) * 1000)
-            FILTER (WHERE sent_at IS NOT NULL), 0)                                 AS avg_latency_ms
-FROM notification_svc.outbox
-WHERE created_at BETWEEN $1 AND $2
-  AND ($3 = '' OR channel            = $3)
-  AND ($4 = '' OR processing_status  = $4)
-  AND ($5 = '' OR correlation_id ILIKE '%' || $5 || '%')
-  AND ($6 = '' OR recipient_email ILIKE '%' || $6 || '%'
-               OR recipient_phone ILIKE '%' || $6 || '%')
-  AND retry_count BETWEEN $7 AND $8
+        AVG(EXTRACT(EPOCH FROM (o.sent_at - o.scheduled_at)) * 1000)
+            FILTER (WHERE o.sent_at IS NOT NULL), 0)                                 AS avg_latency_ms
+FROM notification_svc.outbox o
+JOIN notification_svc.event e ON e.event_id = o.event_id
+WHERE o.created_at BETWEEN $1 AND $2
+  AND ($3 = '' OR o.channel            = $3)
+  AND ($4 = '' OR o.processing_status  = $4)
+  AND ($5 = '' OR o.event_id = $5 OR e.event_display_name ILIKE '%' || $5 || '%')
+  AND ($6 = '' OR o.correlation_id ILIKE '%' || $6 || '%')
+  AND ($7 = '' OR o.recipient_email ILIKE '%' || $7 || '%'
+               OR o.recipient_phone ILIKE '%' || $7 || '%')
+  AND o.retry_count BETWEEN $8 AND $9
 `
 		row := pool.QueryRow(context.Background(), q,
 			start, end,
-			f.Channel, f.Status, f.CorrelationID, f.Recipient,
+			f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
 			f.MinRetry, f.MaxRetry,
 		)
 		var kpi KPIResponse
@@ -258,7 +255,6 @@ func GetLogs(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		start, end := f.dateWindow()
-		offset := (f.Page - 1) * f.Limit
 
 		// Choose variables_payload column based on log_info flag.
 		varCol := "'{}'"
@@ -300,12 +296,11 @@ SELECT
     o.created_at, o.processed_at, o.last_error, o.audit_id::text,
     o.sender_name, o.sender_email, o.rendered_subject, o.priority_level,
     ` + varCol + ` ` + baseWhere + `
-ORDER BY o.created_at DESC
-LIMIT $10 OFFSET $11`
+ORDER BY o.created_at DESC`
 
 		rows, err := pool.Query(r.Context(), rowQ,
 			start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
-			f.MinRetry, f.MaxRetry, f.Limit, offset,
+			f.MinRetry, f.MaxRetry,
 		)
 		if err != nil {
 			errResp(w, http.StatusInternalServerError, err.Error())
@@ -313,7 +308,7 @@ LIMIT $10 OFFSET $11`
 		}
 		defer rows.Close()
 
-		result := make([]LogRow, 0, f.Limit)
+		result := make([]LogRow, 0)
 		for rows.Next() {
 			var row LogRow
 			var createdAt time.Time
@@ -436,14 +431,13 @@ ORDER BY outbox_id, attempt_number ASC`, outboxIDs)
 			}
 		}
 
-		totalPages := (total + int64(f.Limit) - 1) / int64(f.Limit)
 		writeJSON(w, http.StatusOK, LogsResponse{
 			Success:    true,
 			Rows:       result,
 			TotalCount: total,
-			Page:       f.Page,
-			Limit:      f.Limit,
-			TotalPages: totalPages,
+			Page:       1,
+			Limit:      int(total),
+			TotalPages: 1,
 		})
 	}
 }
@@ -632,7 +626,6 @@ WHERE o.created_at BETWEEN $1 AND $2
   AND ($4 = '' OR o.processing_status = $4)
 GROUP BY o.event_id, e.event_display_name, e.source_route
 ORDER BY total DESC
-LIMIT 20
 `
 		rows, err := pool.Query(context.Background(), q, start, end, f.Channel, f.Status)
 		if err != nil {
@@ -930,7 +923,6 @@ WHERE created_at BETWEEN $1 AND $2
   AND retry_count > 0
 GROUP BY retry_count
 ORDER BY retry_count ASC
-LIMIT 20
 `
 		distribRows, err := pool.Query(context.Background(), distribQ, start, end, f.Channel)
 		if err != nil {
@@ -1046,7 +1038,6 @@ FROM notification_svc.send_history sh
 WHERE ($1 = '' OR sh.outbox_id = $1)
   AND ($2 = '' OR sh.correlation_id = $2)
 ORDER BY sh.attempted_at ASC
-LIMIT 200
 `
 		rows, err := pool.Query(context.Background(), q, body.OutboxID, body.CorrelationID)
 		if err != nil {
@@ -1427,29 +1418,31 @@ func fetchKPI(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (KPIResp
 	q := `
 SELECT
     COUNT(*),
-    COUNT(*) FILTER (WHERE processing_status = 'SENT'),
-    COUNT(*) FILTER (WHERE processing_status = 'FAILED'),
-    COUNT(*) FILTER (WHERE processing_status = 'DEAD'),
-    COUNT(*) FILTER (WHERE processing_status IN ('PENDING','PROCESSING')),
-    COUNT(*) FILTER (WHERE retry_count > 0 AND processing_status NOT IN ('SENT','DEAD')),
-    COUNT(*) FILTER (WHERE channel = 'EMAIL'),
-    COUNT(*) FILTER (WHERE channel = 'SMS'),
-    COUNT(*) FILTER (WHERE channel = 'PUSH'),
-    COUNT(*) FILTER (WHERE channel = 'WHATSAPP'),
-    COALESCE(AVG(retry_count), 0),
-    COALESCE(AVG(EXTRACT(EPOCH FROM (sent_at - scheduled_at)) * 1000) FILTER (WHERE sent_at IS NOT NULL), 0)
-FROM notification_svc.outbox
-WHERE created_at BETWEEN $1 AND $2
-  AND ($3 = '' OR channel = $3)
-  AND ($4 = '' OR processing_status = $4)
-  AND ($5 = '' OR correlation_id ILIKE '%' || $5 || '%')
-  AND ($6 = '' OR recipient_email ILIKE '%' || $6 || '%' OR recipient_phone ILIKE '%' || $6 || '%')
-  AND retry_count BETWEEN $7 AND $8
+    COUNT(*) FILTER (WHERE o.processing_status = 'SENT'),
+    COUNT(*) FILTER (WHERE o.processing_status = 'FAILED'),
+    COUNT(*) FILTER (WHERE o.processing_status = 'DEAD'),
+    COUNT(*) FILTER (WHERE o.processing_status IN ('PENDING','PROCESSING')),
+    COUNT(*) FILTER (WHERE o.retry_count > 0 AND o.processing_status NOT IN ('SENT','DEAD')),
+    COUNT(*) FILTER (WHERE o.channel = 'EMAIL'),
+    COUNT(*) FILTER (WHERE o.channel = 'SMS'),
+    COUNT(*) FILTER (WHERE o.channel = 'PUSH'),
+    COUNT(*) FILTER (WHERE o.channel = 'WHATSAPP'),
+    COALESCE(AVG(o.retry_count), 0),
+    COALESCE(AVG(EXTRACT(EPOCH FROM (o.sent_at - o.scheduled_at)) * 1000) FILTER (WHERE o.sent_at IS NOT NULL), 0)
+FROM notification_svc.outbox o
+JOIN notification_svc.event e ON e.event_id = o.event_id
+WHERE o.created_at BETWEEN $1 AND $2
+  AND ($3 = '' OR o.channel = $3)
+  AND ($4 = '' OR o.processing_status = $4)
+  AND ($5 = '' OR o.event_id = $5 OR e.event_display_name ILIKE '%' || $5 || '%')
+  AND ($6 = '' OR o.correlation_id ILIKE '%' || $6 || '%')
+  AND ($7 = '' OR o.recipient_email ILIKE '%' || $7 || '%' OR o.recipient_phone ILIKE '%' || $7 || '%')
+  AND o.retry_count BETWEEN $8 AND $9
 `
 	var kpi KPIResponse
 	kpi.Success = true
 	err := pool.QueryRow(ctx, q,
-		start, end, f.Channel, f.Status, f.CorrelationID, f.Recipient, f.MinRetry, f.MaxRetry,
+		start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient, f.MinRetry, f.MaxRetry,
 	).Scan(
 		&kpi.TotalDispatched, &kpi.TotalSent, &kpi.TotalFailed, &kpi.TotalDead,
 		&kpi.TotalPending, &kpi.TotalRetrying,
@@ -1546,11 +1539,14 @@ SELECT o.event_id, COALESCE(e.event_display_name, o.event_id), COALESCE(e.source
        COALESCE(AVG(o.retry_count), 0)
 FROM notification_svc.outbox o
 LEFT JOIN notification_svc.event e ON e.event_id = o.event_id
-WHERE o.created_at BETWEEN $1 AND $2 AND ($3 = '' OR o.channel = $3) AND ($4 = '' OR o.processing_status = $4)
+WHERE o.created_at BETWEEN $1 AND $2
+  AND ($3 = '' OR o.channel = $3)
+  AND ($4 = '' OR o.processing_status = $4)
+  AND ($5 = '' OR o.event_id = $5 OR e.event_display_name ILIKE '%' || $5 || '%')
 GROUP BY o.event_id, e.event_display_name, e.source_route
-ORDER BY 4 DESC LIMIT 20
+ORDER BY 4 DESC
 `
-	rows, err := pool.Query(ctx, q, start, end, f.Channel, f.Status)
+	rows, err := pool.Query(ctx, q, start, end, f.Channel, f.Status, f.EventType)
 	if err != nil {
 		return TopEventsResponse{Success: true, Events: []EventStat{}}, err
 	}
@@ -1586,7 +1582,7 @@ SELECT retry_count, COUNT(*),
        COUNT(*) FILTER (WHERE processing_status = 'SENT')
 FROM notification_svc.outbox
 WHERE created_at BETWEEN $1 AND $2 AND ($3='' OR channel=$3) AND retry_count > 0
-GROUP BY retry_count ORDER BY retry_count ASC LIMIT 20
+GROUP BY retry_count ORDER BY retry_count ASC
 `, start, end, f.Channel)
 	if err != nil {
 		return RetryStatsResponse{Success: true}, err
@@ -1625,7 +1621,6 @@ FROM notification_svc.outbox WHERE created_at BETWEEN $1 AND $2 GROUP BY channel
 
 func fetchLogs(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (LogsResponse, error) {
 	start, end := f.dateWindow()
-	offset := (f.Page - 1) * f.Limit
 
 	// Choose the SELECT list based on whether the caller wants the heavy details.
 	// When log_info=false we skip variables_payload, template and retry_history
@@ -1660,18 +1655,18 @@ SELECT o.outbox_id, o.correlation_id, COALESCE(e.event_display_name, o.event_id)
        o.created_at, o.processed_at, o.last_error, o.audit_id::text,
        o.sender_name, o.sender_email, o.rendered_subject, o.priority_level,
        ` + varCol + ` ` + baseWhere + `
-ORDER BY o.created_at DESC LIMIT $10 OFFSET $11`
+ORDER BY o.created_at DESC`
 
 	rows, err := pool.Query(ctx, rowQ,
 		start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
-		f.MinRetry, f.MaxRetry, f.Limit, offset,
+		f.MinRetry, f.MaxRetry,
 	)
 	if err != nil {
 		return LogsResponse{Success: true}, err
 	}
 	defer rows.Close()
 
-	result := make([]LogRow, 0, f.Limit)
+	result := make([]LogRow, 0)
 	for rows.Next() {
 		var row LogRow
 		var createdAt time.Time
@@ -1802,8 +1797,7 @@ ORDER BY outbox_id, attempt_number ASC`, outboxIDs)
 		}
 	}
 
-	totalPages := (total + int64(f.Limit) - 1) / int64(f.Limit)
-	return LogsResponse{Success: true, Rows: result, TotalCount: total, Page: f.Page, Limit: f.Limit, TotalPages: totalPages}, nil
+	return LogsResponse{Success: true, Rows: result, TotalCount: total, Page: 1, Limit: int(total), TotalPages: 1}, nil
 }
 
 func fetchProviderStats(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (ProviderStatsResponse, error) {
