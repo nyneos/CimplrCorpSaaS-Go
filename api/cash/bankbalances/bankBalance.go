@@ -531,7 +531,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		actionIDs := make([]string, 0)
-		deleteIDs := make([]string, 0)
+		deleteActionIDs := make([]string, 0)
 		found := map[string]bool{}
 		for rows.Next() {
 			var actionID, balanceID, actionType, procStatus string
@@ -541,7 +541,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			found[balanceID] = true
 			actionIDs = append(actionIDs, actionID)
 			if actionType == "DELETE" {
-				deleteIDs = append(deleteIDs, balanceID)
+				deleteActionIDs = append(deleteActionIDs, actionID)
 			}
 		}
 
@@ -556,40 +556,73 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to begin tx: "+pgUserFriendlyMessage(err))
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
 		// Update audit actions to APPROVED
 		upd := `UPDATE auditactionbankbalances SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
-		_, err = pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs)
+		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to approve actions: "+pgUserFriendlyMessage(err))
 			return
 		}
 
-		decisionQ := `
-			INSERT INTO auditactionbankbalances (
-				balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
-			)
-			SELECT balance_id, 'APPROVE', 'APPROVED', $2, now(), $2, now(), $3
-			FROM unnest($1::text[]) AS balance_id
-		`
-		if _, err = pgxPool.Exec(ctx, decisionQ, req.BalanceIDs, checkerBy, nullifyEmpty(req.Comment)); err != nil {
-			api.RespondWithResult(w, false, "failed to create approve audit rows: "+pgUserFriendlyMessage(err))
-			return
-		}
+		// decisionQ := `
+		// 	INSERT INTO auditactionbankbalances (
+		// 		balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
+		// 	)
+		// 	SELECT balance_id, 'APPROVE', 'APPROVED', $2, now(), $2, now(), $3
+		// 	FROM unnest($1::text[]) AS balance_id
+		// `
 
 		// Delete any balances requested for delete
 		deleted := []string{}
-		if len(deleteIDs) > 0 {
-			delQ := `DELETE FROM bank_balances_manual WHERE balance_id = ANY($1) RETURNING balance_id`
-			drows, derr := pgxPool.Query(ctx, delQ, deleteIDs)
-			if derr == nil {
-				defer drows.Close()
-				for drows.Next() {
-					var id string
-					drows.Scan(&id)
-					deleted = append(deleted, id)
+		if len(deleteActionIDs) > 0 {
+			// delQ := `DELETE FROM bank_balances_manual WHERE balance_id = ANY($1) RETURNING balance_id`
+			delQ := `
+				UPDATE bank_balances_manual b
+				SET is_deleted = TRUE,
+					deleted_at = now(),
+					deleted_by = aa.requested_by
+				FROM auditactionbankbalances aa
+				WHERE aa.action_id = ANY($1)
+				  AND aa.actiontype = 'DELETE'
+				  AND aa.balance_id = b.balance_id
+				RETURNING b.balance_id
+			`
+			drows, derr := tx.Query(ctx, delQ, deleteActionIDs)
+			if derr != nil {
+				api.RespondWithResult(w, false, "failed to soft delete balances: "+pgUserFriendlyMessage(derr))
+				return
+			}
+			defer drows.Close()
+			for drows.Next() {
+				var id string
+				if err := drows.Scan(&id); err != nil {
+					api.RespondWithResult(w, false, "failed to read deleted balances: "+pgUserFriendlyMessage(err))
+					return
 				}
+				deleted = append(deleted, id)
+			}
+			if drows.Err() != nil {
+				api.RespondWithResult(w, false, "failed to read deleted balances: "+pgUserFriendlyMessage(drows.Err()))
+				return
 			}
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to commit approve: "+pgUserFriendlyMessage(err))
+			return
+		}
+		committed = true
 
 		// return structured JSON
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -650,24 +683,38 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to begin tx: "+pgUserFriendlyMessage(err))
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
 		upd := `UPDATE auditactionbankbalances SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
-		_, err = pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs)
+		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to reject actions: "+pgUserFriendlyMessage(err))
 			return
 		}
 
-		decisionQ := `
-			INSERT INTO auditactionbankbalances (
-				balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
-			)
-			SELECT balance_id, 'REJECT', 'REJECTED', $2, now(), $2, now(), $3
-			FROM unnest($1::text[]) AS balance_id
-		`
-		if _, err = pgxPool.Exec(ctx, decisionQ, req.BalanceIDs, checkerBy, nullifyEmpty(req.Comment)); err != nil {
-			api.RespondWithResult(w, false, "failed to create reject audit rows: "+pgUserFriendlyMessage(err))
+		// decisionQ := `
+		// 	INSERT INTO auditactionbankbalances (
+		// 		balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
+		// 	)
+		// 	SELECT balance_id, 'REJECT', 'REJECTED', $2, now(), $2, now(), $3
+		// 	FROM unnest($1::text[]) AS balance_id
+		// `
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to commit reject: "+pgUserFriendlyMessage(err))
 			return
 		}
+		committed = true
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rejected_count": len(actionIDs)})
@@ -711,6 +758,19 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ins := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
 		for _, id := range req.BalanceIDs {
+			var latestActionType, latestStatus string
+			latestErr := tx.QueryRow(ctx, `
+				SELECT actiontype, processing_status
+				FROM auditactionbankbalances
+				WHERE balance_id = $1
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, id).Scan(&latestActionType, &latestStatus)
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+				api.RespondWithResult(w, false, fmt.Sprintf("delete request already pending for balance_id: %s", id))
+				return
+			}
 			if _, err := tx.Exec(ctx, ins, id, nullifyEmpty(req.Reason), requestedBy); err != nil {
 				api.RespondWithResult(w, false, "failed to create delete audit: "+pgUserFriendlyMessage(err))
 				return
@@ -784,7 +844,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		var rows pgx.Rows
 		var err error
-		whereClauses := []string{}
+		whereClauses := []string{"COALESCE(b.is_deleted, false) = false"}
 		args := []interface{}{}
 		pos := 1
 		if len(entityIDs) > 0 {
@@ -960,7 +1020,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Batch fetch audit details for all balance_ids
 			auditMap := make(map[string]map[string]string)
 			if len(balanceIDs) > 0 {
-				auditDetailsQuery := `SELECT balance_id, actiontype, requested_by, requested_at FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, requested_at DESC`
+				auditDetailsQuery := `SELECT balance_id, actiontype, requested_by, requested_at FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, requested_at DESC, action_id DESC`
 				auditRows, auditErr := pgxPool.Query(ctx, auditDetailsQuery, balanceIDs)
 				if auditErr == nil {
 					defer auditRows.Close()
@@ -993,7 +1053,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Batch fetch latest audit for all balance_ids
 			auditLatestMap := make(map[string]map[string]*string)
 			if len(balanceIDs) > 0 {
-				auditLatestQuery := `SELECT DISTINCT ON (balance_id) balance_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankbalances WHERE balance_id = ANY($1) ORDER BY balance_id, requested_at DESC`
+				auditLatestQuery := `SELECT DISTINCT ON (balance_id) balance_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankbalances WHERE balance_id = ANY($1) ORDER BY balance_id, requested_at DESC, action_id DESC`
 				auditLatestRows, err := pgxPool.Query(ctx, auditLatestQuery, balanceIDs)
 				if err == nil {
 					defer auditLatestRows.Close()

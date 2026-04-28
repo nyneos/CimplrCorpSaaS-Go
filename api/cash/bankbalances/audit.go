@@ -86,20 +86,6 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			payload = append(payload, entry)
-
-			if decisionAction := auditDecisionAction(auditString(action), auditString(status), checkerAt); decisionAction != "" {
-				payload = append(payload, map[string]interface{}{
-					"entity_id":    entityID,
-					"action":       decisionAction,
-					"status":       auditString(status),
-					"performed_by": firstNonEmpty(auditString(checkerBy), auditString(performedBy)),
-					"performed_at": auditTime(checkerAt),
-					"checker_by":   auditString(checkerBy),
-					"checker_at":   auditTime(checkerAt),
-					"comment":      auditString(comment),
-					"reason":       auditString(reason),
-				})
-			}
 		}
 		if err := rows.Err(); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to read bank balance audit history")
@@ -128,18 +114,18 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"entity_id":    entityID,
-				"action":       "DOWNLOAD",
-				"status":       "COMPLETED",
-				"performed_by": strings.TrimSpace(requestedBy),
-				"performed_at": auditTime(requestedAt),
-				"checker_by":   "",
-				"checker_at":   nil,
-				"comment":      "",
-				"reason":       "",
-				"file_name":    auditString(fileName),
+				"entity_id":     entityID,
+				"action":        "DOWNLOAD",
+				"status":        "COMPLETED",
+				"performed_by":  strings.TrimSpace(requestedBy),
+				"performed_at":  auditTime(requestedAt),
+				"checker_by":    "",
+				"checker_at":    nil,
+				"comment":       "",
+				"reason":        "",
+				"file_name":     auditString(fileName),
 				"upload_s3_key": auditString(uploadKey),
-				"source":       "BANK_BALANCE",
+				"source":        "BANK_BALANCE",
 			})
 		}
 		if err := downloadRows.Err(); err != nil {
@@ -147,7 +133,11 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", payload)
+		// Standardize: always return 'rows' as the array field
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"rows":    payload,
+		})
 	}
 }
 
@@ -163,35 +153,6 @@ func auditTime(value sql.NullTime) interface{} {
 		return nil
 	}
 	return value.Time
-}
-
-func auditDecisionAction(action, status string, checkerAt sql.NullTime) string {
-	if !checkerAt.Valid {
-		return ""
-	}
-
-	switch strings.ToUpper(strings.TrimSpace(action)) {
-	case "APPROVE", "REJECT":
-		return ""
-	}
-
-	switch strings.ToUpper(strings.TrimSpace(status)) {
-	case "APPROVED":
-		return "APPROVE"
-	case "REJECTED":
-		return "REJECT"
-	default:
-		return ""
-	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
 }
 
 func insertBankBalanceDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, balanceID, requestedBy, uploadS3Key string) {
@@ -242,21 +203,21 @@ func extractAuditFileName(uploadS3Key string) interface{} {
 
 func buildBankBalanceChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, balanceID string) []map[string]interface{} {
 	var (
-		bankName, oldBankName                   string
-		accountNo, oldAccountNo                 string
-		iban, oldIBAN                           string
-		currencyCode, oldCurrencyCode           string
-		nickname, oldNickname                   string
-		asOfDate, oldAsOfDate                   string
-		asOfTime, oldAsOfTime                   string
-		balanceType, oldBalanceType             string
-		balanceAmount, oldBalanceAmount         string
-		statementType, oldStatementType         string
-		sourceChannel, oldSourceChannel         string
-		openingBalance, oldOpeningBalance       string
-		totalCredits, oldTotalCredits           string
-		totalDebits, oldTotalDebits             string
-		closingBalance, oldClosingBalance       string
+		bankName, oldBankName             string
+		accountNo, oldAccountNo           string
+		iban, oldIBAN                     string
+		currencyCode, oldCurrencyCode     string
+		nickname, oldNickname             string
+		asOfDate, oldAsOfDate             string
+		asOfTime, oldAsOfTime             string
+		balanceType, oldBalanceType       string
+		balanceAmount, oldBalanceAmount   string
+		statementType, oldStatementType   string
+		sourceChannel, oldSourceChannel   string
+		openingBalance, oldOpeningBalance string
+		totalCredits, oldTotalCredits     string
+		totalDebits, oldTotalDebits       string
+		closingBalance, oldClosingBalance string
 	)
 
 	err := pgxPool.QueryRow(ctx, `
