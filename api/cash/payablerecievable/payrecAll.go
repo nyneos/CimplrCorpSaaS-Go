@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
@@ -84,7 +83,7 @@ func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		insertTransactionDownloadAudit(ctx, pgxPool, txType, req.TransactionID, requestedBy)
+		insertTransactionDownloadAudit(ctx, pgxPool, txType, req.TransactionID, requestedBy, strings.TrimSpace(*uploadS3Key))
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -162,7 +161,7 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"transaction_id": transactionID,
 				"download_url":   downloadURL,
 			})
-			insertTransactionDownloadAudit(ctx, pgxPool, txType, transactionID, requestedBy)
+			insertTransactionDownloadAudit(ctx, pgxPool, txType, transactionID, requestedBy, strings.TrimSpace(*uploadS3Key))
 		}
 
 		if len(files) == 0 {
@@ -851,8 +850,9 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// 3. Batch fetch audit logs for payables
 		auditPayableMap := make(map[string]map[string]string)
+		latestPayableAuditMap := make(map[string]string)
 		if len(payableIDs) > 0 {
-			query := `SELECT payable_id, actiontype, requested_by, requested_at, processing_status FROM auditactionpayable WHERE payable_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')`
+			query := `SELECT payable_id, actiontype, requested_by, requested_at, processing_status FROM auditactionpayable WHERE payable_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY payable_id, requested_at DESC, action_id DESC`
 			rows, err := pgxPool.Query(ctx, query, payableIDs)
 			if err == nil {
 				defer rows.Close()
@@ -862,6 +862,9 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					_ = rows.Scan(&pid, &atype, &requestedBy, &requestedAt, &status)
 					if _, ok := auditPayableMap[pid]; !ok {
 						auditPayableMap[pid] = make(map[string]string)
+					}
+					if _, ok := latestPayableAuditMap[pid]; !ok {
+						latestPayableAuditMap[pid] = status
 					}
 					if atype == "CREATE" {
 						auditPayableMap[pid]["created_by"] = requestedBy
@@ -894,21 +897,17 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				payables[i].EditedAt = audit["edited_at"]
 				payables[i].DeletedBy = audit["deleted_by"]
 				payables[i].DeletedAt = audit["deleted_at"]
-				// Set status: prefer DELETE, then EDIT, then CREATE
-				if audit["deleted_status"] != "" {
-					payables[i].Status = audit["deleted_status"]
-				} else if audit["edited_status"] != "" {
-					payables[i].Status = audit["edited_status"]
-				} else {
-					payables[i].Status = audit["created_status"]
-				}
+			}
+			if latestStatus, ok := latestPayableAuditMap[payables[i].PayableID]; ok {
+				payables[i].Status = latestStatus
 			}
 		}
 
 		// 4. Batch fetch audit logs for receivables
 		auditReceivableMap := make(map[string]map[string]string)
+		latestReceivableAuditMap := make(map[string]string)
 		if len(receivableIDs) > 0 {
-			query := `SELECT receivable_id, actiontype, requested_by, requested_at, processing_status FROM auditactionreceivable WHERE receivable_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')`
+			query := `SELECT receivable_id, actiontype, requested_by, requested_at, processing_status FROM auditactionreceivable WHERE receivable_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY receivable_id, requested_at DESC, action_id DESC`
 			rows, err := pgxPool.Query(ctx, query, receivableIDs)
 			if err == nil {
 				defer rows.Close()
@@ -918,6 +917,9 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					_ = rows.Scan(&rid, &atype, &requestedBy, &requestedAt, &status)
 					if _, ok := auditReceivableMap[rid]; !ok {
 						auditReceivableMap[rid] = make(map[string]string)
+					}
+					if _, ok := latestReceivableAuditMap[rid]; !ok {
+						latestReceivableAuditMap[rid] = status
 					}
 					if atype == "CREATE" {
 						auditReceivableMap[rid]["created_by"] = requestedBy
@@ -950,24 +952,19 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				receivables[i].EditedAt = audit["edited_at"]
 				receivables[i].DeletedBy = audit["deleted_by"]
 				receivables[i].DeletedAt = audit["deleted_at"]
-				// Set status: prefer DELETE, then EDIT, then CREATE
-				if audit["deleted_status"] != "" {
-					receivables[i].Status = audit["deleted_status"]
-				} else if audit["edited_status"] != "" {
-					receivables[i].Status = audit["edited_status"]
-				} else {
-					receivables[i].Status = audit["created_status"]
-				}
+			}
+			if latestStatus, ok := latestReceivableAuditMap[receivables[i].ReceivableID]; ok {
+				receivables[i].Status = latestStatus
 			}
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		// Merge payables and receivables into a single array if you want a flat list, or return two arrays as separate fields
+		// Here, we return both as separate top-level arrays for clarity
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"payables":    payables,
-				"receivables": receivables,
-			},
+			"payables":             payables,
+			"receivables":          receivables,
 		})
 	}
 }
@@ -1026,6 +1023,18 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			reasonArg = req.Reason
 		}
 		for _, id := range txIDsPay {
+			var latestActionType, latestStatus string
+			latestErr := tx.QueryRow(ctx, `
+				SELECT actiontype, processing_status
+				FROM auditactionpayable
+				WHERE payable_id = $1
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, id).Scan(&latestActionType, &latestStatus)
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "delete request already pending for transaction: " + id})
+				return
+			}
 			var actionID string
 			if err := tx.QueryRow(ctx, insPay, id, reasonArg, requestedBy).Scan(&actionID); err == nil {
 				// nop: collected if needed
@@ -1034,6 +1043,18 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		insRec := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now()) RETURNING action_id`
 		for _, id := range txIDsRec {
+			var latestActionType, latestStatus string
+			latestErr := tx.QueryRow(ctx, `
+				SELECT actiontype, processing_status
+				FROM auditactionreceivable
+				WHERE receivable_id = $1
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, id).Scan(&latestActionType, &latestStatus)
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "delete request already pending for transaction: " + id})
+				return
+			}
 			var actionID string
 			if err := tx.QueryRow(ctx, insRec, id, reasonArg, requestedBy).Scan(&actionID); err == nil {
 				// nop
@@ -1089,11 +1110,27 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		var actionIDs []string
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
 		// For payables: find latest action_id per payable and add to list
 		if len(payIDs) > 0 {
 			for _, pid := range payIDs {
-				var aid string
-				if err := pgxPool.QueryRow(ctx, `SELECT action_id FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC LIMIT 1`, pid).Scan(&aid); err == nil && aid != "" {
+				var aid, status string
+				if err := tx.QueryRow(ctx, `SELECT action_id, processing_status FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`, pid).Scan(&aid, &status); err == nil && aid != "" {
+					if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+						json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot reject non-pending transaction: " + pid})
+						return
+					}
 					actionIDs = append(actionIDs, aid)
 				}
 			}
@@ -1102,8 +1139,12 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// For receivables
 		if len(recIDs) > 0 {
 			for _, rid := range recIDs {
-				var aid string
-				if err := pgxPool.QueryRow(ctx, `SELECT action_id FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC LIMIT 1`, rid).Scan(&aid); err == nil && aid != "" {
+				var aid, status string
+				if err := tx.QueryRow(ctx, `SELECT action_id, processing_status FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`, rid).Scan(&aid, &status); err == nil && aid != "" {
+					if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+						json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot reject non-pending transaction: " + rid})
+						return
+					}
 					actionIDs = append(actionIDs, aid)
 				}
 			}
@@ -1117,12 +1158,19 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if strings.TrimSpace(req.Comment) != "" {
 			commentArg = req.Comment
 		}
-		if _, err := pgxPool.Exec(ctx, `UPDATE auditactionpayable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, actionIDs); err != nil {
-			// ignore error, try receivable update
+		if _, err := tx.Exec(ctx, `UPDATE auditactionpayable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, actionIDs); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to reject payable actions"})
+			return
 		}
-		if _, err := pgxPool.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, actionIDs); err != nil {
-			// ignore
+		if _, err := tx.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, actionIDs); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to reject receivable actions"})
+			return
 		}
+		if err := tx.Commit(ctx); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrTxCommitFailed})
+			return
+		}
+		committed = true
 
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rejected_count": len(actionIDs)})
 	}
@@ -1165,82 +1213,120 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		// Get latest action ids for provided transaction ids
-		var actionIDs []string
+		payActionIDs := make([]string, 0, len(payIDs))
+		recActionIDs := make([]string, 0, len(recIDs))
+		payDeleteActionIDs := make([]string, 0)
+		recDeleteActionIDs := make([]string, 0)
 		for _, pid := range payIDs {
-			var aid string
-			if err := pgxPool.QueryRow(ctx, `SELECT action_id FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC LIMIT 1`, pid).Scan(&aid); err == nil && aid != "" {
-				actionIDs = append(actionIDs, aid)
+			var aid, atype, status string
+			if err := pgxPool.QueryRow(ctx, `
+				SELECT action_id, actiontype, processing_status
+				FROM auditactionpayable
+				WHERE payable_id = $1
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, pid).Scan(&aid, &atype, &status); err == nil && aid != "" {
+				if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot approve non-pending transaction: " + pid})
+					return
+				}
+				payActionIDs = append(payActionIDs, aid)
+				if atype == "DELETE" && status == "PENDING_DELETE_APPROVAL" {
+					payDeleteActionIDs = append(payDeleteActionIDs, aid)
+				}
 			}
 		}
 		for _, rid := range recIDs {
-			var aid string
-			if err := pgxPool.QueryRow(ctx, `SELECT action_id FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC LIMIT 1`, rid).Scan(&aid); err == nil && aid != "" {
-				actionIDs = append(actionIDs, aid)
+			var aid, atype, status string
+			if err := pgxPool.QueryRow(ctx, `
+				SELECT action_id, actiontype, processing_status
+				FROM auditactionreceivable
+				WHERE receivable_id = $1
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, rid).Scan(&aid, &atype, &status); err == nil && aid != "" {
+				if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot approve non-pending transaction: " + rid})
+					return
+				}
+				recActionIDs = append(recActionIDs, aid)
+				if atype == "DELETE" && status == "PENDING_DELETE_APPROVAL" {
+					recDeleteActionIDs = append(recDeleteActionIDs, aid)
+				}
 			}
 		}
 
-		if len(actionIDs) == 0 {
+		if len(payActionIDs) == 0 && len(recActionIDs) == 0 {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "no valid actions found for provided ids"})
 			return
 		}
-		// First, remove PENDING_DELETE_APPROVAL audit actions and collect their target transaction ids
-		var payableIDsToDelete []string
-		var receivableIDsToDelete []string
-
-		delPayQuery := `DELETE FROM auditactionpayable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, payable_id`
-		delPayRows, err := pgxPool.Query(ctx, delPayQuery, actionIDs)
+		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			log.Printf("[WARN] failed to delete auditactionpayable rows: %v", err)
-		} else {
-			defer delPayRows.Close()
-			for delPayRows.Next() {
-				var aid, pid string
-				if err := delPayRows.Scan(&aid, &pid); err == nil {
-					payableIDsToDelete = append(payableIDsToDelete, pid)
-				}
-			}
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
+			return
 		}
-
-		delRecQuery := `DELETE FROM auditactionreceivable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, receivable_id`
-		delRecRows, err := pgxPool.Query(ctx, delRecQuery, actionIDs)
-		if err != nil {
-			log.Printf("[WARN] failed to delete auditactionreceivable rows: %v", err)
-		} else {
-			defer delRecRows.Close()
-			for delRecRows.Next() {
-				var aid, rid string
-				if err := delRecRows.Scan(&aid, &rid); err == nil {
-					receivableIDsToDelete = append(receivableIDsToDelete, rid)
-				}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
 			}
-		}
-
-		// Mark canonical rows as deleted (soft-delete) instead of hard delete
-		if len(payableIDsToDelete) > 0 {
-			if _, err := pgxPool.Exec(ctx, `UPDATE tr_payables SET is_deleted = TRUE, updated_at = now() WHERE payable_id = ANY($1)`, payableIDsToDelete); err != nil {
-				// log or ignore; continue
-			}
-		}
-		if len(receivableIDsToDelete) > 0 {
-			if _, err := pgxPool.Exec(ctx, `UPDATE tr_receivables SET is_deleted = TRUE, updated_at = now() WHERE receivable_id = ANY($1)`, receivableIDsToDelete); err != nil {
-				// log or ignore
-			}
-		}
-
-		// Approve the remaining actions
+		}()
+		// delPayQuery := `DELETE FROM auditactionpayable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL'`
+		// delRecQuery := `DELETE FROM auditactionreceivable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL'`
 		commentArg := interface{}(nil)
 		if strings.TrimSpace(req.Comment) != "" {
 			commentArg = req.Comment
 		}
-		if _, err := pgxPool.Exec(ctx, `UPDATE auditactionpayable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL'`, checkerBy, commentArg, actionIDs); err != nil {
-			// ignore
+		if len(payActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE auditactionpayable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, payActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to approve payable audits"})
+				return
+			}
 		}
-		if _, err := pgxPool.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL'`, checkerBy, commentArg, actionIDs); err != nil {
-			// ignore
+		if len(recActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, recActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to approve receivable audits"})
+				return
+			}
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(actionIDs)})
+		if len(payDeleteActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE tr_payables p
+				SET is_deleted = TRUE,
+					deleted_at = now(),
+					deleted_by = aa.requested_by,
+					updated_at = now()
+				FROM auditactionpayable aa
+				WHERE aa.action_id = ANY($1)
+				  AND aa.payable_id = p.payable_id
+			`, payDeleteActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to soft delete payables"})
+				return
+			}
+		}
+		if len(recDeleteActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE tr_receivables r
+				SET is_deleted = TRUE,
+					deleted_at = now(),
+					deleted_by = aa.requested_by,
+					updated_at = now()
+				FROM auditactionreceivable aa
+				WHERE aa.action_id = ANY($1)
+				  AND aa.receivable_id = r.receivable_id
+			`, recDeleteActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to soft delete receivables"})
+				return
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrTxCommitFailed})
+			return
+		}
+		committed = true
+
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(payActionIDs) + len(recActionIDs)})
 	}
 }
 

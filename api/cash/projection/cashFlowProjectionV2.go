@@ -145,6 +145,20 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			(proposal_id, action_type, processing_status, reason, requested_by, requested_at)
 			SELECT unnest($1::text[]), 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now()
 		`
+		for _, proposalID := range req.ProposalIDs {
+			var latestActionType, latestStatus string
+			latestErr := tx.QueryRow(ctx, `
+				SELECT action_type, processing_status
+				FROM cimplrcorpsaas.audit_action_cashflow_proposal
+				WHERE proposal_id = $1
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, proposalID).Scan(&latestActionType, &latestStatus)
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+				api.RespondWithError(w, http.StatusBadRequest, "delete request already pending for proposal: "+proposalID)
+				return
+			}
+		}
 		if _, err := tx.Exec(ctx, q, req.ProposalIDs, req.Reason, requestedBy); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
@@ -221,7 +235,7 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 				action_id, proposal_id, processing_status 
 			FROM cimplrcorpsaas.audit_action_cashflow_proposal 
 			WHERE proposal_id = ANY($1) 
-			ORDER BY proposal_id, requested_at DESC
+			ORDER BY proposal_id, requested_at DESC, action_id DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
 		if err != nil {
@@ -363,7 +377,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 				action_id, proposal_id, action_type, processing_status 
 			FROM cimplrcorpsaas.audit_action_cashflow_proposal 
 			WHERE proposal_id = ANY($1) 
-			ORDER BY proposal_id, requested_at DESC
+			ORDER BY proposal_id, requested_at DESC, action_id DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
 		if err != nil {
@@ -376,6 +390,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 		foundProposals := make(map[string]bool, len(req.ProposalIDs))
 		cannotApprove := make([]string, 0)
 		deleteProposalIDs := make([]string, 0)
+		deleteActionIDs := make([]string, 0)
 
 		for rows.Next() {
 			var actionID, proposalID, actionType, status string
@@ -387,6 +402,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 				actionIDs = append(actionIDs, actionID)
 				if actionType == "DELETE" {
 					deleteProposalIDs = append(deleteProposalIDs, proposalID)
+					deleteActionIDs = append(deleteActionIDs, actionID)
 				}
 			} else {
 				cannotApprove = append(cannotApprove, proposalID)
@@ -429,12 +445,20 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 			return
 		}
 
-		// OPTIMIZED: Single DELETE using ANY($1) instead of loop
-		// CASCADE handles items and monthly projections automatically
-		if len(deleteProposalIDs) > 0 {
-			delQ := `DELETE FROM cimplrcorpsaas.cashflow_proposal WHERE proposal_id = ANY($1)`
-			if _, err := tx.Exec(ctx, delQ, deleteProposalIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to delete proposals: "+err.Error())
+		// delQ := `DELETE FROM cimplrcorpsaas.cashflow_proposal WHERE proposal_id = ANY($1)`
+		if len(deleteActionIDs) > 0 {
+			delQ := `
+				UPDATE cimplrcorpsaas.cashflow_proposal p
+				SET is_deleted = TRUE,
+					deleted_at = now(),
+					deleted_by = aa.requested_by
+				FROM cimplrcorpsaas.audit_action_cashflow_proposal aa
+				WHERE aa.action_id = ANY($1)
+				  AND aa.action_type = 'DELETE'
+				  AND aa.proposal_id = p.proposal_id
+			`
+			if _, err := tx.Exec(ctx, delQ, deleteActionIDs); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to soft delete proposals: "+err.Error())
 				return
 			}
 		}
@@ -688,7 +712,13 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				p.old_proposal_name,
 				p.old_base_currency_code,
 				p.old_effective_date,
-				a.processing_status
+				CASE
+					WHEN COALESCE(p.is_deleted, false) = true THEN 'DELETED'
+					ELSE COALESCE(a.processing_status, 'N/A')
+				END AS processing_status,
+				COALESCE(p.is_deleted, false),
+				p.deleted_at,
+				p.deleted_by
 			FROM cimplrcorpsaas.cashflow_proposal p
 			LEFT JOIN LATERAL (
 				SELECT processing_status
@@ -706,14 +736,26 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			effectiveDate                                            time.Time
 			oldProposalName, oldBaseCurrency                         interface{}
 			oldEffectiveDate                                         interface{}
+			isDeleted                                                bool
+			deletedAt                                                *time.Time
+			deletedBy                                                *string
 		)
 		err := pgxPool.QueryRow(ctx, hq, req.ProposalID).Scan(
 			&proposalID, &proposalName, &baseCurrency, &effectiveDate,
-			&oldProposalName, &oldBaseCurrency, &oldEffectiveDate, &processingStatus,
+			&oldProposalName, &oldBaseCurrency, &oldEffectiveDate, &processingStatus, &isDeleted, &deletedAt, &deletedBy,
 		)
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, "Proposal not found: "+err.Error())
 			return
+		}
+
+		deletedAtStr := ""
+		if deletedAt != nil {
+			deletedAtStr = deletedAt.Format(constants.DateTimeFormat)
+		}
+		deletedByStr := ""
+		if deletedBy != nil {
+			deletedByStr = *deletedBy
 		}
 
 		header := map[string]interface{}{
@@ -725,6 +767,9 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"old_base_currency":  ifaceToString(oldBaseCurrency),
 			"old_effective_date": ifaceToTimeString(oldEffectiveDate),
 			"processing_status":  processingStatus,
+			"is_deleted":         isDeleted,
+			"deleted_at":         deletedAtStr,
+			"deleted_by":         deletedByStr,
 		}
 
 		// Get items
@@ -919,6 +964,7 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
+			WHERE COALESCE(p.is_deleted, false) = false
 			GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, p.upload_s3_key, a.processing_status
 			ORDER BY COALESCE((SELECT GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = p.proposal_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp) DESC
 		`
@@ -981,6 +1027,7 @@ func GetProjectionDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT upload_s3_key
 			FROM cimplrcorpsaas.cashflow_proposal
 			WHERE proposal_id = $1
+			  AND COALESCE(is_deleted, false) = false
 		`, req.ProposalID).Scan(&uploadS3Key); err != nil {
 			api.RespondWithResult(w, false, "Proposal not found or query error: "+err.Error())
 			return
@@ -998,7 +1045,7 @@ func GetProjectionDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		insertProjectionDownloadAudit(ctx, pgxPool, req.ProposalID, projectionRequestedBy(req.UserID))
+		insertProjectionDownloadAudit(ctx, pgxPool, req.ProposalID, projectionRequestedBy(req.UserID), key)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1044,6 +1091,7 @@ func GetProjectionBulkDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT upload_s3_key
 				FROM cimplrcorpsaas.cashflow_proposal
 				WHERE proposal_id = $1
+				  AND COALESCE(is_deleted, false) = false
 			`, proposalID).Scan(&uploadS3Key); err != nil {
 				failedIDs = append(failedIDs, proposalID)
 				continue
@@ -1065,7 +1113,7 @@ func GetProjectionBulkDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"proposal_id":  proposalID,
 				"download_url": downloadURL,
 			})
-			insertProjectionDownloadAudit(ctx, pgxPool, proposalID, requestedBy)
+			insertProjectionDownloadAudit(ctx, pgxPool, proposalID, requestedBy, key)
 		}
 
 		if len(files) == 0 {

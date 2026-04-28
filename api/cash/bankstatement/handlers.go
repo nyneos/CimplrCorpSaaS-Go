@@ -2,7 +2,9 @@ package bankstatement
 
 import (
 	apictx "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"archive/zip"
@@ -24,6 +26,37 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 )
+
+func auditActorDisplayName(ctx context.Context, userID string) string {
+	if session := middlewares.GetSessionFromContext(ctx); session != nil {
+		if name := strings.TrimSpace(session.Name); name != "" {
+			return name
+		}
+		if email := strings.TrimSpace(session.Email); email != "" {
+			return email
+		}
+		if id := strings.TrimSpace(session.UserID); id != "" {
+			return id
+		}
+	}
+
+	for _, session := range auth.GetActiveSessions() {
+		if session.UserID != userID {
+			continue
+		}
+		if name := strings.TrimSpace(session.Name); name != "" {
+			return name
+		}
+		if email := strings.TrimSpace(session.Email); email != "" {
+			return email
+		}
+		if id := strings.TrimSpace(session.UserID); id != "" {
+			return id
+		}
+	}
+
+	return strings.TrimSpace(userID)
+}
 
 // 1. Get all bank statements (POST, req: user_id)
 func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
@@ -66,6 +99,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 										LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 										LEFT JOIN latest_audit la ON la.bankstatementid = s.bank_statement_id
 										WHERE s.entity_id = ANY($1)
+										  AND COALESCE(s.is_deleted, false) = false
 										ORDER BY s.uploaded_at DESC
 						`, pq.Array(entityIDs))
 		if err != nil {
@@ -88,7 +122,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 				continue
 			}
 			isDeletePending := false
-			if actionType.String == "DELETE" && processingStatus.String == "DELETE_PENDING_APPROVAL" {
+			if actionType.String == "DELETE" && processingStatus.String == "PENDING_DELETE_APPROVAL" {
 				isDeletePending = true
 			}
 			resp = append(resp, map[string]interface{}{
@@ -692,6 +726,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 		}
 		results := make([]map[string]interface{}, 0)
 		ctx := r.Context()
+		actorName := auditActorDisplayName(ctx, body.UserID)
 		for _, bsid := range body.BankStatementIDs {
 			var entityID string
 			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
@@ -710,7 +745,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 			err := db.QueryRowContext(ctx, `
 				       SELECT actiontype, processing_status FROM cimplrcorpsaas.auditactionbankstatement
 				       WHERE bankstatementid = $1
-				       ORDER BY action_id DESC LIMIT 1
+				       ORDER BY requested_at DESC, action_id DESC LIMIT 1
 			       `, bsid).Scan(&actionType, &processingStatus)
 			if err != nil {
 				results = append(results, map[string]interface{}{
@@ -720,7 +755,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				})
 				continue
 			}
-			if actionType == "DELETE" && processingStatus == "DELETE_PENDING_APPROVAL" {
+			if actionType == "DELETE" && processingStatus == "PENDING_DELETE_APPROVAL" {
 				tx, err := db.BeginTx(ctx, nil)
 				if err != nil {
 					results = append(results, map[string]interface{}{
@@ -731,7 +766,25 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					continue
 				}
 				defer tx.Rollback()
-				_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statement_transactions WHERE bank_statement_id = $1`, bsid)
+				// _, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statement_transactions WHERE bank_statement_id = $1`, bsid)
+				// _, err = tx.Exec(`DELETE FROM public.bank_balances_manual WHERE balance_id = $1`, bsid)
+				// _, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid)
+				_, err = tx.Exec(`
+					UPDATE cimplrcorpsaas.auditactionbankstatement
+					SET processing_status = 'APPROVED',
+						checker_by = $2,
+						checker_at = now(),
+						checker_comment = $3
+					WHERE action_id = (
+						SELECT action_id
+						FROM cimplrcorpsaas.auditactionbankstatement
+						WHERE bankstatementid = $1
+						  AND actiontype = 'DELETE'
+						  AND processing_status = 'PENDING_DELETE_APPROVAL'
+						ORDER BY requested_at DESC, action_id DESC
+						LIMIT 1
+					)
+				`, bsid, actorName, body.Comment)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -740,25 +793,20 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					})
 					continue
 				}
-				_, err = tx.Exec(`DELETE FROM public.bank_balances_manual WHERE balance_id = $1`, bsid)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "DELETE", "DELETED", body.UserID, time.Now(), body.Comment)
+				_, err = tx.Exec(`
+					UPDATE cimplrcorpsaas.bank_statements
+					SET is_deleted = TRUE,
+						deleted_at = now(),
+						deleted_by = (
+							SELECT requested_by
+							FROM cimplrcorpsaas.auditactionbankstatement
+							WHERE bankstatementid = $1
+							  AND actiontype = 'DELETE'
+							ORDER BY requested_at DESC, action_id DESC
+							LIMIT 1
+						)
+					WHERE bank_statement_id = $1
+				`, bsid)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -778,7 +826,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
 					"success":           true,
-					"message":           "Bank statement and related data deleted after approval",
+					"message":           "Bank statement soft deleted after approval",
 				})
 			} else {
 				tx, err := db.BeginTx(ctx, nil)
@@ -919,20 +967,24 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				// already reviewed and approved by the approver, so the derived balance
 				// does not need a separate approval cycle.
 				// Use WHERE NOT EXISTS to prevent duplicate audit rows if approval is called twice.
+				actionTime := time.Now()
 				_, err = tx.Exec(`
 				       INSERT INTO auditactionbankbalances (
-					       balance_id, actiontype, processing_status, requested_by, requested_at
+					       balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
 				       )
-				       SELECT $1, $2, $3, $4, $5
+				       SELECT $1, $2, $3, $4, $5, $6, $7, $8
 				       WHERE NOT EXISTS (
-				           SELECT 1 FROM auditactionbankbalances WHERE balance_id = $6
+				           SELECT 1 FROM auditactionbankbalances WHERE balance_id = $9
 				       )
 				       `,
 					bsid,
 					"CREATE",
 					"APPROVED",
-					body.UserID,
-					time.Now(),
+					actorName,
+					actionTime,
+					actorName,
+					actionTime,
+					body.Comment,
 					bsid,
 				)
 				if err != nil {
@@ -944,7 +996,28 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					continue
 				}
 
-				_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "APPROVE", "APPROVED", body.UserID, time.Now(), body.Comment)
+				// _, err = tx.Exec(`INSERT INTO auditactionbankbalances (
+				//        balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
+				// ) SELECT $1, $2, $3, $4, $5, $6, $7, $8 WHERE NOT EXISTS (
+				//        SELECT 1 FROM auditactionbankbalances WHERE balance_id = $9 AND actiontype = 'APPROVE'
+				// )`, bsid, "APPROVE", "APPROVED", actorName, actionTime, actorName, actionTime, body.Comment, bsid)
+				// _, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, bsid, "APPROVE", "APPROVED", actorName, actionTime, actorName, actionTime, body.Comment)
+				_, err = tx.Exec(`
+					UPDATE cimplrcorpsaas.auditactionbankstatement
+					SET processing_status = 'APPROVED',
+						checker_by = $2,
+						checker_at = now(),
+						checker_comment = $3
+					WHERE action_id = (
+						SELECT action_id
+						FROM cimplrcorpsaas.auditactionbankstatement
+						WHERE bankstatementid = $1
+						  AND actiontype IN ('CREATE', 'EDIT')
+						  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL')
+						ORDER BY requested_at DESC, action_id DESC
+						LIMIT 1
+					)
+				`, bsid, actorName, body.Comment)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -980,9 +1053,16 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				})
 			}
 		}
+		overallSuccess := len(results) > 0
+		for _, result := range results {
+			if success, ok := result["success"].(bool); !ok || !success {
+				overallSuccess = false
+				break
+			}
+		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success": overallSuccess,
 			"results": results,
 		})
 	})
@@ -1006,6 +1086,7 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 		}
 		results := make([]map[string]interface{}, 0)
 		ctx := r.Context()
+		actorName := auditActorDisplayName(ctx, body.UserID)
 		for _, bsid := range body.BankStatementIDs {
 			var entityID string
 			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
@@ -1020,8 +1101,42 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 					}
 				}
 			}
-			_, err := db.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "REJECT", "REJECTED", body.UserID, time.Now(), body.Comment)
+			tx, err := db.BeginTx(ctx, nil)
 			if err != nil {
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           false,
+					"error":             err.Error(),
+				})
+				continue
+			}
+			defer tx.Rollback()
+			// _, err = db.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, bsid, "REJECT", "REJECTED", actorName, actionTime, actorName, actionTime, body.Comment)
+			_, err = tx.ExecContext(ctx, `
+				UPDATE cimplrcorpsaas.auditactionbankstatement
+				SET processing_status = 'REJECTED',
+					checker_by = $2,
+					checker_at = now(),
+					checker_comment = $3
+				WHERE action_id = (
+					SELECT action_id
+					FROM cimplrcorpsaas.auditactionbankstatement
+					WHERE bankstatementid = $1
+					  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+					  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+					ORDER BY requested_at DESC, action_id DESC
+					LIMIT 1
+				)
+			`, bsid, actorName, body.Comment)
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           false,
+					"error":             err.Error(),
+				})
+				continue
+			}
+			if err := tx.Commit(); err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
 					"success":           false,
@@ -1035,9 +1150,16 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 				"message":           "Bank statement rejected",
 			})
 		}
+		overallSuccess := len(results) > 0
+		for _, result := range results {
+			if success, ok := result["success"].(bool); !ok || !success {
+				overallSuccess = false
+				break
+			}
+		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success": overallSuccess,
 			"results": results,
 		})
 		if pgxPool != nil {
@@ -1067,6 +1189,7 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 			UserID           string   `json:"user_id"`
 			BankStatementIDs []string `json:"bank_statement_ids"`
 			Comment          string   `json:"comment"`
+			Reason           string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.BankStatementIDs) == 0 {
 			http.Error(w, missingUserIDOrBankStatementIDs, http.StatusBadRequest)
@@ -1088,11 +1211,33 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 					}
 				}
 			}
+			var latestActionType, latestProcessingStatus string
+			latestAuditErr := db.QueryRowContext(ctx, `
+				SELECT actiontype, processing_status
+				FROM cimplrcorpsaas.auditactionbankstatement
+				WHERE bankstatementid = $1
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, bsid).Scan(&latestActionType, &latestProcessingStatus)
+			if latestAuditErr == nil && latestActionType == "DELETE" && latestProcessingStatus == "PENDING_DELETE_APPROVAL" {
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           false,
+					"error":             "delete request already pending approval",
+				})
+				continue
+			}
+			deleteComment := body.Comment
+			if strings.TrimSpace(deleteComment) == "" {
+				deleteComment = body.Reason
+			}
+			requestedBy := auditActorDisplayName(ctx, body.UserID)
 			_, err := db.ExecContext(ctx, `
 				       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
-					       bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment
+					       bankstatementid, actiontype, processing_status, requested_by, requested_at, reason
 				       ) VALUES ($1, $2, $3, $4, $5, $6)
-			       `, bsid, "DELETE", "DELETE_PENDING_APPROVAL", body.UserID, time.Now(), body.Comment)
+			       `, bsid, "DELETE", "PENDING_DELETE_APPROVAL", requestedBy, time.Now(), deleteComment)
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
@@ -1107,15 +1252,25 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 				"message":           "Delete request submitted for approval",
 			})
 		}
+		overallSuccess := len(results) > 0
+		for _, result := range results {
+			if success, ok := result["success"].(bool); !ok || !success {
+				overallSuccess = false
+				break
+			}
+		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success": overallSuccess,
 			"results": results,
 		})
 		if pgxPool != nil {
 			capturedIDs := body.BankStatementIDs
 			capturedUser := body.UserID
 			capturedComment := body.Comment
+			if strings.TrimSpace(capturedComment) == "" {
+				capturedComment = body.Reason
+			}
 			go catalog.TriggerNotification(
 				context.Background(), pgxPool,
 				"/cash/bank-statements/v2/delete",
@@ -1125,7 +1280,7 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 					"Count":            len(capturedIDs),
 					"UserID":           capturedUser,
 					"Comment":          capturedComment,
-					"Action":           "DELETE_PENDING_APPROVAL",
+					"Action":           "PENDING_DELETE_APPROVAL",
 					"ActionAt":         time.Now().Format(time.RFC3339),
 				},
 			)
