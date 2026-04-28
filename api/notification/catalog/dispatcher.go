@@ -11,8 +11,9 @@ package catalog
 //  5. Resolve recipients from notification_svc.template_recipient (USER / ROLE).
 //  6. Evaluate the template body/subject per recipient using the template engine
 //     (goroutines + WaitGroup; mutex-protected outbox accumulator).
-//  7. Batch-INSERT into notification_svc.outbox with ON CONFLICT DO NOTHING
-//     (correlation_id + channel + recipient_user_id unique index = idempotency).
+//  7. Batch-INSERT into notification_svc.outbox (unique index for idempotency).
+//  8. NudgeDeliveryAfterEnqueue — one email / browser-push / SSE pass so sends are
+//     not delayed by worker poll defaults (often 10–15s).
 //
 // EXAMPLE FLOWS
 // ─────────────
@@ -63,11 +64,13 @@ import (
 	"CimplrCorpSaas/api/auth"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	notificationFunctions "CimplrCorpSaas/api/notification/functions"
+	dinojobs "CimplrCorpSaas/internal/jobs/dino"
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -360,8 +363,28 @@ func dispatchNotification(
 	var events []resolvedEvent
 	var err error
 	if isAdmin {
-		api.LogInfo("[NOTIF] admin actor %q — using unrestricted event lookup (all entities) for route=%s", resolution.UserID, sourceRoute)
-		events, err = lookupEvents(ctx, pool, sourceRoute)
+		// Unrestricted lookup fans out one dispatch per entity-scoped event row — same
+		// correlation_id then produces duplicate outbox batches (e.g. bank statement upload).
+		// When the payload carries the domain entity, narrow admin to that org pool instead.
+		if en := payloadString(payload, "EntityName", "entity_name"); en != "" {
+			api.LogInfo("[NOTIF] admin actor — narrowing event lookup to payload EntityName=%q for route=%s", en, sourceRoute)
+			events, err = lookupEventsForActor(ctx, pool, sourceRoute, en)
+		} else if eid := payloadString(payload, "EntityID", "entity_id"); eid != "" {
+			var ename string
+			if qerr := pool.QueryRow(ctx,
+				`SELECT COALESCE(entity_name,'') FROM masterentitycash WHERE entity_id = $1 AND (is_deleted=false OR is_deleted IS NULL) LIMIT 1`,
+				eid,
+			).Scan(&ename); qerr == nil && ename != "" {
+				api.LogInfo("[NOTIF] admin actor — narrowing event lookup via EntityID to entity=%q for route=%s", ename, sourceRoute)
+				events, err = lookupEventsForActor(ctx, pool, sourceRoute, ename)
+			} else {
+				api.LogInfo("[NOTIF] admin actor %q — EntityID not resolved to entity_name; using unrestricted event lookup for route=%s", resolution.UserID, sourceRoute)
+				events, err = lookupEvents(ctx, pool, sourceRoute)
+			}
+		} else {
+			api.LogInfo("[NOTIF] admin actor %q — using unrestricted event lookup (all entities) for route=%s", resolution.UserID, sourceRoute)
+			events, err = lookupEvents(ctx, pool, sourceRoute)
+		}
 	} else {
 		events, err = lookupEventsForActor(ctx, pool, sourceRoute, actorEntity)
 	}
@@ -388,6 +411,7 @@ func dispatchNotification(
 		})
 		return nil
 	}
+	events = dedupeResolvedEventsByEventID(events)
 	api.LogInfo("[NOTIF] resolved %d event(s) for route=%s entity=%q", len(events), sourceRoute, actorEntity)
 
 	var firstErr error
@@ -401,6 +425,26 @@ func dispatchNotification(
 		}
 	}
 	return firstErr
+}
+
+func dedupeResolvedEventsByEventID(events []resolvedEvent) []resolvedEvent {
+	if len(events) <= 1 {
+		return events
+	}
+	seen := make(map[string]struct{}, len(events))
+	out := make([]resolvedEvent, 0, len(events))
+	for _, ev := range events {
+		if ev.eventID == "" {
+			out = append(out, ev)
+			continue
+		}
+		if _, ok := seen[ev.eventID]; ok {
+			continue
+		}
+		seen[ev.eventID] = struct{}{}
+		out = append(out, ev)
+	}
+	return out
 }
 
 // dispatchForEvent runs the full notification pipeline for one resolved event.
@@ -687,6 +731,16 @@ func dispatchForEvent(
 	if err := insertInAppNotification(ctx, pool, outboxRows, outboxIDMap); err != nil {
 		api.LogError("[NOTIF] insertInAppNotification failed (non-fatal): %v", err)
 	}
+
+	// Step 7 — one-shot delivery pass (same logic as outbox / browser-push / inbox worker ticks).
+	// Periodic workers remain; this removes the worst-case wait of OUTBOX_WORKER_POLL_SECS /
+	// BROWSER_PUSH_POLL_SECS / IN_APP_WORKER_POLL_SECS for freshly enqueued rows.
+	p := pool
+	go func() {
+		nctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		dinojobs.NudgeDeliveryAfterEnqueue(nctx, p)
+	}()
 	return nil
 }
 
@@ -719,6 +773,7 @@ func lookupEvents(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) (
 				SELECT 1 FROM notification_svc.template t
 				JOIN notification_svc.audit_template at ON at.template_id = t.template_id
 				WHERE t.event_id = e.event_id AND at.processing_status = 'APPROVED'
+				  AND COALESCE(at.is_deleted, false) = false
 			)) DESC,
 			-- finally most recently approved
 			(SELECT MAX(ae2.checker_at) FROM notification_svc.audit_event ae2
@@ -761,25 +816,26 @@ func lookupEvents(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) (
 //	→ any event scoped to any entity in the pool (or global) fires.
 //	→ self-entity match (depth=0) is ranked first, then nearest relatives, then global.
 func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, actorEntity string) ([]resolvedEvent, error) {
+	// Single recursive CTE: PostgreSQL rejects UNION (dedup) between anchor and recursive terms
+	// and can error (42P19) when RECURSIVE is paired with a non-recursive CTE before the working table.
+	// rel_edges is inlined; anchor ∪ recursive uses UNION ALL only.
 	q := `
 		WITH RECURSIVE org_pool AS (
-			-- Anchor: the actor's own entity (depth 0)
-			SELECT entity_name, 0 AS depth
-			FROM masterentitycash
-			WHERE entity_name = $2
-			  AND (is_deleted = false OR is_deleted IS NULL)
-			UNION
-			-- Walk UP: find ancestors (parents) of entities already in the pool
-			SELECT r.parent_entity_name, op.depth - 1
-			FROM cashentityrelationships r
-			INNER JOIN org_pool op ON op.entity_name = r.child_entity_name
-			WHERE op.depth > -10  -- safety cap upward
-			UNION
-			-- Walk DOWN: find descendants (children) of entities already in the pool
-			SELECT r.child_entity_name, op.depth + 1
-			FROM cashentityrelationships r
-			INNER JOIN org_pool op ON op.entity_name = r.parent_entity_name
-			WHERE op.depth < 10   -- safety cap downward
+			SELECT mec.entity_name::text AS entity_name, 0 AS depth
+			FROM public.masterentitycash mec
+			WHERE mec.entity_name = $2
+			  AND (mec.is_deleted = false OR mec.is_deleted IS NULL)
+			UNION ALL
+			SELECT rel.to_entity::text AS entity_name, op.depth + rel.step AS depth
+			FROM org_pool op
+			INNER JOIN (
+				SELECT r.parent_entity_name AS from_entity, r.child_entity_name AS to_entity, 1 AS step
+				FROM public.cashentityrelationships r
+				UNION ALL
+				SELECT r.child_entity_name AS from_entity, r.parent_entity_name AS to_entity, -1 AS step
+				FROM public.cashentityrelationships r
+			) rel ON rel.from_entity = op.entity_name
+			WHERE ABS(op.depth) < 10
 		)
 		SELECT e.event_id, COALESCE(e.entity_name,'')
 		FROM notification_svc.event e
@@ -813,6 +869,7 @@ func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, 
 				SELECT 1 FROM notification_svc.template t
 				JOIN notification_svc.audit_template at ON at.template_id = t.template_id
 				WHERE t.event_id = e.event_id AND at.processing_status = 'APPROVED'
+				  AND COALESCE(at.is_deleted, false) = false
 			)) DESC,
 			(SELECT MAX(ae2.checker_at) FROM notification_svc.audit_event ae2
 			 WHERE ae2.event_id = e.event_id AND ae2.processing_status = 'APPROVED') DESC NULLS LAST
@@ -837,10 +894,12 @@ func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, 
 // priority_level defaults to 3 when NULL so that finalPriority = 3*10+3 = 33.
 func lookupEnabledChannels(ctx context.Context, pool *pgxpool.Pool, eventID string) ([]enabledChannel, error) {
 	q := `
-		SELECT channel, COALESCE(retry_max,3), COALESCE(retry_backoff_secs,60),
-		       COALESCE(priority_level,3)
-		FROM notification_svc.notification_config
-		WHERE event_id = $1 AND is_enabled = true
+		SELECT nc.channel, COALESCE(nc.retry_max,3), COALESCE(nc.retry_backoff_secs,60),
+		       COALESCE(nc.priority_level,3)
+		FROM notification_svc.notification_config nc
+		INNER JOIN notification_svc.event e ON e.event_id = nc.event_id
+		WHERE nc.event_id = $1 AND nc.is_enabled = true
+		  AND COALESCE(e.is_deleted, false) = false
 	`
 	rows, err := pool.Query(ctx, q, eventID)
 	if err != nil {
@@ -874,10 +933,12 @@ func lookupTemplates(ctx context.Context, pool *pgxpool.Pool, eventID, channel s
 			UPPER(t.channel)                     AS channel
 		FROM notification_svc.audit_template at
 		JOIN notification_svc.template t ON t.template_id = at.template_id
+		INNER JOIN notification_svc.event ev ON ev.event_id = t.event_id
 		WHERE t.event_id = $1
 		  AND UPPER(t.channel) = UPPER($2)
 		  AND at.processing_status = 'APPROVED'
 		  AND COALESCE(at.is_deleted, false) = false
+		  AND COALESCE(ev.is_deleted, false) = false
 		ORDER BY at.requested_at ASC NULLS LAST
 	`
 	dbRows, err := pool.Query(ctx, q, eventID, channel)

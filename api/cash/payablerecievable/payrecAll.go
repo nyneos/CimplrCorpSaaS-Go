@@ -467,7 +467,7 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
-				http.Error(w, "user_id required in form", http.StatusBadRequest)
+				http.Error(w, constants.ErrUserIDRequired, http.StatusBadRequest)
 				return
 			}
 		}

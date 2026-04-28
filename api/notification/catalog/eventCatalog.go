@@ -70,6 +70,27 @@ func entityInPool(entity string, buNames []string) bool {
 	return false
 }
 
+// sqlFilterMasterEntityLiveORGlobalE restricts rows joined as notification_svc.event e:
+// global events (no entity) or entities that still exist in masterentitycash and are not soft-deleted.
+const sqlFilterMasterEntityLiveORGlobalE = `
+	AND (
+		COALESCE(e.entity_name,'') = ''
+		OR EXISTS (
+			SELECT 1 FROM public.masterentitycash me
+			WHERE me.entity_name = e.entity_name AND COALESCE(me.is_deleted, false) = false
+		)
+	)`
+
+// sqlFilterMasterEntityLiveORGlobalM is the same rule when the event row is aliased as m.
+const sqlFilterMasterEntityLiveORGlobalM = `
+	AND (
+		COALESCE(m.entity_name,'') = ''
+		OR EXISTS (
+			SELECT 1 FROM public.masterentitycash me
+			WHERE me.entity_name = m.entity_name AND COALESCE(me.is_deleted, false) = false
+		)
+	)`
+
 // CreateEventSingle creates a single event row and an audit record (PENDING_APPROVAL)
 func CreateEventSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -430,18 +451,107 @@ func BulkApproveEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Handle DELETE approvals: mark master as deleted (overrides is_active above)
-		_, err = tx.Exec(ctx, `
+		// Handle DELETE approvals: mark master as deleted (overrides is_active above).
+		// RETURNING only rows that transition to deleted so we cascade templates/config once.
+		var cascadeEventIDs []string
+		delRows, err := tx.Query(ctx, `
 			UPDATE notification_svc.event
 			SET is_deleted = true, is_active = false
 			WHERE event_id IN (
 				SELECT DISTINCT a.event_id FROM notification_svc.audit_event a
 				WHERE a.event_id = ANY($1::text[]) AND a.action_type = 'DELETE' AND a.processing_status = 'APPROVED'
 			)
+			AND COALESCE(is_deleted, false) = false
+			RETURNING event_id
 		`, req.EventIDs)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		for delRows.Next() {
+			var eid string
+			if err := delRows.Scan(&eid); err != nil {
+				delRows.Close()
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			cascadeEventIDs = append(cascadeEventIDs, eid)
+		}
+		delRows.Close()
+		if err := delRows.Err(); err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		if len(cascadeEventIDs) > 0 {
+			_, err = tx.Exec(ctx, `
+				UPDATE notification_svc.template
+				SET is_active = false
+				WHERE event_id = ANY($1::text[])
+			`, cascadeEventIDs)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+
+			_, err = tx.Exec(ctx, `
+				INSERT INTO notification_svc.audit_template (
+					template_id, action_type, processing_status,
+					subject, body_text, body_html, is_html_enabled, formula_steps, version_label,
+					requested_by, requested_at, checker_by, checker_at, checker_comment, is_deleted
+				)
+				SELECT
+					t.template_id,
+					'DELETE',
+					'APPROVED',
+					COALESCE(la.subject, ''),
+					COALESCE(la.body_text, ''),
+					COALESCE(la.body_html, ''),
+					COALESCE(la.is_html_enabled, false),
+					COALESCE(la.formula_steps, '[]'::jsonb),
+					(SELECT 'v' || (COUNT(*)::int + 1)::text FROM notification_svc.audit_template x WHERE x.template_id = t.template_id),
+					$1, now(), $1, now(), $2, true
+				FROM notification_svc.template t
+				LEFT JOIN LATERAL (
+					SELECT a.subject, a.body_text, a.body_html, a.is_html_enabled, a.formula_steps
+					FROM notification_svc.audit_template a
+					WHERE a.template_id = t.template_id
+					  AND a.processing_status = 'APPROVED'
+					  AND COALESCE(a.is_deleted, false) = false
+					ORDER BY GREATEST(COALESCE(a.checker_at, a.requested_at), a.requested_at) DESC NULLS LAST
+					LIMIT 1
+				) la ON true
+				WHERE t.event_id = ANY($3::text[])
+			`, userEmail, req.Comment, cascadeEventIDs)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+
+			_, err = tx.Exec(ctx, `
+				UPDATE notification_svc.notification_config
+				SET is_enabled = false, updated_by = $1, updated_at = now()
+				WHERE event_id = ANY($2::text[])
+			`, userEmail, cascadeEventIDs)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+
+			_, err = tx.Exec(ctx, `
+				INSERT INTO notification_svc.audit_notification_config (
+					config_id, event_id, channel, action_type, processing_status,
+					requested_by, requested_at, checker_by, checker_at, checker_comment
+				)
+				SELECT nc.config_id, nc.event_id, nc.channel, 'DELETE', 'APPROVED',
+					$1, now(), $1, now(), $2
+				FROM notification_svc.notification_config nc
+				WHERE nc.event_id = ANY($3::text[])
+			`, userEmail, req.Comment, cascadeEventIDs)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -531,7 +641,8 @@ func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND EXISTS (
 				  SELECT 1 FROM notification_svc.audit_event a
 				  WHERE a.event_id = m.event_id AND a.processing_status = 'APPROVED'
-			  )`
+			  )` + sqlFilterMasterEntityLiveORGlobalM + `
+`
 		if isAdmin || len(buNames) == 0 {
 			q = baseQ + ` ORDER BY m.event_display_name`
 		} else {
@@ -598,6 +709,28 @@ func GetEventAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				respondWithError(w, http.StatusForbidden, "you do not have access to this event")
 				return
 			}
+		}
+
+		var eventVisible bool
+		if err := pgxPool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM notification_svc.event m
+				WHERE m.event_id = $1
+				  AND COALESCE(m.is_deleted, false) = false
+				  AND (
+					COALESCE(m.entity_name,'') = ''
+					OR EXISTS (
+						SELECT 1 FROM public.masterentitycash me
+						WHERE me.entity_name = m.entity_name AND COALESCE(me.is_deleted, false) = false
+					)
+				  )
+			)`, req.EventID).Scan(&eventVisible); err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !eventVisible {
+			respondWithError(w, http.StatusNotFound, "event not found")
+			return
 		}
 
 		q := `SELECT audit_id, event_id, action_type, processing_status, reason, requested_by, requested_at, checker_by, checker_at, checker_comment, old_event_display_name, old_description, old_is_active, old_entity_name FROM notification_svc.audit_event WHERE event_id = $1 ORDER BY requested_at DESC`
@@ -890,7 +1023,7 @@ func GetEventsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			      COALESCE(l.action_type, '') = 'DELETE'
 			      AND COALESCE(l.processing_status, '') = 'APPROVED'
 			  )
-		` + entityFilterSQL + `
+		` + sqlFilterMasterEntityLiveORGlobalM + entityFilterSQL + `
 			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
 		`
 		var rows pgx.Rows
@@ -963,6 +1096,8 @@ func GetEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   ) ORDER BY a.requested_at DESC) FROM notification_svc.audit_event a WHERE a.event_id = m.event_id), '[]'::json) AS audits
 			FROM notification_svc.event m
 			WHERE m.event_id = $1
+			  AND COALESCE(m.is_deleted, false) = false
+			` + strings.TrimSpace(sqlFilterMasterEntityLiveORGlobalM) + `
 			LIMIT 1
 		`
 		row := pgxPool.QueryRow(ctx, q, req.EventID)

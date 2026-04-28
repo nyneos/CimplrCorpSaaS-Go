@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -173,7 +174,7 @@ func resolveFDBookingAccountExpression(ctx context.Context, exec fdSchemaQueryEx
 		return "", err
 	}
 	if columnName == "" {
-		return "''::text", nil
+		return constants.ErrEmptyString, nil
 	}
 	return fmt.Sprintf("COALESCE(%s.%s,'')", tableAlias, columnName), nil
 }
@@ -477,4 +478,11 @@ func buildVarianceDetailsJSON(items []varianceengine.VarianceItem) *string {
 	}
 	s := string(b)
 	return &s
+}
+
+// ─── formatNumber ─────────────────────────────────────────────────────────────
+// formatNumber formats a float64 in fixed-point notation (no scientific notation).
+// Trailing zeroes are stripped; e.g. 456688888.0 → "456688888".
+func formatNumber(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }

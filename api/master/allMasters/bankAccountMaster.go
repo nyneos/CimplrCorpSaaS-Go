@@ -711,7 +711,7 @@ func BulkDeleteBankAccountAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason     string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.AccountIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 		sessions := auth.GetActiveSessions()
@@ -966,8 +966,8 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 				COALESCE(a.iban, '') AS iban,
 				COALESCE(a.currency, '') AS currency_code,
 				COALESCE(a.usage, '') AS usage,
-				COALESCE(e.entity_id::text, ec.entity_id::text) AS entity_id,
-				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
+				ent.entity_id,
+				ent.entity_name,
 				COALESCE(latest_bal.balance_amount, 0) AS approved_balance,
 				cl.clearing_codes
 			FROM masterbankaccount a
@@ -980,8 +980,12 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 				ORDER BY bb.as_of_date DESC, bb.as_of_time DESC
 				LIMIT 1
 			) latest_bal ON TRUE
-			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
-			LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
+			LEFT JOIN LATERAL (
+				SELECT entity_id::text AS entity_id, entity_name FROM masterentity WHERE entity_id::text = a.entity_id
+				UNION ALL
+				SELECT entity_id::text AS entity_id, entity_name FROM masterentitycash WHERE entity_id::text = a.entity_id
+				LIMIT 1
+			) ent ON TRUE
 			LEFT JOIN latest_audit l ON l.account_id = a.account_id
 			LEFT JOIN clearing cl ON cl.account_id = a.account_id
 			WHERE 
@@ -1221,7 +1225,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 
 func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-			ctx := r.Context()
+		ctx := r.Context()
 
 		// Step 1: Get user_id
 		userID := ""
@@ -1237,7 +1241,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
-				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 				return
 			}
 		}
@@ -1722,14 +1726,18 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.currency,
 				a.account_nickname,
 				a.account_id,
-				COALESCE(ec.entity_name, me.entity_name, '') AS entity_name,
+				COALESCE(ent.entity_name, '') AS entity_name,
 				COALESCE(a.entity_id, '') AS entity_id,
 				COALESCE(a.usage, '') AS usage,
 				COALESCE(latest_bal.balance_amount, 0) AS approved_balance
 			FROM masterbankaccount a
 			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
-			LEFT JOIN public.masterentitycash ec ON a.entity_id::text = ec.entity_id
-			LEFT JOIN public.masterentity me ON me.entity_id::text = a.entity_id
+			LEFT JOIN LATERAL (
+				SELECT entity_name FROM public.masterentitycash WHERE entity_id = a.entity_id::text
+				UNION ALL
+				SELECT entity_name FROM public.masterentity WHERE entity_id::text = a.entity_id
+				LIMIT 1
+			) ent ON TRUE
 			LEFT JOIN LATERAL (
 				SELECT bb.balance_amount
 				FROM bank_balances_manual bb
@@ -1983,12 +1991,16 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
             ) AS clearing_codes,
             b.bank_id,
             b.bank_name,
-            COALESCE(e.entity_id::text, ec.entity_id::text) AS entity_id,
-            COALESCE(e.entity_name, ec.entity_name) AS entity_name
+            ent.entity_id,
+            ent.entity_name
         FROM masterbankaccount a
         LEFT JOIN masterbank b ON a.bank_id = b.bank_id
-        LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
-        LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
+        LEFT JOIN LATERAL (
+            SELECT entity_id::text AS entity_id, entity_name FROM masterentity WHERE entity_id::text = a.entity_id
+            UNION ALL
+            SELECT entity_id::text AS entity_id, entity_name FROM masterentitycash WHERE entity_id::text = a.entity_id
+            LIMIT 1
+        ) ent ON TRUE
 	WHERE a.account_id = $1 AND COALESCE(a.is_deleted, false) = false`
 
 		filters := []string{}
@@ -2429,8 +2441,8 @@ func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
     a.account_id, 
     a.account_number, 
     a.status,
-    COALESCE(e.entity_id::text, ec.entity_id::text) AS entity_id,
-    COALESCE(e.entity_name, ec.entity_name) AS entity_name,
+    ent.entity_id,
+    ent.entity_name,
     b.bank_name, 
     a.account_nickname,
     COALESCE(aa.processing_status, '') AS processing_status,
@@ -2444,8 +2456,12 @@ func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
     COALESCE(aa.reason, '') AS reason
 FROM masterbankaccount a
 LEFT JOIN masterbank b ON a.bank_id = b.bank_id
-LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
-LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
+LEFT JOIN LATERAL (
+    SELECT entity_id::text AS entity_id, entity_name FROM masterentity WHERE entity_id::text = a.entity_id
+    UNION ALL
+    SELECT entity_id::text AS entity_id, entity_name FROM masterentitycash WHERE entity_id::text = a.entity_id
+    LIMIT 1
+) ent ON TRUE
 LEFT JOIN LATERAL (
     SELECT *
     FROM auditactionbankaccount aa
