@@ -112,15 +112,12 @@ func GetClosureAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // ─── Access validator ─────────────────────────────────────────────────────────
 
 func validateClosureAuditAccess(ctx context.Context, pool *pgxpool.Pool, closureRequestID string) (int, string) {
-	var entityID string
+	var exists bool
 	if err := pool.QueryRow(ctx,
-		`SELECT entity_id FROM investment.fd_closure_request WHERE closure_request_id = $1`,
+		`SELECT EXISTS(SELECT 1 FROM investment.fd_closure_request WHERE closure_request_id = $1)`,
 		closureRequestID,
-	).Scan(&entityID); err != nil {
+	).Scan(&exists); err != nil || !exists {
 		return http.StatusNotFound, "closure request not found"
-	}
-	if ids := api.GetEntityIDsFromCtx(ctx); len(ids) > 0 && !api.IsEntityAllowed(ctx, entityID) {
-		return http.StatusForbidden, "access denied to this closure request"
 	}
 	return 0, ""
 }
