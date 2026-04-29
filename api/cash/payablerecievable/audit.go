@@ -51,6 +51,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		rows, err := pgxPool.Query(ctx, `
 			SELECT
+				action_id,
 				`+idColumn+`,
 				actiontype,
 				processing_status,
@@ -72,11 +73,11 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		payload := make([]map[string]interface{}, 0)
 		for rows.Next() {
-			var entityID, action, status, performedBy string
+			var actionID, entityID, action, status, performedBy string
 			var performedAt time.Time
 			var checkerBy, checkerComment, reason *string
 			var checkerAt *time.Time
-			if err := rows.Scan(&entityID, &action, &status, &performedBy, &performedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+			if err := rows.Scan(&actionID, &entityID, &action, &status, &performedBy, &performedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction audit history"})
 				return
 			}
@@ -91,7 +92,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"checker_at":     timePointerValue(checkerAt),
 				"comment":        stringPointerValue(checkerComment),
 				"reason":         stringPointerValue(reason),
-				"change_summary": buildTransactionChangeSummary(ctx, pgxPool, txType, req.TransactionID, action),
+				"change_summary": buildTransactionChangeSummary(ctx, pgxPool, txType, req.TransactionID, action, actionID),
 			})
 		}
 		if err := rows.Err(); err != nil {
@@ -148,136 +149,144 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func buildTransactionChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, transactionType, transactionID, action string) []map[string]interface{} {
+func buildTransactionChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, transactionType, transactionID, action, actionID string) []map[string]interface{} {
 	if !strings.EqualFold(strings.TrimSpace(action), "EDIT") {
 		return nil
 	}
 
 	switch strings.ToUpper(strings.TrimSpace(transactionType)) {
 	case "PAYABLE":
-		return buildPayableChangeSummary(ctx, pgxPool, transactionID)
+		return buildPayableChangeSummary(ctx, pgxPool, transactionID, actionID)
 	case "RECEIVABLE":
-		return buildReceivableChangeSummary(ctx, pgxPool, transactionID)
+		return buildReceivableChangeSummary(ctx, pgxPool, transactionID, actionID)
 	default:
 		return nil
 	}
 }
 
-func buildPayableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, payableID string) []map[string]interface{} {
+func buildPayableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, payableID, actionID string) []map[string]interface{} {
 	var (
-		entityName, oldEntityName             string
-		counterpartyName, oldCounterpartyName string
-		invoiceNumber, oldInvoiceNumber       string
-		invoiceDate, oldInvoiceDate           string
-		dueDate, oldDueDate                   string
-		amount, oldAmount                     string
-		currencyCode, oldCurrencyCode         string
+		oldEntity, newEntity         sql.NullString
+		oldCounter, newCounter       sql.NullString
+		oldInvoice, newInvoice       sql.NullString
+		oldInvDate, newInvDate       sql.NullString
+		oldDueDate, newDueDate       sql.NullString
+		oldAmount, newAmount         sql.NullString
+		oldCurrency, newCurrency     sql.NullString
 	)
 
 	err := pgxPool.QueryRow(ctx, `
 		SELECT
-			COALESCE(entity_name, ''),
-			COALESCE(old_entity_name, ''),
-			COALESCE(counterparty_name, ''),
-			COALESCE(old_counterparty_name, ''),
-			COALESCE(invoice_number, ''),
-			COALESCE(old_invoice_number, ''),
-			COALESCE(TO_CHAR(invoice_date, 'YYYY-MM-DD'), ''),
-			COALESCE(TO_CHAR(old_invoice_date, 'YYYY-MM-DD'), ''),
-			COALESCE(TO_CHAR(due_date, 'YYYY-MM-DD'), ''),
-			COALESCE(TO_CHAR(old_due_date, 'YYYY-MM-DD'), ''),
-			COALESCE(CAST(amount AS text), ''),
-			COALESCE(CAST(old_amount AS text), ''),
-			COALESCE(currency_code, ''),
-			COALESCE(old_currency_code, '')
-		FROM tr_payables
-		WHERE payable_id = $1
-	`, payableID).Scan(
-		&entityName, &oldEntityName,
-		&counterpartyName, &oldCounterpartyName,
-		&invoiceNumber, &oldInvoiceNumber,
-		&invoiceDate, &oldInvoiceDate,
-		&dueDate, &oldDueDate,
-		&amount, &oldAmount,
-		&currencyCode, &oldCurrencyCode,
+			aa.old_entity_name,
+			aa.new_entity_name,
+			aa.old_counterparty_name,
+			aa.new_counterparty_name,
+			aa.old_invoice_number,
+			aa.new_invoice_number,
+			CAST(aa.old_invoice_date AS text),
+			CAST(aa.new_invoice_date AS text),
+			CAST(aa.old_due_date AS text),
+			CAST(aa.new_due_date AS text),
+			CAST(aa.old_amount AS text),
+			CAST(aa.new_amount AS text),
+			aa.old_currency_code,
+			aa.new_currency_code
+		FROM auditactionpayable aa
+		WHERE aa.action_id = $1 AND aa.payable_id = $2
+	`, actionID, payableID).Scan(
+		&oldEntity, &newEntity,
+		&oldCounter, &newCounter,
+		&oldInvoice, &newInvoice,
+		&oldInvDate, &newInvDate,
+		&oldDueDate, &newDueDate,
+		&oldAmount, &newAmount,
+		&oldCurrency, &newCurrency,
 	)
 	if err != nil {
 		return nil
 	}
 
 	changes := make([]map[string]interface{}, 0)
-	appendTransactionChange(&changes, "Entity Name", oldEntityName, entityName)
-	appendTransactionChange(&changes, "Counterparty Name", oldCounterpartyName, counterpartyName)
-	appendTransactionChange(&changes, "Invoice Number", oldInvoiceNumber, invoiceNumber)
-	appendTransactionChange(&changes, "Invoice Date", oldInvoiceDate, invoiceDate)
-	appendTransactionChange(&changes, "Due Date", oldDueDate, dueDate)
-	appendTransactionChange(&changes, "Amount", oldAmount, amount)
-	appendTransactionChange(&changes, "Currency Code", oldCurrencyCode, currencyCode)
+	appendTransactionChange(&changes, "Entity Name", oldEntity, newEntity)
+	appendTransactionChange(&changes, "Counterparty Name", oldCounter, newCounter)
+	appendTransactionChange(&changes, "Invoice Number", oldInvoice, newInvoice)
+	appendTransactionChange(&changes, "Invoice Date", oldInvDate, newInvDate)
+	appendTransactionChange(&changes, "Due Date", oldDueDate, newDueDate)
+	appendTransactionChange(&changes, "Amount", oldAmount, newAmount)
+	appendTransactionChange(&changes, "Currency Code", oldCurrency, newCurrency)
 	return changes
 }
 
-func buildReceivableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, receivableID string) []map[string]interface{} {
+func buildReceivableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, receivableID, actionID string) []map[string]interface{} {
 	var (
-		entityName, oldEntityName             string
-		counterpartyName, oldCounterpartyName string
-		invoiceNumber, oldInvoiceNumber       string
-		invoiceDate, oldInvoiceDate           string
-		dueDate, oldDueDate                   string
-		amount, oldAmount                     string
-		currencyCode, oldCurrencyCode         string
+		oldEntity, newEntity         sql.NullString
+		oldCounter, newCounter       sql.NullString
+		oldInvoice, newInvoice       sql.NullString
+		oldInvDate, newInvDate       sql.NullString
+		oldDueDate, newDueDate       sql.NullString
+		oldAmount, newAmount         sql.NullString
+		oldCurrency, newCurrency     sql.NullString
 	)
 
 	err := pgxPool.QueryRow(ctx, `
 		SELECT
-			COALESCE(entity_name, ''),
-			COALESCE(old_entity_name, ''),
-			COALESCE(counterparty_name, ''),
-			COALESCE(old_counterparty_name, ''),
-			COALESCE(invoice_number, ''),
-			COALESCE(old_invoice_number, ''),
-			COALESCE(TO_CHAR(invoice_date, 'YYYY-MM-DD'), ''),
-			COALESCE(TO_CHAR(old_invoice_date, 'YYYY-MM-DD'), ''),
-			COALESCE(TO_CHAR(due_date, 'YYYY-MM-DD'), ''),
-			COALESCE(TO_CHAR(old_due_date, 'YYYY-MM-DD'), ''),
-			COALESCE(CAST(invoice_amount AS text), ''),
-			COALESCE(CAST(old_invoice_amount AS text), ''),
-			COALESCE(currency_code, ''),
-			COALESCE(old_currency_code, '')
-		FROM tr_receivables
-		WHERE receivable_id = $1
-	`, receivableID).Scan(
-		&entityName, &oldEntityName,
-		&counterpartyName, &oldCounterpartyName,
-		&invoiceNumber, &oldInvoiceNumber,
-		&invoiceDate, &oldInvoiceDate,
-		&dueDate, &oldDueDate,
-		&amount, &oldAmount,
-		&currencyCode, &oldCurrencyCode,
+			aa.old_entity_name,
+			aa.new_entity_name,
+			aa.old_counterparty_name,
+			aa.new_counterparty_name,
+			aa.old_invoice_number,
+			aa.new_invoice_number,
+			CAST(aa.old_invoice_date AS text),
+			CAST(aa.new_invoice_date AS text),
+			CAST(aa.old_due_date AS text),
+			CAST(aa.new_due_date AS text),
+			CAST(aa.old_amount AS text),
+			CAST(aa.new_amount AS text),
+			aa.old_currency_code,
+			aa.new_currency_code
+		FROM auditactionreceivable aa
+		WHERE aa.action_id = $1 AND aa.receivable_id = $2
+	`, actionID, receivableID).Scan(
+		&oldEntity, &newEntity,
+		&oldCounter, &newCounter,
+		&oldInvoice, &newInvoice,
+		&oldInvDate, &newInvDate,
+		&oldDueDate, &newDueDate,
+		&oldAmount, &newAmount,
+		&oldCurrency, &newCurrency,
 	)
 	if err != nil {
 		return nil
 	}
 
 	changes := make([]map[string]interface{}, 0)
-	appendTransactionChange(&changes, "Entity Name", oldEntityName, entityName)
-	appendTransactionChange(&changes, "Counterparty Name", oldCounterpartyName, counterpartyName)
-	appendTransactionChange(&changes, "Invoice Number", oldInvoiceNumber, invoiceNumber)
-	appendTransactionChange(&changes, "Invoice Date", oldInvoiceDate, invoiceDate)
-	appendTransactionChange(&changes, "Due Date", oldDueDate, dueDate)
-	appendTransactionChange(&changes, "Amount", oldAmount, amount)
-	appendTransactionChange(&changes, "Currency Code", oldCurrencyCode, currencyCode)
+	appendTransactionChange(&changes, "Entity Name", oldEntity, newEntity)
+	appendTransactionChange(&changes, "Counterparty Name", oldCounter, newCounter)
+	appendTransactionChange(&changes, "Invoice Number", oldInvoice, newInvoice)
+	appendTransactionChange(&changes, "Invoice Date", oldInvDate, newInvDate)
+	appendTransactionChange(&changes, "Due Date", oldDueDate, newDueDate)
+	appendTransactionChange(&changes, "Amount", oldAmount, newAmount)
+	appendTransactionChange(&changes, "Currency Code", oldCurrency, newCurrency)
 	return changes
 }
 
-func appendTransactionChange(changes *[]map[string]interface{}, fieldName, oldValue, newValue string) {
-	if strings.TrimSpace(oldValue) == strings.TrimSpace(newValue) {
+func appendTransactionChange(changes *[]map[string]interface{}, fieldName string, oldValue, newValue sql.NullString) {
+	if !newValue.Valid {
 		return
+	}
+	if oldValue.Valid && strings.TrimSpace(oldValue.String) == strings.TrimSpace(newValue.String) {
+		return
+	}
+
+	var oldOut interface{}
+	if oldValue.Valid {
+		oldOut = oldValue.String
 	}
 
 	*changes = append(*changes, map[string]interface{}{
 		"field":     fieldName,
-		"old_value": oldValue,
-		"new_value": newValue,
+		"old_value": oldOut,
+		"new_value": newValue.String,
 	})
 }
 
