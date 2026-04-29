@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -1014,7 +1015,14 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 		if recordID == "" {
 			recordID = strings.TrimSpace(req.RecordID)
 		}
+		// Handle base64-encoded IDs (sent by frontend)
+		if decoded, err := base64.StdEncoding.DecodeString(recordID); err == nil {
+			recordID = string(decoded)
+		}
 		uploadBatchID := strings.TrimSpace(req.UploadBatchID)
+		if decoded, err := base64.StdEncoding.DecodeString(uploadBatchID); err == nil {
+			uploadBatchID = string(decoded)
+		}
 
 		if recordID == "" && uploadBatchID == "" {
 			respondWithError(w, http.StatusBadRequest, "internal_reference_id or upload_batch_id is required")
@@ -1084,6 +1092,10 @@ func normalizeBulkIDs(ids []string) []string {
 		id := strings.TrimSpace(raw)
 		if id == "" {
 			continue
+		}
+		// Handle base64-encoded IDs (sent by frontend)
+		if decoded, err := base64.StdEncoding.DecodeString(id); err == nil {
+			id = string(decoded)
 		}
 		if _, ok := seen[id]; ok {
 			continue
