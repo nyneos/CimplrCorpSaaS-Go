@@ -1427,7 +1427,7 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM audit_action_cashflow_proposal a2
 				WHERE a2.proposal_id = p.proposal_id
-				ORDER BY requested_at DESC
+				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) a ON TRUE
 			ORDER BY p.effective_date DESC, p.proposal_id
@@ -1456,7 +1456,8 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&uploadS3Key,
 				&processingStatus,
 			); err != nil {
-				continue
+				api.RespondWithResult(w, false, "Error reading proposals: "+err.Error())
+				return
 			}
 
 			header := map[string]interface{}{
@@ -1480,7 +1481,9 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
-			"header":               out,
+			"data": map[string]interface{}{
+				"proposals": out,
+			},
 		})
 	}
 }

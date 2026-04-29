@@ -1369,7 +1369,7 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE aafpg.group_id IN (
 					SELECT group_id FROM fund_plan_groups fpg2 WHERE fpg2.plan_id = fpg.plan_id LIMIT 1
 				)
-				ORDER BY requested_at DESC
+				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) aa ON TRUE
 			GROUP BY fpg.plan_id, fpg.entity_name, fpg.horizon, 
@@ -1399,8 +1399,8 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason)
 
 			if err != nil {
-				api.LogError(constants.ErrScanFailed, map[string]interface{}{constants.ValueError: err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailed+err.Error())
+				return
 			}
 
 			plan := map[string]interface{}{
@@ -1429,7 +1429,13 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, plan)
 		}
 
-		api.RespondWithPayload(w, true, "", results)
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"fund_plans": results,
+			},
+		})
 	}
 }
 
@@ -1496,7 +1502,7 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					   checker_by, checker_at, checker_comment, reason
 				FROM auditaction_fund_plan_groups aafpg
 				WHERE aafpg.group_id = fpg.group_id
-				ORDER BY requested_at DESC
+				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) aa ON TRUE
 			WHERE fpg.plan_id = $1
@@ -1525,8 +1531,8 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason)
 
 			if err != nil {
-				api.LogError(constants.ErrScanFailed, map[string]interface{}{constants.ValueError: err.Error()})
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailed+err.Error())
+				return
 			}
 
 			// Set plan info on first iteration
@@ -1572,11 +1578,15 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		result := map[string]interface{}{
-			"plan_info": planInfo,
-			"groups":    groups,
+			"plan_info":        planInfo,
+			"fund_plan_groups": groups,
 		}
 
-		api.RespondWithPayload(w, true, "", result)
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data":               result,
+		})
 	}
 }
 

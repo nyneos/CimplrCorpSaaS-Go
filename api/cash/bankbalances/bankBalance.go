@@ -536,9 +536,14 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var actionID, balanceID, actionType, procStatus string
 			if err := rows.Scan(&actionID, &balanceID, &actionType, &procStatus); err != nil {
-				continue
+				api.RespondWithResult(w, false, "failed to read latest audits: "+pgUserFriendlyMessage(err))
+				return
 			}
 			found[balanceID] = true
+			if procStatus != "PENDING_APPROVAL" && procStatus != "PENDING_EDIT_APPROVAL" && procStatus != "PENDING_DELETE_APPROVAL" {
+				api.RespondWithResult(w, false, "cannot approve non-pending balance: "+balanceID)
+				return
+			}
 			actionIDs = append(actionIDs, actionID)
 			if actionType == "DELETE" {
 				deleteActionIDs = append(deleteActionIDs, actionID)
@@ -653,7 +658,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		sel := `SELECT DISTINCT ON (balance_id) action_id, balance_id FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, requested_at DESC, action_id DESC`
+		sel := `SELECT DISTINCT ON (balance_id) action_id, balance_id, processing_status FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, requested_at DESC, action_id DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.BalanceIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to fetch latest audits: "+pgUserFriendlyMessage(err))
@@ -666,10 +671,16 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var actionID string
 			var balanceID string
-			if err := rows.Scan(&actionID, &balanceID); err != nil {
-				continue
+			var procStatus string
+			if err := rows.Scan(&actionID, &balanceID, &procStatus); err != nil {
+				api.RespondWithResult(w, false, "failed to read latest audits: "+pgUserFriendlyMessage(err))
+				return
 			}
 			found[balanceID] = true
+			if procStatus != "PENDING_APPROVAL" && procStatus != "PENDING_EDIT_APPROVAL" && procStatus != "PENDING_DELETE_APPROVAL" {
+				api.RespondWithResult(w, false, "cannot reject non-pending balance: "+balanceID)
+				return
+			}
 			actionIDs = append(actionIDs, actionID)
 		}
 		missing := []string{}
@@ -1030,7 +1041,8 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						var rbyPtr *string
 						var ratPtr *time.Time
 						if err := auditRows.Scan(&bid, &atype, &rbyPtr, &ratPtr); err != nil {
-							continue
+							api.RespondWithResult(w, false, "failed to read audit details: "+pgUserFriendlyMessage(err))
+							return
 						}
 						if auditMap[bid] == nil {
 							auditMap[bid] = make(map[string]string)
@@ -1062,7 +1074,8 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						var ps, rb, at, aid, cb, cc, r *string
 						var rat, cat *time.Time
 						if err := auditLatestRows.Scan(&bid, &ps, &rb, &rat, &at, &aid, &cb, &cat, &cc, &r); err != nil {
-							continue
+							api.RespondWithResult(w, false, "failed to read latest audit details: "+pgUserFriendlyMessage(err))
+							return
 						}
 						auditLatestMap[bid] = map[string]*string{
 							"processing_status": ps,
@@ -1124,7 +1137,12 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": partialRows})
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: true,
+				"data": map[string]interface{}{
+					"bank_balances": partialRows,
+				},
+			})
 		}
 	}
 }

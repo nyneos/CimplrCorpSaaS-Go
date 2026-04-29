@@ -177,11 +177,12 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		capturedIDs := req.ProposalIDs
 		capturedUser := req.UserID
 		capturedReason := req.Reason
-		payload := BuildProjectionNotifPayload(context.Background(), pgxPool, capturedIDs, "DELETE", capturedUser)
+		notifyCtx := context.WithoutCancel(ctx)
+		payload := BuildProjectionNotifPayload(notifyCtx, pgxPool, capturedIDs, "DELETE", capturedUser)
 		payloadMap := payload.ToMap()
 		payloadMap["Reason"] = capturedReason
 		go catalog.TriggerNotification(
-			context.Background(), pgxPool,
+			notifyCtx, pgxPool,
 			"/cash/projection/v2/delete",
 			fmt.Sprintf("PROJ_DELETE/%s/%d", capturedUser, time.Now().UnixMilli()),
 			payloadMap,
@@ -251,7 +252,8 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 		for rows.Next() {
 			var actionID, proposalID, status string
 			if err := rows.Scan(&actionID, &proposalID, &status); err != nil {
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read latest proposal audits: "+err.Error())
+				return
 			}
 			foundProposals[proposalID] = true
 			if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || status == "PENDING_DELETE_APPROVAL" {
@@ -310,11 +312,12 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 		capturedIDs := req.ProposalIDs
 		capturedUser := req.UserID
 		capturedComment := req.Comment
-		payload := BuildProjectionNotifPayload(context.Background(), pgxPool, capturedIDs, "REJECT", capturedUser)
+		notifyCtx := context.WithoutCancel(ctx)
+		payload := BuildProjectionNotifPayload(notifyCtx, pgxPool, capturedIDs, "REJECT", capturedUser)
 		payloadMap := payload.ToMap()
 		payloadMap["CheckerComment"] = capturedComment
 		go catalog.TriggerNotification(
-			context.Background(), pgxPool,
+			notifyCtx, pgxPool,
 			"/cash/projection/v2/reject",
 			fmt.Sprintf("PROJ_REJECT/%s/%d", capturedUser, time.Now().UnixMilli()),
 			payloadMap,
@@ -395,7 +398,8 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 		for rows.Next() {
 			var actionID, proposalID, actionType, status string
 			if err := rows.Scan(&actionID, &proposalID, &actionType, &status); err != nil {
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read latest proposal audits: "+err.Error())
+				return
 			}
 			foundProposals[proposalID] = true
 			if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || status == "PENDING_DELETE_APPROVAL" {
@@ -480,7 +484,8 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 		capturedUser := req.UserID
 		capturedComment := req.Comment
 		capturedCheckerBy := checkerBy
-		payload := BuildProjectionNotifPayload(context.Background(), pgxPool, capturedIDs, "APPROVE", capturedUser)
+		notifyCtx := context.WithoutCancel(ctx)
+		payload := BuildProjectionNotifPayload(notifyCtx, pgxPool, capturedIDs, "APPROVE", capturedUser)
 		payloadMap := payload.ToMap()
 		payloadMap["CheckerComment"] = capturedComment
 		payloadMap["CheckerBy"] = capturedCheckerBy
@@ -488,7 +493,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 		// Scalar aliases for template {{Count}}, {{TotalExpectedAmount}} etc.
 		payloadMap["Count"] = len(capturedIDs)
 		go catalog.TriggerNotification(
-			context.Background(), pgxPool,
+			notifyCtx, pgxPool,
 			"/cash/projection/v2/approve",
 			fmt.Sprintf("PROJ_APPROVE/%s/%d", capturedUser, time.Now().UnixMilli()),
 			payloadMap,
@@ -542,7 +547,7 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
@@ -654,9 +659,10 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Notify: FULL proposal data for rich templates
 		capturedProposalID := proposalID
 		capturedUser := req.UserID
-		payload := BuildProjectionNotifPayload(context.Background(), pgxPool, []string{capturedProposalID}, "CREATE", capturedUser)
+		notifyCtx := context.WithoutCancel(ctx)
+		payload := BuildProjectionNotifPayload(notifyCtx, pgxPool, []string{capturedProposalID}, "CREATE", capturedUser)
 		go catalog.TriggerNotification(
-			context.Background(), pgxPool,
+			notifyCtx, pgxPool,
 			"/cash/projection/v2/create",
 			fmt.Sprintf("PROJ_CREATE/%s/%d", capturedProposalID, time.Now().UnixMilli()),
 			payload.ToMap(),
@@ -961,12 +967,12 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM cimplrcorpsaas.audit_action_cashflow_proposal a2
 				WHERE a2.proposal_id = p.proposal_id
-				ORDER BY requested_at DESC
+				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) a ON TRUE
 			WHERE COALESCE(p.is_deleted, false) = false
 			GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, p.upload_s3_key, a.processing_status
-			ORDER BY COALESCE((SELECT GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = p.proposal_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp) DESC
+			ORDER BY COALESCE((SELECT GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = p.proposal_id ORDER BY requested_at DESC, action_id DESC LIMIT 1), '1970-01-01'::timestamp) DESC
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -983,7 +989,8 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var effectiveDate time.Time
 			var itemCount int
 			if err := rows.Scan(&proposalID, &proposalName, &baseCurrency, &effectiveDate, &uploadS3Key, &status, &itemCount); err != nil {
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read proposals: "+err.Error())
+				return
 			}
 			proposals = append(proposals, map[string]interface{}{
 				"proposal_id":        proposalID,
@@ -998,8 +1005,10 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":   true,
-			"proposals": proposals,
+			"success": true,
+			"data": map[string]interface{}{
+				"proposals": proposals,
+			},
 		})
 	}
 }
@@ -1329,7 +1338,8 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		capturedProposalID := req.ProposalID
 		capturedUser := req.UserID
 		capturedReason := req.Reason
-		payload := BuildProjectionNotifPayload(context.Background(), pgxPool, []string{capturedProposalID}, "UPDATE", capturedUser)
+		notifyCtx := context.WithoutCancel(ctx)
+		payload := BuildProjectionNotifPayload(notifyCtx, pgxPool, []string{capturedProposalID}, "UPDATE", capturedUser)
 		payloadMap := payload.ToMap()
 		payloadMap["Reason"] = capturedReason
 		// Scalar aliases for template {{ProposalID}}, {{ProposalName}}, {{UpdatedBy}} etc.
@@ -1346,7 +1356,7 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		go catalog.TriggerNotification(
-			context.Background(), pgxPool,
+			notifyCtx, pgxPool,
 			"/cash/projection/v2/update",
 			fmt.Sprintf("PROJ_UPDATE/%s/%d", capturedProposalID, time.Now().UnixMilli()),
 			payloadMap,
