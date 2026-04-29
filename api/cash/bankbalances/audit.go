@@ -26,8 +26,8 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var req bankBalanceAuditRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" || strings.TrimSpace(req.BalanceID) == "" {
-			http.Error(w, "Missing user_id or balance_id", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.BalanceID) == "" {
+			http.Error(w, "Missing balance_id", http.StatusBadRequest)
 			return
 		}
 
