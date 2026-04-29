@@ -184,32 +184,23 @@ func GetConfirmationAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // ─── Access validators ────────────────────────────────────────────────────────
 
 func validateBookingAuditAccess(ctx context.Context, pool *pgxpool.Pool, bookingID string) (int, string) {
-	var entityID string
+	var exists bool
 	if err := pool.QueryRow(ctx,
-		`SELECT entity_id FROM investment.fd_booking_request WHERE booking_id = $1`,
+		`SELECT EXISTS(SELECT 1 FROM investment.fd_booking_request WHERE booking_id = $1)`,
 		bookingID,
-	).Scan(&entityID); err != nil {
+	).Scan(&exists); err != nil || !exists {
 		return http.StatusNotFound, "booking not found"
-	}
-	if ids := api.GetEntityIDsFromCtx(ctx); len(ids) > 0 && !api.IsEntityAllowed(ctx, entityID) {
-		return http.StatusForbidden, "access denied to this booking"
 	}
 	return 0, ""
 }
 
 func validateConfirmationAuditAccess(ctx context.Context, pool *pgxpool.Pool, confirmationID string) (int, string) {
-	var entityID string
-	if err := pool.QueryRow(ctx, `
-		SELECT b.entity_id
-		FROM investment.fd_confirmation c
-		JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
-		WHERE c.confirmation_id = $1`,
+	var exists bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM investment.fd_confirmation WHERE confirmation_id = $1)`,
 		confirmationID,
-	).Scan(&entityID); err != nil {
+	).Scan(&exists); err != nil || !exists {
 		return http.StatusNotFound, "confirmation not found"
-	}
-	if ids := api.GetEntityIDsFromCtx(ctx); len(ids) > 0 && !api.IsEntityAllowed(ctx, entityID) {
-		return http.StatusForbidden, "access denied to this confirmation"
 	}
 	return 0, ""
 }

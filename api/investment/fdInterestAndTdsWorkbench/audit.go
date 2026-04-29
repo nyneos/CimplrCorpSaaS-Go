@@ -117,15 +117,12 @@ func GetTDSReceiptAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // ─── Access validator ─────────────────────────────────────────────────────────
 
 func validateTDSAuditAccess(ctx context.Context, pool *pgxpool.Pool, tdsID string) (int, string) {
-	var entityID string
+	var exists bool
 	if err := pool.QueryRow(ctx,
-		`SELECT entity_id FROM investment.fd_tds_receipt WHERE tds_id = $1 AND is_deleted = false`,
+		`SELECT EXISTS(SELECT 1 FROM investment.fd_tds_receipt WHERE tds_id = $1 AND is_deleted = false)`,
 		tdsID,
-	).Scan(&entityID); err != nil {
+	).Scan(&exists); err != nil || !exists {
 		return http.StatusNotFound, "TDS receipt not found"
-	}
-	if ids := api.GetEntityIDsFromCtx(ctx); len(ids) > 0 && !api.IsEntityAllowed(ctx, entityID) {
-		return http.StatusForbidden, "access denied to this TDS receipt"
 	}
 	return 0, ""
 }
