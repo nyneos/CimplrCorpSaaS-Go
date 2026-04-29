@@ -38,6 +38,16 @@ type Transaction struct {
 	ReferenceNumber *string  `json:"reference_number,omitempty"`
 }
 
+// UploadOpts groups optional parameters for UploadBankStatementV2WithCategorization.
+type UploadOpts struct {
+	UseMapping            bool
+	Mappings              *ColumnMappings
+	AccountNumberOverride string
+	UploadFileName        string
+	UploadedBy            string
+	Password              string
+}
+
 // RecalculateInput matches the user's bank statement format
 type RecalculateInput struct {
 	UserID string               `json:"user_id"`
@@ -51,6 +61,7 @@ type RecalculateCleanData struct {
 }
 
 type RecalculateTransaction struct {
+	TranID     *string  `json:"tran_id,omitempty"`
 	TranDate   *string  `json:"tran_date"`
 	ValueDate  *string  `json:"value_date"`
 	Narration  *string  `json:"narration"`
@@ -82,6 +93,7 @@ type RecalculateCleanDataOutput struct {
 }
 
 type RecalculateTransactionOutput struct {
+	TranID         *string  `json:"tran_id,omitempty"`
 	TranDate       *string  `json:"tran_date"`
 	ValueDate      *string  `json:"value_date"`
 	Narration      string   `json:"narration"`

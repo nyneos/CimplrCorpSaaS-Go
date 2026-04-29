@@ -699,6 +699,25 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					})
 					continue
 				}
+				// Cleanup corresponding PDF upload metadata by checksum.
+				// bank_statements.file_hash stores the uploaded file hash; stream upload table
+				// stores it as bank_pdf_uploads.checksum_sha256.
+				_, err = tx.Exec(`
+					DELETE FROM cimplrcorpsaas.bank_pdf_uploads
+					WHERE checksum_sha256 IN (
+						SELECT file_hash
+						FROM cimplrcorpsaas.bank_statements
+						WHERE bank_statement_id = $1
+					)
+				`, bsid)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
 				_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid)
 				if err != nil {
 					results = append(results, map[string]interface{}{
@@ -1133,7 +1152,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		multiFlag := r.FormValue("multi") == "true"
 		if multiFlag {
 			// explicit multi=true: only try multi approach, surface error if it fails
-			UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(w, r)
+			UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
 			return
 		}
 		// No explicit multi flag: run normal single-account V2 first.
@@ -1237,6 +1256,16 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			})
 			return
 		}
+
+		// Auto-detect multi-account statements even when multi=true is not provided.
+		// This keeps preview/upload behavior aligned with user expectation for mixed-account CSVs.
+		if !multiFlag {
+			if isLikelyMultiAccountStatement(uploadFileName, fileBytes) {
+				log.Printf("[BANK-UPLOAD-DEBUG] Auto-detected multi-account statement for %s; routing to multi handler", uploadFileName)
+				UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
+				return
+			}
+		}
 		hash := sha256.Sum256(fileBytes)
 		fileHash := fmt.Sprintf("%x", hash[:])
 
@@ -1308,7 +1337,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			// V2 failed — try multi as a last-resort fallback (e.g. multi-account sheet)
 			log.Printf("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
 			multiRec := httptest.NewRecorder()
-			UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(multiRec, r)
+			UploadMultiAccountBankStatementHandler(db).ServeHTTP(multiRec, r)
 			// Multi handler returns outer "success":true even when ALL individual accounts fail.
 			// We must check that at least one account in data{} actually succeeded.
 			var multiResp struct {
@@ -1430,6 +1459,52 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			}()
 		}
 	})
+}
+
+func isLikelyMultiAccountStatement(filename string, fileBytes []byte) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext != ".csv" && ext != ".xlsx" && ext != ".xls" {
+		return false
+	}
+	rows, err := parseFileToRows(fileBytes)
+	if err != nil || len(rows) < 2 {
+		return false
+	}
+
+	header := rows[0]
+	findIdx := func(keywords ...string) int {
+		for i, h := range header {
+			lc := strings.ToLower(strings.TrimSpace(h))
+			for _, kw := range keywords {
+				if strings.Contains(lc, strings.ToLower(kw)) {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+
+	accIdx := findIdx("account number", "account_no", "account no", "acct_no", "acct no")
+	if accIdx == -1 {
+		return false
+	}
+
+	uniq := map[string]struct{}{}
+	for i := 1; i < len(rows); i++ {
+		row := rows[i]
+		if accIdx >= len(row) {
+			continue
+		}
+		acc := strings.TrimSpace(row[accIdx])
+		if acc == "" {
+			continue
+		}
+		uniq[acc] = struct{}{}
+		if len(uniq) > 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // UploadZippedBankStatementsHandler accepts a zip file containing multiple bank statement files,
