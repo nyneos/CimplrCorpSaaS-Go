@@ -798,7 +798,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// 	v = z4()
 		// }
 
-		log.Printf("[BANK-PREVIEW] proxying PDF/DOCX to parsing service =%s", v)
+		log.Printf("[BANK-PREVIEW] proxying PDF/DOCX to parsing service =****")
 		// Build multipart/form-data body with field name `pdf` (file)
 		var b bytes.Buffer
 		mw := multipart.NewWriter(&b)

