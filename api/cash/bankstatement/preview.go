@@ -574,8 +574,8 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		}
 
 		// Skip non-transaction rows — check first cell AND the description column.
-		// "balance brought forward", "balance carried forward", "b/f", "balance b/f", "balance c/f"
-		// are real transactions and must NOT be skipped — they establish the period opening balance.
+		// Opening carry lines (B/F, balance brought forward, etc.) establish opening balance only;
+		// they are skipped from the preview list (same as V2 ingestion).
 		nonTxnKeywords := []string{
 			"call 1800", "write to us", "closing balance", "opening balance",
 			"toll free",
@@ -666,6 +666,9 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			description = sanitizeForPostgres(normalizeCell(row[idx]))
 		}
 		txn["description"] = description
+		if IsStatementOpeningCarryRow(description) {
+			continue
+		}
 
 		// Resolve tran_id: file column → cheque/ref → date+timestamp+seq synthetic ID
 		if tranIDStr == "" {

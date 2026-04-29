@@ -131,6 +131,9 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 			log.Printf("[STRUCTURED_PROCESSOR] Warning: failed to parse value_date %s, skipping", txn.ValueDate)
 			continue
 		}
+		if IsStatementOpeningCarryRow(txn.Description) {
+			continue
+		}
 
 		var withdrawal, deposit sql.NullFloat64
 		if txn.Withdrawal > 0 {

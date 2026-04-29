@@ -41,7 +41,11 @@ func StartDashService(db *sql.DB, port string) {
 	host := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, dbPort, name)
+	sslMode := os.Getenv("DB_SSLMODE")
+	if sslMode == "" {
+		sslMode = "disable"
+	}
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)

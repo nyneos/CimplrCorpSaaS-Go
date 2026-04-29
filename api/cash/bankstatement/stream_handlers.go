@@ -3,6 +3,7 @@ package bankstatement
 import (
 	"CimplrCorpSaas/api/constants"
 	notif "CimplrCorpSaas/api/notification/catalog"
+	pdfco "CimplrCorpSaas/internal/pdfco"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -24,6 +25,19 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// bankStmtCoPDFEnabled reads BANK_STMT_CO_PDF from the environment (pdf.co path for PDFs in zip
+// and single-file preview). Former multipart field co_pdf=true is no longer used for this flag.
+// Truthy values: true, 1, yes, on (case-insensitive).
+func bankStmtCoPDFEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("BANK_STMT_CO_PDF")))
+	switch v {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 type BankPDFUpload struct {
 	ID               string         `json:"id" db:"id"`
@@ -351,10 +365,21 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 		return
 	}
 
+	// PDFs in zip are converted via pdf.co when BANK_STMT_CO_PDF is set (env), not form co_pdf.
+	zipCoPDF := bankStmtCoPDFEnabled()
+	if zipCoPDF {
+		log.Printf("[ZIP-PREVIEW] BANK_STMT_CO_PDF enabled — PDF entries will use pdf.co")
+	}
+	zipIsExcel := r.FormValue("is_excel") == "true"
+	zipPassword := r.FormValue("password")
+
 	allowedExt := map[string]bool{
 		".xls":  true,
 		".xlsx": true,
 		".csv":  true,
+	}
+	if zipCoPDF {
+		allowedExt[".pdf"] = true
 	}
 
 	// Copy base form values (excluding account routing keys — we resolve per-file below)
@@ -486,6 +511,94 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 			// !forceOverride: pass through; V2 handler does weighted scoring or auto-detect
 		}
 
+		// --- PDF via pdf.co conversion ---
+		if ext == ".pdf" && zipCoPDF {
+			// If force_override with account numbers, validate the account exists in DB
+			// BEFORE spending pdf.co credits — bail early if the account is unknown.
+			if forceOverride && len(accountNumbers) >= 1 {
+				acctToCheck := accountNumbers[0]
+				if len(accountNumbers) > 1 {
+					acctToCheck = accountNumbers[fileIdx]
+				}
+				var exists bool
+				if dbErr := db.QueryRowContext(ctx,
+					`SELECT EXISTS(SELECT 1 FROM public.masterbankaccount WHERE account_number=$1 AND is_deleted=false)`,
+					acctToCheck,
+				).Scan(&exists); dbErr != nil || !exists {
+					results = append(results, map[string]interface{}{
+						"file":   filename,
+						"status": "failed",
+						"error":  fmt.Sprintf("account %s not found in master data — skipping pdf.co conversion to save credits", acctToCheck),
+					})
+					failedCount++
+					fileIdx++
+					continue
+				}
+			}
+
+			var convertedBytes []byte
+			var convertedName string
+			var meta pdfco.ConvertMeta
+			if zipIsExcel {
+				convertedName = strings.TrimSuffix(filename, ".pdf") + ".xlsx"
+				convertedBytes, meta, err = pdfco.ConvertPDFToXLSX(ctx, fileBytes, filename, zipPassword)
+			} else {
+				convertedName = strings.TrimSuffix(filename, ".pdf") + ".csv"
+				convertedBytes, meta, err = pdfco.ConvertPDFToCSV(ctx, fileBytes, filename, zipPassword)
+			}
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"file":   filename,
+					"status": "failed",
+					"error":  "pdf.co conversion failed: " + err.Error(),
+				})
+				failedCount++
+				fileIdx++
+				continue
+			}
+			log.Printf("[ZIP-PREVIEW] pdf.co %s → %s credits_used=%d remaining=%d", filename, convertedName, meta.CreditsUsed, meta.RemainingCredits)
+
+			// strip pdf.co flags from the form values forwarded to V2
+			cleanFormValues := map[string][]string{}
+			for k, v := range perFileFormValues {
+				if k == "co_pdf" || k == "is_excel" || k == "password" {
+					continue
+				}
+				cleanFormValues[k] = v
+			}
+			resp, err := uploadBankStatementV2FromBytes(ctx, db, pool, convertedName, convertedBytes, cleanFormValues, r.URL.Query())
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"file":  filename,
+					"status": "failed",
+					"error": err.Error(),
+				})
+				failedCount++
+				fileIdx++
+				continue
+			}
+			resp["pdfco_credits_used"] = meta.CreditsUsed
+			resp["pdfco_remaining_credits"] = meta.RemainingCredits
+
+			successVal, _ := resp["success"].(bool)
+			status := "success"
+			if !successVal {
+				status = "failed"
+			}
+			if status == "success" {
+				successCount++
+			} else {
+				failedCount++
+			}
+			results = append(results, map[string]interface{}{
+				"file":     filename,
+				"status":   status,
+				"response": resp,
+			})
+			fileIdx++
+			continue
+		}
+
 		resp, err := uploadBankStatementV2FromBytes(ctx, db, pool, filename, fileBytes, perFileFormValues, r.URL.Query())
 		if err != nil {
 			results = append(results, map[string]interface{}{
@@ -522,7 +635,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 		return
 	}
 	if successCount == 0 && failedCount == 0 && skippedCount > 0 {
-		respondWithError(w, nil, "Zip contains no supported files (only .xls, .xlsx, .csv are allowed)", http.StatusBadRequest)
+		respondWithError(w, nil, "Zip contains no supported files (only .xls, .xlsx, .csv, and .pdf when BANK_STMT_CO_PDF=true)", http.StatusBadRequest)
 		return
 	}
 
@@ -585,6 +698,87 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		if ext == ".zip" {
 			log.Printf("[BANK-PREVIEW] zip upload detected filename=%s", fh.Filename)
 			handleZipBankStatementUpload(db, pool, w, r)
+			return
+		}
+
+		// pdf.co conversion when BANK_STMT_CO_PDF=true (env); is_excel from form selects XLSX over CSV.
+		// Rules:
+		//   BANK_STMT_CO_PDF + is_excel=false → PDF → CSV
+		//   BANK_STMT_CO_PDF + is_excel=true  → PDF → XLSX
+		//   otherwise → fall through to regular PDF/streaming or V2
+		coPDF := bankStmtCoPDFEnabled()
+		if coPDF {
+			log.Printf("[BANK-PREVIEW] BANK_STMT_CO_PDF enabled — PDF will use pdf.co")
+		}
+		isExcel := r.FormValue("is_excel") == "true"
+		password := r.FormValue("password")
+
+		if ext == ".pdf" && coPDF {
+			mf, err := fh.Open()
+			if err != nil {
+				respondWithError(w, err, constants.ErrFileUploadFailed, http.StatusBadRequest)
+				return
+			}
+			pdfBytes, err := io.ReadAll(mf)
+			mf.Close()
+			if err != nil {
+				respondWithError(w, err, "Failed to read PDF file", http.StatusInternalServerError)
+				return
+			}
+
+			var convertedBytes []byte
+			var convertedFilename string
+			var meta pdfco.ConvertMeta
+
+			if isExcel {
+				log.Printf("[BANK-PREVIEW] co_pdf+is_excel: converting PDF→XLSX via pdf.co filename=%s password_set=%v", fh.Filename, password != "")
+				convertedFilename = strings.TrimSuffix(fh.Filename, ".pdf") + ".xlsx"
+				convertedBytes, meta, err = pdfco.ConvertPDFToXLSX(ctx, pdfBytes, fh.Filename, password)
+				if err != nil {
+					log.Printf("[BANK-PREVIEW] pdf.co XLSX conversion failed: %v", err)
+					respondWithError(w, err, "PDF to XLSX conversion failed: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				log.Printf("[BANK-PREVIEW] pdf.co XLSX OK size=%d credits_used=%d remaining=%d", len(convertedBytes), meta.CreditsUsed, meta.RemainingCredits)
+			} else {
+				log.Printf("[BANK-PREVIEW] co_pdf: converting PDF→CSV via pdf.co filename=%s password_set=%v", fh.Filename, password != "")
+				convertedFilename = strings.TrimSuffix(fh.Filename, ".pdf") + ".csv"
+				convertedBytes, meta, err = pdfco.ConvertPDFToCSV(ctx, pdfBytes, fh.Filename, password)
+				if err != nil {
+					log.Printf("[BANK-PREVIEW] pdf.co CSV conversion failed: %v", err)
+					respondWithError(w, err, "PDF to CSV conversion failed: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				log.Printf("[BANK-PREVIEW] pdf.co CSV OK size=%d credits_used=%d remaining=%d", len(convertedBytes), meta.CreditsUsed, meta.RemainingCredits)
+			}
+
+			newReq, err := buildFileMultipartRequest(r, convertedBytes, convertedFilename, "co_pdf", "is_excel", "password")
+			if err != nil {
+				respondWithError(w, err, "Failed to build converted file request", http.StatusInternalServerError)
+				return
+			}
+			// Capture V2 response so we can inject pdf.co credit fields.
+			rec := httptest.NewRecorder()
+			UploadBankStatementV2Handler(db, pool).ServeHTTP(rec, newReq)
+
+			var v2Resp map[string]interface{}
+			if err := json.Unmarshal(rec.Body.Bytes(), &v2Resp); err != nil {
+				// If we can't parse it just forward as-is
+				for k, vals := range rec.Header() {
+					for _, v := range vals {
+						w.Header().Add(k, v)
+					}
+				}
+				w.WriteHeader(rec.Code)
+				w.Write(rec.Body.Bytes())
+				return
+			}
+			v2Resp["pdfco_credits_used"] = meta.CreditsUsed
+			v2Resp["pdfco_remaining_credits"] = meta.RemainingCredits
+
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			w.WriteHeader(rec.Code)
+			json.NewEncoder(w).Encode(v2Resp)
 			return
 		}
 
@@ -1750,4 +1944,73 @@ func q8() string {
 		b[i] = rune(x[i] - 1)
 	}
 	return string(b)
+}
+
+// buildFileMultipartRequest constructs a new POST request identical to original but
+// with the uploaded file replaced by fileBytes under the given filename.
+// stripKeys lists form fields to drop (e.g. "co_pdf", "is_excel", "password") so the V2 handler does not see them.
+func buildFileMultipartRequest(original *http.Request, fileBytes []byte, filename string, stripKeys ...string) (*http.Request, error) {
+	strip := make(map[string]struct{}, len(stripKeys))
+	for _, k := range stripKeys {
+		strip[k] = struct{}{}
+	}
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	if original.MultipartForm != nil {
+		for key, vals := range original.MultipartForm.Value {
+			if _, skip := strip[key]; skip {
+				continue
+			}
+			for _, v := range vals {
+				if err := mw.WriteField(key, v); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fw.Write(fileBytes); err != nil {
+		return nil, err
+	}
+	if err := mw.Close(); err != nil {
+		return nil, err
+	}
+
+	newReq, err := http.NewRequestWithContext(original.Context(), http.MethodPost, original.URL.String(), &buf)
+	if err != nil {
+		return nil, err
+	}
+	for key, vals := range original.Header {
+		if strings.EqualFold(key, "Content-Type") {
+			continue
+		}
+		for _, v := range vals {
+			newReq.Header.Add(key, v)
+		}
+	}
+	newReq.Header.Set("Content-Type", mw.FormDataContentType())
+	return newReq, nil
+}
+
+// PDFCoCreditsHandler returns the remaining pdf.co account credits.
+func PDFCoCreditsHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remaining, err := pdfco.GetRemainingCredits(r.Context())
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":           true,
+			"remaining_credits": remaining,
+		})
+	})
 }

@@ -29,7 +29,11 @@ func StartCashService(db *sql.DB, port string) {
 	host := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, dbPort, name)
+	sslMode := os.Getenv("DB_SSLMODE")
+	if sslMode == "" {
+		sslMode = "disable"
+	}
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
@@ -49,6 +53,7 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/commit", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CommitHandler(db, pgxPool)))
 	mux.Handle("/cash/get-pdf", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetPDFMetadataHandler(db)))
 	mux.Handle("/cash/download-pdf", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DownloadPDFHandler(db)))
+	mux.Handle("/cash/pdf-credits", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.PDFCoCreditsHandler()))
 	// Category Master APIs
 	mux.Handle("/cash/category/create", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CreateTransactionCategoryHandler(db)))
 	mux.Handle("/cash/category/list", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ListTransactionCategoriesHandler(db)))

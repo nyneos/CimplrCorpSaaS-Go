@@ -69,6 +69,10 @@ func parseDate(s string) (time.Time, error) {
 		// Named month formats
 		constants.DateFormatSlash, constants.DateFormatDash, // for 29/Aug/2025 and 29-Aug-2025
 		"2-Jan-2006", "1/Feb/2006",
+		// Space-separated named months (common in PDF→CSV exports): "03 Apr 2026"
+		"02 Jan 2006", "2 Jan 2006", "02 Jan 06", "2 Jan 06",
+		"02 Jan 2006 15:04:05", "2 Jan 2006 15:04:05", "02 Jan 2006 15:04", "2 Jan 2006 15:04",
+		"02 Jan 2006 03:04:05 PM", "2 Jan 2006 03:04:05 PM", "02 Jan 2006 3:04:05 PM", "2 Jan 2006 3:04:05 PM",
 		// dd-mm-yyyy with dash (Indian/European, e.g. BOB: "16-02-2026", "02-02-2026 19:40:13") - BEFORE mm-dd-yyyy!
 		"02-01-2006", "2-1-2006", "02-01-06", "2-1-06",
 		"02-01-2006 15:04:05", "2-1-2006 15:04:05", "02-01-2006 15:04", "2-1-2006 15:04",

@@ -25,7 +25,11 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 		port := os.Getenv("DB_PORT")
 		name := os.Getenv("DB_NAME")
 		if user != "" && pass != "" && host != "" && port != "" && name != "" {
-			dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+			sslMode := os.Getenv("DB_SSLMODE")
+			if sslMode == "" {
+				sslMode = "disable"
+			}
+			dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
 			var err error
 			pool, err = pgxpool.New(context.Background(), dsn)
 			if err != nil {
