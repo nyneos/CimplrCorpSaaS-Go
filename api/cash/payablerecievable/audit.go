@@ -83,14 +83,15 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			payload = append(payload, map[string]interface{}{
+				"action_id":      actionID,
 				"entity_id":      entityID,
-				"action":         action,
-				"status":         status,
-				"performed_by":   performedBy,
-				"performed_at":   performedAt,
+				"action_type":    action,
+				"processing_status": status,
+				"requested_by":   performedBy,
+				"requested_at":   performedAt,
 				"checker_by":     stringPointerValue(checkerBy),
 				"checker_at":     timePointerValue(checkerAt),
-				"comment":        stringPointerValue(checkerComment),
+				"checker_comment": stringPointerValue(checkerComment),
 				"reason":         stringPointerValue(reason),
 				"change_summary": buildTransactionChangeSummary(ctx, pgxPool, txType, req.TransactionID, action, actionID),
 			})
@@ -123,13 +124,13 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			payload = append(payload, map[string]interface{}{
 				"entity_id":     entityID,
-				"action":        "DOWNLOAD",
-				"status":        "COMPLETED",
-				"performed_by":  strings.TrimSpace(requestedBy),
-				"performed_at":  timePointerValue(&requestedAt.Time),
+				"action_type":   "DOWNLOAD",
+				"processing_status": "COMPLETED",
+				"requested_by":  strings.TrimSpace(requestedBy),
+				"requested_at":  timePointerValue(&requestedAt.Time),
 				"checker_by":    "",
 				"checker_at":    nil,
-				"comment":       "",
+				"checker_comment": "",
 				"reason":        "",
 				"file_name":     fileName.String,
 				"upload_s3_key": uploadKey.String,
@@ -143,8 +144,8 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Standardize: always return 'rows' as the array field
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    payload,
+			"success":    true,
+			"audit_logs": payload,
 		})
 	}
 }
