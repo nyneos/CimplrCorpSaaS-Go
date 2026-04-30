@@ -1104,12 +1104,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
+		defer tx.Rollback(ctx)
 
 		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
@@ -1176,7 +1171,6 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		committed = true
 
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
@@ -1206,12 +1200,7 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
+		defer tx.Rollback(ctx)
 		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, actiontype, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
 		if err != nil {
@@ -1292,7 +1281,6 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		committed = true
 
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}

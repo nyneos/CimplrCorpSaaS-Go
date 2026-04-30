@@ -1043,12 +1043,7 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
+		defer tx.Rollback(ctx)
 
 		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) ORDER BY counterparty_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.CounterpartyIDs)
@@ -1112,7 +1107,6 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		committed = true
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
 }
@@ -1143,12 +1137,7 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
+		defer tx.Rollback(ctx)
 
 		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, actiontype, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) ORDER BY counterparty_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.CounterpartyIDs)
@@ -1227,7 +1216,6 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		committed = true
 		api.RespondWithPayload(w, true, "", updated)
 	}
 }

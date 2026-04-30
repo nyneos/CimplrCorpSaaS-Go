@@ -455,6 +455,13 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// parse optional as_of_date and time into proper types in SQL; pass as strings
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to begin tx: "+pgUserFriendlyMessage(err))
+			return
+		}
+		defer tx.Rollback(ctx)
+
 		ins := `INSERT INTO bank_balances_manual (
             balance_id, bank_name, account_no, iban, currency_code, nickname, country,
             as_of_date, as_of_time, balance_type, balance_amount, statement_type, source_channel,
@@ -462,7 +469,7 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`
 
 		// Use Exec context
-		_, err := pgxPool.Exec(ctx, ins,
+		_, err = tx.Exec(ctx, ins,
 			balanceID,
 			nullifyEmpty(req.BankName),
 			nullifyEmpty(req.AccountNo),
@@ -488,9 +495,14 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// insert audit action
 		auditQ := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
-		_, err = pgxPool.Exec(ctx, auditQ, balanceID, nullifyEmpty(req.Reason), requestedBy)
+		_, err = tx.Exec(ctx, auditQ, balanceID, nullifyEmpty(req.Reason), requestedBy)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to create audit action: "+pgUserFriendlyMessage(err))
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
 			return
 		}
 
