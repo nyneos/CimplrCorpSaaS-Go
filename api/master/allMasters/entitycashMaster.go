@@ -1780,9 +1780,21 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return result
 		}
 		allToReject := getAllDescendants(req.EntityIDs)
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
+		}
+		defer tx.Rollback(ctx)
 		// Update processing_status to 'REJECTED' in auditactionentity for all
 		query := `UPDATE auditactionentity SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) RETURNING action_id, entity_id`
-		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
+		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to reject entity actions")
 			if statusCode == http.StatusOK {
@@ -1812,6 +1824,16 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if !success {
 			resp["message"] = "No entities found to reject"
+		}
+		if err := tx.Commit(ctx); err != nil {
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrCommitFailedCapitalized)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
 		}
 		json.NewEncoder(w).Encode(resp)
 	}
@@ -1879,12 +1901,24 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return result
 		}
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
+		}
+		defer tx.Rollback(ctx)
 		// For each entity, check approval_status
 		var allUpdated []map[string]interface{}
 		var anyError error
 		for _, eid := range req.EntityIDs {
 			var status string
-			err := pgxPool.QueryRow(ctx, `SELECT processing_status FROM auditactionentity WHERE entity_id = $1 ORDER BY requested_at DESC LIMIT 1`, eid).Scan(&status)
+			err := tx.QueryRow(ctx, `SELECT processing_status FROM auditactionentity WHERE entity_id = $1 ORDER BY requested_at DESC LIMIT 1`, eid).Scan(&status)
 			if err == pgx.ErrNoRows {
 				continue
 			} else if err != nil {
@@ -1894,7 +1928,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if status == "PENDING_DELETE_APPROVAL" {
 				// Mark all descendants as deleted (do not approve them)
 				descendants := getAllDescendants([]string{eid})
-				rows, err := pgxPool.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, descendants)
+				rows, err := tx.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, descendants)
 				if err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to mark entities as deleted")
 					if statusCode == http.StatusOK {
@@ -1917,7 +1951,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				// Also update the audit rows for these descendants: mark their delete actions as APPROVED
-				auditRows, aerr := pgxPool.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, descendants)
+				auditRows, aerr := tx.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, descendants)
 				if aerr != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(aerr, "Failed to approve delete actions")
 					if statusCode == http.StatusOK {
@@ -1941,7 +1975,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			} else {
 				// Approve only this entity: update auditactionentity processing_status
-				rows, err := pgxPool.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = $3 AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, eid)
+				rows, err := tx.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = $3 AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, eid)
 				if err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to approve entity action")
 					if statusCode == http.StatusOK {
@@ -1976,6 +2010,18 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if !success {
 			resp["message"] = "No entities found to approve"
+		}
+		if anyError == nil {
+			if err := tx.Commit(ctx); err != nil {
+				errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrCommitFailedCapitalized)
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
+				return
+			}
 		}
 		json.NewEncoder(w).Encode(resp)
 	}

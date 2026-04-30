@@ -1286,8 +1286,21 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrTxStartFailed)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
+		}
+		defer tx.Rollback(ctx)
+
 		query := `UPDATE auditactionglaccount SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE gl_account_id = ANY($3) RETURNING action_id, gl_account_id`
-		rows2, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
+		rows2, err := tx.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to reject GL account actions")
 			if statusCode == http.StatusOK {
@@ -1313,6 +1326,16 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
 		if !success {
 			resp["message"] = constants.ErrNoRowsUpdated
+		}
+		if err := tx.Commit(ctx); err != nil {
+			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrCommitFailedCapitalized)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
 		}
 		json.NewEncoder(w).Encode(resp)
 	}
@@ -1378,8 +1401,21 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrTxStartFailed)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
+		}
+		defer tx.Rollback(ctx)
+
 		query := `UPDATE auditactionglaccount SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE gl_account_id = ANY($3) RETURNING action_id, gl_account_id, actiontype`
-		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToApprove)
+		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToApprove)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to approve GL account actions")
 			if statusCode == http.StatusOK {
@@ -1406,7 +1442,7 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(deleteIDs) > 0 {
 			updQ := `UPDATE masterglaccount SET is_deleted=true WHERE gl_account_id = ANY($1)`
-			if _, err := pgxPool.Exec(ctx, updQ, deleteIDs); err != nil {
+			if _, err := tx.Exec(ctx, updQ, deleteIDs); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to set is_deleted: "+err.Error())
 				return
 			}
@@ -1417,6 +1453,16 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
 		if !success {
 			resp["message"] = constants.ErrNoRowsUpdated
+		}
+		if err := tx.Commit(ctx); err != nil {
+			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrCommitFailedCapitalized)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
 		}
 		json.NewEncoder(w).Encode(resp)
 	}
