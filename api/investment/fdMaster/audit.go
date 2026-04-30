@@ -3,6 +3,7 @@ package fdMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -25,7 +26,7 @@ func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		auditTable := resolveFDAuditTable(ctx, pgxPool)
 		if auditTable == "" {
-			api.RespondWithPayload(w, true, "", []map[string]interface{}{})
+			respondFDAuditPayload(w, []map[string]interface{}{})
 			return
 		}
 
@@ -37,7 +38,7 @@ func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		refCol := pickFirstExistingColumn(cols, "fd_id", "master_id", "confirmation_id")
 		if refCol == "" {
-			api.RespondWithPayload(w, true, "", []map[string]interface{}{})
+			respondFDAuditPayload(w, []map[string]interface{}{})
 			return
 		}
 
@@ -53,7 +54,7 @@ func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", payload)
+		respondFDAuditPayload(w, payload)
 	}
 }
 
@@ -101,6 +102,14 @@ func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if payload == nil {
 			payload = []map[string]interface{}{}
 		}
-		api.RespondWithPayload(w, true, "", payload)
+		respondFDAuditPayload(w, payload)
 	}
+}
+
+func respondFDAuditPayload(w http.ResponseWriter, payload interface{}) {
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+		"success": true,
+		"data":    payload,
+	})
 }
