@@ -346,7 +346,12 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
-		rows, err := db.Query(`SELECT * FROM forward_bookings WHERE entity_level_0 = ANY($1)`, pq.Array(buNames))
+		rows, err := db.Query(`
+			SELECT *
+			FROM forward_bookings
+			WHERE entity_level_0 = ANY($1)
+			  AND COALESCE(is_deleted, false) = false
+		`, pq.Array(buNames))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})

@@ -188,6 +188,7 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM public.exposure_headers
 			WHERE exposure_category IS NOT NULL
 			AND lower(coalesce(approval_status, '')) <> 'approved'
+			AND COALESCE(is_deleted, false) = false
 		`
 
 		query += ` AND batch_id = $` + strconv.Itoa(len(args)+1)
@@ -414,6 +415,7 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM public.exposure_headers
 			WHERE exposure_category IS NOT NULL
 			AND lower(coalesce(approval_status, '')) <> 'approved'
+			AND COALESCE(is_deleted, false) = false
 		`
 
 		query += ` AND batch_id = $` + strconv.Itoa(argIndex)

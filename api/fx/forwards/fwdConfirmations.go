@@ -13,6 +13,11 @@ import (
 	"github.com/lib/pq"
 )
 
+func isForwardPendingDeleteStatus(status string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(status))
+	return normalized == "PENDING_DELETE_APPROVAL" || normalized == "DELETE-APPROVAL"
+}
+
 func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Accept system_transaction_id and fields in the JSON body
@@ -136,7 +141,12 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Find which records are delete-approval and accessible
-		delRows, err := db.Query(`SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1) AND processing_status = 'Delete-approval'`, pq.Array(req.SystemTransactionIDs))
+		delRows, err := db.Query(`
+			SELECT system_transaction_id, entity_level_0
+			FROM forward_bookings
+			WHERE system_transaction_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) IN ('DELETE-APPROVAL', 'PENDING_DELETE_APPROVAL')
+		`, pq.Array(req.SystemTransactionIDs))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
@@ -155,9 +165,17 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		delRows.Close()
-		// Delete them
+		// Soft-delete approvals stay in the table and only flip is_deleted.
 		if len(deletedIds) > 0 {
-			_, err := db.Exec(`DELETE FROM forward_bookings WHERE system_transaction_id = ANY($1) AND processing_status = 'Delete-approval'`, pq.Array(deletedIds))
+			_, err := db.Exec(`
+				UPDATE forward_bookings
+				SET processing_status = 'APPROVED',
+				    is_deleted = TRUE,
+				    deleted_at = now(),
+				    deleted_by = $2
+				WHERE system_transaction_id = ANY($1)
+				  AND UPPER(COALESCE(processing_status, '')) IN ('DELETE-APPROVAL', 'PENDING_DELETE_APPROVAL')
+			`, pq.Array(deletedIds), req.UserID)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
@@ -288,7 +306,13 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "No matching forward bookings found"})
 			return
 		}
-		updateQuery := `UPDATE forward_bookings SET processing_status = 'Delete-approval' WHERE system_transaction_id = ANY($1) RETURNING *`
+		updateQuery := `
+			UPDATE forward_bookings
+			SET processing_status = 'PENDING_DELETE_APPROVAL'
+			WHERE system_transaction_id = ANY($1)
+			  AND COALESCE(is_deleted, false) = false
+			RETURNING *
+		`
 		resultRows, err := db.Query(updateQuery, pq.Array(eligibleIds))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)

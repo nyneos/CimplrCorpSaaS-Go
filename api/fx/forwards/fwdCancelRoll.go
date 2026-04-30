@@ -280,6 +280,7 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 				confirmation_upload_link
 			FROM forward_bookings
 			WHERE entity_level_0 = ANY($1)
+				AND COALESCE(is_deleted, false) = false
 				AND status NOT IN ('Cancelled', 'Pending Confirmation')
 				AND processing_status = 'Approved'
 		`

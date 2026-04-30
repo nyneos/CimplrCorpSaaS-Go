@@ -610,7 +610,9 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			SELECT h.*, l.*
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
-			WHERE h.entity = ANY($1) AND lower(coalesce(h.exposure_creation_status, '')) = 'approved'
+			WHERE h.entity = ANY($1)
+			  AND lower(coalesce(h.exposure_creation_status, '')) = 'approved'
+			  AND COALESCE(h.is_deleted, false) = false
 		`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure headers/line items")
@@ -796,7 +798,10 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			SELECT h.*, l.*
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
-			WHERE h.entity = ANY($1) AND h.approval_status NOT IN ('Approved', 'approved') AND lower(coalesce(h.exposure_creation_status, '')) = 'approved'
+			WHERE h.entity = ANY($1)
+			  AND h.approval_status NOT IN ('Approved', 'approved', 'APPROVED')
+			  AND lower(coalesce(h.exposure_creation_status, '')) = 'approved'
+			  AND COALESCE(h.is_deleted, false) = false
 		`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch pending approval headers/line items")
@@ -938,6 +943,7 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 			UserID            string   `json:"user_id"`
 			ExposureHeaderIds []string `json:"exposureHeaderIds"`
 			DeleteComment     string   `json:"delete_comment"`
+			Reason            string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.UserID == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrExposureHeaderIDsUserID)
@@ -959,9 +965,19 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Mark for delete approval first
+		deleteComment := req.DeleteComment
+		if strings.TrimSpace(deleteComment) == "" {
+			deleteComment = req.Reason
+		}
+
 		res, err := db.Exec(
-			`UPDATE exposure_headers SET approval_status = 'Delete-Approval', delete_comment = $1, requested_by = $2 WHERE exposure_header_id = ANY($3::uuid[])`,
-			req.DeleteComment,
+			`UPDATE exposure_headers
+			 SET approval_status = 'PENDING_DELETE_APPROVAL',
+			     delete_comment = $1,
+			     requested_by = $2
+			 WHERE exposure_header_id = ANY($3::uuid[])
+			   AND COALESCE(is_deleted, false) = false`,
+			deleteComment,
 			requestedBy,
 			pq.Array(req.ExposureHeaderIds),
 		)
@@ -1013,7 +1029,14 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		}
 
 		rows, err := db.Query(
-			`UPDATE exposure_headers SET approval_status = 'Rejected', rejected_by = $1, rejection_comment = $2, rejected_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`,
+			`UPDATE exposure_headers
+			 SET approval_status = 'REJECTED',
+			     rejected_by = $1,
+			     rejection_comment = $2,
+			     rejected_at = NOW()
+			 WHERE exposure_header_id = ANY($3::uuid[])
+			   AND COALESCE(is_deleted, false) = false
+			 RETURNING *`,
 			rejectedBy,
 			req.RejectionComment,
 			pq.Array(req.ExposureHeaderIds),
@@ -1120,9 +1143,9 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		skipped := []string{}
 		for _, h := range headers {
 			status := strings.ToLower(h.ApprovalStatus)
-			if strings.Contains(status, "delete") {
+			if status == "pending_delete_approval" || strings.Contains(status, "delete-approval") {
 				toDelete = append(toDelete, h.ExposureHeaderId)
-			} else if status == "pending" || status == "rejected" {
+			} else if status == "pending" || status == "rejected" || status == "pending_approval" || status == "pending_edit_approval" {
 				toApprove = append(toApprove, h.ExposureHeaderId)
 			} else if status == "approved" {
 				skipped = append(skipped, h.ExposureHeaderId)
@@ -1134,26 +1157,25 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			"rolled":   []map[string]interface{}{},
 			"skipped":  skipped,
 		}
-		// Handle delete-approval: delete header and line items
+		var approvalErr error
+		// Handle delete approval as a soft delete on the master row.
 		if len(toDelete) > 0 {
-			errors := []string{}
-			// Delete from exposure_rollover_log
-			if _, err := tx.Exec(`DELETE FROM exposure_rollover_log WHERE child_header_id = ANY($1::uuid[]) OR parent_header_id = ANY($1::uuid[])`, pq.Array(toDelete)); err != nil {
-				errors = append(errors, "exposure_rollover_log: "+err.Error())
-			}
-			// Delete from exposure_bucketing
-			if _, err := tx.Exec(`DELETE FROM exposure_bucketing WHERE exposure_header_id = ANY($1::uuid[])`, pq.Array(toDelete)); err != nil {
-				errors = append(errors, "exposure_bucketing: "+err.Error())
-			}
-			// Delete from hedging_proposal
-			if _, err := tx.Exec(`DELETE FROM hedging_proposal WHERE exposure_header_id = ANY($1::uuid[])`, pq.Array(toDelete)); err != nil {
-				errors = append(errors, "hedging_proposal: "+err.Error())
-			}
-			// Log deleted headers before deletion
-			delRows, errDel := tx.Query(`DELETE FROM exposure_headers WHERE exposure_header_id = ANY($1::uuid[]) RETURNING *`, pq.Array(toDelete))
+			delRows, errDel := tx.Query(`
+				UPDATE exposure_headers
+				SET approval_status = 'APPROVED',
+				    approved_by = $1,
+				    approval_comment = $2,
+				    approved_at = NOW(),
+				    is_deleted = TRUE,
+				    deleted_at = NOW(),
+				    deleted_by = $1
+				WHERE exposure_header_id = ANY($3::uuid[])
+				  AND COALESCE(is_deleted, false) = false
+				RETURNING *
+			`, approvedBy, req.ApprovalComment, pq.Array(toDelete))
 			deletedHeaders := []map[string]interface{}{}
 			if errDel != nil {
-				errors = append(errors, "exposure_headers: "+errDel.Error())
+				approvalErr = errDel
 			} else {
 				delCols, _ := delRows.Columns()
 				for delRows.Next() {
@@ -1172,10 +1194,6 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 					deletedHeaders = append(deletedHeaders, rowMap)
 				}
 				delRows.Close()
-			}
-			// Delete from exposure_line_items
-			if _, err := tx.Exec(`DELETE FROM exposure_line_items WHERE exposure_header_id = ANY($1::uuid[])`, pq.Array(toDelete)); err != nil {
-				errors = append(errors, "exposure_line_items: "+err.Error())
 			}
 			results["deleted"] = deletedHeaders
 			// Reverse rollover if needed
@@ -1235,6 +1253,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			appRows, err := tx.Query(`UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approval_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
 			if err != nil {
 				log.Printf("[WARN] approving exposure headers failed: %v", err)
+				approvalErr = err
 			} else {
 				defer appRows.Close()
 				approvedHeaders := []map[string]interface{}{}
@@ -1311,15 +1330,30 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 					}
 				}
 			}
-			tx.Commit()
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: true,
-				"deleted":              results["deleted"],
-				"approved":             results["approved"],
-				"rolled":               results["rolled"],
-				"skipped":              results["skipped"],
-			})
 		}
+
+		if approvalErr != nil {
+			respondWithError(w, http.StatusInternalServerError, approvalErr.Error())
+			return
+		}
+
+		if len(toDelete) == 0 && len(toApprove) == 0 {
+			respondWithError(w, http.StatusBadRequest, "No eligible exposure headers found for approval")
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"deleted":              results["deleted"],
+			"approved":             results["approved"],
+			"rolled":               results["rolled"],
+			"skipped":              results["skipped"],
+		})
 	}
 }
 
