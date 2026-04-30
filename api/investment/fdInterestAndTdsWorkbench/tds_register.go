@@ -224,7 +224,8 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 			    a.checker_by, a.checker_at, a.checker_comment
 			  FROM investment.fd_tds_receipt_audit a
 			  ORDER BY a.tds_id,
-			    GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz),COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+			    GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz),COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC,
+			    a.audit_id DESC
 			),
 			history AS (
 			  SELECT

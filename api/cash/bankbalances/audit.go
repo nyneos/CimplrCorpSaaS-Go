@@ -26,8 +26,8 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var req bankBalanceAuditRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" || strings.TrimSpace(req.BalanceID) == "" {
-			http.Error(w, "Missing user_id or balance_id", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.BalanceID) == "" {
+			http.Error(w, "Missing balance_id", http.StatusBadRequest)
 			return
 		}
 
@@ -69,15 +69,15 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			entry := map[string]interface{}{
-				"entity_id":    entityID,
-				"action":       auditString(action),
-				"status":       auditString(status),
-				"performed_by": auditString(performedBy),
-				"performed_at": auditTime(performedAt),
-				"checker_by":   auditString(checkerBy),
-				"checker_at":   auditTime(checkerAt),
-				"comment":      auditString(comment),
-				"reason":       auditString(reason),
+				"entity_id":         entityID,
+				"action_type":       auditString(action),
+				"processing_status": auditString(status),
+				"requested_by":      auditString(performedBy),
+				"requested_at":      auditTime(performedAt),
+				"checker_by":        auditString(checkerBy),
+				"checker_at":        auditTime(checkerAt),
+				"checker_comment":   auditString(comment),
+				"reason":            auditString(reason),
 			}
 			if strings.EqualFold(auditString(action), "EDIT") {
 				if changes := buildBankBalanceChangeSummary(ctx, pgxPool, req.BalanceID); len(changes) > 0 {
@@ -114,18 +114,18 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"entity_id":     entityID,
-				"action":        "DOWNLOAD",
-				"status":        "COMPLETED",
-				"performed_by":  strings.TrimSpace(requestedBy),
-				"performed_at":  auditTime(requestedAt),
-				"checker_by":    "",
-				"checker_at":    nil,
-				"comment":       "",
-				"reason":        "",
-				"file_name":     auditString(fileName),
-				"upload_s3_key": auditString(uploadKey),
-				"source":        "BANK_BALANCE",
+				"entity_id":         entityID,
+				"action_type":       "DOWNLOAD",
+				"processing_status": "COMPLETED",
+				"requested_by":      strings.TrimSpace(requestedBy),
+				"requested_at":      auditTime(requestedAt),
+				"checker_by":        "",
+				"checker_at":        nil,
+				"checker_comment":   "",
+				"reason":            "",
+				"file_name":         auditString(fileName),
+				"upload_s3_key":     auditString(uploadKey),
+				"source":            "BANK_BALANCE",
 			})
 		}
 		if err := downloadRows.Err(); err != nil {
@@ -135,8 +135,8 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Standardize: always return 'rows' as the array field
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    payload,
+			"success":    true,
+			"audit_logs": payload,
 		})
 	}
 }

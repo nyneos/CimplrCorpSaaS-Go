@@ -73,16 +73,16 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 			}
 
 			entry := map[string]interface{}{
-				"audit_id":     auditID,
-				"entity_id":    entityID,
-				"action":       action.String,
-				"status":       status.String,
-				"performed_by": performedBy.String,
-				"performed_at": nullableTime(performedAt),
-				"checker_by":   checkerBy.String,
-				"checker_at":   nullableTime(checkerAt),
-				"comment":      comment.String,
-				"reason":       reason.String,
+				"audit_id":           auditID,
+				"entity_id":          entityID,
+				"action_type":        action.String,
+				"processing_status":  status.String,
+				"requested_by":       performedBy.String,
+				"requested_at":       nullableTime(performedAt),
+				"checker_by":         checkerBy.String,
+				"checker_at":         nullableTime(checkerAt),
+				"checker_comment":    comment.String,
+				"reason":             reason.String,
 			}
 			if strings.EqualFold(action.String, "EDIT") {
 				if changes := buildBankStatementChangeSummary(ctx, db, body.BankStatementID); len(changes) > 0 {
@@ -99,8 +99,8 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 
 		// Standardize: always return 'rows' as the array field
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    payload,
+			"success":    true,
+			"audit_logs": payload,
 		})
 	})
 }
@@ -151,12 +151,19 @@ func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"file_id":           fileID.String,
-				"bank_statement_id": bankStatementID.String,
-				"performed_by":      performedBy.String,
-				"performed_at":      performedAt,
-				"ip":                ip.String,
-				"entity_name":       entityName.String,
+				"entity_id":          bankStatementID.String,
+				"action_type":        "DOWNLOAD",
+				"processing_status":  "COMPLETED",
+				"requested_by":       performedBy.String,
+				"requested_at":       performedAt,
+				"checker_by":         "",
+				"checker_at":         nil,
+				"checker_comment":    "",
+				"reason":             "",
+				"file_id":            fileID.String,
+				"bank_statement_id":  bankStatementID.String,
+				"ip":                 ip.String,
+				"entity_name":        entityName.String,
 			})
 		}
 		if err := rows.Err(); err != nil {
@@ -166,8 +173,8 @@ func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 
 		// Standardize: always return 'rows' as the array field
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    payload,
+			"success":    true,
+			"audit_logs": payload,
 		})
 	})
 }
@@ -219,11 +226,16 @@ func GetBankStatementBalanceImpactAuditHandler(db *sql.DB) http.Handler {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"balance_id":        balanceID,
-				"action":            action.String,
-				"status":            status.String,
-				"performed_by":      performedBy.String,
-				"performed_at":      nullableTime(performedAt),
+				"entity_id":          balanceID,
+				"balance_id":         balanceID,
+				"action_type":        action.String,
+				"processing_status":  status.String,
+				"requested_by":       performedBy.String,
+				"requested_at":       nullableTime(performedAt),
+				"checker_by":         "",
+				"checker_at":         nil,
+				"checker_comment":    "",
+				"reason":             "",
 				"bank_statement_id": body.BankStatementID,
 			})
 		}
@@ -234,8 +246,8 @@ func GetBankStatementBalanceImpactAuditHandler(db *sql.DB) http.Handler {
 
 		// Standardize: always return 'rows' as the array field
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    payload,
+			"success":    true,
+			"audit_logs": payload,
 		})
 	})
 }
@@ -287,12 +299,21 @@ func GetBankStatementTransactionAuditHandler(db *sql.DB) http.Handler {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"transaction_id": transactionID.String,
-				"field_name":     fieldName.String,
-				"old_value":      oldValue.String,
-				"new_value":      newValue.String,
-				"performed_by":   performedBy.String,
-				"performed_at":   nullableTime(performedAt),
+				"entity_id":         transactionID.String,
+				"action_type":       "EDIT",
+				"processing_status": "COMPLETED",
+				"requested_by":      performedBy.String,
+				"requested_at":      nullableTime(performedAt),
+				"checker_by":        "",
+				"checker_at":        nil,
+				"checker_comment":   "",
+				"reason":            "",
+				"transaction_id":    transactionID.String,
+				"change_summary": []map[string]interface{}{{
+					"field":     fieldName.String,
+					"old_value": oldValue.String,
+					"new_value": newValue.String,
+				}},
 			})
 		}
 		if err := rows.Err(); err != nil {
@@ -302,8 +323,8 @@ func GetBankStatementTransactionAuditHandler(db *sql.DB) http.Handler {
 
 		// Standardize: always return 'rows' as the array field
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    payload,
+			"success":    true,
+			"audit_logs": payload,
 		})
 	})
 }

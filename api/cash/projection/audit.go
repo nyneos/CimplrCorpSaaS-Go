@@ -72,15 +72,15 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			entry := map[string]interface{}{
-				"entity_id":    entityID,
-				"action":       action,
-				"status":       status,
-				"performed_by": performedBy,
-				"performed_at": performedAt,
-				"checker_by":   ifaceToString(checkerBy),
-				"checker_at":   ifaceToTimeString(checkerAt),
-				"comment":      ifaceToString(checkerComment),
-				"reason":       ifaceToString(reason),
+				"entity_id":          entityID,
+				"action_type":        action,
+				"processing_status":  status,
+				"requested_by":       performedBy,
+				"requested_at":       performedAt,
+				"checker_by":         ifaceToString(checkerBy),
+				"checker_at":         ifaceToTimeString(checkerAt),
+				"checker_comment":    ifaceToString(checkerComment),
+				"reason":             ifaceToString(reason),
 			}
 			if strings.EqualFold(action, "EDIT") {
 				if changes := buildProjectionChangeSummary(ctx, pgxPool, req.ProposalID); len(changes) > 0 {
@@ -92,15 +92,15 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if decisionAction := projectionDecisionAction(action, status, checkerAt); decisionAction != "" {
 				payload = append(payload, map[string]interface{}{
-					"entity_id":    entityID,
-					"action":       decisionAction,
-					"status":       status,
-					"performed_by": projectionFirstNonEmpty(ifaceToString(checkerBy), performedBy),
-					"performed_at": ifaceToTimeString(checkerAt),
-					"checker_by":   ifaceToString(checkerBy),
-					"checker_at":   ifaceToTimeString(checkerAt),
-					"comment":      ifaceToString(checkerComment),
-					"reason":       ifaceToString(reason),
+					"entity_id":         entityID,
+					"action_type":       decisionAction,
+					"processing_status": status,
+					"requested_by":      projectionFirstNonEmpty(ifaceToString(checkerBy), performedBy),
+					"requested_at":      ifaceToTimeString(checkerAt),
+					"checker_by":        ifaceToString(checkerBy),
+					"checker_at":        ifaceToTimeString(checkerAt),
+					"checker_comment":   ifaceToString(checkerComment),
+					"reason":            ifaceToString(reason),
 				})
 			}
 		}
@@ -131,14 +131,14 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"entity_id":     entityID,
-				"action":        "DOWNLOAD",
-				"status":        "COMPLETED",
-				"performed_by":  strings.TrimSpace(requestedBy),
-				"performed_at":  requestedAt.Time,
+				"entity_id":         entityID,
+				"action_type":       "DOWNLOAD",
+				"processing_status": "COMPLETED",
+				"requested_by":      strings.TrimSpace(requestedBy),
+				"requested_at":      requestedAt.Time,
 				"checker_by":    "",
 				"checker_at":    nil,
-				"comment":       "",
+				"checker_comment": "",
 				"reason":        "",
 				"file_name":     fileName.String,
 				"upload_s3_key": uploadKey.String,
@@ -152,8 +152,8 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Standardize: always return 'rows' as the array field
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    payload,
+			"success":    true,
+			"audit_logs": payload,
 		})
 	}
 }
