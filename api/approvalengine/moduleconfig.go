@@ -58,6 +58,7 @@ var txTypeRegistry = map[string]txTableConfig{
 	"FD_CLOSURE_PREMATURE":    {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
 	"FD_CLOSURE_ROLLOVER":     {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
 	"FD_CLOSURE_AUTO_RENEWAL": {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
+	"FD_CLOSURE_DELETE":       {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
 } // LookupTxTableConfig returns the audit table name and audit ID column for the
 // given transaction type. If the type is not registered, both strings are empty.
 func LookupTxTableConfig(transactionType string) (auditTable, auditIDColumn string) {

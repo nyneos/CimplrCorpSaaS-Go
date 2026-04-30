@@ -715,12 +715,26 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
 
-		// Step 1: Audit UPDATE
+		// Step 1: Approve only the latest pending audit row per receipt.
 		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_interest_receipt_audit
+			WITH latest_pending AS (
+				SELECT DISTINCT ON (a.receipt_id)
+					a.audit_id
+				FROM investment.fd_interest_receipt_audit a
+				WHERE a.receipt_id = ANY($3)
+				  AND a.processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+				ORDER BY a.receipt_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC,
+					a.audit_id DESC
+			)
+			UPDATE investment.fd_interest_receipt_audit a
 			SET processing_status='APPROVED', checker_by=$1,
 			    checker_at=now(), checker_comment=$2
-			WHERE receipt_id=ANY($3) AND processing_status LIKE 'PENDING%'`, userEmail, req.Comment, req.ReceiptIDs)
+			FROM latest_pending lp
+			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit update failed: "+err.Error())
 			return
@@ -728,9 +742,26 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Step 2: Receipt status
 		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_interest_receipt
+			WITH latest_actions AS (
+				SELECT DISTINCT ON (a.receipt_id)
+					a.receipt_id, a.action_type, a.processing_status
+				FROM investment.fd_interest_receipt_audit a
+				WHERE a.receipt_id = ANY($1)
+				ORDER BY a.receipt_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC,
+					a.audit_id DESC
+			)
+			UPDATE investment.fd_interest_receipt r
 			SET receipt_status='APPROVED'
-			WHERE receipt_id=ANY($1) AND receipt_status='CAPTURED'`, req.ReceiptIDs)
+			FROM latest_actions la
+			WHERE r.receipt_id = la.receipt_id
+			  AND r.receipt_id = ANY($1)
+			  AND la.action_type <> 'DELETE'
+			  AND la.processing_status = 'APPROVED'
+			  AND r.receipt_status='CAPTURED'`, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Receipt update failed: "+err.Error())
 			return
@@ -739,13 +770,25 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		// Step 2b: Approve TDS audit rows for these receipts.
 		// fd_tds_receipt_audit is keyed by tds_id (not receipt_id) — join through fd_tds_receipt.
 		_, err = tx.Exec(ctx, `
+			WITH latest_pending_tds AS (
+				SELECT DISTINCT ON (a.tds_id)
+					a.audit_id
+				FROM investment.fd_tds_receipt_audit a
+				JOIN investment.fd_tds_receipt t ON t.tds_id = a.tds_id
+				WHERE t.receipt_id = ANY($3)
+				  AND a.processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+				ORDER BY a.tds_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC,
+					a.audit_id DESC
+			)
 			UPDATE investment.fd_tds_receipt_audit a
 			SET processing_status='APPROVED', checker_by=$1,
 			    checker_at=now(), checker_comment=$2
-			FROM investment.fd_tds_receipt t
-			WHERE a.tds_id = t.tds_id
-			  AND t.receipt_id = ANY($3)
-			  AND a.processing_status LIKE 'PENDING%'`, userEmail, req.Comment, req.ReceiptIDs)
+			FROM latest_pending_tds lp
+			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "TDS audit update failed: "+err.Error())
 			return
@@ -753,9 +796,27 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Step 2c: Update TDS status to APPROVED
 		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_tds_receipt
+			WITH latest_tds_actions AS (
+				SELECT DISTINCT ON (a.tds_id)
+					a.tds_id, a.action_type, a.processing_status
+				FROM investment.fd_tds_receipt_audit a
+				JOIN investment.fd_tds_receipt t ON t.tds_id = a.tds_id
+				WHERE t.receipt_id = ANY($1)
+				ORDER BY a.tds_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC,
+					a.audit_id DESC
+			)
+			UPDATE investment.fd_tds_receipt t
 			SET tds_status='APPROVED'
-			WHERE receipt_id=ANY($1) AND tds_status='CAPTURED'`, req.ReceiptIDs)
+			FROM latest_tds_actions lta
+			WHERE t.tds_id = lta.tds_id
+			  AND t.receipt_id = ANY($1)
+			  AND lta.action_type <> 'DELETE'
+			  AND lta.processing_status = 'APPROVED'
+			  AND t.tds_status='CAPTURED'`, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "TDS status update failed: "+err.Error())
 			return
@@ -856,19 +917,50 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx) //nolint:errcheck
 
 		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_interest_receipt_audit
+			WITH latest_pending AS (
+				SELECT DISTINCT ON (a.receipt_id)
+					a.audit_id
+				FROM investment.fd_interest_receipt_audit a
+				WHERE a.receipt_id = ANY($3)
+				  AND a.processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+				ORDER BY a.receipt_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC,
+					a.audit_id DESC
+			)
+			UPDATE investment.fd_interest_receipt_audit a
 			SET processing_status='REJECTED', checker_by=$1,
 			    checker_at=now(), checker_comment=$2
-			WHERE receipt_id=ANY($3) AND processing_status LIKE 'PENDING%'`, userEmail, req.Comment, req.ReceiptIDs)
+			FROM latest_pending lp
+			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit update failed: "+err.Error())
 			return
 		}
 
 		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_interest_receipt
+			WITH latest_actions AS (
+				SELECT DISTINCT ON (a.receipt_id)
+					a.receipt_id, a.action_type, a.processing_status
+				FROM investment.fd_interest_receipt_audit a
+				WHERE a.receipt_id = ANY($1)
+				ORDER BY a.receipt_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC,
+					a.audit_id DESC
+			)
+			UPDATE investment.fd_interest_receipt r
 			SET receipt_status='REJECTED'
-			WHERE receipt_id=ANY($1) AND receipt_status='CAPTURED'`, req.ReceiptIDs)
+			FROM latest_actions la
+			WHERE r.receipt_id = la.receipt_id
+			  AND r.receipt_id = ANY($1)
+			  AND la.action_type <> 'DELETE'
+			  AND la.processing_status = 'REJECTED'
+			  AND r.receipt_status='CAPTURED'`, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Receipt update failed: "+err.Error())
 			return
@@ -963,7 +1055,8 @@ WITH latest_audit AS (
     GREATEST(
       COALESCE(a.requested_at,'1970-01-01'::timestamptz),
       COALESCE(a.checker_at,'1970-01-01'::timestamptz)
-    ) DESC
+    ) DESC,
+    a.audit_id DESC
 ),
 history AS (
   SELECT
@@ -1137,7 +1230,8 @@ WITH latest_audit AS (
   FROM investment.fd_interest_receipt_audit a
   WHERE a.processing_status = 'APPROVED'
   ORDER BY a.receipt_id,
-	GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+	GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC,
+	a.audit_id DESC
 ),
 history AS (
   SELECT
@@ -1257,7 +1351,8 @@ WITH latest_audit AS (
   FROM investment.fd_tds_receipt_audit a
   WHERE a.processing_status = 'APPROVED'
   ORDER BY a.tds_id,
-	GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+	GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC,
+	a.audit_id DESC
 ),
 history AS (
   SELECT

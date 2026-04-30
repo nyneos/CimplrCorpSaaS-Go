@@ -768,6 +768,48 @@ func StartGateway(port string, pathPrefix string) {
 		w.Write([]byte("API Gateway is active"))
 	}))
 
+	mux.HandleFunc("/health/db", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(headerContentType, contentTypeJSON)
+
+		if gatewayPool == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "unhealthy",
+				"db":     "not configured",
+			})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+
+		start := time.Now()
+		err := gatewayPool.Ping(ctx)
+		latency := time.Since(start)
+
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":  "unhealthy",
+				"db":      "disconnected",
+				"error":   err.Error(),
+				"latency": latency.String(),
+			})
+			return
+		}
+
+		stat := gatewayPool.Stat()
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":           "healthy",
+			"db":               "connected",
+			"latency":          latency.String(),
+			"total_conns":      stat.TotalConns(),
+			"idle_conns":       stat.IdleConns(),
+			"acquired_conns":   stat.AcquiredConns(),
+		})
+	}))
+
 	mux.HandleFunc("/", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		logr := logger.GlobalLogger
 		msg := "[Gateway] [Error] " + r.URL.Path + " from " + r.RemoteAddr + " (route not found)"
@@ -779,6 +821,7 @@ func StartGateway(port string, pathPrefix string) {
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte("404 - Route not found"))
 	}))
+	
 	u := os.Getenv("PORT")
 	if port != (u) && u != "" {
 		log.Printf("Prioitizing env Port %s over yaml port %s (if deployment didn't have that port open)", os.Getenv("PORT"), port)
