@@ -114,6 +114,7 @@ func GetForwardBookingsByEntityAndCurrency(db *sql.DB) http.HandlerFunc {
 				fb.maturity_date AS "Maturity"
 			FROM forward_bookings fb
 			WHERE fb.quote_currency = $1
+				AND COALESCE(fb.is_deleted, false) = false
 				AND (
 					fb.entity_level_0 = $2
 					OR fb.entity_level_1 = $2
