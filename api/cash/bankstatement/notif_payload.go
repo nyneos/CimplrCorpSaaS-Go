@@ -408,18 +408,18 @@ func BuildBankStatementNotifPayload(
 
 // BuildBankStatementParams groups parameters for constructing BankStatementNotifPayload.
 type BuildBankStatementParams struct {
-	BSID string
-	AccountNumber string
-	Metadata *Metadata
+	BSID           string
+	AccountNumber  string
+	Metadata       *Metadata
 	OpeningBalance float64
 	ClosingBalance float64
-	EntityID string
-	UploadedBy string
-	FileName string
-	TXNS []RecalculateTransaction
-	KPICats []map[string]interface{}
-	CategoryRules []categoryRuleComponent
-	Status string
+	EntityID       string
+	UploadedBy     string
+	FileName       string
+	TXNS           []RecalculateTransaction
+	KPICats        []map[string]interface{}
+	CategoryRules  []categoryRuleComponent
+	Status         string
 }
 
 // BuildBankStatementPayload constructs a BankStatementNotifPayload from the

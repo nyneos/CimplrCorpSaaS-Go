@@ -806,11 +806,10 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				` + recipientSubquery + ` AS recipients
 
 			FROM notification_svc.template t
-			INNER JOIN notification_svc.event e ON e.event_id = t.event_id
+			LEFT JOIN notification_svc.event e ON e.event_id = t.event_id
 			LEFT JOIN latest_audit l ON l.template_id = t.template_id
 			LEFT JOIN history h ON h.template_id = t.template_id
-			WHERE COALESCE(e.is_deleted, false) = false
-		` + sqlFilterMasterEntityLiveORGlobalE + entityFilterSQL + `
+		` + entityFilterSQL + `
 			ORDER BY GREATEST(COALESCE(l.requested_at,'1970-01-01'::timestamptz), COALESCE(l.checker_at,'1970-01-01'::timestamptz)) DESC
 		`
 		var rows pgx.Rows
@@ -954,10 +953,8 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM notification_svc.audit_template a
 			JOIN notification_svc.template t ON t.template_id = a.template_id
 			LEFT JOIN history h ON h.template_id = a.template_id
-			INNER JOIN notification_svc.event e ON e.event_id = t.event_id
+			LEFT JOIN notification_svc.event e ON e.event_id = t.event_id
 			WHERE a.is_deleted = false
-			AND COALESCE(e.is_deleted, false) = false
-			` + sqlFilterMasterEntityLiveORGlobalE + `
 			AND 1=1
 			` + entityFilterSQL + filterClause + `
 			ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamptz), COALESCE(a.checker_at, '1970-01-01'::timestamptz)) DESC NULLS LAST
@@ -1167,17 +1164,6 @@ func GetTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
-		buNames, isAdmin := callerContext(ctx)
-		if !isAdmin && len(buNames) > 0 {
-			var evtEntity string
-			_ = pgxPool.QueryRow(ctx,
-				`SELECT COALESCE(e.entity_name,'') FROM notification_svc.template t JOIN notification_svc.event e ON e.event_id=t.event_id WHERE t.template_id=$1`,
-				req.TemplateID).Scan(&evtEntity)
-			if !entityInPool(evtEntity, buNames) {
-				api.RespondWithPayload(w, false, "you do not have access to this template", nil)
-				return
-			}
-		}
 		q := fmt.Sprintf(`
 			SELECT t.template_id, t.event_id, t.channel, t.role_scope, t.template_name, t.description, t.is_active,
 				COALESCE((SELECT json_agg(json_build_object(
@@ -1191,12 +1177,7 @@ func GetTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					'old_recipients', COALESCE(a.old_recipients, '{}')
 				) ORDER BY a.requested_at DESC) FROM notification_svc.audit_template a WHERE a.template_id = t.template_id AND COALESCE(a.is_deleted, false) = false), '[]'::json) AS audits,
 				%s AS recipients
-			FROM notification_svc.template t
-			INNER JOIN notification_svc.event e ON e.event_id = t.event_id
-			WHERE t.template_id = $1
-			  AND COALESCE(e.is_deleted, false) = false
-			%s
-			LIMIT 1`, recipientSubquery, strings.TrimSpace(sqlFilterMasterEntityLiveORGlobalE))
+			FROM notification_svc.template t WHERE t.template_id = $1 LIMIT 1`, recipientSubquery)
 		row := pgxPool.QueryRow(ctx, q, req.TemplateID)
 		var tplID, eventID, channel, roleScope, name, desc string
 		var isActive bool
@@ -1260,8 +1241,7 @@ func GetTemplatesApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			JOIN notification_svc.event e ON e.event_id = t.event_id
 			LEFT JOIN latest_audit l ON l.template_id = t.template_id
 			WHERE t.is_active = true
-			  AND COALESCE(e.is_deleted, false) = false
-		` + sqlFilterMasterEntityLiveORGlobalE + entityFilterSQL + ` ORDER BY t.template_name`
+		` + entityFilterSQL + ` ORDER BY t.template_name`
 		var rows pgx.Rows
 		var err error
 		if len(entityArgs) > 0 {
@@ -1319,35 +1299,13 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		buNames, isAdmin := callerContext(ctx)
 
-		var tplVisible bool
-		if err := pgxPool.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM notification_svc.template t
-				INNER JOIN notification_svc.event e ON e.event_id = t.event_id
-				WHERE t.template_id = $1
-				  AND COALESCE(e.is_deleted, false) = false
-				  AND (
-					COALESCE(e.entity_name,'') = ''
-					OR EXISTS (
-						SELECT 1 FROM public.masterentitycash me
-						WHERE me.entity_name = e.entity_name AND COALESCE(me.is_deleted, false) = false
-					)
-				  )
-			)`, req.TemplateID).Scan(&tplVisible); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
-			return
-		}
-		if !tplVisible {
-			api.RespondWithPayload(w, false, "template not found", nil)
-			return
-		}
-
-		// Org pool: non-admin callers may only read templates for events in their accessible pool.
+		// Access check: verify the template's parent event is in caller's pool.
 		if !isAdmin && len(buNames) > 0 {
 			var evtEntity string
-			if err := pgxPool.QueryRow(ctx,
-				`SELECT COALESCE(e.entity_name,'') FROM notification_svc.template t INNER JOIN notification_svc.event e ON e.event_id=t.event_id WHERE t.template_id=$1`,
-				req.TemplateID).Scan(&evtEntity); err != nil || !entityInPool(evtEntity, buNames) {
+			_ = pgxPool.QueryRow(ctx,
+				`SELECT COALESCE(e.entity_name,'') FROM notification_svc.template t JOIN notification_svc.event e ON e.event_id=t.event_id WHERE t.template_id=$1`,
+				req.TemplateID).Scan(&evtEntity)
+			if !entityInPool(evtEntity, buNames) {
 				api.RespondWithPayload(w, false, "you do not have access to this template", nil)
 				return
 			}
@@ -2327,11 +2285,7 @@ func populateRecipientsForTemplate(ctx context.Context, pgxPool *pgxpool.Pool, t
 			if v, ok := rmap["recipient_priority"].(float64); ok && v > 0 {
 				recipPriority = int(v)
 			}
-			dbRtype := strings.ToUpper(rtype)
-			if dbRtype == "EXTERNAL" {
-				dbRtype = "USER" // DB constraint only allows USER|ROLE; external emails stored as USER
-			}
-			rows = append(rows, []interface{}{templateID, dbRtype, ruser, rrole, isActive, createdBy, recipPriority})
+			rows = append(rows, []interface{}{templateID, strings.ToUpper(rtype), ruser, rrole, isActive, createdBy, recipPriority})
 		}
 		if err := batchInsertRecipients(ctx, pgxPool, templateID, rows); err != nil {
 			return 0, err
@@ -2432,35 +2386,9 @@ func populateRecipientsOnTx(ctx context.Context, tx pgx.Tx, pgxPool *pgxpool.Poo
 			}
 			rtype, _ := rmap["recipient_type"].(string)
 			var ruser, rrole interface{}
-
-			// Resolve recipient_user_id: if it's an email, look up the internal user ID.
-			// Also accept recipient_email as a fallback key (EXTERNAL callers use it).
-			candidateEmail := ""
 			if s, ok := rmap["recipient_user_id"].(string); ok && s != "" {
-				if strings.Contains(s, "@") {
-					candidateEmail = s
-				} else {
-					ruser = s
-				}
+				ruser = s
 			}
-			if candidateEmail == "" {
-				if s, ok := rmap["recipient_email"].(string); ok && s != "" {
-					candidateEmail = s
-				}
-			}
-			if candidateEmail != "" {
-				var resolvedUID string
-				lookupErr := pgxPool.QueryRow(ctx,
-					`SELECT id::text FROM users WHERE email = $1 LIMIT 1`, candidateEmail,
-				).Scan(&resolvedUID)
-				if lookupErr == nil && resolvedUID != "" {
-					ruser = resolvedUID
-				} else {
-					// External/unknown email — store directly; dispatcher treats it as external.
-					ruser = candidateEmail
-				}
-			}
-
 			if s, ok := rmap["recipient_role"].(string); ok && s != "" {
 				rrole = s
 			}
@@ -2472,11 +2400,7 @@ func populateRecipientsOnTx(ctx context.Context, tx pgx.Tx, pgxPool *pgxpool.Poo
 			if v, ok := rmap["recipient_priority"].(float64); ok && v > 0 {
 				recipPriority = int(v)
 			}
-			dbRtype := strings.ToUpper(rtype)
-			if dbRtype == "EXTERNAL" {
-				dbRtype = "USER" // DB constraint only allows USER|ROLE; external emails stored as USER
-			}
-			rows = append(rows, []interface{}{templateID, dbRtype, ruser, rrole, isActive, createdBy, recipPriority})
+			rows = append(rows, []interface{}{templateID, strings.ToUpper(rtype), ruser, rrole, isActive, createdBy, recipPriority})
 		}
 		return len(rows), batchInsertRecipientsOnTx(ctx, tx, rows)
 

@@ -121,7 +121,7 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes 
 		csvFilename = noExt + ".csv"
 	}
 
-	txns, err := processSingleFilePreviewFlat(ctx, db, csvBytes, csvFilename, false, nil)
+	txns, err := processSingleFilePreviewFlat(ctx, db, csvBytes, csvFilename, false, nil, accountOverride)
 	if err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
@@ -133,7 +133,9 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes 
 
 // BuildPreviewResponsesFromCSVBytes returns one preview payload per account.
 // For single-account converted CSVs this returns exactly one entry.
-func BuildPreviewResponsesFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes []byte, filename string) ([]map[string]interface{}, error) {
+// When accountOverride is set (forced single account from the upload form), the multi-account
+// split path is skipped so preview and staging resolve the same master row as CSV/XLS uploads.
+func BuildPreviewResponsesFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes []byte, filename string, accountOverride string) ([]map[string]interface{}, error) {
 	csvFilename := filename
 	if !strings.HasSuffix(strings.ToLower(csvFilename), ".csv") {
 		noExt := strings.TrimSuffix(csvFilename, ".pdf")
@@ -142,30 +144,32 @@ func BuildPreviewResponsesFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes
 	}
 
 	// Prefer multi-account parser first so one converted CSV can stage N statements.
-	if txns, err := processMultiAccountCSVPreviewFlat(ctx, db, csvBytes); err == nil && len(txns) > 0 {
-		grouped := map[string][]map[string]interface{}{}
-		order := make([]string, 0)
-		for _, t := range txns {
-			acc, _ := t["account_number"].(string)
-			acc = strings.TrimSpace(acc)
-			if acc == "" {
-				acc = "__unknown__"
+	if strings.TrimSpace(accountOverride) == "" {
+		if txns, err := processMultiAccountCSVPreviewFlat(ctx, db, csvBytes); err == nil && len(txns) > 0 {
+			grouped := map[string][]map[string]interface{}{}
+			order := make([]string, 0)
+			for _, t := range txns {
+				acc, _ := t["account_number"].(string)
+				acc = strings.TrimSpace(acc)
+				if acc == "" {
+					acc = "__unknown__"
+				}
+				if _, ok := grouped[acc]; !ok {
+					order = append(order, acc)
+				}
+				grouped[acc] = append(grouped[acc], t)
 			}
-			if _, ok := grouped[acc]; !ok {
-				order = append(order, acc)
+			if len(grouped) > 0 {
+				out := make([]map[string]interface{}, 0, len(grouped))
+				for _, acc := range order {
+					out = append(out, buildPreviewResponseFromTxnMaps(grouped[acc], csvBytes, acc))
+				}
+				return out, nil
 			}
-			grouped[acc] = append(grouped[acc], t)
-		}
-		if len(grouped) > 0 {
-			out := make([]map[string]interface{}, 0, len(grouped))
-			for _, acc := range order {
-				out = append(out, buildPreviewResponseFromTxnMaps(grouped[acc], csvBytes, acc))
-			}
-			return out, nil
 		}
 	}
 
-	single, err := BuildPreviewResponseFromCSVBytes(ctx, db, csvBytes, filename, "")
+	single, err := BuildPreviewResponseFromCSVBytes(ctx, db, csvBytes, filename, accountOverride)
 	if err != nil {
 		return nil, err
 	}

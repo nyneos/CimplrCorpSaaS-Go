@@ -28,11 +28,7 @@ func StartUAMService(db *sql.DB, port string) {
 		host := os.Getenv("DB_HOST")
 		port := os.Getenv("DB_PORT")
 		name := os.Getenv("DB_NAME")
-		sslMode := os.Getenv("DB_SSLMODE")
-		if sslMode == "" {
-			sslMode = "disable"
-		}
-		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
 		pool, err := pgxpool.New(context.Background(), dsn)
 		if err != nil {
 			log.Fatalf("UAM: failed to connect to pgxpool DB: %v", err)
@@ -67,7 +63,7 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.Handle("/uam/instance/detail", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetInstanceDetail(pgxPool)))
 	/*users*/
 	mux.Handle("/uam/users/create-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.CreateUser(db, pgxPool))))
-	mux.Handle("/uam/users/get-users", middlewares.PreValidationMiddleware(pgxPool)(http.HandlerFunc(user.GetUsers(db))))
+	mux.Handle("/uam/users/get-users", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetUsers(db))))
 	mux.Handle("/uam/users/get-approved-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetApprovedUser(db))))
 	mux.Handle("/uam/users/get-user-by-id", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetUserById(db))))
 	mux.Handle("/uam/users/update-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.UpdateUser(db))))
