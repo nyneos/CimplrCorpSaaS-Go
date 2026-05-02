@@ -2005,7 +2005,7 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(interest_received_in_period,0),
 				COALESCE(tds_applicable_amount,0)
 			FROM investment.fd_accrual_ledger
-			WHERE `+whereClause,
+			WHERE `+whereClause+` AND COALESCE(is_deleted,false)=false`,
 			whereArgs...,
 		).Scan(
 			&ledgerID, &outRunID, &outFDID,
@@ -2372,7 +2372,8 @@ func RejectOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(tds_applicable_amount,0),
 				COALESCE(override_proposed_by,'')
 			FROM investment.fd_accrual_ledger
-			WHERE run_id=$1 AND fd_id=$2 AND override_status='PROPOSED'`,
+			WHERE run_id=$1 AND fd_id=$2 AND override_status='PROPOSED'
+			  AND COALESCE(is_deleted,false)=false`,
 			req.RunID, req.FDID,
 		).Scan(
 			&ledgerID,
@@ -3134,6 +3135,7 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 				COALESCE(tds_applicable_amount,0)
 			FROM investment.fd_accrual_ledger
 			WHERE run_id=$1 AND fd_id=$2
+			  AND COALESCE(is_deleted,false)=false
 			ORDER BY accrual_period_start ASC LIMIT 1`,
 			runID, fd.FDID).Scan(&ledgerID,
 			&prevPeriodInterest, &prevClosingBal, &prevTDS, &prevNetInterest,
@@ -3611,9 +3613,11 @@ func RecomputeAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		results := make([]runResult, 0, len(req.RunIDs))
 		for _, runID := range req.RunIDs {
-			// Clear old ledger rows so we don't double-count
+			// Soft-delete old ledger rows so we don't double-count but preserve audit trail
 			_, _ = pgxPool.Exec(ctx,
-				`DELETE FROM investment.fd_accrual_ledger WHERE run_id=$1`, runID)
+				`UPDATE investment.fd_accrual_ledger
+				 SET is_deleted=true, deleted_at=now(), deleted_by=$2
+				 WHERE run_id=$1 AND COALESCE(is_deleted,false)=false`, runID, userEmail)
 
 			// Reset run to allow re-execution
 			_, _ = pgxPool.Exec(ctx,

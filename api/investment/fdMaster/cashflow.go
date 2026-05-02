@@ -2624,6 +2624,7 @@ type SaveCashflowBatchParams struct {
 	FDID                string
 	Rows                []CashflowRow
 	CreatedBy           string
+	DeletedBy           string
 	MasterEntityID      string
 	MasterEntityName    string
 	MasterBankID        string
@@ -2646,7 +2647,13 @@ func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
 	masterBankID := p.MasterBankID
 	masterBankName := p.MasterBankName
 	masterSourceAccount := p.MasterSourceAccount
-	_, _ = exec.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = $1", table, fdCol), fdID)
+	deletedBy := p.DeletedBy
+	if deletedBy == "" {
+		deletedBy = createdBy
+	}
+	_, _ = exec.Exec(ctx, fmt.Sprintf(
+		"UPDATE %s SET is_deleted=true, deleted_at=now(), deleted_by=$2 WHERE %s=$1 AND COALESCE(is_deleted,false)=false",
+		table, fdCol), fdID, deletedBy)
 
 	// ── Determine the fixed column list for the batch INSERT ───────────────
 	// We resolve which columns exist ONCE here, then reuse for every row.
