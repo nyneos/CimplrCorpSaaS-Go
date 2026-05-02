@@ -667,7 +667,7 @@ func StartGateway(port string, pathPrefix string) {
 
 		// Also include process environment values for common keys
 		envKeys := []string{
-			"DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT", "DB_NAME",
+			"DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT", "DB_NAME", "DB_SSLMODE",
 			"UPLOAD_TO_STORAGE", "BANK_STMT_S3_ENABLED", "BANK_STMT_DEBUG_PARSE",
 			"ENABLE_ADMIN_OVERRIDE", "ADMIN_USER_IDS", "ADMIN_ROLES", "DEVEL_MODE",
 			"PAYLOAD_ENC_KEY", "RESPONSE_ENC_KEY", "CATEGORIZATION_SCHEDULE",
