@@ -6,6 +6,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/propagation"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -30,10 +31,19 @@ func InitTracerProvider(serviceName string) (*sdktrace.TracerProvider, func(cont
 		return nil, nil, err
 	}
 
+	exporter, err := stdouttrace.New(
+		stdouttrace.WithPrettyPrint(),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample())),
 	)
+	otel.SetTracerProvider(tp)
 
 	return tp, tp.Shutdown, nil
 }
