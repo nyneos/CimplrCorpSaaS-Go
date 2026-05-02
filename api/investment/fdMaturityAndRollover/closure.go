@@ -222,7 +222,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN uam.approval_instance ai ON ai.instance_id = cr.approval_instance_id
 			LEFT JOIN LATERAL (
 			  SELECT COUNT(*) AS total_periods, MAX(event_date) AS last_event_date
-			  FROM investment.fd_cashflow_schedule WHERE fd_id = m.fd_id
+			  FROM investment.fd_cashflow_schedule WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
 			) cf ON true
 			WHERE %s
 			ORDER BY m.maturity_date ASC
@@ -325,7 +325,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN uam.approval_instance ai ON ai.instance_id = cr.approval_instance_id
 				LEFT JOIN LATERAL (
 				  SELECT COUNT(*) AS total_periods, MAX(event_date) AS last_event_date
-				  FROM investment.fd_cashflow_schedule WHERE fd_id = m.fd_id
+				  FROM investment.fd_cashflow_schedule WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
 				) cf ON true
 				WHERE ` + allWhere + `
 				ORDER BY m.maturity_date ASC
