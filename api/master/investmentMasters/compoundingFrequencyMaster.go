@@ -100,7 +100,7 @@ func GetCompoundingFrequenciesApprovedActive(pgxPool *pgxpool.Pool) http.Handler
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -114,7 +114,7 @@ func GetCompoundingFrequenciesApprovedActive(pgxPool *pgxpool.Pool) http.Handler
 			var isActive bool
 
 			if err := rows.Scan(&id, &code, &name, &ftype, &periods, &days, &desc, &isActive); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Scan error: "+err.Error())
 				api.LogError("Database scan error in GetCompoundingFrequenciesApprovedActive: %v", err)
 				return
 			}
@@ -131,7 +131,7 @@ func GetCompoundingFrequenciesApprovedActive(pgxPool *pgxpool.Pool) http.Handler
 			})
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("Retrieved %d active approved compounding frequencies", len(out))
 	}
 }
@@ -244,7 +244,7 @@ func CreateCompoundingFrequencySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			IsActive                  *bool  `json:"is_active"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -258,7 +258,7 @@ func CreateCompoundingFrequencySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"description":                  req.Description,
 		}
 		if errMsg := validateCompoundingFrequencyMap(inputMap); errMsg != "" {
-			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			api.Error(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -275,7 +275,7 @@ func CreateCompoundingFrequencySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -283,7 +283,7 @@ func CreateCompoundingFrequencySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -296,7 +296,7 @@ func CreateCompoundingFrequencySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var id string
 		if err := tx.QueryRow(ctx, insertQ, req.FrequencyCode, req.FrequencyName, strings.ToUpper(req.FrequencyType), req.CompoundingPeriodsPerYear, req.DaysPerPeriod, req.Description, req.IsActive).Scan(&id); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -306,17 +306,17 @@ func CreateCompoundingFrequencySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		if _, err := tx.Exec(ctx, auditQ, id, userEmail); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true, "frequency_id": id, "requested": userEmail})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "frequency_id": id, "requested": userEmail}, "")
 		api.LogInfo("Compounding frequency created: ID=%s, Code=%s", id, req.FrequencyCode)
 	}
 }
@@ -337,11 +337,11 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rows provided")
+			api.Error(w, http.StatusBadRequest, "No rows provided")
 			return
 		}
 
@@ -353,7 +353,7 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -382,13 +382,24 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(validRows) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
+			{
+				apiErrMsg := constants.ErrAllRowsFailedValidation
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk create transaction begin failed: %v", err)
 			return
 		}
@@ -412,7 +423,7 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		duplicateRows, err := tx.Query(ctx, duplicateQuery, codes, names)
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Duplicate check failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer duplicateRows.Close()
@@ -423,7 +434,7 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for duplicateRows.Next() {
 			var code, name string
 			if err := duplicateRows.Scan(&code, &name); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Duplicate check scan failed")
+				api.Error(w, http.StatusInternalServerError, "Duplicate check scan failed")
 				return
 			}
 			existingCodes[code] = true
@@ -455,7 +466,18 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(finalValidInputs) == 0 {
-			api.RespondWithPayload(w, false, "All rows are duplicates", errorsList)
+			{
+				apiErrMsg := "All rows are duplicates"
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -475,7 +497,7 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := tx.Query(ctx, batchInsert, valueArgs...)
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Batch insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Batch insert failed: %v", err)
 			return
 		}
@@ -486,7 +508,7 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var id, code string
 			if err := rows.Scan(&id, &code); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
 				api.LogError("Insert scan failed: %v", err)
 				return
 			}
@@ -504,7 +526,7 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			auditQ := fmt.Sprintf("INSERT INTO investment.fd_audit_compounding_frequency (frequency_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ","))
 			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
 				msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrBatchAuditFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				api.LogError("Batch audit failed: %v", err)
 				return
 			}
@@ -512,13 +534,13 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Bulk create commit failed: %v", err)
 			return
 		}
 
 		allResults := append(inserted, errorsList...)
-		api.RespondWithPayload(w, len(inserted) > 0, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("Compounding frequency bulk create: %d inserted, %d errors", len(inserted), len(errorsList))
 	}
 }
@@ -527,20 +549,20 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(10 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			api.Error(w, http.StatusBadRequest, "Failed to parse multipart form")
 			api.LogError("ParseMultipartForm failed: %v", err)
 			return
 		}
 
 		userID := r.FormValue("user_id")
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
 		file, handler, err := r.FormFile("file")
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "File upload failed")
+			api.Error(w, http.StatusBadRequest, "File upload failed")
 			api.LogError("File upload failed: %v", err)
 			return
 		}
@@ -548,7 +570,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ext := strings.ToLower(filepath.Ext(handler.Filename))
 		if ext != ".csv" && ext != ".xlsx" {
-			api.RespondWithError(w, http.StatusBadRequest, "Only CSV and XLSX files are supported")
+			api.Error(w, http.StatusBadRequest, "Only CSV and XLSX files are supported")
 			return
 		}
 
@@ -560,7 +582,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -571,13 +593,13 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err = parseXLSXFile(file)
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "File parsing failed: "+err.Error())
+			api.Error(w, http.StatusBadRequest, "File parsing failed: "+err.Error())
 			api.LogError("File parsing failed: %v", err)
 			return
 		}
 
 		if len(rows) < 2 {
-			api.RespondWithError(w, http.StatusBadRequest, "File must contain header and at least one data row")
+			api.Error(w, http.StatusBadRequest, "File must contain header and at least one data row")
 			return
 		}
 
@@ -605,7 +627,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// compounding_periods_per_year may be required depending on frequency_type per-row
 		for _, rc := range requiredCols {
 			if _, ok := colMap[rc]; !ok {
-				api.RespondWithError(w, http.StatusBadRequest, "Required column '"+rc+"' not found")
+				api.Error(w, http.StatusBadRequest, "Required column '"+rc+"' not found")
 				return
 			}
 		}
@@ -650,7 +672,18 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if vErr := validateCompoundingFrequencyMap(input); vErr != "" {
 				// Fail-fast response
 				summary := fmt.Sprintf("Compounding frequency upload aborted: row %d failed validation: %s", ri+2, vErr)
-				api.RespondWithPayload(w, false, summary, nil)
+				{
+					apiErrMsg := summary
+					apiErrStatus := http.StatusInternalServerError
+					if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+						apiErrStatus = http.StatusBadRequest
+					} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+						apiErrStatus = http.StatusUnprocessableEntity
+					} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+						apiErrStatus = http.StatusUnauthorized
+					}
+					api.Error(w, apiErrStatus, apiErrMsg)
+				}
 				return
 			}
 
@@ -690,7 +723,18 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(inputs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
+			{
+				apiErrMsg := constants.ErrAllRowsFailedValidation
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -698,7 +742,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -721,7 +765,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		duplicateRows, err := tx.Query(ctx, duplicateQuery, codes, names)
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Duplicate check failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer duplicateRows.Close()
@@ -732,7 +776,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for duplicateRows.Next() {
 			var code, name string
 			if err := duplicateRows.Scan(&code, &name); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Duplicate check scan failed")
+				api.Error(w, http.StatusInternalServerError, "Duplicate check scan failed")
 				return
 			}
 			existingCodes[code] = true
@@ -762,7 +806,18 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(finalValidInputs) == 0 {
-			api.RespondWithPayload(w, false, "All rows are duplicates", errorsList)
+			{
+				apiErrMsg := "All rows are duplicates"
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -782,7 +837,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rowsRes, err := tx.Query(ctx, batchInsert, valueArgs...)
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Batch insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Batch insert failed: %v", err)
 			return
 		}
@@ -793,7 +848,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rowsRes.Next() {
 			var id, code string
 			if err := rowsRes.Scan(&id, &code); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
 				api.LogError("Insert scan failed: %v", err)
 				return
 			}
@@ -811,7 +866,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			auditQ := fmt.Sprintf("INSERT INTO investment.fd_audit_compounding_frequency (frequency_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ","))
 			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
 				msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrBatchAuditFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				api.LogError("Batch audit failed: %v", err)
 				return
 			}
@@ -819,13 +874,13 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Upload commit failed: %v", err)
 			return
 		}
 
 		allResults := append(inserted, errorsList...)
-		api.RespondWithPayload(w, len(inserted) > 0, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("Compounding frequency upload: %d inserted, %d errors", len(inserted), len(errorsList))
 	}
 }
@@ -835,7 +890,7 @@ func GetCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("frequency_id")
 		if id == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "frequency_id is required")
+			api.Error(w, http.StatusBadRequest, "frequency_id is required")
 			return
 		}
 
@@ -851,21 +906,12 @@ func GetCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var isActive, isDeleted bool
 		if err := pgxPool.QueryRow(ctx, q, id).Scan(&fid, &code, &name, &ftype, &periods, &days, &desc, &isActive, &isDeleted); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"frequency_id":                 fid,
-			"frequency_code":               code,
-			"frequency_name":               name,
-			"frequency_type":               ftype,
-			"compounding_periods_per_year": periods,
-			"days_per_period":              days,
-			"description":                  desc,
-			"is_active":                    isActive,
-			"is_deleted":                   isDeleted,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"frequency_id": fid, "frequency_code": code, "frequency_name": name, "frequency_type": ftype, "compounding_periods_per_year": periods, "days_per_period": days, "description": desc, "is_active": isActive, "is_deleted": isDeleted}, "")
 	}
 }
 
@@ -953,7 +999,7 @@ func GetCompoundingFrequenciesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -975,16 +1021,13 @@ func GetCompoundingFrequenciesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
 			api.LogError("Row iteration error in GetCompoundingFrequenciesWithAudit: %v", rows.Err())
 			return
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"rows":                 out,
-		})
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("Retrieved %d compounding frequencies with audit data", len(out))
 	}
 }
@@ -1079,7 +1122,7 @@ func GetCompoundingFrequencyAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1102,7 +1145,7 @@ func GetCompoundingFrequencyAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc
 				&currentCode, &currentName, &currentType, &currentPeriods, &currentDays, &currentDesc, &currentIsActive, &currentIsDeleted,
 				&oldCode, &oldName, &oldType, &oldPeriods, &oldDays, &oldDesc, &oldIsActive,
 			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Scan error: "+err.Error())
 				api.LogError("Database scan error in GetCompoundingFrequencyAuditHistory: %v", err)
 				return
 			}
@@ -1139,16 +1182,13 @@ func GetCompoundingFrequencyAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+rows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, "Row iteration error: "+rows.Err().Error())
 			api.LogError("Row iteration error in GetCompoundingFrequencyAuditHistory: %v", rows.Err())
 			return
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"audit_logs":           out,
-		})
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("Retrieved %d compounding frequency audit history records", len(out))
 	}
 }
@@ -1162,12 +1202,12 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason       string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		if len(req.FrequencyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFrequencyIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoFrequencyIDsProvided)
 			return
 		}
 
@@ -1179,14 +1219,14 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk delete transaction begin failed: %v", err)
 			return
 		}
@@ -1201,7 +1241,7 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := tx.Query(ctx, verifyQuery, req.FrequencyIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Verification failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Delete verification failed: %v", err)
 			return
 		}
@@ -1211,7 +1251,7 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Verification scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Verification scan failed: "+err.Error())
 				api.LogError("Delete verification scan failed: %v", err)
 				return
 			}
@@ -1234,7 +1274,7 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
 				msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrBatchAuditFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				api.LogError("Batch delete audit insert failed: %v", err)
 				return
 			}
@@ -1242,7 +1282,7 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Bulk delete commit failed: %v", err)
 			return
 		}
@@ -1267,7 +1307,7 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		success := len(validIDs) > 0
-		api.RespondWithPayload(w, success, "", results)
+		api.Success(w, http.StatusOK, results, "")
 		api.LogInfo("Delete requests created for compounding frequency: %d requested, %d errors, %d total", len(validIDs), len(req.FrequencyIDs)-len(validIDs), len(req.FrequencyIDs))
 	}
 }
@@ -1281,11 +1321,11 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment      string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.FrequencyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFrequencyIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoFrequencyIDsProvided)
 			return
 		}
 
@@ -1297,7 +1337,7 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1305,7 +1345,7 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Begin transaction failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1319,7 +1359,7 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Approval failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -1338,13 +1378,13 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Delete execution failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -1353,7 +1393,7 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"approved_count":       len(req.FrequencyIDs),
 			"checker":              userEmail,
 		}
-		api.RespondWithPayload(w, true, "", response)
+		api.Success(w, http.StatusOK, response, "")
 		api.LogInfo("Bulk approval completed: %d frequency IDs approved by %s", len(req.FrequencyIDs), userEmail)
 	}
 }
@@ -1367,11 +1407,11 @@ func BulkRejectCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment      string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.FrequencyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFrequencyIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoFrequencyIDsProvided)
 			return
 		}
 
@@ -1383,7 +1423,7 @@ func BulkRejectCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1391,7 +1431,7 @@ func BulkRejectCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Begin transaction failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1404,13 +1444,13 @@ func BulkRejectCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Rejection failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -1419,7 +1459,7 @@ func BulkRejectCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"rejected_count":       len(req.FrequencyIDs),
 			"checker":              userEmail,
 		}
-		api.RespondWithPayload(w, true, "", response)
+		api.Success(w, http.StatusOK, response, "")
 		api.LogInfo("Bulk rejection completed: %d frequency IDs rejected by %s", len(req.FrequencyIDs), userEmail)
 	}
 }
@@ -1434,17 +1474,17 @@ func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason      string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		if req.FrequencyID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "frequency_id is required")
+			api.Error(w, http.StatusBadRequest, "frequency_id is required")
 			return
 		}
 
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No fields provided for update")
+			api.Error(w, http.StatusBadRequest, "No fields provided for update")
 			return
 		}
 
@@ -1456,7 +1496,7 @@ func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1464,7 +1504,7 @@ func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Transaction start failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1478,7 +1518,7 @@ func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var oldVals [7]interface{}
 		if err := tx.QueryRow(ctx, sel, req.FrequencyID).Scan(&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4], &oldVals[5], &oldVals[6]); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Fetch failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -1506,7 +1546,7 @@ func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No valid updatable fields found")
+			api.Error(w, http.StatusBadRequest, "No valid updatable fields found")
 			return
 		}
 
@@ -1515,7 +1555,7 @@ func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrUpdateFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -1538,13 +1578,13 @@ func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		auditQuery := fmt.Sprintf("INSERT INTO investment.fd_audit_compounding_frequency (%s) VALUES (%s)", strings.Join(auditCols, ", "), strings.Join(auditParams, ", "))
 		if _, err := tx.Exec(ctx, auditQuery, auditVals...); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -1554,7 +1594,7 @@ func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"requested":            userEmail,
 			"reason":               req.Reason,
 		}
-		api.RespondWithPayload(w, true, "", response)
+		api.Success(w, http.StatusOK, response, "")
 		api.LogInfo("Compounding frequency updated successfully: ID=%s, Reason=%s", req.FrequencyID, req.Reason)
 	}
 }
@@ -1571,11 +1611,11 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rows provided")
+			api.Error(w, http.StatusBadRequest, "No rows provided")
 			return
 		}
 
@@ -1587,7 +1627,7 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1619,13 +1659,24 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(validUpdates) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errors)
+			{
+				apiErrMsg := constants.ErrAllRowsFailedValidation
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk update transaction begin failed: %v", err)
 			return
 		}
@@ -1639,7 +1690,7 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rowsOld, err := tx.Query(ctx, oldValuesQuery, allIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Fetch old values failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Batch old values fetch failed: %v", err)
 			return
 		}
@@ -1650,7 +1701,7 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			var vals [7]interface{}
 			if err := rowsOld.Scan(&id, &vals[0], &vals[1], &vals[2], &vals[3], &vals[4], &vals[5], &vals[6]); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Old values scan failed: "+err.Error())
 				api.LogError("Old values scan failed: %v", err)
 				return
 			}
@@ -1705,7 +1756,7 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			updateArgs = append(updateArgs, allIDs)
 			if _, err := tx.Exec(ctx, updateQuery, updateArgs...); err != nil {
 				msg, status := getUserFriendlyCompoundingFrequencyError(err, "Batch update failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				api.LogError("Batch update failed: %v", err)
 				return
 			}
@@ -1746,14 +1797,14 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Bulk update commit failed: %v", err)
 			return
 		}
 
 		allResults := append(successResults, errors...)
 		success := len(successResults) > 0
-		api.RespondWithPayload(w, success, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("ULTRA FAST bulk update frequency: %d updated, %d errors, %d total - single transaction", len(successResults), len(errors), len(req.Rows))
 	}
 }

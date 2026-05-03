@@ -127,11 +127,11 @@ func CreateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ERPSystemInput
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if err := validateERPSystemInput(req.ERPSystemInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.Error(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -143,7 +143,7 @@ func CreateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -151,7 +151,7 @@ func CreateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -166,7 +166,7 @@ func CreateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.Version, req.BaseURL, req.Timezone, strings.ToUpper(req.DefaultCurrency),
 		).Scan(&erpID); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "ERP system insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -183,7 +183,7 @@ func CreateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.AuthConfig.CertKMSRef, req.AuthConfig.Scopes,
 		); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "ERP auth config insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -191,13 +191,13 @@ func CreateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO apibox.audit_erp_system (erp_system_id, action_type, processing_status, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, erpID, userEmail); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -220,9 +220,8 @@ func CreateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 		}(erpID, userEmail)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true, "erp_system_id": erpID, "requested": userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "erp_system_id": erpID, "requested": userEmail}, "")
 		api.LogInfo("ERP system created: ID=%s by=%s", erpID, userEmail)
 	}
 }
@@ -236,11 +235,11 @@ func CreateERPSystemBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []ERPSystemInput `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
 			return
 		}
 
@@ -252,7 +251,7 @@ func CreateERPSystemBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -274,7 +273,7 @@ func CreateERPSystemBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "erp_system_id": id})
 		}
 
-		api.RespondWithPayload(w, len(inserted) > 0, "", append(inserted, errList...))
+		api.Success(w, http.StatusOK, append(inserted, errList...), "")
 	}
 }
 
@@ -337,15 +336,15 @@ func UpdateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason      string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.ERPSystemID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "erp_system_id is required")
+			api.Error(w, http.StatusBadRequest, "erp_system_id is required")
 			return
 		}
 		if len(req.Fields) == 0 && req.AuthConfig == nil {
-			api.RespondWithError(w, http.StatusBadRequest, "fields or auth_config is required")
+			api.Error(w, http.StatusBadRequest, "fields or auth_config is required")
 			return
 		}
 
@@ -357,7 +356,7 @@ func UpdateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -365,7 +364,7 @@ func UpdateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -376,11 +375,11 @@ func UpdateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM apibox.erp_system_master WHERE erp_system_id=$1 FOR UPDATE`, req.ERPSystemID,
 		).Scan(&oldERPType, &oldBaseURL, &oldVersion); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "ERP system record not found")
+				api.Error(w, http.StatusNotFound, "ERP system record not found")
 				return
 			}
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -406,7 +405,7 @@ func UpdateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				args = append(args, req.ERPSystemID)
 				if _, err := tx.Exec(ctx, fmt.Sprintf("UPDATE apibox.erp_system_master SET %s WHERE erp_system_id=$%d", strings.Join(sets, ","), pos), args...); err != nil {
 					msg, status := getUserFriendlyCounterpartyError(err, "ERP system update failed")
-					api.RespondWithError(w, status, msg)
+					api.Error(w, status, msg)
 					return
 				}
 			}
@@ -416,45 +415,45 @@ func UpdateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.AuthConfig != nil {
 			authType := strings.ToUpper(req.AuthConfig.AuthType)
 			if !validAuthTypes[authType] {
-				api.RespondWithError(w, http.StatusBadRequest, "auth_config.auth_type must be one of OAUTH2, BASIC_AUTH, API_KEY, CERT")
+				api.Error(w, http.StatusBadRequest, "auth_config.auth_type must be one of OAUTH2, BASIC_AUTH, API_KEY, CERT")
 				return
 			}
 			// Validate KMS refs for the new auth config
 			if authType == "OAUTH2" {
 				if req.AuthConfig.TokenEndpointKMSRef != "" {
 					if err := validateKMSPath("token_endpoint_kms_ref", req.AuthConfig.TokenEndpointKMSRef); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.Error(w, http.StatusBadRequest, err.Error())
 						return
 					}
 				}
 				if req.AuthConfig.ClientIDKMSRef != "" {
 					if err := validateKMSPath("client_id_kms_ref", req.AuthConfig.ClientIDKMSRef); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.Error(w, http.StatusBadRequest, err.Error())
 						return
 					}
 				}
 				if req.AuthConfig.ClientSecretKMSRef != "" {
 					if err := validateKMSPath("client_secret_kms_ref", req.AuthConfig.ClientSecretKMSRef); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.Error(w, http.StatusBadRequest, err.Error())
 						return
 					}
 				}
 			}
 			if authType == "BASIC_AUTH" && req.AuthConfig.ClientSecretKMSRef != "" {
 				if err := validateKMSPath("client_secret_kms_ref", req.AuthConfig.ClientSecretKMSRef); err != nil {
-					api.RespondWithError(w, http.StatusBadRequest, err.Error())
+					api.Error(w, http.StatusBadRequest, err.Error())
 					return
 				}
 			}
 			if authType == "API_KEY" && req.AuthConfig.APIKeyKMSRef != "" {
 				if err := validateKMSPath("api_key_kms_ref", req.AuthConfig.APIKeyKMSRef); err != nil {
-					api.RespondWithError(w, http.StatusBadRequest, err.Error())
+					api.Error(w, http.StatusBadRequest, err.Error())
 					return
 				}
 			}
 			if authType == "CERT" && req.AuthConfig.CertKMSRef != "" {
 				if err := validateKMSPath("cert_kms_ref", req.AuthConfig.CertKMSRef); err != nil {
-					api.RespondWithError(w, http.StatusBadRequest, err.Error())
+					api.Error(w, http.StatusBadRequest, err.Error())
 					return
 				}
 			}
@@ -476,7 +475,7 @@ func UpdateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				req.ERPSystemID,
 			); err != nil {
 				msg, status := getUserFriendlyCounterpartyError(err, "ERP auth config update failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
@@ -488,16 +487,16 @@ func UpdateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6)`,
 			req.ERPSystemID, req.Reason, userEmail, oldERPType, oldBaseURL, oldVersion); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true, "erp_system_id": req.ERPSystemID})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "erp_system_id": req.ERPSystemID}, "")
 	}
 }
 
@@ -511,11 +510,11 @@ func BulkApproveERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment      string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.ERPSystemIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoErpSystemIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoErpSystemIDsProvided)
 			return
 		}
 
@@ -527,7 +526,7 @@ func BulkApproveERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -535,7 +534,7 @@ func BulkApproveERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -547,7 +546,7 @@ func BulkApproveERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FOR UPDATE`, req.ERPSystemIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch audits failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		type ar struct{ AuditID, ID, ActionType, ReqBy string }
@@ -577,10 +576,10 @@ func BulkApproveERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, len(success) > 0, "", append(success, errList...))
+		api.Success(w, http.StatusOK, append(success, errList...), "")
 	}
 }
 
@@ -594,11 +593,11 @@ func BulkRejectERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment      string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.ERPSystemIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoErpSystemIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoErpSystemIDsProvided)
 			return
 		}
 
@@ -610,7 +609,7 @@ func BulkRejectERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -618,7 +617,7 @@ func BulkRejectERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -629,15 +628,15 @@ func BulkRejectERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userEmail, req.Comment, req.ERPSystemIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, res.RowsAffected() > 0, "", map[string]interface{}{constants.ValueSuccess: true, "rejected_count": res.RowsAffected()})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "rejected_count": res.RowsAffected()}, "")
 	}
 }
 
@@ -651,11 +650,11 @@ func BulkDeleteERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason       string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.ERPSystemIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoErpSystemIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoErpSystemIDsProvided)
 			return
 		}
 
@@ -667,7 +666,7 @@ func BulkDeleteERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -675,7 +674,7 @@ func BulkDeleteERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -692,15 +691,15 @@ func BulkDeleteERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO apibox.audit_erp_system (erp_system_id, action_type, processing_status, reason, requested_by, requested_at)
 			VALUES %s`, strings.Join(auditVals, ",")), auditArgs...); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true, "submitted_count": len(req.ERPSystemIDs)})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "submitted_count": len(req.ERPSystemIDs)}, "")
 	}
 }
 
@@ -754,7 +753,7 @@ func GetERPSystemAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Query failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -775,7 +774,7 @@ func GetERPSystemAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if result == nil {
 			result = []map[string]interface{}{}
 		}
-		api.RespondWithPayload(w, true, "", result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 
@@ -802,7 +801,7 @@ func GetERPSystemAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Audit history query failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -823,7 +822,7 @@ func GetERPSystemAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if result == nil {
 			result = []map[string]interface{}{}
 		}
-		api.RespondWithPayload(w, true, "", result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 
@@ -856,7 +855,7 @@ func GetERPSystemApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Query failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -877,7 +876,7 @@ func GetERPSystemApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if result == nil {
 			result = []map[string]interface{}{}
 		}
-		api.RespondWithPayload(w, true, "", result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 
@@ -887,7 +886,7 @@ func GetERPSystemDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		erpID := r.URL.Query().Get("erp_system_id")
 		if erpID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "erp_system_id query param is required")
+			api.Error(w, http.StatusBadRequest, "erp_system_id query param is required")
 			return
 		}
 
@@ -915,7 +914,7 @@ func GetERPSystemDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE e.erp_system_id=$1`, erpID)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Detail query failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -924,16 +923,16 @@ func GetERPSystemDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if rows.Next() {
 			vals, err := rows.Values()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read row")
+				api.Error(w, http.StatusInternalServerError, "Failed to read row")
 				return
 			}
 			row := make(map[string]interface{}, len(fds))
 			for i, fd := range fds {
 				row[string(fd.Name)] = vals[i]
 			}
-			api.RespondWithPayload(w, true, "", row)
+			api.Success(w, http.StatusOK, row, "")
 			return
 		}
-		api.RespondWithError(w, http.StatusNotFound, "ERP system record not found")
+		api.Error(w, http.StatusNotFound, "ERP system record not found")
 	}
 }

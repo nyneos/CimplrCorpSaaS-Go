@@ -20,9 +20,7 @@ import (
 
 // simple error responder
 func respondWithErrorTemplate(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errMsg})
+	api.Error(w, status, errMsg)
 }
 
 func getRequesterEmailTemplate() string {
@@ -508,10 +506,10 @@ func respondValidationErrors(w http.ResponseWriter, findings []map[string]string
 	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(http.StatusUnprocessableEntity)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   fmt.Sprintf("Template validation failed with %d error(s). Fix all issues and try again.", len(errs)),
-		"errors":  errs,
+	_ = json.NewEncoder(w).Encode(api.APIResponse{
+		Success: false,
+		Data:    errs,
+		Error:   fmt.Sprintf("Template validation failed with %d error(s). Fix all issues and try again.", len(errs)),
 	})
 }
 
@@ -532,11 +530,11 @@ func CreateTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Formula      any    `json:"formula_steps"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.EventID == "" || req.Channel == "" || req.TemplateName == "" {
-			api.RespondWithPayload(w, false, constants.ErrEventIDChannelTemplateNameRequired, nil)
+			respondPayloadError(w, constants.ErrEventIDChannelTemplateNameRequired)
 			return
 		}
 		if req.IsHTML == nil {
@@ -545,7 +543,7 @@ func CreateTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		userEmail := getRequesterEmailTemplate()
 		if userEmail == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondPayloadError(w, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -559,7 +557,7 @@ func CreateTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -567,7 +565,7 @@ func CreateTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		insertQ := `INSERT INTO notification_svc.template (event_id, channel, role_scope, template_name, description, created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING template_id`
 		var tplID string
 		if err := tx.QueryRow(ctx, insertQ, req.EventID, strings.ToUpper(req.Channel), req.RoleScope, req.TemplateName, req.Description, userEmail).Scan(&tplID); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
@@ -585,16 +583,16 @@ func CreateTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		auditQ := `INSERT INTO notification_svc.audit_template (template_id, action_type, processing_status, subject, body_text, body_html, is_html_enabled, formula_steps, version_label, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,$4,$5,$6,(SELECT 'v' || (COUNT(*)+1) FROM notification_svc.audit_template WHERE template_id = $8),$7,now())`
 		if _, err := tx.Exec(ctx, auditQ, tplID, req.Subject, req.BodyText, req.BodyHTML, isHTMLVal, formulaVal, userEmail, tplID); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"template_id": tplID, "requested": userEmail})
+		api.Success(w, http.StatusOK, map[string]interface{}{"template_id": tplID, "requested": userEmail}, "")
 	}
 }
 
@@ -617,23 +615,23 @@ func CreateTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithPayload(w, false, "rows required", nil)
+			respondPayloadError(w, "rows required")
 			return
 		}
 		userEmail := getRequesterEmailTemplate()
 		if userEmail == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondPayloadError(w, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -649,7 +647,7 @@ func CreateTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		batchQ := fmt.Sprintf(`INSERT INTO notification_svc.template (event_id, channel, role_scope, template_name, description, created_by) VALUES %s RETURNING template_id, template_name`, strings.Join(valueStrings, ","))
 		rows, err := tx.Query(ctx, batchQ, valueArgs...)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -668,18 +666,18 @@ func CreateTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, id := range templateIDs {
 				aq := `INSERT INTO notification_svc.audit_template (template_id, action_type, processing_status, requested_by, version_label, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,(SELECT 'v' || (COUNT(*)+1) FROM notification_svc.audit_template WHERE template_id = $3),now())`
 				if _, err := tx.Exec(ctx, aq, id, userEmail, id); err != nil {
-					api.RespondWithPayload(w, false, err.Error(), nil)
+					respondPayloadError(w, err.Error())
 					return
 				}
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"inserted": inserted})
+		api.Success(w, http.StatusOK, map[string]interface{}{"inserted": inserted}, "")
 	}
 }
 
@@ -821,7 +819,7 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err = pgxPool.Query(ctx, q)
 		}
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -841,10 +839,10 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if rows.Err() != nil {
-			api.RespondWithPayload(w, false, "row scan error: "+rows.Err().Error(), nil)
+			respondPayloadError(w, "row scan error: "+rows.Err().Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -971,7 +969,7 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err = pgxPool.Query(ctx, q)
 		}
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -991,10 +989,10 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if rows.Err() != nil {
-			api.RespondWithPayload(w, false, "row scan error: "+rows.Err().Error(), nil)
+			respondPayloadError(w, "row scan error: "+rows.Err().Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1023,11 +1021,11 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RoleScope    string `json:"role_scope"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.TemplateID == "" {
-			api.RespondWithPayload(w, false, "template_id is required", nil)
+			respondPayloadError(w, "template_id is required")
 			return
 		}
 		if req.IsHTML == nil {
@@ -1036,7 +1034,7 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		editor := getRequesterEmailTemplate()
 		if editor == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondPayloadError(w, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -1061,7 +1059,7 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := pgxPool.QueryRow(ctx,
 			`SELECT EXISTS(SELECT 1 FROM notification_svc.template WHERE template_id=$1)`,
 			req.TemplateID).Scan(&exists); err != nil || !exists {
-			api.RespondWithPayload(w, false, "template not found", nil)
+			respondPayloadError(w, "template not found")
 			return
 		}
 
@@ -1140,11 +1138,11 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			oldRecipientsJSON, // $13
 			req.TemplateID,    // $14 — subquery ref (avoids 42P08)
 		).Scan(&newAuditID, &newVersion); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"template_id":    req.TemplateID,
 			"audit_id":       newAuditID,
 			"version_label":  newVersion,
@@ -1152,7 +1150,7 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"status":         "PENDING_EDIT_APPROVAL",
 			"requested_by":   editor,
 			"old_recipients": string(oldRecipientsJSON),
-		})
+		}, "")
 	}
 }
 
@@ -1163,7 +1161,7 @@ func GetTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			TemplateID string `json:"template_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TemplateID == "" {
-			api.RespondWithPayload(w, false, constants.ErrTemplateIDRequired, nil)
+			respondPayloadError(w, constants.ErrTemplateIDRequired)
 			return
 		}
 		ctx := r.Context()
@@ -1174,7 +1172,7 @@ func GetTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				`SELECT COALESCE(e.entity_name,'') FROM notification_svc.template t JOIN notification_svc.event e ON e.event_id=t.event_id WHERE t.template_id=$1`,
 				req.TemplateID).Scan(&evtEntity)
 			if !entityInPool(evtEntity, buNames) {
-				api.RespondWithPayload(w, false, "you do not have access to this template", nil)
+				respondPayloadError(w, "you do not have access to this template")
 				return
 			}
 		}
@@ -1203,7 +1201,7 @@ func GetTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var audits json.RawMessage
 		var recipients json.RawMessage
 		if err := row.Scan(&tplID, &eventID, &channel, &roleScope, &name, &desc, &isActive, &audits, &recipients); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		var auditsVal interface{}
@@ -1221,7 +1219,7 @@ func GetTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"audits":        auditsVal,
 			"recipients":    recVal,
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1270,7 +1268,7 @@ func GetTemplatesApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err = pgxPool.Query(ctx, q)
 		}
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1302,7 +1300,7 @@ func GetTemplatesApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			}
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1313,7 +1311,7 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			TemplateID string `json:"template_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TemplateID == "" {
-			api.RespondWithPayload(w, false, constants.ErrTemplateIDRequired, nil)
+			respondPayloadError(w, constants.ErrTemplateIDRequired)
 			return
 		}
 		ctx := r.Context()
@@ -1334,11 +1332,11 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					)
 				  )
 			)`, req.TemplateID).Scan(&tplVisible); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		if !tplVisible {
-			api.RespondWithPayload(w, false, "template not found", nil)
+			respondPayloadError(w, "template not found")
 			return
 		}
 
@@ -1348,7 +1346,7 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := pgxPool.QueryRow(ctx,
 				`SELECT COALESCE(e.entity_name,'') FROM notification_svc.template t INNER JOIN notification_svc.event e ON e.event_id=t.event_id WHERE t.template_id=$1`,
 				req.TemplateID).Scan(&evtEntity); err != nil || !entityInPool(evtEntity, buNames) {
-				api.RespondWithPayload(w, false, "you do not have access to this template", nil)
+				respondPayloadError(w, "you do not have access to this template")
 				return
 			}
 		}
@@ -1356,7 +1354,7 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		q := `SELECT audit_id, template_id, action_type, processing_status, subject, body_text, body_html, is_html_enabled, formula_steps, version_label, requested_by, requested_at, checker_by, checker_at, checker_comment, old_subject, old_body_text, old_body_html, old_formula_steps, COALESCE(is_deleted,false) AS is_deleted, COALESCE(old_recipients,'{}') AS old_recipients FROM notification_svc.audit_template WHERE template_id = $1 ORDER BY requested_at DESC`
 		rows, err := pgxPool.Query(ctx, q, req.TemplateID)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1398,7 +1396,7 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			}
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1412,18 +1410,18 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 
 		if len(req.AuditIDs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAuditIDsRequired, nil)
+			respondPayloadError(w, constants.ErrAuditIDsRequired)
 			return
 		}
 
 		userEmail := getRequesterEmailTemplate()
 		if userEmail == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondPayloadError(w, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -1431,7 +1429,7 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1444,7 +1442,7 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.AuditIDs,
 		)
 		if err != nil {
-			api.RespondWithPayload(w, false, "lookup failed: "+err.Error(), nil)
+			respondPayloadError(w, "lookup failed: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1461,14 +1459,13 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var t targetRow
 			if err := rows.Scan(&t.AuditID, &t.TemplateID, &t.ActionType, &t.Status); err != nil {
-				api.RespondWithPayload(w, false, err.Error(), nil)
+				respondPayloadError(w, err.Error())
 				return
 			}
 
 			if !strings.Contains(t.Status, "PENDING") {
-				api.RespondWithPayload(w, false,
-					fmt.Sprintf("audit %s is not in a PENDING state (current: %s)", t.AuditID, t.Status),
-					nil)
+				respondPayloadError(w,
+					fmt.Sprintf("audit %s is not in a PENDING state (current: %s)", t.AuditID, t.Status))
 				return
 			}
 
@@ -1476,12 +1473,12 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithPayload(w, false, rows.Err().Error(), nil)
+			respondPayloadError(w, rows.Err().Error())
 			return
 		}
 
 		if len(targets) == 0 {
-			api.RespondWithPayload(w, false, "no eligible rows", nil)
+			respondPayloadError(w, "no eligible rows")
 			return
 		}
 
@@ -1510,13 +1507,12 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				// Handle unique constraint violation cleanly
 				if strings.Contains(err.Error(), "uniq_one_live_version") {
-					api.RespondWithPayload(w, false,
-						"another approved live version already exists for this template. reject or archive the existing live version before approving this one.",
-						nil)
+					respondPayloadError(w,
+						"another approved live version already exists for this template. reject or archive the existing live version before approving this one.")
 					return
 				}
 
-				api.RespondWithPayload(w, false, "approve failed: "+err.Error(), nil)
+				respondPayloadError(w, "approve failed: "+err.Error())
 				return
 			}
 
@@ -1532,20 +1528,20 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 
 			if err != nil {
-				api.RespondWithPayload(w, false, "template update failed: "+err.Error(), nil)
+				respondPayloadError(w, "template update failed: "+err.Error())
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"approved_count": len(targets),
 			"checker":        userEmail,
-		})
+		}, "")
 	}
 }
 
@@ -1560,16 +1556,16 @@ func BulkRejectTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		if len(req.AuditIDs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAuditIDsRequired, nil)
+			respondPayloadError(w, constants.ErrAuditIDsRequired)
 			return
 		}
 		userEmail := getRequesterEmailTemplate()
 		if userEmail == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondPayloadError(w, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		ctx := r.Context()
@@ -1640,7 +1636,7 @@ func BulkRejectTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   AND COALESCE(is_deleted, false) = false`,
 			userEmail, req.Comment, req.AuditIDs)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		for _, id := range req.AuditIDs {
@@ -1658,10 +1654,10 @@ func BulkRejectTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// All IDs were ineligible — return detailed failures
 		// api.RespondWithPayload(w, false, "no eligible audit rows to reject", results)
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"checker": userEmail,
 			"results": results,
-		})
+		}, "")
 	}
 }
 
@@ -1677,16 +1673,16 @@ func DeleteTemplateVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason   string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		if len(req.AuditIDs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAuditIDsRequired, nil)
+			respondPayloadError(w, constants.ErrAuditIDsRequired)
 			return
 		}
 		userEmail := getRequesterEmailTemplate()
 		if userEmail == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondPayloadError(w, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		ctx := r.Context()
@@ -1740,7 +1736,7 @@ func DeleteTemplateVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				 action_type       = 'DELETE'
 			 WHERE audit_id = ANY($3::uuid[])`,
 			userEmail, req.Reason, validIDs); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrUpdateFailed+err.Error(), nil)
+			respondPayloadError(w, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
@@ -1754,7 +1750,7 @@ func DeleteTemplateVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"requested_by":  userEmail,
 			})
 		}
-		api.RespondWithPayload(w, true, "", results)
+		api.Success(w, http.StatusOK, results, "")
 	}
 }
 
@@ -1770,19 +1766,19 @@ func CreateTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RecipientPriority *int   `json:"recipient_priority"` // 1=highest urgency, default 3
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.TemplateID == "" || req.RecipientType == "" {
-			api.RespondWithPayload(w, false, "template_id and recipient_type required", nil)
+			respondPayloadError(w, "template_id and recipient_type required")
 			return
 		}
 		if strings.ToUpper(req.RecipientType) == "USER" && req.RecipientUserID == "" {
-			api.RespondWithPayload(w, false, "recipient_user_id required for USER type", nil)
+			respondPayloadError(w, "recipient_user_id required for USER type")
 			return
 		}
 		if strings.ToUpper(req.RecipientType) == "ROLE" && req.RecipientRole == "" {
-			api.RespondWithPayload(w, false, "recipient_role required for ROLE type", nil)
+			respondPayloadError(w, "recipient_role required for ROLE type")
 			return
 		}
 		if req.IsActive == nil {
@@ -1795,7 +1791,7 @@ func CreateTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		userEmail := getRequesterEmailTemplate()
 		if userEmail == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondPayloadError(w, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -1809,13 +1805,13 @@ func CreateTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nullableStr(req.RecipientUserID), nullableStr(req.RecipientRole),
 			req.IsActive, userEmail, priority,
 		).Scan(&rid); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"recipient_id":       rid,
 			"recipient_priority": priority,
-		})
+		}, "")
 	}
 }
 
@@ -1826,7 +1822,7 @@ func GetRecipientsByTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			TemplateID string `json:"template_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TemplateID == "" {
-			api.RespondWithPayload(w, false, constants.ErrTemplateIDRequired, nil)
+			respondPayloadError(w, constants.ErrTemplateIDRequired)
 			return
 		}
 		ctx := r.Context()
@@ -1839,7 +1835,7 @@ func GetRecipientsByTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  ORDER BY recipient_priority ASC, created_at ASC`
 		rows, err := pgxPool.Query(ctx, q, req.TemplateID)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1863,7 +1859,7 @@ func GetRecipientsByTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			}
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1874,16 +1870,16 @@ func DeleteTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RecipientID string `json:"recipient_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RecipientID == "" {
-			api.RespondWithPayload(w, false, "recipient_id required", nil)
+			respondPayloadError(w, "recipient_id required")
 			return
 		}
 		ctx := r.Context()
 		q := `UPDATE notification_svc.template_recipient SET is_active=false WHERE recipient_id=$1`
 		if _, err := pgxPool.Exec(ctx, q, req.RecipientID); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"recipient_id": req.RecipientID})
+		api.Success(w, http.StatusOK, map[string]interface{}{"recipient_id": req.RecipientID}, "")
 	}
 }
 
@@ -1898,11 +1894,11 @@ func UpdateTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RecipientPriority *int   `json:"recipient_priority"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RecipientID == "" {
-			api.RespondWithPayload(w, false, "recipient_id required", nil)
+			respondPayloadError(w, "recipient_id required")
 			return
 		}
 		if req.IsActive == nil && req.RecipientPriority == nil {
-			api.RespondWithPayload(w, false, "at least one of is_active or recipient_priority is required", nil)
+			respondPayloadError(w, "at least one of is_active or recipient_priority is required")
 			return
 		}
 
@@ -1930,14 +1926,14 @@ func UpdateTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var isActiveOut bool
 		var priorityOut int
 		if err := pgxPool.QueryRow(ctx, q, args...).Scan(&rid, &isActiveOut, &priorityOut); err != nil {
-			api.RespondWithPayload(w, false, "recipient not found or update failed: "+err.Error(), nil)
+			respondPayloadError(w, "recipient not found or update failed: "+err.Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"recipient_id":       rid,
 			"is_active":          isActiveOut,
 			"recipient_priority": priorityOut,
-		})
+		}, "")
 	}
 }
 
@@ -1965,20 +1961,20 @@ func BulkCreateRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"recipients"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.TemplateID == "" {
-			api.RespondWithPayload(w, false, constants.ErrTemplateIDRequired, nil)
+			respondPayloadError(w, constants.ErrTemplateIDRequired)
 			return
 		}
 		if len(req.Recipients) == 0 {
-			api.RespondWithPayload(w, false, "recipients array must not be empty", nil)
+			respondPayloadError(w, "recipients array must not be empty")
 			return
 		}
 		userEmail := getRequesterEmailTemplate()
 		if userEmail == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondPayloadError(w, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -2003,7 +1999,7 @@ func BulkCreateRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					`SELECT user_id, entity_name FROM user_entity_mappings WHERE user_id = ANY($1::text[])`,
 					userIDs)
 				if ueErr != nil {
-					api.RespondWithPayload(w, false, "could not validate recipient entities: "+ueErr.Error(), nil)
+					respondPayloadError(w, "could not validate recipient entities: "+ueErr.Error())
 					return
 				}
 				defer ueRows.Close()
@@ -2021,8 +2017,8 @@ func BulkCreateRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				for _, uid := range userIDs {
 					entities := userEntities[uid]
 					if len(entities) == 0 {
-						api.RespondWithPayload(w, false,
-							fmt.Sprintf("recipient user %q has no entity mappings", uid), nil)
+						respondPayloadError(w,
+							fmt.Sprintf("recipient user %q has no entity mappings", uid))
 						return
 					}
 					inPool := false
@@ -2033,8 +2029,8 @@ func BulkCreateRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 					}
 					if !inPool {
-						api.RespondWithPayload(w, false,
-							fmt.Sprintf("recipient user %q has no entity in your accessible org pool (entities: %v)", uid, entities), nil)
+						respondPayloadError(w,
+							fmt.Sprintf("recipient user %q has no entity in your accessible org pool (entities: %v)", uid, entities))
 						return
 					}
 				}
@@ -2077,30 +2073,30 @@ func BulkCreateRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if len(validationErrors) > 0 {
-			api.RespondWithPayload(w, false, strings.Join(validationErrors, "; "), nil)
+			respondPayloadError(w, strings.Join(validationErrors, "; "))
 			return
 		}
 
 		// Insert via transaction
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, "db error: "+err.Error(), nil)
+			respondPayloadError(w, "db error: "+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
 
 		if err := batchInsertRecipientsOnTx(ctx, tx, rows); err != nil {
-			api.RespondWithPayload(w, false, "insert failed: "+err.Error(), nil)
+			respondPayloadError(w, "insert failed: "+err.Error())
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
+			respondPayloadError(w, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"template_id":    req.TemplateID,
 			"inserted_count": len(rows),
-		})
+		}, "")
 	}
 }
 
@@ -2577,11 +2573,11 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Strategy     map[string]interface{} `json:"recipient_strategy"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.EventID == "" || req.Channel == "" || req.TemplateName == "" {
-			api.RespondWithPayload(w, false, constants.ErrEventIDChannelTemplateNameRequired, nil)
+			respondPayloadError(w, constants.ErrEventIDChannelTemplateNameRequired)
 			return
 		}
 		if req.IsHTML == nil {
@@ -2590,7 +2586,7 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		creator := getRequesterEmailTemplate()
 		if creator == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondPayloadError(w, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -2602,7 +2598,7 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var evtEntity string
 			_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_name,'') FROM notification_svc.event WHERE event_id=$1`, req.EventID).Scan(&evtEntity)
 			if !entityInPool(evtEntity, buNames) {
-				api.RespondWithPayload(w, false, "event entity is not in your accessible org pool", nil)
+				respondPayloadError(w, "event entity is not in your accessible org pool")
 				return
 			}
 		}
@@ -2618,7 +2614,7 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// If recipients fail → whole tx rolls back → no dangling template row.
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer tx.Rollback(ctx) // no-op after Commit
@@ -2630,7 +2626,7 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.EventID, strings.ToUpper(req.Channel), req.RoleScope,
 			req.TemplateName, req.Description, creator,
 		).Scan(&tplID); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
@@ -2655,7 +2651,7 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tplID, req.Subject, req.BodyText, req.BodyHTML,
 			isHTMLVal, formulaVal, creator, tplID,
 		); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
@@ -2667,7 +2663,7 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			c, err := populateRecipientsOnTx(ctx, tx, pgxPool, tplID, req.Strategy, creator)
 			if err != nil {
 				// tx.Rollback fires via defer — nothing is committed
-				api.RespondWithPayload(w, false, "recipients failed — rolled back: "+err.Error(), nil)
+				respondPayloadError(w, "recipients failed - rolled back: "+err.Error())
 				return
 			}
 			added = c
@@ -2675,11 +2671,11 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// 4. Commit everything atomically
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"template_id": tplID, "recipients_added": added, "requested": creator})
+		api.Success(w, http.StatusOK, map[string]interface{}{"template_id": tplID, "recipients_added": added, "requested": creator}, "")
 	}
 }
 
@@ -2703,20 +2699,20 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithPayload(w, false, "rows required", nil)
+			respondPayloadError(w, "rows required")
 			return
 		}
 		if len(req.Rows) > 100 {
-			api.RespondWithPayload(w, false, "too many rows: max 100 templates per bulk request", nil)
+			respondPayloadError(w, "too many rows: max 100 templates per bulk request")
 			return
 		}
 		creator := getRequesterEmailTemplate()
 		if creator == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondPayloadError(w, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -2746,8 +2742,8 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						if scanErr := evtEntityRows.Scan(&eid, &eEntity); scanErr == nil {
 							if !entityInPool(eEntity, buNamesCheck) {
 								evtEntityRows.Close()
-								api.RespondWithPayload(w, false,
-									fmt.Sprintf("event %q entity %q is not in your accessible org pool", eid, eEntity), nil)
+								respondPayloadError(w,
+									fmt.Sprintf("event %q entity %q is not in your accessible org pool", eid, eEntity))
 								return
 							}
 						}
@@ -2788,10 +2784,10 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(validationErrors) > 0 {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusUnprocessableEntity)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":           false,
-				"error":             fmt.Sprintf("%d row(s) failed validation. Fix all errors and retry — no templates were saved.", len(validationErrors)),
-				"validation_errors": validationErrors,
+			_ = json.NewEncoder(w).Encode(api.APIResponse{
+				Success: false,
+				Data:    validationErrors,
+				Error:   fmt.Sprintf("%d row(s) failed validation. Fix all errors and retry - no templates were saved.", len(validationErrors)),
 			})
 			return
 		}
@@ -2799,7 +2795,7 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -2822,7 +2818,7 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rowsOut, err := tx.Query(ctx, batchQ, valueArgs...)
 		if err != nil {
 			api.LogError("[DEBUG] Template batch insert FAILED: sql=%s args=%v err=%v", batchQ, valueArgs, err)
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer rowsOut.Close()
@@ -2855,14 +2851,14 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[DEBUG] Audit template insert: template=%s subject=%v is_html=%v formula=%v", id, rrow.Subject, isHTMLVal, formulaVal)
 				if _, err := tx.Exec(ctx, aq, id, rrow.Subject, rrow.BodyText, rrow.BodyHTML, isHTMLVal, formulaVal, creator, id); err != nil {
 					api.LogError("[DEBUG] Audit template insert FAILED: sql=%s err=%v", aq, err)
-					api.RespondWithPayload(w, false, err.Error(), nil)
+					respondPayloadError(w, err.Error())
 					return
 				}
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
@@ -2886,6 +2882,7 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			summary = append(summary, map[string]interface{}{"template_id": tplID, "added": c, "error": ""})
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"inserted": inserted, "recipients_added": totalAdded, "recipient_summary": summary})
+		api.Success(w, http.StatusOK, map[string]interface{}{"inserted": inserted, "recipients_added": totalAdded, "recipient_summary": summary}, "")
 	}
 }
+

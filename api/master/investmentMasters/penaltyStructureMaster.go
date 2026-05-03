@@ -325,7 +325,7 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreatePenaltyStructureSingleRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 
 		}
 
@@ -338,7 +338,7 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		input := req.PenaltyStructureInput
 
 		if err := validatePenaltyFields(input); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.Error(w, http.StatusBadRequest, err.Error())
 			api.LogError("Validation failed for penalty structure: %v", err)
 			return
 		}
@@ -351,7 +351,7 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -359,17 +359,28 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
 
 		// Check uniqueness before attempting insert to provide a friendly error
 		if conflict, err := penaltyStructureFindConflict(ctx, tx, input); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 			return
 		} else if conflict != nil {
-			api.RespondWithPayload(w, false, fmt.Sprintf("Penalty create aborted: a matching active penalty structure already exists (penalty_id=%v, bank_code=%v, penalty_type=%v, min_tenor_days=%v, max_tenor_days=%v, penalty_value=%v)", conflict["penalty_id"], conflict["bank_code"], conflict["penalty_type"], conflict["min_tenor_days"], conflict["max_tenor_days"], conflict["penalty_value"]), nil)
+			{
+				apiErrMsg := fmt.Sprintf("Penalty create aborted: a matching active penalty structure already exists (penalty_id=%v, bank_code=%v, penalty_type=%v, min_tenor_days=%v, max_tenor_days=%v, penalty_value=%v)", conflict["penalty_id"], conflict["bank_code"], conflict["penalty_type"], conflict["min_tenor_days"], conflict["max_tenor_days"], conflict["penalty_value"])
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -404,7 +415,7 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, "Insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -414,13 +425,13 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
             ) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`
 		if _, err := tx.Exec(ctx, auditQuery, penaltyID, userEmail); err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -432,7 +443,7 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"requested":            userEmail,
 			"is_active":            input.IsActive,
 		}
-		api.RespondWithPayload(w, true, "", response)
+		api.Success(w, http.StatusOK, response, "")
 		api.LogInfo("Penalty structure created successfully: ID=%s, Bank=%s", penaltyID, input.BankCode)
 	}
 }
@@ -442,12 +453,12 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreatePenaltyStructureRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rows provided")
+			api.Error(w, http.StatusBadRequest, "No rows provided")
 			return
 		}
 
@@ -459,7 +470,7 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -487,13 +498,24 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(validRows) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
+			{
+				apiErrMsg := constants.ErrAllRowsFailedValidation
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk create transaction begin failed: %v", err)
 			return
 		}
@@ -503,7 +525,18 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		finalValidInputs := validRows
 
 		if len(finalValidInputs) == 0 {
-			api.RespondWithPayload(w, false, "All rows are duplicates", errorsList)
+			{
+				apiErrMsg := "All rows are duplicates"
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -512,7 +545,7 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for i := 0; i < len(finalValidInputs); {
 			conflict, err := penaltyStructureFindConflict(ctx, tx, finalValidInputs[i])
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed uniqueness check: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "failed uniqueness check: "+err.Error())
 				return
 			}
 			if conflict != nil {
@@ -566,7 +599,7 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				row.IsActive,
 			).Scan(&id, &code); err != nil {
 				msg, status := getUserFriendlyPenaltyError(err, "Insert failed for row")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				api.LogError("Insert failed for row %d: %v", i, err)
 				return
 			}
@@ -596,7 +629,7 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
 				msg, status := getUserFriendlyPenaltyError(err, constants.ErrBatchAuditFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				api.LogError("Batch audit insert failed: %v", err)
 				return
 			}
@@ -604,14 +637,14 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Bulk create commit failed: %v", err)
 			return
 		}
 
 		allResults := append(insertedRecords, errorsList...)
 		success := len(insertedRecords) > 0
-		api.RespondWithPayload(w, success, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("Bulk create: %d inserted, %d errors, %d total", len(insertedRecords), len(errorsList), len(req.Rows))
 	}
 }
@@ -620,16 +653,16 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UpdatePenaltyStructureRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		if req.PenaltyID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "penalty_id is required")
+			api.Error(w, http.StatusBadRequest, "penalty_id is required")
 			return
 		}
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No fields provided for update")
+			api.Error(w, http.StatusBadRequest, "No fields provided for update")
 			return
 		}
 
@@ -641,7 +674,7 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -649,7 +682,7 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, "Transaction start failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -690,7 +723,7 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		); err != nil {
 			// If no row found, return a 404 Not Found with a clear message.
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "Penalty record not found")
+				api.Error(w, http.StatusNotFound, "Penalty record not found")
 				api.LogError("Penalty fetch: not found penalty_id=%s", req.PenaltyID)
 				return
 			}
@@ -698,7 +731,7 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Log the DB error with context so we can diagnose intermittent failures.
 			api.LogError("Penalty fetch failed: penalty_id=%s err=%v", req.PenaltyID, err)
 			msg, status := getUserFriendlyPenaltyError(err, "Fetch failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -739,7 +772,7 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No valid updatable fields found")
+			api.Error(w, http.StatusBadRequest, "No valid updatable fields found")
 			return
 		}
 
@@ -752,7 +785,7 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Log the failing UPDATE with query and sanitized args for diagnostics
 			api.LogError("Penalty update failed: penalty_id=%s query=%s args=%v err=%v", req.PenaltyID, q, args, err)
 			msg, status := getUserFriendlyPenaltyError(err, "Update failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -774,17 +807,17 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			oldNoInterest, oldDescription, oldEffectiveFrom, oldEffectiveTo, oldIsActive,
 		); err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{constants.ValueSuccess: true, "penalty_id": req.PenaltyID})
+		api.Success(w, http.StatusOK, map[string]interface{}{"penalty_id": req.PenaltyID}, "")
 		api.LogInfo("Penalty updated: ID=%s, requested=%s", req.PenaltyID, userEmail)
 	}
 }
@@ -800,12 +833,12 @@ func UpdatePenaltyStructureBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rows provided")
+			api.Error(w, http.StatusBadRequest, "No rows provided")
 			return
 		}
 
@@ -817,7 +850,7 @@ func UpdatePenaltyStructureBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -860,13 +893,24 @@ func UpdatePenaltyStructureBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(validUpdates) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
+			{
+				apiErrMsg := constants.ErrAllRowsFailedValidation
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk update transaction begin failed: %v", err)
 			return
 		}
@@ -885,7 +929,7 @@ func UpdatePenaltyStructureBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := tx.Query(ctx, oldValuesQuery, allIDs)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, "Fetch old values failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Batch old values fetch failed: %v", err)
 			return
 		}
@@ -896,7 +940,7 @@ func UpdatePenaltyStructureBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			var oldVals [16]interface{}
 			if err := rows.Scan(&id, &oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12], &oldVals[13], &oldVals[14], &oldVals[15]); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Old values scan failed: "+err.Error())
 				api.LogError("Old values scan failed: %v", err)
 				return
 			}
@@ -967,7 +1011,7 @@ func UpdatePenaltyStructureBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if _, err := tx.Exec(ctx, updateQuery, updateArgs...); err != nil {
 				msg, status := getUserFriendlyPenaltyError(err, "Batch update failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				api.LogError("Batch update failed: %v", err)
 				return
 			}
@@ -1022,14 +1066,14 @@ func UpdatePenaltyStructureBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Bulk update commit failed: %v", err)
 			return
 		}
 
 		allResults := append(successResults, errorsList...)
 		success := len(successResults) > 0
-		api.RespondWithPayload(w, success, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("Bulk update completed: %d updated, %d errors, %d total", len(successResults), len(errorsList), len(req.Rows))
 	}
 }
@@ -1042,12 +1086,12 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason     string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		if len(req.PenaltyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPenaltyIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoPenaltyIDsProvided)
 			return
 		}
 
@@ -1059,7 +1103,7 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1067,7 +1111,7 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1076,7 +1120,7 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		existingRows, err := tx.Query(ctx, `SELECT penalty_id FROM investment.fd_penalty_structure_master WHERE penalty_id = ANY($1::text[])`, req.PenaltyIDs)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, "Fetch existing penalty ids failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Delete: fetch existing penalty ids failed: %v", err)
 			return
 		}
@@ -1086,7 +1130,7 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for existingRows.Next() {
 			var id string
 			if err := existingRows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Existing id scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Existing id scan failed: "+err.Error())
 				api.LogError("Delete: existing id scan failed: %v", err)
 				return
 			}
@@ -1110,7 +1154,18 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(auditValues) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
+			{
+				apiErrMsg := constants.ErrAllRowsFailedValidation
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -1122,20 +1177,20 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Delete: audit insert failed: %v", err)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Delete: commit failed: %v", err)
 			return
 		}
 
 		allResults := append(success, errorsList...)
-		api.RespondWithPayload(w, len(success) > 0, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("Delete request created for %d penalty_ids, %d errors", len(success), len(errorsList))
 	}
 }
@@ -1148,11 +1203,11 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CheckerComment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.PenaltyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPenaltyIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoPenaltyIDsProvided)
 			return
 		}
 
@@ -1164,7 +1219,7 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1172,7 +1227,7 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1188,7 +1243,7 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := tx.Query(ctx, sel, req.PenaltyIDs)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, "Fetch audit rows failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Bulk approve: fetch audits failed: %v", err)
 			return
 		}
@@ -1204,7 +1259,7 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var a auditRow
 			if err := rows.Scan(&a.AuditID, &a.PenaltyID, &a.ActionType, &a.ProcessingStatus); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Audit scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Audit scan failed: "+err.Error())
 				api.LogError("Bulk approve: audit scan failed: %v", err)
 				return
 			}
@@ -1212,7 +1267,18 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(audits) == 0 {
-			api.RespondWithPayload(w, false, "No matching pending audit records found for provided penalty_ids", nil)
+			{
+				apiErrMsg := "No matching pending audit records found for provided penalty_ids"
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -1239,13 +1305,13 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Bulk approve commit failed: %v", err)
 			return
 		}
 
 		allResults := append(success, errorsList...)
-		api.RespondWithPayload(w, len(success) > 0, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("Bulk approve completed: %d approved, %d errors", len(success), len(errorsList))
 	}
 }
@@ -1258,12 +1324,12 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CheckerComment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		if len(req.PenaltyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPenaltyIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoPenaltyIDsProvided)
 			return
 		}
 
@@ -1275,7 +1341,7 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1283,7 +1349,7 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1296,7 +1362,7 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, userEmail, req.CheckerComment, req.PenaltyIDs)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, "Rejection failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Bulk reject: exec failed: %v", err)
 			return
 		}
@@ -1305,16 +1371,13 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		updated := int(res.RowsAffected())
 
 		// Form simple success response
-		api.RespondWithPayload(w, updated > 0, "", map[string]interface{}{
-			constants.ValueSuccess: true,
-			"rejected_count":       updated,
-			"checker":              userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "rejected_count": updated, "checker": userEmail}, "")
 		api.LogInfo("Bulk reject: %d audit rows rejected by %s", updated, userEmail)
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Bulk reject commit failed: %v", err)
 			return
 		}
@@ -1341,9 +1404,9 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		 ctx := r.Context()
-		 // Cast date columns to text (YYYY-MM-DD) so pgx can scan into string vars
-		 baseQuery := `
+		ctx := r.Context()
+		// Cast date columns to text (YYYY-MM-DD) so pgx can scan into string vars
+		baseQuery := `
 		     SELECT m.penalty_id, m.bank_code,
 			     COALESCE(mb.bank_name,'') AS bank_name,
 			     COALESCE(mb.bank_short_name,'') AS bank_short_name,
@@ -1369,7 +1432,7 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		rows, err := pgxPool.Query(ctx, baseQuery, args...)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, "Fetch approved active failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Get approved active failed: %v", err)
 			return
 		}
@@ -1395,7 +1458,7 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			var isActive *bool
 
 			if err := rows.Scan(&id, &bank, &bankName, &bankShortName, &minAmt, &maxAmt, &minTenor, &maxTenor, &minHeld, &maxHeld, &pType, &pValue, &calcMethod, &noInterest, &desc, &effFrom, &effTo, &isActive); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Row scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Row scan failed: "+err.Error())
 				api.LogError("Get approved active scan failed: %v", err)
 				return
 			}
@@ -1434,7 +1497,7 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			})
 		}
 
-		api.RespondWithPayload(w, true, "", results)
+		api.Success(w, http.StatusOK, results, "")
 	}
 }
 
@@ -1549,7 +1612,7 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1571,16 +1634,13 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
 			api.LogError("Row iteration error in GetPenaltyStructuresWithAudit: %v", rows.Err())
 			return
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"rows":                 out,
-		})
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("Retrieved %d penalty structures with audit data", len(out))
 	}
 }
@@ -1710,7 +1770,7 @@ func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1749,7 +1809,7 @@ func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldBank, &oldMinAmt, &oldMaxAmt, &oldMinTenor, &oldMaxTenor, &oldMinHeld, &oldMaxHeld,
 				&oldPenaltyType, &oldPenaltyValue, &oldCalcMethod, &oldNoInterest, &oldDesc, &oldEffFrom, &oldEffTo, &oldIsActive,
 			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Scan error: "+err.Error())
 				api.LogError("Database scan error in GetPenaltyStructureAuditHistory: %v", err)
 				return
 			}
@@ -1819,16 +1879,13 @@ func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+rows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, "Row iteration error: "+rows.Err().Error())
 			api.LogError("Row iteration error in GetPenaltyStructureAuditHistory: %v", rows.Err())
 			return
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"audit_logs":           out,
-		})
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("Retrieved %d penalty audit history records", len(out))
 	}
 }
@@ -1838,20 +1895,20 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Expect multipart form with 'file' and form value 'user_id'
 		userID := r.FormValue("user_id")
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
 		file, handler, err := r.FormFile("file")
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "file is required")
+			api.Error(w, http.StatusBadRequest, "file is required")
 			return
 		}
 		defer file.Close()
 
 		ext := strings.ToLower(filepath.Ext(handler.Filename))
 		if ext != ".csv" && ext != ".xlsx" {
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported file type; only .csv and .xlsx allowed")
+			api.Error(w, http.StatusBadRequest, "unsupported file type; only .csv and .xlsx allowed")
 			return
 		}
 
@@ -1864,7 +1921,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1875,12 +1932,12 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rowsData, err = parseXLSXFile(file)
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "failed to parse file: "+err.Error())
+			api.Error(w, http.StatusBadRequest, "failed to parse file: "+err.Error())
 			return
 		}
 
 		if len(rowsData) < 2 {
-			api.RespondWithError(w, http.StatusBadRequest, "file must contain a header and at least one data row")
+			api.Error(w, http.StatusBadRequest, "file must contain a header and at least one data row")
 			return
 		}
 
@@ -1894,7 +1951,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		for _, rc := range requiredCols {
 			if _, ok := colMap[rc]; !ok {
-				api.RespondWithError(w, http.StatusBadRequest, "missing required column: "+rc)
+				api.Error(w, http.StatusBadRequest, "missing required column: "+rc)
 				return
 			}
 		}
@@ -1905,7 +1962,18 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// sendFail sends a concise human-readable fail-fast response
 		sendFail := func(row int, msg string) {
 			summary := fmt.Sprintf("Penalty upload aborted: row %d failed validation: %s", row, msg)
-			api.RespondWithPayload(w, false, summary, nil)
+			{
+				apiErrMsg := summary
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 		}
 
 		for rowIdx, row := range data {
@@ -2010,7 +2078,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Check unique constraint pre-insert to provide friendly error
 			if conflict, err := penaltyStructureFindConflict(ctx, pgxPool, input); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+				api.Error(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 				return
 			} else if conflict != nil {
 				sendFail(rowIdx+2, fmt.Sprintf("conflicts with existing active penalty structure (penalty_id=%v, bank_code=%v, penalty_type=%v, min_tenor_days=%v, max_tenor_days=%v, penalty_value=%v)", conflict["penalty_id"], conflict["bank_code"], conflict["penalty_type"], conflict["min_tenor_days"], conflict["max_tenor_days"], conflict["penalty_value"]))
@@ -2021,14 +2089,25 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(validInputs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, nil)
+			{
+				apiErrMsg := constants.ErrAllRowsFailedValidation
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
 		// Transactional batch insert
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Upload: transaction begin failed: %v", err)
 			return
 		}
@@ -2094,7 +2173,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				row.IsActive,
 			).Scan(&id, &code); err != nil {
 				msg, status := getUserFriendlyPenaltyError(err, "Insert failed for row")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				api.LogError("Insert failed for row %d: %v", i, err)
 				return
 			}
@@ -2117,7 +2196,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			auditQuery := fmt.Sprintf(`INSERT INTO investment.fd_audit_penalty_structure (penalty_id, action_type, processing_status, requested_by, requested_at) VALUES %s`, strings.Join(auditVals, ","))
 			if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
 				msg, status := getUserFriendlyPenaltyError(err, constants.ErrBatchAuditFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				api.LogError("Upload: audit insert failed: %v", err)
 				return
 			}
@@ -2125,14 +2204,14 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			api.LogError("Upload: commit failed: %v", err)
 			return
 		}
 
 		allResults := insertedRecords
 		success := len(insertedRecords) > 0
-		api.RespondWithPayload(w, success, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("Upload completed: %d inserted, file=%s", len(insertedRecords), handler.Filename)
 	}
 }
@@ -2144,12 +2223,12 @@ func GetPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			PenaltyID string `json:"penalty_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		if req.PenaltyID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "penalty_id is required")
+			api.Error(w, http.StatusBadRequest, "penalty_id is required")
 			return
 		}
 
@@ -2162,7 +2241,7 @@ func GetPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -2207,10 +2286,10 @@ func GetPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		err := row.Scan(&pid, &bank, &bankName, &bankShortName, &minAmt, &maxAmt, &minTenor, &maxTenor, &minHeld, &maxHeld, &pType, &pValue, &calcMethod, &noInterest, &desc, &effFrom, &effTo, &isActive, &isDeleted, &createdAt, &updatedAt)
 		if err != nil {
 			if err.Error() == "no rows in result set" {
-				api.RespondWithError(w, http.StatusNotFound, "Penalty structure not found")
+				api.Error(w, http.StatusNotFound, "Penalty structure not found")
 			} else {
 				msg, status := getUserFriendlyPenaltyError(err, "Get failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				api.LogError("Get penalty structure failed: %v", err)
 			}
 			return
@@ -2252,7 +2331,7 @@ func GetPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"updated_at":                      updatedAt,
 		}
 
-		api.RespondWithPayload(w, true, "", result)
+		api.Success(w, http.StatusOK, result, "")
 		api.LogInfo("Get penalty structure completed for ID %s by %s", req.PenaltyID, userEmail)
 	}
 }

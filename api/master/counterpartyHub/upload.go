@@ -31,7 +31,7 @@ import (
 func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			api.Error(w, http.StatusBadRequest, "Failed to parse multipart form")
 			return
 		}
 
@@ -39,7 +39,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		cpType := strings.ToUpper(strings.TrimSpace(r.FormValue("counterparty_type")))
 
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.Error(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
 		validTypes := map[string]bool{
@@ -47,7 +47,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"CCP_CSD": true, "PAYMENT_NETWORK": true, "ERP_SYSTEM": true,
 		}
 		if !validTypes[cpType] {
-			api.RespondWithError(w, http.StatusBadRequest, "counterparty_type must be one of BANK, EXCHANGE, DATA_PROVIDER, CCP_CSD, PAYMENT_NETWORK, ERP_SYSTEM")
+			api.Error(w, http.StatusBadRequest, "counterparty_type must be one of BANK, EXCHANGE, DATA_PROVIDER, CCP_CSD, PAYMENT_NETWORK, ERP_SYSTEM")
 			return
 		}
 
@@ -59,13 +59,13 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		file, header, err := r.FormFile("file")
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "file is required")
+			api.Error(w, http.StatusBadRequest, "file is required")
 			return
 		}
 		defer file.Close()
@@ -79,15 +79,15 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		case strings.HasSuffix(filename, ".xlsx"):
 			rows, err = parseXLSX(file)
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "Only CSV (.csv) and Excel (.xlsx) files are supported")
+			api.Error(w, http.StatusBadRequest, "Only CSV (.csv) and Excel (.xlsx) files are supported")
 			return
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse file: %s", err.Error()))
+			api.Error(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse file: %s", err.Error()))
 			return
 		}
 		if len(rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "File contains no data rows")
+			api.Error(w, http.StatusBadRequest, "File contains no data rows")
 			return
 		}
 
@@ -161,11 +161,8 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "id": id, "counterparty_type": cpType})
 		}
 
-		api.RespondWithPayload(w, len(inserted) > 0, "", map[string]interface{}{
-			"inserted_count": len(inserted),
-			"error_count":    len(errList),
-			"results":        append(inserted, errList...),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"inserted_count": len(inserted), "error_count": len(errList), "data": append(inserted, errList...)}, "")
 	}
 }
 
@@ -476,14 +473,12 @@ func GetUploadTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		cpType := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("type")))
 		cols, ok := templates[cpType]
 		if !ok {
-			api.RespondWithError(w, http.StatusBadRequest, "type must be one of BANK, EXCHANGE, DATA_PROVIDER, CCP_CSD, PAYMENT_NETWORK, ERP_SYSTEM")
+			api.Error(w, http.StatusBadRequest, "type must be one of BANK, EXCHANGE, DATA_PROVIDER, CCP_CSD, PAYMENT_NETWORK, ERP_SYSTEM")
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"counterparty_type": cpType,
-			"columns":           cols,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"counterparty_type": cpType, "columns": cols}, "")
 	}
 }
 
@@ -506,7 +501,7 @@ func GetUploadTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			api.Error(w, http.StatusBadRequest, "Failed to parse multipart form")
 			return
 		}
 
@@ -514,7 +509,7 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		formType := strings.ToUpper(strings.TrimSpace(r.FormValue("counterparty_type")))
 
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.Error(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
 
@@ -526,13 +521,13 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		file, header, err := r.FormFile("file")
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "file is required")
+			api.Error(w, http.StatusBadRequest, "file is required")
 			return
 		}
 		defer file.Close()
@@ -545,15 +540,15 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		case strings.HasSuffix(filename, ".xlsx"):
 			rows, err = parseXLSX(file)
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "Only .csv and .xlsx files are supported")
+			api.Error(w, http.StatusBadRequest, "Only .csv and .xlsx files are supported")
 			return
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+err.Error())
+			api.Error(w, http.StatusBadRequest, "Failed to parse file: "+err.Error())
 			return
 		}
 		if len(rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "File contains no data rows")
+			api.Error(w, http.StatusBadRequest, "File contains no data rows")
 			return
 		}
 
@@ -647,11 +642,8 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		api.RespondWithPayload(w, len(inserted) > 0, "", map[string]interface{}{
-			"inserted_count": len(inserted),
-			"error_count":    len(errList),
-			"results":        append(inserted, errList...),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"inserted_count": len(inserted), "error_count": len(errList), "data": append(inserted, errList...)}, "")
 		api.LogInfo("UploadV2: %d inserted, %d errors by %s", len(inserted), len(errList), userEmail)
 	}
 }
@@ -789,28 +781,24 @@ func GetUploadTemplateV2(_ *pgxpool.Pool) http.HandlerFunc {
 				all[t] = append(common, extra...)
 			}
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{"templates": all})
+			api.Success(w, http.StatusOK, map[string]interface{}{"templates": all}, "")
 			return
 		}
 
 		extra, ok := typed[cpType]
 		if !ok {
-			api.RespondWithError(w, http.StatusBadRequest,
-				"type must be one of BANK, EXCHANGE, DATA_PROVIDER, CCP_CSD, PAYMENT_NETWORK, ERP_SYSTEM")
+			api.Error(w, http.StatusBadRequest, "type must be one of BANK, EXCHANGE, DATA_PROVIDER, CCP_CSD, PAYMENT_NETWORK, ERP_SYSTEM")
 			return
 		}
 
 		cols := append(common, extra...)
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"counterparty_type": cpType,
-			"columns":           cols,
-			"notes": map[string]string{
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"counterparty_type": cpType, "columns": cols, "notes": map[string]string{
 				"asset_classes":  "semicolon-separated, e.g. EQUITY;DERIVATIVES",
 				"data_types":     "semicolon-separated, e.g. PRICE;CORPORATE_ACTION",
 				"effective_from": "YYYY-MM-DD",
 				"renewal_date":   "YYYY-MM-DD (DATA_PROVIDER only)",
-			},
-		})
+			}}, "")
 	}
 }

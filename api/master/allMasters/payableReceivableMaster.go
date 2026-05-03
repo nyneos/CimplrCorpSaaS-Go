@@ -138,13 +138,13 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []PayableReceivableRequest `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
 		session := middlewares.GetSessionFromContext(r.Context())
 		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 		createdBy := session.Name
@@ -156,11 +156,11 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		categories := api.GetCashFlowCategoryNamesFromCtx(ctx)
 
 		if len(entities) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
 			return
 		}
 		if len(currCodes) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No accessible currencies found")
+			api.Error(w, http.StatusBadRequest, "No accessible currencies found")
 			return
 		}
 
@@ -324,7 +324,7 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: overall, "rows": created})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: overall, "data": created}, "")
 	}
 }
 
@@ -343,13 +343,13 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
 		session := middlewares.GetSessionFromContext(r.Context())
 		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -360,7 +360,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(entities) == 0 {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": []map[string]interface{}{}})
+			api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": []map[string]interface{}{}}, "")
 			return
 		}
 
@@ -405,9 +405,9 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to fetch payable/receivable types")
 			if statusCode == http.StatusOK {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
 			} else {
-				api.RespondWithError(w, statusCode, errMsg)
+				api.Error(w, statusCode, errMsg)
 			}
 			return
 		}
@@ -676,7 +676,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -686,13 +686,13 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
 		session := middlewares.GetSessionFromContext(r.Context())
 		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -703,7 +703,7 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		if len(entities) == 0 {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": []map[string]interface{}{}})
+			api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": []map[string]interface{}{}}, "")
 			return
 		}
 
@@ -727,9 +727,9 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to fetch approved types")
 			if statusCode == http.StatusOK {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
 			} else {
-				api.RespondWithError(w, statusCode, errMsg)
+				api.Error(w, statusCode, errMsg)
 			}
 			return
 		}
@@ -754,12 +754,12 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			})
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -774,13 +774,13 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
 		session := middlewares.GetSessionFromContext(r.Context())
 		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 		updatedBy := session.Name
@@ -789,7 +789,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		entities := api.GetEntityNamesFromCtx(ctx)
 
 		if len(entities) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
 			return
 		}
 
@@ -1000,7 +1000,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: overall, "rows": results})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: overall, "data": results}, "")
 	}
 }
 
@@ -1012,19 +1012,19 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason  string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
 		session := middlewares.GetSessionFromContext(r.Context())
 		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 		requestedBy := session.Name
 
 		if len(req.TypeIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "type_ids required")
+			api.Error(w, http.StatusBadRequest, "type_ids required")
 			return
 		}
 
@@ -1034,9 +1034,9 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
 			} else {
-				api.RespondWithError(w, statusCode, errMsg)
+				api.Error(w, statusCode, errMsg)
 			}
 			return
 		}
@@ -1051,12 +1051,12 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, tid := range req.TypeIDs {
 			if strings.TrimSpace(tid) == "" {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusBadRequest, "empty type_id provided")
+				api.Error(w, http.StatusBadRequest, "empty type_id provided")
 				return
 			}
 			if _, err := tx.Exec(ctx, q, tid, req.Reason, requestedBy); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 		}
@@ -1066,16 +1066,16 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to save deletion request")
 			if statusCode == http.StatusOK {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
 			} else {
-				api.RespondWithError(w, statusCode, errMsg)
+				api.Error(w, statusCode, errMsg)
 			}
 			return
 		}
 		committed = true
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true}, "")
 	}
 }
 
@@ -1087,13 +1087,13 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			Comment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
 		session := middlewares.GetSessionFromContext(r.Context())
 		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 		checkerBy := session.Name
@@ -1101,7 +1101,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1109,7 +1109,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1120,7 +1120,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		for rows.Next() {
 			var aid, tid, pstatus string
 			if err := rows.Scan(&aid, &tid, &pstatus); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan audit rows: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "failed to scan audit rows: "+err.Error())
 				return
 			}
 			foundTypes[tid] = true
@@ -1143,14 +1143,14 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			if len(cannotReject) > 0 {
 				msg += fmt.Sprintf("cannot reject already approved type_ids: %v", cannotReject)
 			}
-			api.RespondWithError(w, http.StatusBadRequest, msg)
+			api.Error(w, http.StatusBadRequest, msg)
 			return
 		}
 
 		upd := `UPDATE auditactionpayablereceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id, type_id`
 		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, actionIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to update audit rows: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "failed to update audit rows: "+err.Error())
 			return
 		}
 		defer urows.Close()
@@ -1163,16 +1163,16 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 
 		if len(updated) != len(actionIDs) {
-			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)))
+			api.Error(w, http.StatusInternalServerError, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)))
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "updated": updated}, "")
 	}
 }
 
@@ -1184,12 +1184,12 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			Comment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		session := middlewares.GetSessionFromContext(r.Context())
 		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 		checkerBy := session.Name
@@ -1197,14 +1197,14 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
 		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, actiontype, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1216,7 +1216,7 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		for rows.Next() {
 			var aid, tid, atype, pstatus string
 			if err := rows.Scan(&aid, &tid, &atype, &pstatus); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan audit rows: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "failed to scan audit rows: "+err.Error())
 				return
 			}
 			foundTypes[tid] = true
@@ -1241,14 +1241,14 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			if len(cannotApprove) > 0 {
 				msg += fmt.Sprintf("cannot approve already approved type_ids: %v", cannotApprove)
 			}
-			api.RespondWithError(w, http.StatusBadRequest, msg)
+			api.Error(w, http.StatusBadRequest, msg)
 			return
 		}
 
 		upd := `UPDATE auditactionpayablereceivable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id, type_id, actiontype`
 		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, actionIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to update audit rows: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "failed to update audit rows: "+err.Error())
 			return
 		}
 		defer urows.Close()
@@ -1265,24 +1265,24 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 
 		if len(updated) != len(actionIDs) {
-			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)))
+			api.Error(w, http.StatusInternalServerError, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)))
 			return
 		}
 
 		if len(deleteTypeIDs) > 0 {
 			softDelQ := `UPDATE masterpayablereceivabletype SET is_deleted = true WHERE type_id = ANY($1)`
 			if _, err := tx.Exec(ctx, softDelQ, deleteTypeIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to soft-delete master rows: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "failed to soft-delete master rows: "+err.Error())
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "updated": updated}, "")
 	}
 }
 func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -1294,21 +1294,21 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				UserID string `json:"user_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-				api.RespondWithError(w, http.StatusBadRequest, "user_id required in body")
+				api.Error(w, http.StatusBadRequest, "user_id required in body")
 				return
 			}
 			userID = req.UserID
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
-				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+				api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 				return
 			}
 		}
 
 		session := middlewares.GetSessionFromContext(r.Context())
 		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 		userName := session.Name
@@ -1318,31 +1318,31 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		categories := api.GetCashFlowCategoryNamesFromCtx(ctx)
 
 		if len(entities) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
+			api.Error(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 		batchIDs := make([]string, 0, len(files))
 		for _, fh := range files {
 			f, err := fh.Open()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file: "+fh.Filename)
+				api.Error(w, http.StatusBadRequest, "Failed to open file: "+fh.Filename)
 				return
 			}
 			ext := getFileExt(fh.Filename)
 			records, err := parseCashFlowCategoryFile(f, ext)
 			f.Close()
 			if err != nil || len(records) < 2 {
-				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
+				api.Error(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
 				return
 			}
 			headerRow := records[0]
@@ -1383,9 +1383,9 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errMsg, statusCode := getUserFriendlyPayableReceivableError(err, constants.ErrTxStartFailed)
 				if statusCode == http.StatusOK {
 					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
 				} else {
-					api.RespondWithError(w, statusCode, errMsg)
+					api.Error(w, statusCode, errMsg)
 				}
 				return
 			}
@@ -1399,7 +1399,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_payablereceivable`)
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Mapping error: "+err.Error())
 				return
 			}
 			mapping := make(map[string]string)
@@ -1431,7 +1431,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if len(mappedTargets) == 0 {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusBadRequest, "No mapped columns found in uploaded file")
+				api.Error(w, http.StatusBadRequest, "No mapped columns found in uploaded file")
 				return
 			}
 
@@ -1472,7 +1472,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_payablereceivable_table"}, columns, pgx.CopyFromRows(reducedRows))
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
 				return
 			}
 
@@ -1501,7 +1501,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if err := tx.QueryRow(ctx, checkEntityQ, batchID, entitiesUpper).Scan(&invalidEntity); err == nil {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusForbidden, "Invalid or unauthorized business_unit_division in upload: "+invalidEntity)
+					api.Error(w, http.StatusForbidden, "Invalid or unauthorized business_unit_division in upload: "+invalidEntity)
 					return
 				}
 			}
@@ -1515,7 +1515,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if err := tx.QueryRow(ctx, checkCurrQ, batchID, currCodesUpper).Scan(&invalidCurr); err == nil {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusForbidden, "Invalid or unauthorized default_currency in upload: "+invalidCurr)
+					api.Error(w, http.StatusForbidden, "Invalid or unauthorized default_currency in upload: "+invalidCurr)
 					return
 				}
 			}
@@ -1529,7 +1529,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if err := tx.QueryRow(ctx, checkCatQ, batchID, categoriesUpper).Scan(&invalidCat); err == nil {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusForbidden, "Invalid or unauthorized cash_flow_category in upload: "+invalidCat)
+					api.Error(w, http.StatusForbidden, "Invalid or unauthorized cash_flow_category in upload: "+invalidCat)
 					return
 				}
 			}
@@ -1579,7 +1579,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err := tx.Query(ctx, insertSQL, batchID)
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
 				return
 			}
 			var newIDs []string
@@ -1590,14 +1590,14 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				} else {
 					rows.Close()
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed reading inserted ids: "+err.Error())
+					api.Error(w, http.StatusInternalServerError, "Failed reading inserted ids: "+err.Error())
 					return
 				}
 			}
 			if err := rows.Err(); err != nil {
 				rows.Close()
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Error iterating inserted rows: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Error iterating inserted rows: "+err.Error())
 				return
 			}
 			rows.Close()
@@ -1606,19 +1606,19 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditSQL := `INSERT INTO auditactionpayablereceivable (type_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT type_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterpayablereceivabletype WHERE type_id = ANY($2)`
 				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
+					api.Error(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
 					return
 				}
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
 			committed = true
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs}, "")
 	}
 }

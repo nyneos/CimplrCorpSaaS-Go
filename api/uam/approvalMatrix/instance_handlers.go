@@ -26,7 +26,7 @@ import (
 func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -38,25 +38,25 @@ func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment       string `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body: "+err.Error())
+			api.Error(w, http.StatusBadRequest, "Invalid JSON body: "+err.Error())
 			return
 		}
 		if req.UserID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if req.InstanceEyeID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "instance_eye_id is required")
+			api.Error(w, http.StatusBadRequest, "instance_eye_id is required")
 			return
 		}
 		if req.ActionType != "APPROVED" && req.ActionType != "REJECTED" {
-			api.RespondWithError(w, http.StatusBadRequest, "action_type must be APPROVED or REJECTED")
+			api.Error(w, http.StatusBadRequest, "action_type must be APPROVED or REJECTED")
 			return
 		}
 
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "No active session found for this user")
+			api.Error(w, http.StatusUnauthorized, "No active session found for this user")
 			return
 		}
 
@@ -74,15 +74,15 @@ func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			lower := strings.ToLower(msg)
 			switch {
 			case strings.Contains(lower, "not found"):
-				api.RespondWithError(w, http.StatusNotFound, msg)
+				api.Error(w, http.StatusNotFound, msg)
 			case strings.Contains(lower, "unauthorized"):
-				api.RespondWithError(w, http.StatusForbidden, msg)
+				api.Error(w, http.StatusForbidden, msg)
 			case strings.Contains(lower, "not active"), strings.Contains(lower, "not pending"):
-				api.RespondWithError(w, http.StatusBadRequest, msg)
+				api.Error(w, http.StatusBadRequest, msg)
 			case strings.Contains(lower, "already acted"):
-				api.RespondWithError(w, http.StatusConflict, msg)
+				api.Error(w, http.StatusConflict, msg)
 			default:
-				api.RespondWithError(w, http.StatusInternalServerError, "Approval action failed: "+msg)
+				api.Error(w, http.StatusInternalServerError, "Approval action failed: "+msg)
 			}
 			return
 		}
@@ -90,11 +90,11 @@ func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.LogInfo("[ApprovalEngine] ApprovalAction: eye=%s action=%s by=%s",
 			req.InstanceEyeID, req.ActionType, userEmail)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"instance_eye_id": req.InstanceEyeID,
 			"action_type":     req.ActionType,
 			"acted_by":        userEmail,
-		})
+		}, "")
 	}
 }
 
@@ -107,28 +107,28 @@ func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetMyPendingApprovals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		userID := r.URL.Query().Get("user_id")
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
 		ctx := r.Context()
 		summaries, err := approvalengine.GetPendingForUser(ctx, pgxPool, userID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch pending approvals: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch pending approvals: "+err.Error())
 			return
 		}
 
 		api.LogInfo("[ApprovalEngine] GetPendingApprovals: user=%s count=%d", userID, len(summaries))
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rows":  summaries,
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  summaries,
 			"count": len(summaries),
-		})
+		}, "")
 	}
 }
 
@@ -140,27 +140,27 @@ func GetMyPendingApprovals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetMySubmissions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		userID := r.URL.Query().Get("user_id")
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
 		ctx := r.Context()
 		summaries, err := approvalengine.GetMySubmissions(ctx, pgxPool, userID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch submissions: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch submissions: "+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rows":  summaries,
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  summaries,
 			"count": len(summaries),
-		})
+		}, "")
 	}
 }
 
@@ -196,13 +196,13 @@ func GetMySubmissions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetInstanceDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		instanceID := r.URL.Query().Get("instance_id")
 		if instanceID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "instance_id is required")
+			api.Error(w, http.StatusBadRequest, "instance_id is required")
 			return
 		}
 		viewerUserID := r.URL.Query().Get("user_id") // optional
@@ -211,13 +211,13 @@ func GetInstanceDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		detail, err := approvalengine.GetRichInstanceDetail(ctx, pgxPool, instanceID, viewerUserID)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
-				api.RespondWithError(w, http.StatusNotFound, err.Error())
+				api.Error(w, http.StatusNotFound, err.Error())
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch instance: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch instance: "+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", detail)
+		api.Success(w, http.StatusOK, detail, "")
 	}
 }

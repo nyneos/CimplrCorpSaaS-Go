@@ -2,9 +2,9 @@ package counterpartyHub
 
 import (
 	"context"
-	"math/big"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"regexp"
 	"strings"
@@ -354,4 +354,3 @@ func insertTypedDetail(ctx context.Context, tx pgx.Tx, cpID, cpType string, fiel
 		return "", fmt.Errorf("unsupported counterparty_type: %s", cpType)
 	}
 }
-

@@ -72,11 +72,11 @@ func CreatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			PaymentNetworkInput
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if err := validatePaymentNetworkInput(req.PaymentNetworkInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.Error(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -88,7 +88,7 @@ func CreatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -96,7 +96,7 @@ func CreatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -114,7 +114,7 @@ func CreatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.CutOffTime, req.Timezone, req.APIEndpointKMSRef,
 		).Scan(&pnID); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Payment network insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -122,13 +122,13 @@ func CreatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO apibox.audit_payment_network (payment_network_id, action_type, processing_status, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, pnID, userEmail); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -151,9 +151,8 @@ func CreatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 		}(pnID, userEmail)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true, "payment_network_id": pnID, "requested": userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "payment_network_id": pnID, "requested": userEmail}, "")
 		api.LogInfo("PaymentNetwork created: ID=%s by=%s", pnID, userEmail)
 	}
 }
@@ -167,11 +166,11 @@ func CreatePaymentNetworkBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []PaymentNetworkInput `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
 			return
 		}
 
@@ -183,7 +182,7 @@ func CreatePaymentNetworkBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -205,7 +204,7 @@ func CreatePaymentNetworkBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "payment_network_id": id})
 		}
 
-		api.RespondWithPayload(w, len(inserted) > 0, "", append(inserted, errList...))
+		api.Success(w, http.StatusOK, append(inserted, errList...), "")
 	}
 }
 
@@ -253,11 +252,11 @@ func UpdatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason           string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.PaymentNetworkID == "" || len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "payment_network_id and fields are required")
+			api.Error(w, http.StatusBadRequest, "payment_network_id and fields are required")
 			return
 		}
 
@@ -269,7 +268,7 @@ func UpdatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -277,7 +276,7 @@ func UpdatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -288,11 +287,11 @@ func UpdatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM apibox.payment_network_master WHERE payment_network_id=$1 FOR UPDATE`, req.PaymentNetworkID,
 		).Scan(&oldNetworkType, &oldRoutingNumber, &oldBICCode); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "Payment network record not found")
+				api.Error(w, http.StatusNotFound, "Payment network record not found")
 				return
 			}
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -312,7 +311,7 @@ func UpdatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if k == "api_endpoint_kms_ref" {
 				if s, ok := v.(string); ok {
 					if err := validateKMSPath("api_endpoint_kms_ref", s); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.Error(w, http.StatusBadRequest, err.Error())
 						return
 					}
 				}
@@ -320,7 +319,7 @@ func UpdatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if k == "network_type" {
 				if s, ok := v.(string); ok {
 					if !validNetworkTypes[strings.ToUpper(s)] {
-						api.RespondWithError(w, http.StatusBadRequest, "network_type must be one of SWIFT, CHIPS, ACH, SEPA, RTGS, NEFT, IMPS, OTHER")
+						api.Error(w, http.StatusBadRequest, "network_type must be one of SWIFT, CHIPS, ACH, SEPA, RTGS, NEFT, IMPS, OTHER")
 						return
 					}
 				}
@@ -330,13 +329,13 @@ func UpdatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pos++
 		}
 		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No valid updatable fields")
+			api.Error(w, http.StatusBadRequest, "No valid updatable fields")
 			return
 		}
 		args = append(args, req.PaymentNetworkID)
 		if _, err := tx.Exec(ctx, fmt.Sprintf("UPDATE apibox.payment_network_master SET %s WHERE payment_network_id=$%d", strings.Join(sets, ","), pos), args...); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Update failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -347,16 +346,16 @@ func UpdatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6)`,
 			req.PaymentNetworkID, req.Reason, userEmail, oldNetworkType, oldRoutingNumber, oldBICCode); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true, "payment_network_id": req.PaymentNetworkID})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "payment_network_id": req.PaymentNetworkID}, "")
 	}
 }
 
@@ -370,11 +369,11 @@ func BulkApprovePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment           string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.PaymentNetworkIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPaymentNetworkIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoPaymentNetworkIDsProvided)
 			return
 		}
 
@@ -386,7 +385,7 @@ func BulkApprovePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -394,7 +393,7 @@ func BulkApprovePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -406,7 +405,7 @@ func BulkApprovePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FOR UPDATE`, req.PaymentNetworkIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch audits failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		type ar struct{ AuditID, ID, ActionType, ReqBy string }
@@ -436,10 +435,10 @@ func BulkApprovePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, len(success) > 0, "", append(success, errList...))
+		api.Success(w, http.StatusOK, append(success, errList...), "")
 	}
 }
 
@@ -453,11 +452,11 @@ func BulkRejectPaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment           string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.PaymentNetworkIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPaymentNetworkIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoPaymentNetworkIDsProvided)
 			return
 		}
 
@@ -469,7 +468,7 @@ func BulkRejectPaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -477,7 +476,7 @@ func BulkRejectPaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -488,15 +487,15 @@ func BulkRejectPaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userEmail, req.Comment, req.PaymentNetworkIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, res.RowsAffected() > 0, "", map[string]interface{}{constants.ValueSuccess: true, "rejected_count": res.RowsAffected()})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "rejected_count": res.RowsAffected()}, "")
 	}
 }
 
@@ -510,11 +509,11 @@ func BulkDeletePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason            string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.PaymentNetworkIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPaymentNetworkIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoPaymentNetworkIDsProvided)
 			return
 		}
 
@@ -526,7 +525,7 @@ func BulkDeletePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -534,7 +533,7 @@ func BulkDeletePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -551,15 +550,15 @@ func BulkDeletePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO apibox.audit_payment_network (payment_network_id, action_type, processing_status, reason, requested_by, requested_at)
 			VALUES %s`, strings.Join(auditVals, ",")), auditArgs...); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true, "submitted_count": len(req.PaymentNetworkIDs)})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "submitted_count": len(req.PaymentNetworkIDs)}, "")
 	}
 }
 
@@ -612,7 +611,7 @@ func GetPaymentNetworkAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Query failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -633,7 +632,7 @@ func GetPaymentNetworkAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if result == nil {
 			result = []map[string]interface{}{}
 		}
-		api.RespondWithPayload(w, true, "", result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 
@@ -660,7 +659,7 @@ func GetPaymentNetworkAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Audit history query failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -681,7 +680,7 @@ func GetPaymentNetworkAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if result == nil {
 			result = []map[string]interface{}{}
 		}
-		api.RespondWithPayload(w, true, "", result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 
@@ -714,7 +713,7 @@ func GetPaymentNetworkApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Query failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -735,7 +734,7 @@ func GetPaymentNetworkApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if result == nil {
 			result = []map[string]interface{}{}
 		}
-		api.RespondWithPayload(w, true, "", result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 
@@ -745,7 +744,7 @@ func GetPaymentNetworkDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pnID := r.URL.Query().Get("payment_network_id")
 		if pnID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "payment_network_id query param is required")
+			api.Error(w, http.StatusBadRequest, "payment_network_id query param is required")
 			return
 		}
 
@@ -772,7 +771,7 @@ func GetPaymentNetworkDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE p.payment_network_id=$1`, pnID)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Detail query failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -781,16 +780,16 @@ func GetPaymentNetworkDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if rows.Next() {
 			vals, err := rows.Values()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read row")
+				api.Error(w, http.StatusInternalServerError, "Failed to read row")
 				return
 			}
 			row := make(map[string]interface{}, len(fds))
 			for i, fd := range fds {
 				row[string(fd.Name)] = vals[i]
 			}
-			api.RespondWithPayload(w, true, "", row)
+			api.Success(w, http.StatusOK, row, "")
 			return
 		}
-		api.RespondWithError(w, http.StatusNotFound, "Payment network record not found")
+		api.Error(w, http.StatusNotFound, "Payment network record not found")
 	}
 }

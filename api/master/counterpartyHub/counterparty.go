@@ -122,11 +122,11 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateCounterpartyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if err := validateCounterpartyInput(req.CounterpartyInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.Error(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -135,61 +135,61 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		switch cpType {
 		case "BANK":
 			if req.Bank == nil {
-				api.RespondWithError(w, http.StatusBadRequest, `"bank" payload is required for counterparty_type=BANK`)
+				api.Error(w, http.StatusBadRequest, `"bank" payload is required for counterparty_type=BANK`)
 				return
 			}
 			if err := validateBankFields(*req.Bank); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.Error(w, http.StatusBadRequest, err.Error())
 				return
 			}
 		case "EXCHANGE":
 			if req.Exchange == nil {
-				api.RespondWithError(w, http.StatusBadRequest, `"exchange" payload is required for counterparty_type=EXCHANGE`)
+				api.Error(w, http.StatusBadRequest, `"exchange" payload is required for counterparty_type=EXCHANGE`)
 				return
 			}
 			req.Exchange.CounterpartyID = "PLACEHOLDER"
 			if err := validateExchangeInput(*req.Exchange); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.Error(w, http.StatusBadRequest, err.Error())
 				return
 			}
 		case "DATA_PROVIDER":
 			if req.DataProvider == nil {
-				api.RespondWithError(w, http.StatusBadRequest, `"data_provider" payload is required for counterparty_type=DATA_PROVIDER`)
+				api.Error(w, http.StatusBadRequest, `"data_provider" payload is required for counterparty_type=DATA_PROVIDER`)
 				return
 			}
 			req.DataProvider.CounterpartyID = "PLACEHOLDER"
 			if err := validateDataProviderInput(*req.DataProvider); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.Error(w, http.StatusBadRequest, err.Error())
 				return
 			}
 		case "CCP_CSD":
 			if req.CcpCsd == nil {
-				api.RespondWithError(w, http.StatusBadRequest, `"ccp_csd" payload is required for counterparty_type=CCP_CSD`)
+				api.Error(w, http.StatusBadRequest, `"ccp_csd" payload is required for counterparty_type=CCP_CSD`)
 				return
 			}
 			req.CcpCsd.CounterpartyID = "PLACEHOLDER"
 			if err := validateCcpCsdInput(*req.CcpCsd); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.Error(w, http.StatusBadRequest, err.Error())
 				return
 			}
 		case "PAYMENT_NETWORK":
 			if req.PaymentNetwork == nil {
-				api.RespondWithError(w, http.StatusBadRequest, `"payment_network" payload is required for counterparty_type=PAYMENT_NETWORK`)
+				api.Error(w, http.StatusBadRequest, `"payment_network" payload is required for counterparty_type=PAYMENT_NETWORK`)
 				return
 			}
 			req.PaymentNetwork.CounterpartyID = "PLACEHOLDER"
 			if err := validatePaymentNetworkInput(*req.PaymentNetwork); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.Error(w, http.StatusBadRequest, err.Error())
 				return
 			}
 		case "ERP_SYSTEM":
 			if req.ERPSystem == nil {
-				api.RespondWithError(w, http.StatusBadRequest, `"erp_system" payload is required for counterparty_type=ERP_SYSTEM`)
+				api.Error(w, http.StatusBadRequest, `"erp_system" payload is required for counterparty_type=ERP_SYSTEM`)
 				return
 			}
 			req.ERPSystem.CounterpartyID = "PLACEHOLDER"
 			if err := validateERPSystemInput(*req.ERPSystem); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.Error(w, http.StatusBadRequest, err.Error())
 				return
 			}
 		}
@@ -202,7 +202,7 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -210,7 +210,7 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -229,7 +229,7 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.LEI, req.RMEmail, req.EffFrom, req.EffTo, req.Notes, userEmail,
 		).Scan(&counterpartyID); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -257,7 +257,7 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Child record insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -267,13 +267,13 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				(counterparty_id, action_type, processing_status, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, counterpartyID, userEmail); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -297,14 +297,8 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 		}(counterpartyID, userEmail)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true,
-			"counterparty_id":      counterpartyID,
-			"child_id":             childID,
-			"counterparty_type":    cpType,
-			"counterparty_code":    strings.ToUpper(req.CounterpartyCode),
-			"requested":            userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "counterparty_id": counterpartyID, "child_id": childID, "counterparty_type": cpType, "counterparty_code": strings.ToUpper(req.CounterpartyCode), "requested": userEmail}, "")
 		api.LogInfo("Counterparty+child created: ID=%s type=%s childID=%s by=%s", counterpartyID, cpType, childID, userEmail)
 	}
 }
@@ -315,11 +309,11 @@ func CreateCounterpartyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateCounterpartyBulkRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
 			return
 		}
 
@@ -331,7 +325,7 @@ func CreateCounterpartyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -353,13 +347,24 @@ func CreateCounterpartyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(validRows) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
+			{
+				apiErrMsg := constants.ErrAllRowsFailedValidation
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -410,14 +415,14 @@ func CreateCounterpartyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				VALUES %s`, strings.Join(auditValues, ","))
 			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
 				msg, status := getUserFriendlyCounterpartyError(err, constants.ErrBatchAuditFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -435,7 +440,7 @@ func CreateCounterpartyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		allResults := append(insertedRecords, errorsList...)
-		api.RespondWithPayload(w, len(insertedRecords) > 0, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("Bulk create counterparty: %d inserted, %d errors", len(insertedRecords), len(errorsList))
 	}
 }
@@ -479,15 +484,15 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UpdateCounterpartyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.CounterpartyID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "counterparty_id is required")
+			api.Error(w, http.StatusBadRequest, "counterparty_id is required")
 			return
 		}
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No fields provided for update")
+			api.Error(w, http.StatusBadRequest, "No fields provided for update")
 			return
 		}
 
@@ -499,7 +504,7 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -507,7 +512,7 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -527,17 +532,17 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&oldCode, &oldName, &oldStatus, &oldSyncStatus, &oldEffFrom, &oldEffTo, &oldIsActive,
 		); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "Counterparty record not found")
+				api.Error(w, http.StatusNotFound, "Counterparty record not found")
 				return
 			}
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		// Reject counterparty_code change once ACTIVE
 		if _, changing := req.Fields["counterparty_code"]; changing && oldStatus == "ACTIVE" {
-			api.RespondWithError(w, http.StatusBadRequest, "Counterparty code cannot be changed after activation")
+			api.Error(w, http.StatusBadRequest, "Counterparty code cannot be changed after activation")
 			return
 		}
 
@@ -566,7 +571,7 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		pos++
 
 		if len(sets) == 1 {
-			api.RespondWithError(w, http.StatusBadRequest, "No valid updatable fields found")
+			api.Error(w, http.StatusBadRequest, "No valid updatable fields found")
 			return
 		}
 
@@ -575,7 +580,7 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, req.CounterpartyID)
 		if _, err := tx.Exec(ctx, updQ, args...); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Update failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -590,13 +595,13 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			oldCode, oldName, oldStatus, oldSyncStatus, oldEffFrom, oldEffTo, oldIsActive,
 		); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -620,9 +625,8 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 		}(req.CounterpartyID, userEmail)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true, "counterparty_id": req.CounterpartyID,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "counterparty_id": req.CounterpartyID}, "")
 		api.LogInfo("Counterparty updated: ID=%s by=%s", req.CounterpartyID, userEmail)
 	}
 }
@@ -633,11 +637,11 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req BulkApproveCounterpartyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.CounterpartyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCounterpartyIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoCounterpartyIDsProvided)
 			return
 		}
 
@@ -649,7 +653,7 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -657,7 +661,7 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -671,7 +675,7 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FOR UPDATE OF a`, req.CounterpartyIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch audit rows failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -688,7 +692,7 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var a auditRow
 			if err := rows.Scan(&a.AuditID, &a.CPID, &a.ActionType, &a.Status, &a.RequestedBy, &a.CPType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Audit scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Audit scan failed: "+err.Error())
 				return
 			}
 			audits = append(audits, a)
@@ -696,7 +700,18 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows.Close()
 
 		if len(audits) == 0 {
-			api.RespondWithPayload(w, false, "No pending audit records found for provided counterparty_ids", nil)
+			{
+				apiErrMsg := "No pending audit records found for provided counterparty_ids"
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -775,7 +790,7 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -791,7 +806,7 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		allResults := append(success, errorsList...)
-		api.RespondWithPayload(w, len(success) > 0, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("Bulk approve counterparty: %d approved, %d errors", len(success), len(errorsList))
 	}
 }
@@ -802,11 +817,11 @@ func BulkRejectCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req BulkRejectCounterpartyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.CounterpartyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCounterpartyIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoCounterpartyIDsProvided)
 			return
 		}
 
@@ -818,7 +833,7 @@ func BulkRejectCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -827,7 +842,7 @@ func BulkRejectCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -865,7 +880,7 @@ func BulkRejectCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				userEmail, req.Comment, rejectIDs)
 			if err != nil {
 				msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			updated = res.RowsAffected()
@@ -873,7 +888,7 @@ func BulkRejectCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -885,7 +900,7 @@ func BulkRejectCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(selfIDs) > 0 {
 			response["self_reject_skipped"] = selfIDs
 		}
-		api.RespondWithPayload(w, updated > 0, "", response)
+		api.Success(w, http.StatusOK, response, "")
 		api.LogInfo("Bulk reject counterparty: %d rejected by %s", updated, userEmail)
 	}
 }
@@ -896,11 +911,11 @@ func BulkDeleteCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req BulkDeleteCounterpartyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.CounterpartyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCounterpartyIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoCounterpartyIDsProvided)
 			return
 		}
 
@@ -912,7 +927,7 @@ func BulkDeleteCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -920,7 +935,7 @@ func BulkDeleteCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -930,7 +945,7 @@ func BulkDeleteCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.CounterpartyIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch existing IDs failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		found := make(map[string]bool)
@@ -961,7 +976,18 @@ func BulkDeleteCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(auditValues) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
+			{
+				apiErrMsg := constants.ErrAllRowsFailedValidation
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -971,13 +997,13 @@ func BulkDeleteCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			VALUES %s`, strings.Join(auditValues, ","))
 		if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -992,7 +1018,7 @@ func BulkDeleteCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		allResults := append(successList, errorsList...)
-		api.RespondWithPayload(w, len(successList) > 0, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("Bulk delete request: %d submitted, %d errors", len(successList), len(errorsList))
 	}
 }
@@ -1101,7 +1127,7 @@ func GetCounterpartyMasterAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1121,12 +1147,12 @@ func GetCounterpartyMasterAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
 			return
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 		api.LogInfo("GetCounterpartyMasterAll: returned %d rows", len(out))
 	}
 }
@@ -1161,7 +1187,7 @@ func GetCounterpartyMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1182,7 +1208,7 @@ func GetCounterpartyMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -1213,7 +1239,7 @@ func GetCounterpartyMasterApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1234,7 +1260,7 @@ func GetCounterpartyMasterApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -1245,7 +1271,7 @@ func GetCounterpartyMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		cpID := r.URL.Query().Get("counterparty_id")
 		if cpID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "counterparty_id query param is required")
+			api.Error(w, http.StatusBadRequest, "counterparty_id query param is required")
 			return
 		}
 
@@ -1271,13 +1297,13 @@ func GetCounterpartyMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE m.counterparty_id=$1`, cpID)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer prows.Close()
 
 		if !prows.Next() {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrCounterpartyNotFound1)
+			api.Error(w, http.StatusNotFound, constants.ErrCounterpartyNotFound1)
 			return
 		}
 		pFields := prows.FieldDescriptions()
@@ -1321,7 +1347,7 @@ func GetCounterpartyMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) DESC`, cpID)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Audit history query failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer arows.Close()
@@ -1349,12 +1375,8 @@ func GetCounterpartyMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		childData, _ := fetchLinkedChildDetail(ctx, pgxPool, cpType, cpID)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 result,
-			"audits":               audits,
-			"child":                childData,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "data": result, "audits": audits, "child": childData}, "")
 	}
 }
 

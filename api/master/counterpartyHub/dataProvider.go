@@ -67,11 +67,11 @@ func CreateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DataProviderInput
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if err := validateDataProviderInput(req.DataProviderInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.Error(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -83,7 +83,7 @@ func CreateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -91,7 +91,7 @@ func CreateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -108,7 +108,7 @@ func CreateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.EntitlementCodes, req.RenewalDate, req.RefreshIntervalSec,
 		).Scan(&providerID); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Data provider insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -117,7 +117,7 @@ func CreateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				`INSERT INTO apibox.data_provider_data_types (provider_id, data_type) VALUES ($1,$2)`,
 				providerID, strings.ToUpper(dt)); err != nil {
 				msg, status := getUserFriendlyCounterpartyError(err, "Data type insert failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
@@ -127,13 +127,13 @@ func CreateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				(provider_id, action_type, processing_status, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, providerID, userEmail); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -156,9 +156,8 @@ func CreateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 		}(providerID, userEmail)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true, "provider_id": providerID, "requested": userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "provider_id": providerID, "requested": userEmail}, "")
 		api.LogInfo("DataProvider created: ID=%s by=%s", providerID, userEmail)
 	}
 }
@@ -172,11 +171,11 @@ func CreateDataProviderBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []DataProviderInput `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
 			return
 		}
 
@@ -188,7 +187,7 @@ func CreateDataProviderBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -210,7 +209,7 @@ func CreateDataProviderBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "provider_id": pid})
 		}
 
-		api.RespondWithPayload(w, len(inserted) > 0, "", append(inserted, errList...))
+		api.Success(w, http.StatusOK, append(inserted, errList...), "")
 	}
 }
 
@@ -263,11 +262,11 @@ func UpdateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason     string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.ProviderID == "" || len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "provider_id and fields are required")
+			api.Error(w, http.StatusBadRequest, "provider_id and fields are required")
 			return
 		}
 
@@ -279,7 +278,7 @@ func UpdateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -287,7 +286,7 @@ func UpdateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -299,11 +298,11 @@ func UpdateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			 FROM apibox.data_provider_master WHERE provider_id=$1 FOR UPDATE`, req.ProviderID,
 		).Scan(&oldType, &oldDelivery, &oldRefresh); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "Data provider not found")
+				api.Error(w, http.StatusNotFound, "Data provider not found")
 				return
 			}
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -319,7 +318,7 @@ func UpdateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if k == "api_creds_kms_ref" {
 				if s, ok := v.(string); ok {
 					if err := validateKMSPath("api_creds_kms_ref", s); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.Error(w, http.StatusBadRequest, err.Error())
 						return
 					}
 				}
@@ -329,13 +328,13 @@ func UpdateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pos++
 		}
 		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No valid updatable fields")
+			api.Error(w, http.StatusBadRequest, "No valid updatable fields")
 			return
 		}
 		args = append(args, req.ProviderID)
 		if _, err := tx.Exec(ctx, fmt.Sprintf("UPDATE apibox.data_provider_master SET %s WHERE provider_id=$%d", strings.Join(sets, ","), pos), args...); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Update failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -346,16 +345,16 @@ func UpdateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6)`,
 			req.ProviderID, req.Reason, userEmail, oldType, oldDelivery, oldRefresh); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true, "provider_id": req.ProviderID})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "provider_id": req.ProviderID}, "")
 	}
 }
 
@@ -369,11 +368,11 @@ func BulkApproveDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.ProviderIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoProviderIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoProviderIDsProvided)
 			return
 		}
 
@@ -385,7 +384,7 @@ func BulkApproveDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -393,7 +392,7 @@ func BulkApproveDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -405,7 +404,7 @@ func BulkApproveDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FOR UPDATE`, req.ProviderIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch audits failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		type ar struct{ AuditID, ID, ActionType, ReqBy string }
@@ -440,10 +439,10 @@ func BulkApproveDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, len(success) > 0, "", append(success, errList...))
+		api.Success(w, http.StatusOK, append(success, errList...), "")
 	}
 }
 
@@ -457,11 +456,11 @@ func BulkRejectDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.ProviderIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoProviderIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoProviderIDsProvided)
 			return
 		}
 
@@ -473,7 +472,7 @@ func BulkRejectDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -481,7 +480,7 @@ func BulkRejectDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -493,17 +492,16 @@ func BulkRejectDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userEmail, req.Comment, req.ProviderIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, res.RowsAffected() > 0, "", map[string]interface{}{
-			constants.ValueSuccess: true, "rejected_count": res.RowsAffected(),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "rejected_count": res.RowsAffected()}, "")
 	}
 }
 
@@ -517,11 +515,11 @@ func BulkDeleteDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason      string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.ProviderIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoProviderIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoProviderIDsProvided)
 			return
 		}
 
@@ -533,7 +531,7 @@ func BulkDeleteDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -541,7 +539,7 @@ func BulkDeleteDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -558,15 +556,15 @@ func BulkDeleteDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO apibox.audit_data_provider (provider_id, action_type, processing_status, reason, requested_by, requested_at)
 			VALUES %s`, strings.Join(auditVals, ",")), auditArgs...); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true, "submitted_count": len(req.ProviderIDs)})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "submitted_count": len(req.ProviderIDs)}, "")
 	}
 }
 
@@ -627,7 +625,7 @@ func GetDataProviderAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -646,7 +644,7 @@ func GetDataProviderAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -670,7 +668,7 @@ func GetDataProviderAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -689,7 +687,7 @@ func GetDataProviderAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -712,7 +710,7 @@ func GetDataProviderApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -731,7 +729,7 @@ func GetDataProviderApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -742,7 +740,7 @@ func GetDataProviderDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		id := r.URL.Query().Get("provider_id")
 		if id == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "provider_id is required")
+			api.Error(w, http.StatusBadRequest, "provider_id is required")
 			return
 		}
 
@@ -756,10 +754,10 @@ func GetDataProviderDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM apibox.data_provider_master WHERE provider_id=$1`, id,
 		).Scan(&pid, &cpid, &pcode, &ptype, &delivery, &apiCreds, &entCodes, &renewal, &refresh); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "Data provider not found")
+				api.Error(w, http.StatusNotFound, "Data provider not found")
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -773,14 +771,12 @@ func GetDataProviderDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		dtRows.Close()
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "data": map[string]interface{}{
 				"provider_id": pid, "counterparty_id": cpid, "provider_code": pcode,
 				"provider_type": ptype, "delivery_mechanism": delivery, "api_creds_kms_ref": apiCreds,
 				"entitlement_codes": entCodes, "renewal_date": renewal, "refresh_interval_sec": refresh,
 				"data_types": dataTypes,
-			},
-		})
+			}}, "")
 	}
 }

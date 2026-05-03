@@ -89,11 +89,11 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ExchangeInput
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if err := validateExchangeInput(req.ExchangeInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.Error(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -105,7 +105,7 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -126,7 +126,7 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -144,7 +144,7 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			settlementCycle, req.HolidayCalendarRef,
 		).Scan(&exchangeID); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Exchange insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -154,7 +154,7 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				`INSERT INTO apibox.exchange_asset_classes (exchange_id, asset_class) VALUES ($1,$2)`,
 				exchangeID, strings.ToUpper(ac)); err != nil {
 				msg, status := getUserFriendlyCounterpartyError(err, "Asset class insert failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
@@ -172,7 +172,7 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				req.FIXCredsKMSRef, heartbeat, req.TLSVersion,
 			); err != nil {
 				msg, status := getUserFriendlyCounterpartyError(err, "FIX session insert failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
@@ -183,13 +183,13 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				(exchange_id, action_type, processing_status, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, exchangeID, userEmail); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -212,9 +212,8 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 		}(exchangeID, userEmail)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true, "exchange_id": exchangeID, "mic_code": strings.ToUpper(req.MICCode), "requested": userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "exchange_id": exchangeID, "mic_code": strings.ToUpper(req.MICCode), "requested": userEmail}, "")
 		api.LogInfo("Exchange created: ID=%s MIC=%s by=%s", exchangeID, req.MICCode, userEmail)
 	}
 }
@@ -228,11 +227,11 @@ func CreateExchangeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []ExchangeInput `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
 			return
 		}
 
@@ -244,7 +243,7 @@ func CreateExchangeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -274,7 +273,7 @@ func CreateExchangeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		allResults := append(insertedRecords, errorsList...)
-		api.RespondWithPayload(w, len(insertedRecords) > 0, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("Bulk create exchange: %d inserted, %d errors", len(insertedRecords), len(errorsList))
 	}
 }
@@ -366,11 +365,11 @@ func UpdateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason     string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.ExchangeID == "" || len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "exchange_id and fields are required")
+			api.Error(w, http.StatusBadRequest, "exchange_id and fields are required")
 			return
 		}
 
@@ -382,7 +381,7 @@ func UpdateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -390,7 +389,7 @@ func UpdateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -401,11 +400,11 @@ func UpdateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM apibox.exchange_master WHERE exchange_id=$1 FOR UPDATE`, req.ExchangeID,
 		).Scan(&oldMIC, &oldType, &oldRegBody, &oldTZ); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "Exchange record not found")
+				api.Error(w, http.StatusNotFound, "Exchange record not found")
 				return
 			}
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -427,14 +426,14 @@ func UpdateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pos++
 		}
 		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No valid updatable fields found")
+			api.Error(w, http.StatusBadRequest, "No valid updatable fields found")
 			return
 		}
 		args = append(args, req.ExchangeID)
 		if _, err := tx.Exec(ctx, fmt.Sprintf("UPDATE apibox.exchange_master SET %s WHERE exchange_id=$%d",
 			strings.Join(sets, ","), pos), args...); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Update failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -445,17 +444,17 @@ func UpdateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6,$7)`,
 			req.ExchangeID, req.Reason, userEmail, oldMIC, oldType, oldRegBody, oldTZ); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true, "exchange_id": req.ExchangeID})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "exchange_id": req.ExchangeID}, "")
 		api.LogInfo("Exchange updated: ID=%s by=%s", req.ExchangeID, userEmail)
 	}
 }
@@ -470,11 +469,11 @@ func BulkApproveExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.ExchangeIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoExchangeIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoExchangeIDsProvided)
 			return
 		}
 
@@ -486,7 +485,7 @@ func BulkApproveExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -494,7 +493,7 @@ func BulkApproveExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -506,7 +505,7 @@ func BulkApproveExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FOR UPDATE`, req.ExchangeIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch audits failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		type ar struct{ AuditID, ID, ActionType, ReqBy string }
@@ -541,10 +540,10 @@ func BulkApproveExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, len(success) > 0, "", append(success, errList...))
+		api.Success(w, http.StatusOK, append(success, errList...), "")
 	}
 }
 
@@ -558,11 +557,11 @@ func BulkRejectExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.ExchangeIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoExchangeIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoExchangeIDsProvided)
 			return
 		}
 
@@ -574,7 +573,7 @@ func BulkRejectExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -582,7 +581,7 @@ func BulkRejectExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -594,17 +593,16 @@ func BulkRejectExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userEmail, req.Comment, req.ExchangeIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, res.RowsAffected() > 0, "", map[string]interface{}{
-			constants.ValueSuccess: true, "rejected_count": res.RowsAffected(), "checker": userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "rejected_count": res.RowsAffected(), "checker": userEmail}, "")
 	}
 }
 
@@ -618,11 +616,11 @@ func BulkDeleteExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason      string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.ExchangeIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoExchangeIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoExchangeIDsProvided)
 			return
 		}
 
@@ -634,7 +632,7 @@ func BulkDeleteExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -642,7 +640,7 @@ func BulkDeleteExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -660,17 +658,16 @@ func BulkDeleteExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				(exchange_id, action_type, processing_status, reason, requested_by, requested_at)
 			VALUES %s`, strings.Join(auditVals, ",")), auditArgs...); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true, "submitted_count": len(req.ExchangeIDs),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "submitted_count": len(req.ExchangeIDs)}, "")
 	}
 }
 
@@ -730,7 +727,7 @@ func GetExchangeAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -749,7 +746,7 @@ func GetExchangeAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -773,7 +770,7 @@ func GetExchangeAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -792,7 +789,7 @@ func GetExchangeAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -820,7 +817,7 @@ func GetExchangeApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -839,7 +836,7 @@ func GetExchangeApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -850,7 +847,7 @@ func GetExchangeDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		id := r.URL.Query().Get("exchange_id")
 		if id == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "exchange_id is required")
+			api.Error(w, http.StatusBadRequest, "exchange_id is required")
 			return
 		}
 		q := `
@@ -867,10 +864,10 @@ func GetExchangeDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&eid, &cpid, &mic, &exType, &regBody, &tz, &sc, &opOpen, &opClose, &calRef, &isDeleted,
 		); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "Exchange not found")
+				api.Error(w, http.StatusNotFound, "Exchange not found")
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -892,6 +889,6 @@ func GetExchangeDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": result})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": result}, "")
 	}
 }

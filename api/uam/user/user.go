@@ -39,12 +39,7 @@ func generateRandomPassword(length int) (string, error) {
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
-	})
+	api.Error(w, status, errMsg)
 }
 
 // decodeSQLValue converts SQL driver types to JSON-friendly Go values.
@@ -222,13 +217,11 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":        true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"user_id":        userId,
 			"role_id":        roleId,
 			"plain_password": cimplr,
-		})
+		}, "")
 	}
 }
 
@@ -328,12 +321,10 @@ WHERE EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = u.id AN
 			}
 			users = append(users, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"users":      users,
 			"pagination": pagination,
-		})
+		}, "")
 	}
 }
 
@@ -388,11 +379,9 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 		for i, col := range cols {
 			userMap[col] = decodeSQLValue(vals[i])
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"user":    userMap,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"user": userMap,
+		}, "")
 	}
 }
 
@@ -474,11 +463,9 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 			users = append(users, userMap)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"users":   users,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"users": users,
+		}, "")
 	}
 }
 
@@ -617,10 +604,10 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 			valPtrs[i] = &vals[i]
 		}
 		rows.Scan(valPtrs...)
-			userMap := map[string]interface{}{}
-			for i, col := range cols {
-				userMap[col] = decodeSQLValue(vals[i])
-			}
+		userMap := map[string]interface{}{}
+		for i, col := range cols {
+			userMap[col] = decodeSQLValue(vals[i])
+		}
 		// Replace entity mappings if the caller provided a new list.
 		if len(newEntityMappings) > 0 {
 			db.Exec("DELETE FROM user_entity_mappings WHERE user_id = $1", id)
@@ -633,8 +620,7 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 				)
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "user": userMap})
+		api.Success(w, http.StatusOK, map[string]interface{}{"user": userMap}, "")
 	}
 }
 
@@ -708,17 +694,15 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 				valPtrs[i] = &vals[i]
 			}
 			rows.Scan(valPtrs...)
-					userMap := map[string]interface{}{}
-					for i, col := range cols {
-						userMap[col] = decodeSQLValue(vals[i])
-					}
+			userMap := map[string]interface{}{}
+			for i, col := range cols {
+				userMap[col] = decodeSQLValue(vals[i])
+			}
 			updated = append(updated, userMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"users":   updated,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"users": updated,
+		}, "")
 	}
 }
 
@@ -841,8 +825,10 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 				}
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": results["deleted"], "approved": results["approved"]})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"deleted":  results["deleted"],
+			"approved": results["approved"],
+		}, "")
 	}
 }
 
@@ -904,7 +890,6 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			}
 			updated = append(updated, userMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
+		api.Success(w, http.StatusOK, map[string]interface{}{"updated": updated}, "")
 	}
 }

@@ -107,26 +107,26 @@ func validateDayCountFields(input DayCountConventionInput) error {
 func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(10 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
+			api.Error(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
 			return
 		}
 
 		userID := r.FormValue("user_id")
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
 		file, handler, err := r.FormFile("file")
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to get file: "+err.Error())
+			api.Error(w, http.StatusBadRequest, "Failed to get file: "+err.Error())
 			return
 		}
 		defer file.Close()
 
 		ext := strings.ToLower(filepath.Ext(handler.Filename))
 		if ext != ".csv" && ext != ".xlsx" {
-			api.RespondWithError(w, http.StatusBadRequest, "Only .csv and .xlsx files are supported")
+			api.Error(w, http.StatusBadRequest, "Only .csv and .xlsx files are supported")
 			return
 		}
 
@@ -138,7 +138,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -149,12 +149,12 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			data, err = parseXLSXFile(file)
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+err.Error())
+			api.Error(w, http.StatusBadRequest, "Failed to parse file: "+err.Error())
 			return
 		}
 
 		if len(data) < 2 {
-			api.RespondWithError(w, http.StatusBadRequest, "File must have a header row and at least one data row")
+			api.Error(w, http.StatusBadRequest, "File must have a header row and at least one data row")
 			return
 		}
 
@@ -175,7 +175,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		requiredCols := []string{"day_count_name", "convention_type"}
 		for _, col := range requiredCols {
 			if _, ok := colMap[normalize(col)]; !ok {
-				api.RespondWithError(w, http.StatusBadRequest, "Missing required column: "+col)
+				api.Error(w, http.StatusBadRequest, "Missing required column: "+col)
 				return
 			}
 		}
@@ -192,7 +192,18 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// helper to send concise fail-fast response
 		sendFail := func(row int, errMsg string) {
 			summary := fmt.Sprintf("Day count upload aborted: row %d failed validation: %s", row, errMsg)
-			api.RespondWithPayload(w, false, summary, nil)
+			{
+				apiErrMsg := summary
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 		}
 
 		for i, row := range data[1:] {
@@ -228,13 +239,24 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(validInputs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, nil)
+			{
+				apiErrMsg := constants.ErrAllRowsFailedValidation
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -250,7 +272,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, names)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Duplicate check failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer dupRows.Close()
@@ -259,7 +281,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for dupRows.Next() {
 			var nm string
 			if err := dupRows.Scan(&nm); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Duplicate scan failed")
+				api.Error(w, http.StatusInternalServerError, "Duplicate scan failed")
 				return
 			}
 			existingNames[nm] = true
@@ -274,7 +296,18 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					src = validSourceRows[i]
 				}
 				// report concise duplicate error
-				api.RespondWithPayload(w, false, fmt.Sprintf("Day count upload aborted: row %d failed validation: Day count convention name already exists and is active.", src), nil)
+				{
+					apiErrMsg := fmt.Sprintf("Day count upload aborted: row %d failed validation: Day count convention name already exists and is active.", src)
+					apiErrStatus := http.StatusInternalServerError
+					if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+						apiErrStatus = http.StatusBadRequest
+					} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+						apiErrStatus = http.StatusUnprocessableEntity
+					} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+						apiErrStatus = http.StatusUnauthorized
+					}
+					api.Error(w, apiErrStatus, apiErrMsg)
+				}
 				return
 			}
 			finalValid = append(finalValid, input)
@@ -303,7 +336,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		insertRows, err := tx.Query(ctx, batchInsertQuery, valueArgs...)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Batch insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer insertRows.Close()
@@ -314,7 +347,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for insertRows.Next() {
 			var code string
 			if err := insertRows.Scan(&code); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Insert scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Insert scan failed: "+err.Error())
 				return
 			}
 			insertedCodes = append(insertedCodes, code)
@@ -340,24 +373,35 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, strings.Join(auditValues, ","))
 			if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
 				msg, status := getUserFriendlyDayCountError(err, "Audit insert failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if len(insertedRecords) > 0 {
 			msg := fmt.Sprintf("%d day count conventions created successfully", len(insertedRecords))
-			api.RespondWithPayload(w, true, msg, nil)
+			api.Success(w, http.StatusOK, map[string]interface{}{}, msg)
 			api.LogInfo("DayCount upload: %d inserted from file %s", len(insertedRecords), handler.Filename)
 			return
 		}
-		api.RespondWithPayload(w, false, "No records were created", nil)
+		{
+			apiErrMsg := "No records were created"
+			apiErrStatus := http.StatusInternalServerError
+			if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+				apiErrStatus = http.StatusBadRequest
+			} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+				apiErrStatus = http.StatusUnprocessableEntity
+			} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+				apiErrStatus = http.StatusUnauthorized
+			}
+			api.Error(w, apiErrStatus, apiErrMsg)
+		}
 		api.LogInfo("DayCount upload: 0 inserted from file %s", handler.Filename)
 	}
 }
@@ -367,7 +411,7 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateDayCountConventionSingleRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -376,21 +420,21 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// validate code
 		if req.DayCountCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
 			return
 		}
 		if len(req.DayCountCode) > 50 {
-			api.RespondWithError(w, http.StatusBadRequest, "day_count_code too long")
+			api.Error(w, http.StatusBadRequest, "day_count_code too long")
 			return
 		}
 		codeRe := regexp.MustCompile(`^DC-[A-Z0-9-]+$`)
 		if !codeRe.MatchString(req.DayCountCode) {
-			api.RespondWithError(w, http.StatusBadRequest, "day_count_code must match pattern DC-[A-Z0-9-]+")
+			api.Error(w, http.StatusBadRequest, "day_count_code must match pattern DC-[A-Z0-9-]+")
 			return
 		}
 
 		if err := validateDayCountFields(req.DayCountConventionInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.Error(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -407,7 +451,7 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -415,7 +459,7 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -430,7 +474,7 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, req.DayCountCode, req.DayCountName, req.ConventionType, req.Description, req.FormulaExample, req.IsActive).Scan(&dayCountCode, &dayCountID)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -443,23 +487,18 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 		`, dayCountCode, userEmail); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true,
-			"day_count_code":       dayCountCode,
-			"day_count_id":         dayCountID,
-			"day_count_name":       req.DayCountName,
-			"requested_by":         userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "day_count_code": dayCountCode, "day_count_id": dayCountID, "day_count_name": req.DayCountName, "requested_by": userEmail}, "")
 		api.LogInfo("DayCount created: code=%s", dayCountCode)
 	}
 }
@@ -469,11 +508,11 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateDayCountConventionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rows provided")
+			api.Error(w, http.StatusBadRequest, "No rows provided")
 			return
 		}
 
@@ -485,7 +524,7 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -541,13 +580,24 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(validRows) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errResults)
+			{
+				apiErrMsg := constants.ErrAllRowsFailedValidation
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -562,7 +612,7 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, codes)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Duplicate check failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer dupRows.Close()
@@ -571,7 +621,7 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for dupRows.Next() {
 			var nm string
 			if err := dupRows.Scan(&nm); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Duplicate scan failed")
+				api.Error(w, http.StatusInternalServerError, "Duplicate scan failed")
 				return
 			}
 			existingCodes[nm] = true
@@ -593,7 +643,18 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(finalValid) == 0 {
-			api.RespondWithPayload(w, false, "All rows are duplicates", errResults)
+			{
+				apiErrMsg := "All rows are duplicates"
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -613,7 +674,7 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		insertRows, err := tx.Query(ctx, batchInsertQuery, valueArgs...)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Batch insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer insertRows.Close()
@@ -625,7 +686,7 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var code string
 			var id interface{}
 			if err := insertRows.Scan(&code, &id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
 				return
 			}
 			insertedCodes = append(insertedCodes, code)
@@ -651,19 +712,19 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, strings.Join(auditValues, ","))
 			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
 				msg, status := getUserFriendlyDayCountError(err, constants.ErrBatchAuditFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		allResults := append(insertedRecords, errResults...)
-		api.RespondWithPayload(w, len(insertedRecords) > 0, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("DayCount bulk create: %d inserted, %d errors", len(insertedRecords), len(errResults))
 	}
 }
@@ -673,15 +734,15 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UpdateDayCountConventionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.DayCountCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
 			return
 		}
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No fields provided for update")
+			api.Error(w, http.StatusBadRequest, "No fields provided for update")
 			return
 		}
 
@@ -693,7 +754,7 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -701,7 +762,7 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Transaction start failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -717,7 +778,7 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, req.DayCountCode).Scan(&oldName, &oldType, &oldDesc, &oldFormula, &oldIsActive)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Fetch failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -748,7 +809,7 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				args = append(args, req.DayCountCode)
 				if _, err := tx.Exec(ctx, q, args...); err != nil {
 					msg, status := getUserFriendlyDayCountError(err, constants.ErrUpdateFailed)
-					api.RespondWithError(w, status, msg)
+					api.Error(w, status, msg)
 					return
 				}
 			}
@@ -776,21 +837,18 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			strings.Join(auditCols, ", "), strings.Join(auditParams, ", "))
 		if _, err := tx.Exec(ctx, auditQuery, auditVals...); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true,
-			"day_count_code":       req.DayCountCode,
-			"requested_by":         userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "day_count_code": req.DayCountCode, "requested_by": userEmail}, "")
 		api.LogInfo("DayCount updated: code=%s", req.DayCountCode)
 	}
 }
@@ -807,11 +865,11 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rows provided")
+			api.Error(w, http.StatusBadRequest, "No rows provided")
 			return
 		}
 
@@ -823,7 +881,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -862,13 +920,24 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(validUpdates) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errResults)
+			{
+				apiErrMsg := constants.ErrAllRowsFailedValidation
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -881,7 +950,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, allCodes)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Fetch old values failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer oldRows.Close()
@@ -896,7 +965,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var code string
 			var rec oldRecord
 			if err := oldRows.Scan(&code, &rec.Name, &rec.Type, &rec.Desc, &rec.Formula, &rec.IsActive); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Old values scan failed: "+err.Error())
 				return
 			}
 			oldMap[code] = rec
@@ -988,12 +1057,12 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		allResults := append(successResults, errResults...)
-		api.RespondWithPayload(w, len(successResults) > 0, "", allResults)
+		api.Success(w, http.StatusOK, allResults, "")
 		api.LogInfo("DayCount bulk update: %d updated, %d errors", len(successResults), len(errResults))
 	}
 }
@@ -1007,11 +1076,11 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason        string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.DayCountCodes) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoDayCountCodesProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoDayCountCodesProvided)
 			return
 		}
 
@@ -1023,14 +1092,14 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1041,7 +1110,7 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, req.DayCountCodes)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Verification failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer verifyRows.Close()
@@ -1050,7 +1119,7 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for verifyRows.Next() {
 			var code string
 			if err := verifyRows.Scan(&code); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
 				return
 			}
 			validCodes = append(validCodes, code)
@@ -1071,14 +1140,14 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, strings.Join(auditValues, ","))
 			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
 				msg, status := getUserFriendlyDayCountError(err, constants.ErrBatchAuditFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrCommitFailedUser)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -1094,7 +1163,7 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "day_count_code": c, constants.ValueError: "Not found or already deleted"})
 			}
 		}
-		api.RespondWithPayload(w, len(validCodes) > 0, "", results)
+		api.Success(w, http.StatusOK, results, "")
 		api.LogInfo("DayCount delete requested: %d valid, %d total", len(validCodes), len(req.DayCountCodes))
 	}
 }
@@ -1108,11 +1177,11 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment       string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.DayCountCodes) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoDayCountCodesProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoDayCountCodesProvided)
 			return
 		}
 
@@ -1124,7 +1193,7 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1132,7 +1201,7 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1144,7 +1213,7 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, userEmail, req.Comment, req.DayCountCodes)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Approval failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -1162,21 +1231,18 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, req.DayCountCodes)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Delete execution failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true,
-			"approved_count":       len(req.DayCountCodes),
-			"checker":              userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "approved_count": len(req.DayCountCodes), "checker": userEmail}, "")
 		api.LogInfo("DayCount bulk approve: %d approved by %s", len(req.DayCountCodes), userEmail)
 	}
 }
@@ -1190,11 +1256,11 @@ func BulkRejectDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment       string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.DayCountCodes) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoDayCountCodesProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoDayCountCodesProvided)
 			return
 		}
 
@@ -1206,7 +1272,7 @@ func BulkRejectDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1214,7 +1280,7 @@ func BulkRejectDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1226,21 +1292,18 @@ func BulkRejectDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, userEmail, req.Comment, req.DayCountCodes)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Rejection failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true,
-			"rejected_count":       len(req.DayCountCodes),
-			"checker":              userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "rejected_count": len(req.DayCountCodes), "checker": userEmail}, "")
 		api.LogInfo("DayCount bulk reject: %d rejected by %s", len(req.DayCountCodes), userEmail)
 	}
 }
@@ -1261,7 +1324,7 @@ func GetDayCountConventionsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFun
 		`)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1273,7 +1336,7 @@ func GetDayCountConventionsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFun
 			var isActive bool
 
 			if err := rows.Scan(&id, &code, &name, &convType, &desc, &formula, &isActive); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Scan error: "+err.Error())
 				return
 			}
 			out = append(out, map[string]interface{}{
@@ -1286,7 +1349,7 @@ func GetDayCountConventionsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFun
 				"is_active":       isActive,
 			})
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("DayCount approved-active: returned %d records", len(out))
 	}
 }
@@ -1383,7 +1446,7 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1394,7 +1457,7 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			vals, err := rows.Values()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Row value error: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Row value error: "+err.Error())
 				return
 			}
 			row := make(map[string]interface{}, len(fields))
@@ -1409,15 +1472,12 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
 			return
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"rows":                 out,
-		})
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("DayCount WithAudit: returned %d records", len(out))
 	}
 }
@@ -1474,7 +1534,7 @@ func GetDayCountConventionAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1493,7 +1553,7 @@ func GetDayCountConventionAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&curName, &curType, &curDesc, &curFormula, &curIsActive, &curIsDeleted,
 				&oldName, &oldType, &oldDesc, &oldFormula, &oldIsActive,
 			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Scan error: "+err.Error())
 				return
 			}
 
@@ -1525,15 +1585,12 @@ func GetDayCountConventionAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+rows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, "Row iteration error: "+rows.Err().Error())
 			return
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"audit_logs":           out,
-		})
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("DayCount AuditHistory: returned %d records", len(out))
 	}
 }
@@ -1546,11 +1603,11 @@ func GetDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DayCountCode string `json:"day_count_code"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.DayCountCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
 			return
 		}
 
@@ -1562,7 +1619,7 @@ func GetDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1577,13 +1634,13 @@ func GetDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, req.DayCountCode)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Get failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
 
 		if !rows.Next() {
-			api.RespondWithError(w, http.StatusNotFound, "Day count convention not found")
+			api.Error(w, http.StatusNotFound, "Day count convention not found")
 			return
 		}
 
@@ -1593,19 +1650,11 @@ func GetDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := rows.Scan(&id, &code, &name, &convType, &desc, &formula, &isActive, &isDeleted); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Scan failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"day_count_id":    id,
-			"day_count_code":  code,
-			"day_count_name":  name,
-			"convention_type": convType,
-			"description":     desc,
-			"formula_example": formula,
-			"is_active":       isActive,
-			"is_deleted":      isDeleted,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"day_count_id": id, "day_count_code": code, "day_count_name": name, "convention_type": convType, "description": desc, "formula_example": formula, "is_active": isActive, "is_deleted": isDeleted}, "")
 		api.LogInfo("GetDayCountConvention: code=%s by %s", code, userEmail)
 	}
 }

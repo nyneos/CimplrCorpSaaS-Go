@@ -1,7 +1,7 @@
 package role
 
 import (
-	// "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -18,12 +18,7 @@ import (
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
-	})
+	api.Error(w, status, errMsg)
 }
 
 // Handler: Create role
@@ -136,11 +131,9 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 				roleMap["roleCode"] = ""
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"role":    roleMap,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"role": roleMap,
+		}, "")
 	}
 }
 
@@ -271,12 +264,11 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 			}
 			roleData = append(roleData, role)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"permissions": rolesPerms,
 			"roleData":    roleData,
 			"pagination":  pagination,
-		})
+		}, "")
 	}
 }
 
@@ -379,8 +371,10 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 				}
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": results["deleted"], "approved": results["approved"]})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"deleted":  results["deleted"],
+			"approved": results["approved"],
+		}, "")
 	}
 }
 
@@ -445,8 +439,7 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 			}
 			deleted = append(deleted, roleMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": deleted})
+		api.Success(w, http.StatusOK, map[string]interface{}{"deleted": deleted}, "")
 	}
 }
 
@@ -506,8 +499,7 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 			}
 			updated = append(updated, roleMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
+		api.Success(w, http.StatusOK, map[string]interface{}{"updated": updated}, "")
 	}
 }
 
@@ -551,8 +543,7 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 			rows.Scan(&name)
 			roleNames = append(roleNames, name)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "roles": roleNames})
+		api.Success(w, http.StatusOK, map[string]interface{}{"roles": roleNames}, "")
 	}
 }
 
@@ -575,8 +566,7 @@ func GetJustRolesPERMISSIONapproved(db *sql.DB) http.HandlerFunc {
 			rows.Scan(&name)
 			roleNames = append(roleNames, name)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "roles": roleNames})
+		api.Success(w, http.StatusOK, map[string]interface{}{"roles": roleNames}, "")
 	}
 }
 
@@ -674,12 +664,11 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 			}
 			roleData = append(roleData, role)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"permissions": rolesPerms,
 			"roleData":    roleData,
 			"pagination":  pagination,
-		})
+		}, "")
 	}
 }
 
@@ -809,10 +798,8 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 		for i, col := range cols {
 			roleMap[col] = vals[i]
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"role":    roleMap,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"role": roleMap,
+		}, "")
 	}
 }

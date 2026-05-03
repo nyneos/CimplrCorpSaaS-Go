@@ -222,7 +222,7 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = req.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -234,19 +234,19 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		// === Step 2: Parse uploaded CSV ===
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrFailedToParseForm)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No file uploaded")
+			api.Error(w, http.StatusBadRequest, "No file uploaded")
 			return
 		}
 
@@ -274,13 +274,13 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, fh := range files {
 			f, err := fh.Open()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
+				api.Error(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
 				return
 			}
 			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
 			f.Close()
 			if err != nil || len(records) < 2 {
-				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty CSV file")
+				api.Error(w, http.StatusBadRequest, "Invalid or empty CSV file")
 				return
 			}
 
@@ -295,7 +295,7 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if !(slices.Contains(validCols, "amc_name") && slices.Contains(validCols, "internal_amc_code")) {
-				api.RespondWithError(w, http.StatusBadRequest, "CSV must include amc_name and internal_amc_code")
+				api.Error(w, http.StatusBadRequest, "CSV must include amc_name and internal_amc_code")
 				return
 			}
 
@@ -332,7 +332,7 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				msg, status := getUserFriendlyAMCError(err, constants.ErrTxBeginFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			committed := false
@@ -346,7 +346,7 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"investment", "masteramc"}, validCols, pgx.CopyFromRows(copyRows)); err != nil {
 				msg, status := getUserFriendlyAMCError(err, "COPY failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 
@@ -357,7 +357,7 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
     WHERE internal_amc_code = ANY($1)
 `, amcCodes); err != nil {
 				msg, status := getUserFriendlyAMCError(err, "Failed to auto-populate source")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 
@@ -370,14 +370,14 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				`
 				if _, err := tx.Exec(ctx, auditSQL, userName, amcCodes); err != nil {
 					msg, status := getUserFriendlyAMCError(err, constants.ErrAuditInsertFailed)
-					api.RespondWithError(w, status, msg)
+					api.Error(w, status, msg)
 					return
 				}
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				msg, status := getUserFriendlyAMCError(err, constants.ErrCommitFailedCapitalized)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			committed = true
@@ -385,10 +385,7 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"batch_ids":            batchIDs,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"batch_ids": batchIDs}, "")
 	}
 }
 
@@ -414,13 +411,13 @@ func CreateAMCsingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateAMCRequestsingle
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		// --- Validate required fields ---
 		if strings.TrimSpace(req.AmcName) == "" || strings.TrimSpace(req.InternalAmcCode) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "amc_name and internal_amc_code are required")
+			api.Error(w, http.StatusBadRequest, "amc_name and internal_amc_code are required")
 			return
 		}
 
@@ -433,7 +430,7 @@ func CreateAMCsingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -441,7 +438,7 @@ func CreateAMCsingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, "Transaction start failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -478,7 +475,7 @@ func CreateAMCsingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, "Insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -489,24 +486,17 @@ func CreateAMCsingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`
 		if _, err := tx.Exec(ctx, auditQuery, amcID, userEmail); err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{
-			constants.ValueSuccess: true,
-			"amc_id":               amcID,
-			"amc_name":             req.AmcName,
-			"source":               "Manual",
-			"requested":            userEmail,
-			constants.KeyStatus:    defaultIfEmpty(req.Status, "Active"),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"amc_id": amcID, "amc_name": req.AmcName, "source": "Manual", "requested": userEmail, constants.KeyStatus: defaultIfEmpty(req.Status, "Active")}, "")
 	}
 }
 
@@ -545,7 +535,7 @@ func CreateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateAMCRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -558,7 +548,7 @@ func CreateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -654,7 +644,7 @@ func CreateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		api.Success(w, http.StatusOK, results, "")
 	}
 }
 
@@ -669,7 +659,7 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -681,7 +671,7 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -805,7 +795,7 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}()
 		}
 
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		api.Success(w, http.StatusOK, results, "")
 	}
 }
 
@@ -820,17 +810,17 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UpdateAMCRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		if req.AmcID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "amc_id is required")
+			api.Error(w, http.StatusBadRequest, "amc_id is required")
 			return
 		}
 
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No fields provided for update")
+			api.Error(w, http.StatusBadRequest, "No fields provided for update")
 			return
 		}
 
@@ -843,7 +833,7 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -851,7 +841,7 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, "Transaction start failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -873,7 +863,7 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12], &oldVals[13],
 		); err != nil {
 			msg, status := getUserFriendlyAMCError(err, "Fetch failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -909,7 +899,7 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No valid updatable fields found")
+			api.Error(w, http.StatusBadRequest, "No valid updatable fields found")
 			return
 		}
 
@@ -920,7 +910,7 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrUpdateFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -931,22 +921,18 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())`
 		if _, err := tx.Exec(ctx, audit, req.AmcID, req.Reason, userEmail); err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true,
-			"amc_id":               req.AmcID,
-			"requested":            userEmail,
-			"reason":               req.Reason,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "amc_id": req.AmcID, "requested": userEmail, "reason": req.Reason}, "")
 	}
 }
 
@@ -958,7 +944,7 @@ func DeleteAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -970,12 +956,12 @@ func DeleteAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		if len(req.AmcIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "amc_ids required")
+			api.Error(w, http.StatusBadRequest, "amc_ids required")
 			return
 		}
 
@@ -983,7 +969,7 @@ func DeleteAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, "Transaction failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -994,17 +980,17 @@ func DeleteAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())`
 			if _, err := tx.Exec(ctx, q, id, req.Reason, requestedBy); err != nil {
 				msg, status := getUserFriendlyAMCError(err, "Insert failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{"deleted_requested": req.AmcIDs})
+		api.Success(w, http.StatusOK, map[string]interface{}{"deleted_requested": req.AmcIDs}, "")
 	}
 }
 
@@ -1016,7 +1002,7 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -1028,7 +1014,7 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1036,7 +1022,7 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrTxBeginFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1049,7 +1035,7 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := tx.Query(ctx, sel, req.AmcIDs)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1064,7 +1050,7 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(actionIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rejectable AMC actions found")
+			api.Error(w, http.StatusBadRequest, "No rejectable AMC actions found")
 			return
 		}
 
@@ -1074,16 +1060,16 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE action_id = ANY($3)`
 		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, actionIDs); err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrUpdateFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})
+		api.Success(w, http.StatusOK, map[string]interface{}{"rejected_action_ids": actionIDs}, "")
 	}
 }
 
@@ -1095,7 +1081,7 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -1108,7 +1094,7 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1116,7 +1102,7 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrTxBeginFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1130,7 +1116,7 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := tx.Query(ctx, sel, req.AmcIDs)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1163,10 +1149,18 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(actionIDs) == 0 && len(markDeletedActionIDs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrNoApprovableActions, map[string]any{
-				"approved_action_ids": []string{},
-				"deleted_amcs":        []string{},
-			})
+			{
+				apiErrMsg := constants.ErrNoApprovableActions
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 		if len(actionIDs) > 0 {
@@ -1176,7 +1170,7 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE action_id = ANY($3)`
 			if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, actionIDs); err != nil {
 				msg, status := getUserFriendlyAMCError(err, "Approve update failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
@@ -1188,7 +1182,7 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE action_id = ANY($3)`
 			if _, err := tx.Exec(ctx, updDel, checkerBy, req.Comment, markDeletedActionIDs); err != nil {
 				msg, status := getUserFriendlyAMCError(err, "Delete approve update failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 
@@ -1198,21 +1192,18 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE amc_id = ANY($1)`
 			if _, err := tx.Exec(ctx, del, deleteIDs); err != nil {
 				msg, status := getUserFriendlyAMCError(err, "Master soft delete failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{
-			"approved_action_ids": actionIDs,
-			"deleted_amcs":        deleteIDs,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"approved_action_ids": actionIDs, "deleted_amcs": deleteIDs}, "")
 	}
 }
 
@@ -1238,7 +1229,7 @@ func GetApprovedActiveAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1253,7 +1244,7 @@ func GetApprovedActiveAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"internal_amc_code": code,
 			})
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1349,7 +1340,7 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1371,14 +1362,11 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
 			return
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"rows":                 out,
-		})
+		api.Success(w, http.StatusOK, out, "")
 	}
 }

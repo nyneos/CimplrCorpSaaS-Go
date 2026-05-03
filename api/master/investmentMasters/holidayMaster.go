@@ -195,7 +195,7 @@ func CreateCalendarSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var req CreateCalendarReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, 400, constants.ErrInvalidJSONRequired)
+			api.Error(w, 400, constants.ErrInvalidJSONRequired)
 			return
 		}
 		missing := []string{}
@@ -219,7 +219,7 @@ func CreateCalendarSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(missing) > 0 {
-			api.RespondWithError(w, 400, "missing required fields: "+strings.Join(missing, ", "))
+			api.Error(w, 400, "missing required fields: "+strings.Join(missing, ", "))
 			return
 		}
 		userEmail := ""
@@ -230,7 +230,7 @@ func CreateCalendarSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			api.Error(w, 401, constants.ErrInvalidSession)
 			return
 		}
 		if req.Status == "" {
@@ -243,7 +243,7 @@ func CreateCalendarSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrTxBeginFailedCapitalized+err.Error())
+			api.Error(w, 500, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -257,7 +257,7 @@ func CreateCalendarSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, req.CalendarCode).Scan(&exists)
 
 		if err == nil {
-			api.RespondWithError(w, 400, "calendar_code already exists")
+			api.Error(w, 400, "calendar_code already exists")
 			return
 		}
 
@@ -277,7 +277,7 @@ func CreateCalendarSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&calendarID)
 
 		if err != nil {
-			api.RespondWithError(w, 500, "calendar insert failed: "+err.Error())
+			api.Error(w, 500, "calendar insert failed: "+err.Error())
 			return
 		}
 
@@ -288,16 +288,16 @@ func CreateCalendarSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, calendarID, userEmail)
 
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrAuditInsertFailed+err.Error())
+			api.Error(w, 500, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, 500, constants.ErrCommitFailed+err.Error())
+			api.Error(w, 500, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"calendar_id": calendarID})
+		api.Success(w, http.StatusOK, map[string]interface{}{"calendar_id": calendarID}, "")
 	}
 }
 
@@ -321,7 +321,7 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var req BulkHolidayReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, 400, constants.ErrInvalidJSONShort)
+			api.Error(w, 400, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -329,7 +329,7 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if strings.TrimSpace(req.UserID) == "" ||
 			strings.TrimSpace(req.CalendarID) == "" ||
 			len(req.Rows) == 0 {
-			api.RespondWithError(w, 400, "user_id, calendar_id and rows required")
+			api.Error(w, 400, "user_id, calendar_id and rows required")
 			return
 		}
 
@@ -342,14 +342,14 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			api.Error(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrTxBeginFailedCapitalized+err.Error())
+			api.Error(w, 500, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -370,7 +370,7 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) ON COMMIT DROP;
 		`)
 		if err != nil {
-			api.RespondWithError(w, 500, "tmp table error: "+err.Error())
+			api.Error(w, 500, "tmp table error: "+err.Error())
 			return
 		}
 
@@ -381,7 +381,7 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if strings.TrimSpace(r.HolidayDate) == "" ||
 				strings.TrimSpace(r.HolidayName) == "" ||
 				strings.TrimSpace(r.HolidayType) == "" {
-				api.RespondWithError(w, 400, "holiday_date, holiday_name & holiday_type are required")
+				api.Error(w, 400, "holiday_date, holiday_name & holiday_type are required")
 				return
 			}
 
@@ -409,7 +409,7 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pgx.CopyFromRows(copyRows),
 		)
 		if err != nil {
-			api.RespondWithError(w, 500, "copy error: "+err.Error())
+			api.Error(w, 500, "copy error: "+err.Error())
 			return
 		}
 
@@ -429,7 +429,7 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			);
 		`)
 		if err != nil {
-			api.RespondWithError(w, 500, "insert error: "+err.Error())
+			api.Error(w, 500, "insert error: "+err.Error())
 			return
 		}
 
@@ -443,20 +443,17 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 `, userEmail)
 
 		if err != nil {
-			api.RespondWithError(w, 500, "audit insert error: "+err.Error())
+			api.Error(w, 500, "audit insert error: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, 500, "commit error: "+err.Error())
+			api.Error(w, 500, "commit error: "+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"calendar_id":       req.CalendarID,
-			"rows":              len(req.Rows),
-			constants.KeyStatus: "PENDING_EDIT_APPROVAL",
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"calendar_id": req.CalendarID, "data": len(req.Rows), constants.KeyStatus: "PENDING_EDIT_APPROVAL"}, "")
 	}
 }
 
@@ -474,7 +471,7 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = tmp.UserID
 		}
 		if strings.TrimSpace(userID) == "" {
-			api.RespondWithError(w, 400, constants.ErrUserIDRequired)
+			api.Error(w, 400, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -487,18 +484,18 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			api.Error(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
 		// ---- Parse multipart ----
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, 400, "form parse: "+err.Error())
+			api.Error(w, 400, "form parse: "+err.Error())
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, 400, constants.ErrNoFileUploaded)
+			api.Error(w, 400, constants.ErrNoFileUploaded)
 			return
 		}
 
@@ -518,13 +515,13 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, fh := range files {
 			f, err := fh.Open()
 			if err != nil {
-				api.RespondWithError(w, 400, "open file failed")
+				api.Error(w, 400, "open file failed")
 				return
 			}
 			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
 			f.Close()
 			if err != nil || len(records) < 2 {
-				api.RespondWithError(w, 400, "invalid csv")
+				api.Error(w, 400, "invalid csv")
 				return
 			}
 
@@ -547,7 +544,7 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			reqCols := []string{"calendar_code", "calendar_name", "timezone", "weekend_pattern", "eff_from"}
 			for _, c := range reqCols {
 				if !slices.Contains(validCols, c) {
-					api.RespondWithError(w, 400, "CSV missing mandatory columns: "+strings.Join(reqCols, ", "))
+					api.Error(w, 400, "CSV missing mandatory columns: "+strings.Join(reqCols, ", "))
 					return
 				}
 			}
@@ -579,7 +576,7 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// ---- DB TX ----
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, 500, constants.ErrTxBegin+err.Error())
+				api.Error(w, 500, constants.ErrTxBegin+err.Error())
 				return
 			}
 			defer tx.Rollback(ctx)
@@ -602,7 +599,7 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				pgx.CopyFromRows(rowsToInsert),
 			)
 			if err != nil {
-				api.RespondWithError(w, 500, "copy: "+err.Error())
+				api.Error(w, 500, "copy: "+err.Error())
 				return
 			}
 
@@ -625,7 +622,7 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				)
 			`)
 			if err != nil {
-				api.RespondWithError(w, 500, "insert: "+err.Error())
+				api.Error(w, 500, "insert: "+err.Error())
 				return
 			}
 
@@ -639,22 +636,19 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND is_deleted=false
 			`, userEmail)
 			if err != nil {
-				api.RespondWithError(w, 500, "audit: "+err.Error())
+				api.Error(w, 500, "audit: "+err.Error())
 				return
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, 500, "commit: "+err.Error())
+				api.Error(w, 500, "commit: "+err.Error())
 				return
 			}
 
 			batchIDs = append(batchIDs, uuid.New().String())
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{
-			constants.ValueSuccess: true,
-			"batch_ids":            batchIDs,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"batch_ids": batchIDs}, "")
 	}
 }
 
@@ -673,7 +667,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = tmp.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, 400, constants.ErrUserIDRequired)
+			api.Error(w, 400, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -685,18 +679,18 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			api.Error(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
 		// ---- step 2: parse multipart ----
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, 400, "parse form: "+err.Error())
+			api.Error(w, 400, "parse form: "+err.Error())
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, 400, constants.ErrNoFileUploaded)
+			api.Error(w, 400, constants.ErrNoFileUploaded)
 			return
 		}
 
@@ -715,13 +709,13 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, fh := range files {
 			f, err := fh.Open()
 			if err != nil {
-				api.RespondWithError(w, 400, "open file failed")
+				api.Error(w, 400, "open file failed")
 				return
 			}
 			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
 			f.Close()
 			if err != nil || len(records) < 2 {
-				api.RespondWithError(w, 400, "invalid csv")
+				api.Error(w, 400, "invalid csv")
 				return
 			}
 
@@ -742,7 +736,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			reqCols := []string{"calendar_code", "holiday_date", "holiday_name", "holiday_type"}
 			for _, c := range reqCols {
 				if !slices.Contains(validCols, c) {
-					api.RespondWithError(w, 400, "CSV must include: calendar_code, holiday_date, holiday_name, holiday_type")
+					api.Error(w, 400, "CSV must include: calendar_code, holiday_date, holiday_name, holiday_type")
 					return
 				}
 			}
@@ -778,7 +772,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cc := strings.TrimSpace(r[headerPos["calendar_code"]])
 				calID := calMap[cc]
 				if calID == "" {
-					api.RespondWithError(w, 400, "calendar_code not found: "+cc)
+					api.Error(w, 400, "calendar_code not found: "+cc)
 					return
 				}
 
@@ -796,7 +790,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, 500, constants.ErrTxBegin+err.Error())
+				api.Error(w, 500, constants.ErrTxBegin+err.Error())
 				return
 			}
 			defer tx.Rollback(ctx)
@@ -819,7 +813,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				pgx.CopyFromRows(tmpRows),
 			)
 			if err != nil {
-				api.RespondWithError(w, 500, "copy: "+err.Error())
+				api.Error(w, 500, "copy: "+err.Error())
 				return
 			}
 
@@ -838,7 +832,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				)
 			`)
 			if err != nil {
-				api.RespondWithError(w, 500, "insert: "+err.Error())
+				api.Error(w, 500, "insert: "+err.Error())
 				return
 			}
 
@@ -849,22 +843,19 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM tmp_holiday_upload
 			`, userEmail)
 			if err != nil {
-				api.RespondWithError(w, 500, "audit: "+err.Error())
+				api.Error(w, 500, "audit: "+err.Error())
 				return
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, 500, "commit: "+err.Error())
+				api.Error(w, 500, "commit: "+err.Error())
 				return
 			}
 
 			batchIDs = append(batchIDs, uuid.New().String())
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{
-			constants.ValueSuccess: true,
-			"batch_ids":            batchIDs,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"batch_ids": batchIDs}, "")
 	}
 }
 
@@ -967,7 +958,7 @@ ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrQueryFailed+err.Error())
+			api.Error(w, 500, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -992,11 +983,11 @@ ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, 500, constants.ErrScanFailedPrefix+rows.Err().Error())
+			api.Error(w, 500, constants.ErrScanFailedPrefix+rows.Err().Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1028,7 +1019,7 @@ ORDER BY GREATEST(COALESCE(la.requested_at, '1970-01-01'::timestamp), COALESCE(l
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrQueryFailed+err.Error())
+			api.Error(w, 500, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1039,7 +1030,7 @@ ORDER BY GREATEST(COALESCE(la.requested_at, '1970-01-01'::timestamp), COALESCE(l
 			var effFrom, effTo *time.Time
 
 			if err := rows.Scan(&id, &code, &name, &effFrom, &effTo); err != nil {
-				api.RespondWithError(w, 500, constants.ErrScanFailedPrefix+err.Error())
+				api.Error(w, 500, constants.ErrScanFailedPrefix+err.Error())
 				return
 			}
 
@@ -1052,7 +1043,7 @@ ORDER BY GREATEST(COALESCE(la.requested_at, '1970-01-01'::timestamp), COALESCE(l
 			})
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1070,7 +1061,7 @@ func GetCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CalendarID string `json:"calendar_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.CalendarID) == "" {
-			api.RespondWithError(w, 400, constants.ErrCalendarIDRequiredUser)
+			api.Error(w, 400, constants.ErrCalendarIDRequiredUser)
 			return
 		}
 
@@ -1183,11 +1174,11 @@ WHERE mc.calendar_id = $1 AND COALESCE(mc.is_deleted,false)=false;
 		var data any
 		err := pgxPool.QueryRow(ctx, q, req.CalendarID).Scan(&data)
 		if err != nil {
-			api.RespondWithError(w, 404, "calendar not found")
+			api.Error(w, 404, "calendar not found")
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", data)
+		api.Success(w, http.StatusOK, data, "")
 	}
 }
 
@@ -1217,7 +1208,7 @@ ORDER BY mc.calendar_code;
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1234,11 +1225,11 @@ ORDER BY mc.calendar_code;
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+rows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+rows.Err().Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1249,7 +1240,7 @@ func GetCalendarWithHolidaysApproved(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CalendarID string `json:"calendar_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.CalendarID) == "" {
-			api.RespondWithError(w, 400, constants.ErrCalendarIDRequiredUser)
+			api.Error(w, 400, constants.ErrCalendarIDRequiredUser)
 			return
 		}
 
@@ -1365,11 +1356,11 @@ WHERE mc.calendar_id = $1
 		var data any
 		err := pgxPool.QueryRow(ctx, q, req.CalendarID).Scan(&data)
 		if err != nil {
-			api.RespondWithError(w, 404, "calendar not found or not approved")
+			api.Error(w, 404, "calendar not found or not approved")
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", data)
+		api.Success(w, http.StatusOK, data, "")
 	}
 }
 
@@ -1383,11 +1374,11 @@ func DeleteCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, 400, constants.ErrInvalidJSONShort)
+			api.Error(w, 400, constants.ErrInvalidJSONShort)
 			return
 		}
 		if len(req.CalendarIDs) == 0 {
-			api.RespondWithError(w, 400, "calendar_ids required")
+			api.Error(w, 400, "calendar_ids required")
 			return
 		}
 
@@ -1399,14 +1390,14 @@ func DeleteCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			api.Error(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrTxBeginFailedCapitalized+err.Error())
+			api.Error(w, 500, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1419,17 +1410,17 @@ func DeleteCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, id, req.Reason, requestedBy)
 
 			if err != nil {
-				api.RespondWithError(w, 500, "insert failed: "+err.Error())
+				api.Error(w, 500, "insert failed: "+err.Error())
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, 500, constants.ErrCommitFailed+err.Error())
+			api.Error(w, 500, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.CalendarIDs})
+		api.Success(w, http.StatusOK, map[string]interface{}{"delete_requested": req.CalendarIDs}, "")
 	}
 }
 
@@ -1443,7 +1434,7 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, 400, constants.ErrInvalidJSONShort)
+			api.Error(w, 400, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -1455,14 +1446,14 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			api.Error(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, 500, "tx begin failed")
+			api.Error(w, 500, "tx begin failed")
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1477,7 +1468,7 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := tx.Query(ctx, sel, req.CalendarIDs)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrQueryFailed+err.Error())
+			api.Error(w, 500, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1507,8 +1498,18 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(toApprove) == 0 && len(toDeleteActionIDs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrNoApprovableActions,
-				map[string]any{"approved_action_ids": []string{}, "deleted_calendars": []string{}})
+			{
+				apiErrMsg := constants.ErrNoApprovableActions
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -1519,7 +1520,7 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toApprove)
 			if err != nil {
-				api.RespondWithError(w, 500, "approve update failed: "+err.Error())
+				api.Error(w, 500, "approve update failed: "+err.Error())
 				return
 			}
 		}
@@ -1531,7 +1532,7 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toDeleteActionIDs)
 			if err != nil {
-				api.RespondWithError(w, 500, "mark deleted failed: "+err.Error())
+				api.Error(w, 500, "mark deleted failed: "+err.Error())
 				return
 			}
 
@@ -1541,18 +1542,17 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE calendar_id = ANY($1)
 			`, deleteMasterIDs)
 			if err != nil {
-				api.RespondWithError(w, 500, "master soft-delete failed: "+err.Error())
+				api.Error(w, 500, "master soft-delete failed: "+err.Error())
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, 500, constants.ErrCommitFailed+err.Error())
+			api.Error(w, 500, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "",
-			map[string]any{"approved_action_ids": toApprove, "deleted_calendars": deleteMasterIDs})
+		api.Success(w, http.StatusOK, map[string]interface{}{"approved_action_ids": toApprove, "deleted_calendars": deleteMasterIDs}, "")
 	}
 }
 
@@ -1566,7 +1566,7 @@ func BulkRejectCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, 400, constants.ErrInvalidJSONShort)
+			api.Error(w, 400, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -1578,14 +1578,14 @@ func BulkRejectCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			api.Error(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, 500, "tx begin failed")
+			api.Error(w, 500, "tx begin failed")
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1599,7 +1599,7 @@ func BulkRejectCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.CalendarIDs)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrQueryFailed+err.Error())
+			api.Error(w, 500, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1625,8 +1625,7 @@ func BulkRejectCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(missing) > 0 || len(cannotReject) > 0 {
-			api.RespondWithError(w, 400,
-				fmt.Sprintf("missing: %v | cannot reject approved: %v", missing, cannotReject))
+			api.Error(w, 400, fmt.Sprintf("missing: %v | cannot reject approved: %v", missing, cannotReject))
 			return
 		}
 
@@ -1637,16 +1636,16 @@ func BulkRejectCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, checkerBy, req.Comment, actionIDs)
 
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrUpdateFailed+err.Error())
+			api.Error(w, 500, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, 500, constants.ErrCommitFailedUser)
+			api.Error(w, 500, constants.ErrCommitFailedUser)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})
+		api.Success(w, http.StatusOK, map[string]interface{}{"rejected_action_ids": actionIDs}, "")
 	}
 }
 
@@ -1661,15 +1660,15 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, 400, constants.ErrInvalidJSONShort)
+			api.Error(w, 400, constants.ErrInvalidJSONShort)
 			return
 		}
 		if strings.TrimSpace(req.CalendarID) == "" {
-			api.RespondWithError(w, 400, constants.ErrCalendarIDRequiredUser)
+			api.Error(w, 400, constants.ErrCalendarIDRequiredUser)
 			return
 		}
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, 400, constants.ErrNoFieldsToUpdateUser)
+			api.Error(w, 400, constants.ErrNoFieldsToUpdateUser)
 			return
 		}
 
@@ -1681,14 +1680,14 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			api.Error(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrTxBeginFailedCapitalized+err.Error())
+			api.Error(w, 500, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1716,7 +1715,7 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.QueryRow(ctx, sel, req.CalendarID).Scan(scanArgs...); err != nil {
-			api.RespondWithError(w, 500, "calendar fetch failed: "+err.Error())
+			api.Error(w, 500, "calendar fetch failed: "+err.Error())
 			return
 		}
 		for i, c := range cols {
@@ -1755,7 +1754,7 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
                         WHERE calendar_code=$1 AND COALESCE(is_deleted,false)=false LIMIT 1
                     `, newCode).Scan(&exists)
 					if err == nil {
-						api.RespondWithError(w, 400, "calendar_code already exists")
+						api.Error(w, 400, "calendar_code already exists")
 						return
 					}
 				}
@@ -1768,7 +1767,7 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(sets) == 0 {
-			api.RespondWithError(w, 400, "no valid updatable fields found")
+			api.Error(w, 400, "no valid updatable fields found")
 			return
 		}
 
@@ -1777,7 +1776,7 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, req.CalendarID)
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithError(w, 500, constants.ErrUpdateFailed+err.Error())
+			api.Error(w, 500, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
@@ -1788,19 +1787,16 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
             VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
         `, req.CalendarID, req.Reason, userEmail)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrAuditInsertFailed+err.Error())
+			api.Error(w, 500, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, 500, constants.ErrCommitFailed+err.Error())
+			api.Error(w, 500, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{
-			"calendar_id":  req.CalendarID,
-			"requested_by": userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"calendar_id": req.CalendarID, "requested_by": userEmail}, "")
 	}
 }
 
@@ -1815,15 +1811,15 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, 400, constants.ErrInvalidJSONShort)
+			api.Error(w, 400, constants.ErrInvalidJSONShort)
 			return
 		}
 		if strings.TrimSpace(req.HolidayID) == "" {
-			api.RespondWithError(w, 400, "holiday_id required")
+			api.Error(w, 400, "holiday_id required")
 			return
 		}
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, 400, constants.ErrNoFieldsToUpdateUser)
+			api.Error(w, 400, constants.ErrNoFieldsToUpdateUser)
 			return
 		}
 
@@ -1835,14 +1831,14 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			api.Error(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrTxBeginFailedCapitalized+err.Error())
+			api.Error(w, 500, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1869,7 +1865,7 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.QueryRow(ctx, sel, req.HolidayID).Scan(scanArgs...); err != nil {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, 404, "Holiday not found")
+			api.Error(w, 404, "Holiday not found")
 			return
 		}
 		for i, c := range cols {
@@ -1926,7 +1922,7 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					s := strings.TrimSpace(tv)
 					if s == "" {
 						tx.Rollback(ctx)
-						api.RespondWithError(w, 400, "invalid holiday_date")
+						api.Error(w, 400, "invalid holiday_date")
 						return
 					}
 					// try NormalizeDate to get YYYY-MM-DD
@@ -1945,7 +1941,7 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							newDateVal = v
 						} else {
 							tx.Rollback(ctx)
-							api.RespondWithError(w, 400, "invalid holiday_date format")
+							api.Error(w, 400, "invalid holiday_date format")
 							return
 						}
 					}
@@ -1969,7 +1965,7 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						newDateVal = nd
 					} else {
 						tx.Rollback(ctx)
-						api.RespondWithError(w, 400, "invalid holiday_date format")
+						api.Error(w, 400, "invalid holiday_date format")
 						return
 					}
 				}
@@ -1990,7 +1986,7 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(sets) == 0 {
 			// ensure transaction is rolled back before returning
 			tx.Rollback(ctx)
-			api.RespondWithError(w, 400, "no valid editable fields")
+			api.Error(w, 400, "no valid editable fields")
 			return
 		}
 		if toDateStr(newDateVal) != toDateStr(oldVals["holiday_date"]) ||
@@ -2007,12 +2003,12 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if err == nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, 400, "duplicate holiday date+name+type for this calendar")
+				api.Error(w, 400, "duplicate holiday date+name+type for this calendar")
 				return
 			}
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, 500, "duplicate check failed: "+err.Error())
+				api.Error(w, 500, "duplicate check failed: "+err.Error())
 				return
 			}
 		}
@@ -2023,7 +2019,7 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, 500, constants.ErrUpdateFailed+err.Error())
+			api.Error(w, 500, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
@@ -2034,21 +2030,16 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, calendarID, req.Reason, userEmail)
 		if err != nil {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, 500, constants.ErrAuditInsertFailed+err.Error())
+			api.Error(w, 500, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, 500, constants.ErrCommitFailed+err.Error())
+			api.Error(w, 500, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{
-			"holiday_id":        req.HolidayID,
-			"calendar_id":       calendarID,
-			"requested_by":      userEmail,
-			constants.KeyStatus: "PENDING_EDIT_APPROVAL",
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"holiday_id": req.HolidayID, "calendar_id": calendarID, "requested_by": userEmail, constants.KeyStatus: "PENDING_EDIT_APPROVAL"}, "")
 	}
 }
 
@@ -2063,11 +2054,11 @@ func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, 400, constants.ErrInvalidJSONShort)
+			api.Error(w, 400, constants.ErrInvalidJSONShort)
 			return
 		}
 		if strings.TrimSpace(req.CalendarID) == "" {
-			api.RespondWithError(w, 400, constants.ErrCalendarIDRequiredUser)
+			api.Error(w, 400, constants.ErrCalendarIDRequiredUser)
 			return
 		}
 		userEmail := ""
@@ -2078,14 +2069,14 @@ func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSessionShort)
+			api.Error(w, 401, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrTxBeginFailed+err.Error())
+			api.Error(w, 500, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -2114,7 +2105,7 @@ func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := row.Scan(scanArgs...); err != nil {
-			api.RespondWithError(w, 404, "calendar not found")
+			api.Error(w, 404, "calendar not found")
 			return
 		}
 		for i, c := range cols {
@@ -2143,7 +2134,7 @@ func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			calArgs = append(calArgs, req.CalendarID)
 
 			if _, err := tx.Exec(ctx, q, calArgs...); err != nil {
-				api.RespondWithError(w, 500, "Calendar update failed: "+err.Error())
+				api.Error(w, 500, "Calendar update failed: "+err.Error())
 				return
 			}
 		}
@@ -2223,20 +2214,17 @@ func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
 		`, req.CalendarID, req.Reason, userEmail)
 		if err != nil {
-			api.RespondWithError(w, 500, "audit failed: "+err.Error())
+			api.Error(w, 500, "audit failed: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, 500, constants.ErrCommitFailed+err.Error())
+			api.Error(w, 500, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"calendar_id": req.CalendarID,
-			"result":      holidayResults,
-			"audit":       "PENDING_EDIT_APPROVAL",
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"calendar_id": req.CalendarID, "result": holidayResults, "audit": "PENDING_EDIT_APPROVAL"}, "")
 	}
 }
 
@@ -2249,7 +2237,7 @@ func GetPastYearsHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, 400, constants.ErrInvalidJSONShort)
+			api.Error(w, 400, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -2261,7 +2249,7 @@ func GetPastYearsHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if user == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			api.Error(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
@@ -2303,7 +2291,7 @@ ORDER BY h.holiday_date, h.holiday_name
 
 		rows, err := pgxPool.Query(ctx, query, startYear, endYear)
 		if err != nil {
-			api.RespondWithError(w, 500, err.Error())
+			api.Error(w, 500, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -2316,7 +2304,7 @@ ORDER BY h.holiday_date, h.holiday_name
 			var recRule, notes *string
 
 			if err := rows.Scan(&id, &date, &name, &htype, &recRule, &notes); err != nil {
-				api.RespondWithError(w, 500, err.Error())
+				api.Error(w, 500, err.Error())
 				return
 			}
 
@@ -2332,7 +2320,7 @@ ORDER BY h.holiday_date, h.holiday_name
 			result = append(result, record)
 		}
 
-		api.RespondWithPayload(w, true, "", result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 

@@ -121,7 +121,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = tmp.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, 400, constants.ErrUserIDRequired)
+			api.Error(w, 400, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -133,18 +133,18 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			api.Error(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
 		if err := r.ParseMultipartForm(64 << 20); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "form parse")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, 400, constants.ErrNoFileUploaded)
+			api.Error(w, 400, constants.ErrNoFileUploaded)
 			return
 		}
 
@@ -155,14 +155,14 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			f, err := fh.Open()
 			if err != nil {
 				msg, status := getUserFriendlyFolioError(err, "open file")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			defer f.Close()
 
 			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
 			if err != nil || len(records) < 2 {
-				api.RespondWithError(w, 400, "invalid csv")
+				api.Error(w, 400, "invalid csv")
 				return
 			}
 
@@ -179,7 +179,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			required := []string{"entity_name", "amc_name", "folio_number", "first_holder_name", "default_subscription_account", "default_redemption_account"}
 			for _, c := range required {
 				if _, ok := headerPos[c]; !ok {
-					api.RespondWithError(w, 400, fmt.Sprintf("missing column: %s", c))
+					api.Error(w, 400, fmt.Sprintf("missing column: %s", c))
 					return
 				}
 			}
@@ -202,7 +202,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !entityFound {
-					api.RespondWithError(w, 403, "Access denied. Entity '"+entityName+"' not in your accessible entities")
+					api.Error(w, 403, "Access denied. Entity '"+entityName+"' not in your accessible entities")
 					return
 				}
 
@@ -216,7 +216,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !amcFound {
-					api.RespondWithError(w, 400, constants.ErrAMCNotFoundOrNotApprovedActive+amcName)
+					api.Error(w, 400, constants.ErrAMCNotFoundOrNotApprovedActive+amcName)
 					return
 				}
 
@@ -230,7 +230,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !subAcctFound {
-					api.RespondWithError(w, 400, "Subscription account not found or not approved/active: "+subAcct)
+					api.Error(w, 400, "Subscription account not found or not approved/active: "+subAcct)
 					return
 				}
 
@@ -244,7 +244,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !redAcctFound {
-					api.RespondWithError(w, 400, "Redemption account not found or not approved/active: "+redAcct)
+					api.Error(w, 400, "Redemption account not found or not approved/active: "+redAcct)
 					return
 				}
 			}
@@ -309,7 +309,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				msg, status := getUserFriendlyFolioError(err, "tx")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			defer tx.Rollback(ctx)
@@ -321,13 +321,13 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`)
 			if err != nil {
 				msg, status := getUserFriendlyFolioError(err, "tmp table")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_folio"}, copyCols, pgx.CopyFromRows(copyRows)); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "copy")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 
@@ -347,7 +347,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 `
 			if _, err := tx.Exec(ctx, updateSQL); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "update masterfolio")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 
@@ -371,7 +371,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 `
 			if _, err := tx.Exec(ctx, insertSQL); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "insert masterfolio")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 
@@ -384,7 +384,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`
 			if _, err := tx.Exec(ctx, auditSQL, userEmail); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "audit insert")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 
@@ -399,7 +399,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				`)
 				if err != nil {
 					msg, status := getUserFriendlyFolioError(err, "mapping tmp")
-					api.RespondWithError(w, status, msg)
+					api.Error(w, status, msg)
 					return
 				}
 
@@ -422,7 +422,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						[]string{"folio_number", "scheme_id", constants.KeyStatus},
 						pgx.CopyFromRows(mappingRows)); err != nil {
 						msg, status := getUserFriendlyFolioError(err, "mapping copy")
-						api.RespondWithError(w, status, msg)
+						api.Error(w, status, msg)
 						return
 					}
 
@@ -434,14 +434,14 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						ON CONFLICT (folio_id, scheme_id) DO NOTHING;
 					`); err != nil {
 						msg, status := getUserFriendlyFolioError(err, "mapping insert")
-						api.RespondWithError(w, status, msg)
+						api.Error(w, status, msg)
 						return
 					}
 				}
 			}
 			if err := tx.Commit(ctx); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "commit")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 
@@ -454,13 +454,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		total := time.Since(startOverall).Milliseconds()
-		api.RespondWithPayload(w, true, "", map[string]any{
-			constants.ValueSuccess: true,
-			"processed":            len(results),
-			"batches":              results,
-			"total_ms":             total,
-			"rows_count":           len(results),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"processed": len(results), "batches": results, "total_ms": total, "rows_count": len(results)}, "")
 	}
 }
 
@@ -471,7 +465,7 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Get user's accessible entities from context
 		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
 		if len(approvedEntities) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, "No accessible entities found")
+			api.Error(w, http.StatusForbidden, "No accessible entities found")
 			return
 		}
 
@@ -653,7 +647,7 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, approvedEntities, amcNames, accountIdentifiers, schemeIDs)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "query")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -679,11 +673,11 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if rows.Err() != nil {
 			msg, status := getUserFriendlyFolioError(rows.Err(), "scan")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -694,7 +688,7 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Get user's accessible entities from context
 		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
 		if len(approvedEntities) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, "No accessible entities found")
+			api.Error(w, http.StatusForbidden, "No accessible entities found")
 			return
 		}
 
@@ -747,7 +741,7 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, approvedEntities, amcNames, accountIdentifiers)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "query")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -768,11 +762,11 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if rows.Err() != nil {
 			msg, status := getUserFriendlyFolioError(rows.Err(), "scan")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -790,7 +784,7 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SchemeRefs              []string `json:"scheme_ids,omitempty"` // may be ids/names/isin etc.
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -798,7 +792,7 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if strings.TrimSpace(req.EntityName) == "" || strings.TrimSpace(req.AMCName) == "" ||
 			strings.TrimSpace(req.FolioNumber) == "" || strings.TrimSpace(req.FirstHolderName) == "" ||
 			strings.TrimSpace(req.DefaultSubscriptionAcct) == "" || strings.TrimSpace(req.DefaultRedemptionAcct) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredFieldsUser)
+			api.Error(w, http.StatusBadRequest, constants.ErrMissingRequiredFieldsUser)
 			return
 		}
 
@@ -810,7 +804,7 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -819,7 +813,7 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Validate entity access
 		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
 		if len(approvedEntities) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, "No accessible entities found in context")
+			api.Error(w, http.StatusForbidden, "No accessible entities found in context")
 			return
 		}
 		entityFound := false
@@ -830,7 +824,7 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !entityFound {
-			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Access denied. Entity '%s' not in your accessible entities: %v", req.EntityName, approvedEntities))
+			api.Error(w, http.StatusForbidden, fmt.Sprintf("Access denied. Entity '%s' not in your accessible entities: %v", req.EntityName, approvedEntities))
 			return
 		}
 
@@ -844,14 +838,14 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !amcFound {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+req.AMCName)
+			api.Error(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+req.AMCName)
 			return
 		}
 
 		// Validate bank accounts
 		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
 		if len(approvedBankAccounts) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, "No approved bank accounts found in context")
+			api.Error(w, http.StatusForbidden, "No approved bank accounts found in context")
 			return
 		}
 		subAcctFound := false
@@ -862,7 +856,7 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !subAcctFound {
-			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Subscription account '%s' not found or not approved/active. Available accounts: %d", req.DefaultSubscriptionAcct, len(approvedBankAccounts)))
+			api.Error(w, http.StatusBadRequest, fmt.Sprintf("Subscription account '%s' not found or not approved/active. Available accounts: %d", req.DefaultSubscriptionAcct, len(approvedBankAccounts)))
 			return
 		}
 
@@ -874,14 +868,14 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !redAcctFound {
-			api.RespondWithError(w, http.StatusBadRequest, "Redemption account not found or not approved/active: "+req.DefaultRedemptionAcct)
+			api.Error(w, http.StatusBadRequest, "Redemption account not found or not approved/active: "+req.DefaultRedemptionAcct)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "tx")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -891,7 +885,7 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		err = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE entity_name=$1 AND amc_name=$2 AND folio_number=$3 AND COALESCE(is_deleted,false)=false LIMIT 1`,
 			req.EntityName, req.AMCName, req.FolioNumber).Scan(&existing)
 		if err == nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFolioAlreadyExistsUser)
+			api.Error(w, http.StatusBadRequest, constants.ErrFolioAlreadyExistsUser)
 			return
 		}
 
@@ -903,7 +897,7 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RETURNING folio_id
 			`, req.EntityName, req.AMCName, req.FolioNumber, req.FirstHolderName, req.DefaultSubscriptionAcct, req.DefaultRedemptionAcct, defaultIfEmpty(req.Status, "Active")).Scan(&folioID); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "insert")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -934,7 +928,7 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if _, err := tx.CopyFrom(ctx, pgx.Identifier{"investment", "folioschememapping"},
 					[]string{"folio_id", "scheme_id", constants.KeyStatus, "old_status"}, pgx.CopyFromRows(mappingRows)); err != nil {
 					msg, status := getUserFriendlyFolioError(err, "mapping insert")
-					api.RespondWithError(w, status, msg)
+					api.Error(w, status, msg)
 					return
 				}
 			}
@@ -946,17 +940,17 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 		`, folioID, userEmail); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "audit")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "commit")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{"folio_id": folioID, "requested": userEmail})
+		api.Success(w, http.StatusOK, map[string]interface{}{"folio_id": folioID, "requested": userEmail}, "")
 	}
 }
 
@@ -976,11 +970,11 @@ func CreateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
 			return
 		}
 
@@ -992,7 +986,7 @@ func CreateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1083,7 +1077,7 @@ func CreateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "folio_id": folioID})
 		}
 
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		api.Success(w, http.StatusOK, results, "")
 	}
 }
 
@@ -1096,15 +1090,15 @@ func UpdateFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason  string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if strings.TrimSpace(req.FolioID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFolioIDRequiredUser)
+			api.Error(w, http.StatusBadRequest, constants.ErrFolioIDRequiredUser)
 			return
 		}
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFieldsToUpdateUser)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoFieldsToUpdateUser)
 			return
 		}
 
@@ -1116,7 +1110,7 @@ func UpdateFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1124,7 +1118,7 @@ func UpdateFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "tx")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1139,7 +1133,7 @@ func UpdateFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		if err := tx.QueryRow(ctx, sel, req.FolioID).Scan(&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4], &oldVals[5], &oldVals[6]); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "fetch")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -1167,7 +1161,7 @@ func UpdateFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND entity_name=$2 AND amc_name=$3 AND COALESCE(is_deleted,false)=false LIMIT 1`,
 							newVal, ifaceToString(oldVals[0]), ifaceToString(oldVals[1])).Scan(&exists)
 						if err == nil {
-							api.RespondWithError(w, http.StatusBadRequest, "folio_number already exists for this entity+amc")
+							api.Error(w, http.StatusBadRequest, "folio_number already exists for this entity+amc")
 							return
 						}
 					}
@@ -1179,7 +1173,7 @@ func UpdateFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "no valid updatable fields found")
+			api.Error(w, http.StatusBadRequest, "no valid updatable fields found")
 			return
 		}
 
@@ -1187,7 +1181,7 @@ func UpdateFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, req.FolioID)
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "update")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -1197,17 +1191,17 @@ func UpdateFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
 		`, req.FolioID, req.Reason, userEmail); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "audit")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "commit")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{"folio_id": req.FolioID, "requested": userEmail})
+		api.Success(w, http.StatusOK, map[string]interface{}{"folio_id": req.FolioID, "requested": userEmail}, "")
 	}
 }
 
@@ -1222,7 +1216,7 @@ func UpdateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -1234,7 +1228,7 @@ func UpdateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1322,7 +1316,7 @@ func UpdateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "folio_id": row.FolioID})
 		}
 
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		api.Success(w, http.StatusOK, results, "")
 	}
 }
 
@@ -1334,11 +1328,11 @@ func DeleteFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason   string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if len(req.FolioIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "folio_ids required")
+			api.Error(w, http.StatusBadRequest, "folio_ids required")
 			return
 		}
 
@@ -1350,7 +1344,7 @@ func DeleteFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1358,7 +1352,7 @@ func DeleteFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "tx")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1369,17 +1363,17 @@ func DeleteFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())
 			`, id, req.Reason, requestedBy); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "audit")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "commit")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.FolioIDs})
+		api.Success(w, http.StatusOK, map[string]interface{}{"delete_requested": req.FolioIDs}, "")
 	}
 }
 
@@ -1391,7 +1385,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -1402,7 +1396,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1410,7 +1404,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "tx")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1424,7 +1418,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := tx.Query(ctx, sel, req.FolioIDs)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "query")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1453,10 +1447,18 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(toApprove) == 0 && len(toDeleteActionIDs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrNoApprovableActions, map[string]any{
-				"approved_action_ids": []string{},
-				"deleted_folios":      []string{},
-			})
+			{
+				apiErrMsg := constants.ErrNoApprovableActions
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -1467,7 +1469,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toApprove); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "approve update")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
@@ -1479,7 +1481,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toDeleteActionIDs); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "mark deleted")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			if _, err := tx.Exec(ctx, `
@@ -1488,21 +1490,18 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE folio_id = ANY($1)
 			`, deleteMasterIDs); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "soft delete")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "commit")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{
-			"approved_action_ids": toApprove,
-			"deleted_folios":      deleteMasterIDs,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"approved_action_ids": toApprove, "deleted_folios": deleteMasterIDs}, "")
 	}
 }
 
@@ -1514,7 +1513,7 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -1525,7 +1524,7 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1533,7 +1532,7 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "tx")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1547,7 +1546,7 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := tx.Query(ctx, sel, req.FolioIDs)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "query")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1582,7 +1581,7 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if len(cannotReject) > 0 {
 				msg += fmt.Sprintf(constants.ErrCannotRejectApprovedFormat, cannotReject)
 			}
-			api.RespondWithError(w, http.StatusBadRequest, msg)
+			api.Error(w, http.StatusBadRequest, msg)
 			return
 		}
 
@@ -1592,17 +1591,17 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE action_id = ANY($3)
 		`, checkerBy, req.Comment, actionIDs); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "update")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "commit")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})
+		api.Success(w, http.StatusOK, map[string]interface{}{"rejected_action_ids": actionIDs}, "")
 	}
 }
 
@@ -1616,7 +1615,7 @@ func GetSingleFolioWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var req reqStruct
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.FolioID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "folio_id is required in body")
+			api.Error(w, http.StatusBadRequest, "folio_id is required in body")
 			return
 		}
 
@@ -1726,7 +1725,7 @@ func GetSingleFolioWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, req.FolioID)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "query")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1751,11 +1750,11 @@ func GetSingleFolioWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+rows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+rows.Err().Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1890,7 +1889,7 @@ func GetSchemesByApprovedFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "query")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1900,7 +1899,7 @@ func GetSchemesByApprovedFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var schemeID, schemeName, isin, internalCode, amfiCode string
 			if err := rows.Scan(&schemeID, &schemeName, &isin, &internalCode, &amfiCode); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "scan")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			out = append(out, map[string]interface{}{
@@ -1913,10 +1912,10 @@ func GetSchemesByApprovedFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsError+rows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrRowsError+rows.Err().Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }

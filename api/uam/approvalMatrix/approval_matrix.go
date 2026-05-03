@@ -345,37 +345,37 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Eyes            []EyeInput `json:"eyes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.EntityCode == "" || req.TransactionType == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "entity_code and transaction_type are required")
+			api.Error(w, http.StatusBadRequest, "entity_code and transaction_type are required")
 			return
 		}
 		if err := validateMasterFields(req.ModuleCode, req.ApprovalOrder, req.MinAmount, req.MaxAmount, req.SlaHours); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.Error(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 		var allUserIDs []string
 		for i, eye := range req.Eyes {
 			if err := validateEyeFields(eye.EyeCount, eye.Position, eye.SlaHours); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("eye[%d]: %s", i, err.Error()))
+				api.Error(w, http.StatusBadRequest, fmt.Sprintf("eye[%d]: %s", i, err.Error()))
 				return
 			}
 			// Ensure every slot is filled: members count must equal eye_count
 			if len(eye.Members) == 0 {
-				api.RespondWithError(w, http.StatusBadRequest,
+				api.Error(w, http.StatusBadRequest,
 					fmt.Sprintf("eye[%d] (position %d): eye_count is %d but 0 members provided — every slot must have an assigned person",
 						i, eye.Position, eye.EyeCount))
 				return
 			}
 			if len(eye.Members) != eye.EyeCount {
-				api.RespondWithError(w, http.StatusBadRequest,
+				api.Error(w, http.StatusBadRequest,
 					fmt.Sprintf("eye[%d] (position %d): eye_count is %d but %d member(s) provided — all %d slots must be filled",
 						i, eye.Position, eye.EyeCount, len(eye.Members), eye.EyeCount))
 				return
@@ -385,7 +385,7 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					req.Eyes[i].Members[j].SlotOrder = 1
 				}
 				if err := validateMemberFields(m.MemberType, m.AssignmentType, m.RoleID, m.UserID, req.Eyes[i].Members[j].SlotOrder); err != nil {
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("eye[%d].member[%d]: %s", i, j, err.Error()))
+					api.Error(w, http.StatusBadRequest, fmt.Sprintf("eye[%d].member[%d]: %s", i, j, err.Error()))
 					return
 				}
 				// Collect user_ids for existence check
@@ -398,12 +398,12 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		// Validate all user_ids exist in public.users BEFORE opening the DB transaction.
 		if err := validateUserIDsExist(ctx, pgxPool, allUserIDs); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.Error(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -418,7 +418,7 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.MinAmount, req.MaxAmount, req.Description, req.ApprovalOrder, req.SlaHours,
 		).Scan(&matrixID); err != nil {
 			msg, status := getUserFriendlyApprovalMatrixError(err, "Create master failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -430,7 +430,7 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		); err != nil {
 			logDBError(err, "master audit insert")
 			msg, status := getUserFriendlyApprovalMatrixError(err, "Audit insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -445,7 +445,7 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			).Scan(&eyeID); err != nil {
 				logDBError(err, "Create eye failed")
 				msg, status := getUserFriendlyApprovalMatrixError(err, "Create eye failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 
@@ -457,7 +457,7 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			); err != nil {
 				logDBError(err, "eye audit insert")
 				msg, status := getUserFriendlyApprovalMatrixError(err, constants.ErrEyeAuditFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 
@@ -471,7 +471,7 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					eyeID, matrixID, m.MemberType, m.AssignmentType, m.RoleID, m.UserID, m.SlotOrder,
 				).Scan(&memberID); err != nil {
 					msg, status := getUserFriendlyApprovalMatrixError(err, "Create member failed")
-					api.RespondWithError(w, status, msg)
+					api.Error(w, status, msg)
 					return
 				}
 
@@ -484,7 +484,7 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				); err != nil {
 					logDBError(err, "member audit insert")
 					msg, status := getUserFriendlyApprovalMatrixError(err, constants.ErrMemberAuditFailed)
-					api.RespondWithError(w, status, msg)
+					api.Error(w, status, msg)
 					return
 				}
 				totalMembers++
@@ -493,13 +493,13 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			logDBError(err, "CreateApprovalMatrix commit")
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{
+		api.Success(w, http.StatusOK, map[string]any{
 			"matrix_id": matrixID, "eyes_created": len(req.Eyes),
 			"members_created": totalMembers, "requested_by": userEmail,
-		})
+		}, "")
 		api.LogInfo("ApprovalMatrix created: matrix_id=%s eyes=%d members=%d by=%s", matrixID, len(req.Eyes), totalMembers, userEmail)
 	}
 }
@@ -537,31 +537,31 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Members      []MemberUpdate         `json:"members"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.MatrixID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "matrix_id is required")
+			api.Error(w, http.StatusBadRequest, "matrix_id is required")
 			return
 		}
 		hasMatrix := len(req.MatrixFields) > 0
 		hasEyes := len(req.Eyes) > 0
 		hasMembers := len(req.Members) > 0
 		if !hasMatrix && !hasEyes && !hasMembers {
-			api.RespondWithError(w, http.StatusBadRequest,
+			api.Error(w, http.StatusBadRequest,
 				"Provide at least one of: matrix_fields, eyes[], members[]")
 			return
 		}
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -582,10 +582,10 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&oldApprovalOrder, &oldSlaHours, &oldIsActive,
 		); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, constants.ErrApprovalMatrixNotFound)
+				api.Error(w, http.StatusNotFound, constants.ErrApprovalMatrixNotFound)
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, "Fetch matrix failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Fetch matrix failed: "+err.Error())
 			return
 		}
 
@@ -610,7 +610,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				q := fmt.Sprintf("UPDATE uam.approval_matrix_master SET %s WHERE matrix_id=$%d",
 					strings.Join(sets, ", "), pos)
 				if _, err := tx.Exec(ctx, q, args...); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Update matrix fields failed: "+err.Error())
+					api.Error(w, http.StatusInternalServerError, "Update matrix fields failed: "+err.Error())
 					return
 				}
 			}
@@ -628,7 +628,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			oldMinAmount, oldMaxAmount, oldDescription,
 			oldApprovalOrder, oldSlaHours, oldIsActive,
 		); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Matrix audit insert failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Matrix audit insert failed: "+err.Error())
 			return
 		}
 
@@ -655,7 +655,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				 WHERE eye_id=ANY($1) AND matrix_id=$2 AND is_deleted=false FOR UPDATE`,
 				eyeIDs, req.MatrixID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Eye snapshot failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Eye snapshot failed: "+err.Error())
 				return
 			}
 			eyeSnapMap := map[string]eyeSnap{}
@@ -663,7 +663,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var s eyeSnap
 				if err := eSnapRows.Scan(&s.eyeID, &s.eyeCount, &s.position, &s.slaHours, &s.isActive); err != nil {
 					eSnapRows.Close()
-					api.RespondWithError(w, http.StatusInternalServerError, "Eye snapshot scan failed: "+err.Error())
+					api.Error(w, http.StatusInternalServerError, "Eye snapshot scan failed: "+err.Error())
 					return
 				}
 				eyeSnapMap[s.eyeID] = s
@@ -673,7 +673,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, eu := range req.Eyes {
 				snap, ok := eyeSnapMap[eu.EyeID]
 				if !ok {
-					api.RespondWithError(w, http.StatusNotFound, "Eye not found or does not belong to this matrix: "+eu.EyeID)
+					api.Error(w, http.StatusNotFound, "Eye not found or does not belong to this matrix: "+eu.EyeID)
 					return
 				}
 				var sets []string
@@ -691,7 +691,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := fmt.Sprintf("UPDATE uam.approval_matrix_eye SET %s WHERE eye_id=$%d",
 						strings.Join(sets, ", "), pos)
 					if _, err := tx.Exec(ctx, q, args...); err != nil {
-						api.RespondWithError(w, http.StatusInternalServerError, "Update eye "+eu.EyeID+" failed: "+err.Error())
+						api.Error(w, http.StatusInternalServerError, "Update eye "+eu.EyeID+" failed: "+err.Error())
 						return
 					}
 				}
@@ -704,7 +704,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					eu.EyeID, req.MatrixID, req.Reason, userEmail,
 					snap.eyeCount, snap.position, snap.slaHours, snap.isActive,
 				); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Eye audit insert failed for "+eu.EyeID+": "+err.Error())
+					api.Error(w, http.StatusInternalServerError, "Eye audit insert failed for "+eu.EyeID+": "+err.Error())
 					return
 				}
 				eyesUpdated++
@@ -738,7 +738,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				 WHERE member_id=ANY($1) AND matrix_id=$2 AND is_deleted=false FOR UPDATE`,
 				memberIDs, req.MatrixID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Member snapshot failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Member snapshot failed: "+err.Error())
 				return
 			}
 			mSnapMap := map[string]memberSnap{}
@@ -747,7 +747,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if err := mSnapRows.Scan(&s.memberID, &s.eyeID, &s.memberType, &s.assignmentType,
 					&s.roleID, &s.userID, &s.slotOrder, &s.isActive); err != nil {
 					mSnapRows.Close()
-					api.RespondWithError(w, http.StatusInternalServerError, "Member snapshot scan failed: "+err.Error())
+					api.Error(w, http.StatusInternalServerError, "Member snapshot scan failed: "+err.Error())
 					return
 				}
 				mSnapMap[s.memberID] = s
@@ -757,7 +757,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, mu := range req.Members {
 				snap, ok := mSnapMap[mu.MemberID]
 				if !ok {
-					api.RespondWithError(w, http.StatusNotFound, "Member not found or does not belong to this matrix: "+mu.MemberID)
+					api.Error(w, http.StatusNotFound, "Member not found or does not belong to this matrix: "+mu.MemberID)
 					return
 				}
 				var sets []string
@@ -775,7 +775,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := fmt.Sprintf("UPDATE uam.approval_matrix_eye_member SET %s WHERE member_id=$%d",
 						strings.Join(sets, ", "), pos)
 					if _, err := tx.Exec(ctx, q, args...); err != nil {
-						api.RespondWithError(w, http.StatusInternalServerError, "Update member "+mu.MemberID+" failed: "+err.Error())
+						api.Error(w, http.StatusInternalServerError, "Update member "+mu.MemberID+" failed: "+err.Error())
 						return
 					}
 				}
@@ -787,7 +787,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					mu.MemberID, snap.eyeID, req.MatrixID, req.Reason, userEmail,
 					snap.memberType, snap.assignmentType, snap.roleID, snap.userID, snap.slotOrder, snap.isActive,
 				); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Member audit insert failed for "+mu.MemberID+": "+err.Error())
+					api.Error(w, http.StatusInternalServerError, "Member audit insert failed for "+mu.MemberID+": "+err.Error())
 					return
 				}
 				membersUpdated++
@@ -795,16 +795,16 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{
+		api.Success(w, http.StatusOK, map[string]any{
 			"matrix_id":       req.MatrixID,
 			"eyes_updated":    eyesUpdated,
 			"members_updated": membersUpdated,
 			"requested_by":    userEmail,
 			"reason":          req.Reason,
-		})
+		}, "")
 		api.LogInfo("ApprovalMatrix update: matrix=%s eyes=%d members=%d by=%s",
 			req.MatrixID, eyesUpdated, membersUpdated, userEmail)
 	}
@@ -830,23 +830,23 @@ func DeleteApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason    string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.MatrixIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMatrixIDsCannotBeEmpty)
+			api.Error(w, http.StatusBadRequest, constants.ErrMatrixIDsCannotBeEmpty)
 			return
 		}
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -857,11 +857,11 @@ func DeleteApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`SELECT COUNT(*) FROM uam.approval_matrix_master WHERE matrix_id=ANY($1) AND is_deleted=false`,
 			req.MatrixIDs,
 		).Scan(&foundCount); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Lookup failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Lookup failed: "+err.Error())
 			return
 		}
 		if foundCount != len(req.MatrixIDs) {
-			api.RespondWithError(w, http.StatusNotFound,
+			api.Error(w, http.StatusNotFound,
 				fmt.Sprintf("%d of %d matrix_ids not found or already deleted — aborting all",
 					len(req.MatrixIDs)-foundCount, len(req.MatrixIDs)))
 			return
@@ -877,7 +877,7 @@ func DeleteApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.Reason, userEmail, req.MatrixIDs,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Master audit insert failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Master audit insert failed: "+err.Error())
 			return
 		}
 
@@ -891,7 +891,7 @@ func DeleteApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.Reason, userEmail, req.MatrixIDs,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Eye audit insert failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Eye audit insert failed: "+err.Error())
 			return
 		}
 
@@ -905,20 +905,20 @@ func DeleteApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.Reason, userEmail, req.MatrixIDs,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Member audit insert failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Member audit insert failed: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{
+		api.Success(w, http.StatusOK, map[string]any{
 			"matrices_queued": int(masterTag.RowsAffected()),
 			"eyes_queued":     int(eyeTag.RowsAffected()),
 			"members_queued":  int(memberTag.RowsAffected()),
 			"requested_by":    userEmail,
-		})
+		}, "")
 		api.LogInfo("DeleteApprovalMatrix: matrices=%d eyes=%d members=%d by=%s",
 			masterTag.RowsAffected(), eyeTag.RowsAffected(), memberTag.RowsAffected(), userEmail)
 	}
@@ -941,23 +941,23 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.MatrixIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMatrixIDsCannotBeEmpty)
+			api.Error(w, http.StatusBadRequest, constants.ErrMatrixIDsCannotBeEmpty)
 			return
 		}
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -968,7 +968,7 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE matrix_id=ANY($1) AND action_type='DELETE' AND processing_status LIKE 'PENDING%'`,
 			req.MatrixIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Delete detection failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Delete detection failed: "+err.Error())
 			return
 		}
 		var deleteMatrixIDs []string
@@ -976,7 +976,7 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			if err := deleteRows.Scan(&id); err != nil {
 				deleteRows.Close()
-				api.RespondWithError(w, http.StatusInternalServerError, "Delete detection scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Delete detection scan failed: "+err.Error())
 				return
 			}
 			deleteMatrixIDs = append(deleteMatrixIDs, id)
@@ -991,7 +991,7 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userEmail, req.Comment, req.MatrixIDs,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Approve master audit failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Approve master audit failed: "+err.Error())
 			return
 		}
 
@@ -1003,7 +1003,7 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userEmail, req.Comment, req.MatrixIDs,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Approve eye cascade failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Approve eye cascade failed: "+err.Error())
 			return
 		}
 
@@ -1015,7 +1015,7 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userEmail, req.Comment, req.MatrixIDs,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Approve member cascade failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Approve member cascade failed: "+err.Error())
 			return
 		}
 
@@ -1024,34 +1024,34 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.Exec(ctx,
 				`UPDATE uam.approval_matrix_master SET is_deleted=true WHERE matrix_id=ANY($1)`,
 				deleteMatrixIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Delete flip master failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Delete flip master failed: "+err.Error())
 				return
 			}
 			if _, err := tx.Exec(ctx,
 				`UPDATE uam.approval_matrix_eye SET is_deleted=true WHERE matrix_id=ANY($1)`,
 				deleteMatrixIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Delete flip eyes failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Delete flip eyes failed: "+err.Error())
 				return
 			}
 			if _, err := tx.Exec(ctx,
 				`UPDATE uam.approval_matrix_eye_member SET is_deleted=true WHERE matrix_id=ANY($1)`,
 				deleteMatrixIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Delete flip members failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Delete flip members failed: "+err.Error())
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{
+		api.Success(w, http.StatusOK, map[string]any{
 			"matrices_approved": int(masterTag.RowsAffected()),
 			"eyes_approved":     int(eyeTag.RowsAffected()),
 			"members_approved":  int(memberTag.RowsAffected()),
 			"deleted_matrices":  len(deleteMatrixIDs),
 			"checker_by":        userEmail,
-		})
+		}, "")
 		api.LogInfo("BulkApprove: matrices=%d eyes=%d members=%d deleted=%d by=%s",
 			masterTag.RowsAffected(), eyeTag.RowsAffected(), memberTag.RowsAffected(), len(deleteMatrixIDs), userEmail)
 	}
@@ -1069,23 +1069,23 @@ func BulkRejectMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.MatrixIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMatrixIDsCannotBeEmpty)
+			api.Error(w, http.StatusBadRequest, constants.ErrMatrixIDsCannotBeEmpty)
 			return
 		}
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1100,7 +1100,7 @@ func BulkRejectMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			logDBError(err, "BulkReject master")
 			msg, status := getUserFriendlyApprovalMatrixError(err, "Reject matrices failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		matricesRejected := int(masterTag.RowsAffected())
@@ -1115,7 +1115,7 @@ func BulkRejectMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			logDBError(err, "BulkReject eye cascade")
 			msg, status := getUserFriendlyApprovalMatrixError(err, "Reject eyes failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		eyesRejected := int(eyeTag.RowsAffected())
@@ -1130,22 +1130,22 @@ func BulkRejectMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			logDBError(err, "BulkReject member cascade")
 			msg, status := getUserFriendlyApprovalMatrixError(err, "Reject members failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		membersRejected := int(memberTag.RowsAffected())
 
 		if err := tx.Commit(ctx); err != nil {
 			logDBError(err, "BulkRejectMatrix commit")
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{
+		api.Success(w, http.StatusOK, map[string]any{
 			"matrices_rejected": matricesRejected,
 			"eyes_rejected":     eyesRejected,
 			"members_rejected":  membersRejected,
 			"checker_by":        userEmail,
-		})
+		}, "")
 		api.LogInfo("BulkReject: matrices=%d eyes=%d members=%d by=%s",
 			matricesRejected, eyesRejected, membersRejected, userEmail)
 	}
@@ -1271,7 +1271,7 @@ func GetApprovalMatrixAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		pgRows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer pgRows.Close()
@@ -1281,7 +1281,7 @@ func GetApprovalMatrixAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for pgRows.Next() {
 			vals, err := pgRows.Values()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed")
+				api.Error(w, http.StatusInternalServerError, "Scan failed")
 				return
 			}
 			row := make(map[string]interface{}, len(fds))
@@ -1293,7 +1293,7 @@ func GetApprovalMatrixAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if out == nil {
 			out = []map[string]interface{}{}
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{"rows": out, "count": len(out)})
+		api.Success(w, http.StatusOK, map[string]any{"data": out, "count": len(out)}, "")
 		api.LogInfo("GetApprovalMatrixAll: returned %d rows", len(out))
 	}
 }
@@ -1307,7 +1307,7 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		matrixID := r.URL.Query().Get("matrix_id")
 		if matrixID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "matrix_id query param is required")
+			api.Error(w, http.StatusBadRequest, "matrix_id query param is required")
 			return
 		}
 		ctx := r.Context()
@@ -1365,10 +1365,10 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, constants.ErrApprovalMatrixNotFound)
+				api.Error(w, http.StatusNotFound, constants.ErrApprovalMatrixNotFound)
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		detail.ProcessingStatus = processingStatus
@@ -1416,7 +1416,7 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY e.position`, matrixID,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Eye query failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Eye query failed: "+err.Error())
 			return
 		}
 		defer eyeRows.Close()
@@ -1432,7 +1432,7 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&ed.CreatedBy, &ed.CreatedAt, &ed.EditedBy, &ed.EditedAt,
 				&ed.OldEyeCount, &ed.OldPosition, &ed.OldSlaHours, &ed.OldIsActive,
 			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Eye scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Eye scan failed: "+err.Error())
 				return
 			}
 			ed.EyeID = eidStr
@@ -1483,7 +1483,7 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY mb.eye_id, mb.slot_order`, matrixID,
 			)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Member query failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Member query failed: "+err.Error())
 				return
 			}
 			defer memberRows.Close()
@@ -1502,7 +1502,7 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&md.OldRoleID, &md.OldUserID,
 					&md.OldSlotOrder, &md.OldIsActive,
 				); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Member scan failed: "+err.Error())
+					api.Error(w, http.StatusInternalServerError, "Member scan failed: "+err.Error())
 					return
 				}
 				md.MemberID = midStr
@@ -1516,7 +1516,7 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, eid := range eyeOrder {
 			detail.Eyes = append(detail.Eyes, *eyeMap[eid])
 		}
-		api.RespondWithPayload(w, true, "", detail)
+		api.Success(w, http.StatusOK, detail, "")
 	}
 }
 
@@ -1529,7 +1529,7 @@ func GetApprovalMatrixAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		matrixID := r.URL.Query().Get("matrix_id")
 		if matrixID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "matrix_id query param is required")
+			api.Error(w, http.StatusBadRequest, "matrix_id query param is required")
 			return
 		}
 		ctx := r.Context()
@@ -1603,7 +1603,7 @@ func GetApprovalMatrixAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE matrix_id=$1
 			ORDER BY requested_at DESC`, matrixID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Master audit query failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Master audit query failed: "+err.Error())
 			return
 		}
 
@@ -1623,7 +1623,7 @@ func GetApprovalMatrixAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&m.oldApprovalOrder, &m.oldSlaHours, &m.oldIsActive,
 			); err != nil {
 				masterRows.Close()
-				api.RespondWithError(w, http.StatusInternalServerError, "Master audit scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Master audit scan failed: "+err.Error())
 				return
 			}
 			k := eventKey{m.actionType, m.requestedBy, m.requestedAt}
@@ -1647,7 +1647,7 @@ func GetApprovalMatrixAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE matrix_id=$1
 			ORDER BY requested_at DESC, eye_id`, matrixID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Eye audit query failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Eye audit query failed: "+err.Error())
 			return
 		}
 
@@ -1668,7 +1668,7 @@ func GetApprovalMatrixAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&e.oldEyeCount, &e.oldPosition, &e.oldSlaHours, &e.oldIsActive,
 			); err != nil {
 				eyeAuditRows.Close()
-				api.RespondWithError(w, http.StatusInternalServerError, "Eye audit scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Eye audit scan failed: "+err.Error())
 				return
 			}
 			k := eventKey{e.actionType, e.requestedBy, e.requestedAt}
@@ -1698,7 +1698,7 @@ func GetApprovalMatrixAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE matrix_id=$1
 			ORDER BY requested_at DESC, eye_id, member_id`, matrixID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Member audit query failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Member audit query failed: "+err.Error())
 			return
 		}
 
@@ -1718,7 +1718,7 @@ func GetApprovalMatrixAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&m.oldSlotOrder, &m.oldIsActive,
 			); err != nil {
 				memAuditRows.Close()
-				api.RespondWithError(w, http.StatusInternalServerError, "Member audit scan failed: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Member audit scan failed: "+err.Error())
 				return
 			}
 			k := eventKey{m.actionType, m.requestedBy, m.requestedAt}
@@ -1854,7 +1854,7 @@ func GetApprovalMatrixAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if events == nil {
 			events = []eventSnap{}
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{"rows": events, "count": len(events)})
+		api.Success(w, http.StatusOK, map[string]any{"data": events, "count": len(events)}, "")
 	}
 }
 
@@ -1904,7 +1904,7 @@ func GetApprovedActiveMatrices(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, fullQ, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1914,7 +1914,7 @@ func GetApprovedActiveMatrices(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			vals, err := rows.Values()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed")
+				api.Error(w, http.StatusInternalServerError, "Scan failed")
 				return
 			}
 			row := make(map[string]interface{}, len(fds))
@@ -1926,7 +1926,7 @@ func GetApprovedActiveMatrices(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if out == nil {
 			out = []map[string]interface{}{}
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{"rows": out})
+		api.Success(w, http.StatusOK, map[string]any{"data": out}, "")
 	}
 }
 
@@ -1943,15 +1943,15 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Members  []MemberInput `json:"members"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.MatrixID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "matrix_id is required")
+			api.Error(w, http.StatusBadRequest, "matrix_id is required")
 			return
 		}
 		if err := validateEyeFields(req.EyeCount, req.Position, req.SlaHours); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.Error(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		for i, m := range req.Members {
@@ -1959,20 +1959,20 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				req.Members[i].SlotOrder = 1
 			}
 			if err := validateMemberFields(m.MemberType, m.AssignmentType, m.RoleID, m.UserID, req.Members[i].SlotOrder); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("member[%d]: %s", i, err.Error()))
+				api.Error(w, http.StatusBadRequest, fmt.Sprintf("member[%d]: %s", i, err.Error()))
 				return
 			}
 		}
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1983,10 +1983,10 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.MatrixID,
 		).Scan(&exists); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, constants.ErrApprovalMatrixNotFound)
+				api.Error(w, http.StatusNotFound, constants.ErrApprovalMatrixNotFound)
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrLookupFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrLookupFailed)
 			return
 		}
 
@@ -1997,7 +1997,7 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.MatrixID, req.EyeCount, req.Position, req.SlaHours,
 		).Scan(&eyeID); err != nil {
 			msg, status := getUserFriendlyApprovalMatrixError(err, "Add eye failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if _, err := tx.Exec(ctx, `
@@ -2007,7 +2007,7 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		); err != nil {
 			logDBError(err, "AddEyeToMatrix audit")
 			msg, status := getUserFriendlyApprovalMatrixError(err, constants.ErrEyeAuditFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -2021,7 +2021,7 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				eyeID, req.MatrixID, m.MemberType, m.AssignmentType, m.RoleID, m.UserID, m.SlotOrder,
 			).Scan(&memberID); err != nil {
 				msg, status := getUserFriendlyApprovalMatrixError(err, "Add member failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			if _, err := tx.Exec(ctx, `
@@ -2032,7 +2032,7 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			); err != nil {
 				logDBError(err, "AddEyeToMatrix member audit")
 				msg, status := getUserFriendlyApprovalMatrixError(err, constants.ErrMemberAuditFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			membersCreated++
@@ -2040,13 +2040,13 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			logDBError(err, "AddEyeToMatrix commit")
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{
+		api.Success(w, http.StatusOK, map[string]any{
 			"eye_id": eyeID, "matrix_id": req.MatrixID,
 			"members_created": membersCreated, "requested_by": userEmail,
-		})
+		}, "")
 		api.LogInfo("Eye added: eye_id=%s matrix_id=%s members=%d", eyeID, req.MatrixID, membersCreated)
 	}
 }
@@ -2060,26 +2060,26 @@ func UpdateEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.EyeID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "eye_id is required")
+			api.Error(w, http.StatusBadRequest, "eye_id is required")
 			return
 		}
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No fields provided for update")
+			api.Error(w, http.StatusBadRequest, "No fields provided for update")
 			return
 		}
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -2092,11 +2092,11 @@ func UpdateEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM uam.approval_matrix_eye WHERE eye_id=$1 AND is_deleted=false FOR UPDATE`, req.EyeID,
 		).Scan(&matrixID, &oldEyeCount, &oldPosition, &oldSlaHours, &oldIsActive); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "Eye not found")
+				api.Error(w, http.StatusNotFound, "Eye not found")
 				return
 			}
 			msg, status := getUserFriendlyApprovalMatrixError(err, "Fetch eye failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		allowed := map[string]bool{"sla_hours": true, "position": true, "is_active": true}
@@ -2111,7 +2111,7 @@ func UpdateEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No valid updatable fields found")
+			api.Error(w, http.StatusBadRequest, "No valid updatable fields found")
 			return
 		}
 		args = append(args, req.EyeID)
@@ -2119,7 +2119,7 @@ func UpdateEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			logDBError(err, "UpdateEye exec")
 			msg, status := getUserFriendlyApprovalMatrixError(err, "Update eye failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if _, err := tx.Exec(ctx, `
@@ -2131,15 +2131,15 @@ func UpdateEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		); err != nil {
 			logDBError(err, "UpdateEye audit")
 			msg, status := getUserFriendlyApprovalMatrixError(err, constants.ErrEyeAuditFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			logDBError(err, "UpdateEye commit")
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{"eye_id": req.EyeID, "requested_by": userEmail})
+		api.Success(w, http.StatusOK, map[string]any{"eye_id": req.EyeID, "requested_by": userEmail}, "")
 		api.LogInfo("Eye updated: eye_id=%s by=%s", req.EyeID, userEmail)
 	}
 }
@@ -2152,22 +2152,22 @@ func DeleteEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.EyeIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "eye_ids cannot be empty")
+			api.Error(w, http.StatusBadRequest, "eye_ids cannot be empty")
 			return
 		}
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -2176,7 +2176,7 @@ func DeleteEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.EyeIDs,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrLookupFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrLookupFailed)
 			return
 		}
 		type eyeRec struct{ matrixID string }
@@ -2232,10 +2232,10 @@ func DeleteEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := tx.Commit(ctx); err != nil {
 			logDBError(err, "DeleteEye commit")
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
 			return
 		}
-		api.RespondWithPayload(w, true, "", results)
+		api.Success(w, http.StatusOK, results, "")
 		api.LogInfo("DeleteEye: %d IDs by=%s", len(req.EyeIDs), userEmail)
 	}
 }
@@ -2249,15 +2249,15 @@ func AddMemberToEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Members  []MemberInput `json:"members"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.EyeID == "" || req.MatrixID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "eye_id and matrix_id are required")
+			api.Error(w, http.StatusBadRequest, "eye_id and matrix_id are required")
 			return
 		}
 		if len(req.Members) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "members array cannot be empty")
+			api.Error(w, http.StatusBadRequest, "members array cannot be empty")
 			return
 		}
 		for i, m := range req.Members {
@@ -2265,19 +2265,19 @@ func AddMemberToEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				req.Members[i].SlotOrder = 1
 			}
 			if err := validateMemberFields(m.MemberType, m.AssignmentType, m.RoleID, m.UserID, req.Members[i].SlotOrder); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("member[%d]: %s", i, err.Error()))
+				api.Error(w, http.StatusBadRequest, fmt.Sprintf("member[%d]: %s", i, err.Error()))
 				return
 			}
 		}
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -2286,10 +2286,10 @@ func AddMemberToEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`SELECT true FROM uam.approval_matrix_eye WHERE eye_id=$1 AND is_deleted=false`, req.EyeID,
 		).Scan(&exists); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "Eye-round not found")
+				api.Error(w, http.StatusNotFound, "Eye-round not found")
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrLookupFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrLookupFailed)
 			return
 		}
 		membersCreated := 0
@@ -2302,7 +2302,7 @@ func AddMemberToEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				req.EyeID, req.MatrixID, m.MemberType, m.AssignmentType, m.RoleID, m.UserID, m.SlotOrder,
 			).Scan(&memberID); err != nil {
 				msg, status := getUserFriendlyApprovalMatrixError(err, "Add member failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			if _, err := tx.Exec(ctx, `
@@ -2313,19 +2313,19 @@ func AddMemberToEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			); err != nil {
 				logDBError(err, "AddMemberToEye audit")
 				msg, status := getUserFriendlyApprovalMatrixError(err, constants.ErrMemberAuditFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			membersCreated++
 		}
 		if err := tx.Commit(ctx); err != nil {
 			logDBError(err, "AddMemberToEye commit")
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{
+		api.Success(w, http.StatusOK, map[string]any{
 			"members_created": membersCreated, "eye_id": req.EyeID, "requested_by": userEmail,
-		})
+		}, "")
 		api.LogInfo("Members added: eye_id=%s count=%d by=%s", req.EyeID, membersCreated, userEmail)
 	}
 }
@@ -2339,26 +2339,26 @@ func UpdateMember(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason   string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.MemberID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "member_id is required")
+			api.Error(w, http.StatusBadRequest, "member_id is required")
 			return
 		}
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No fields provided for update")
+			api.Error(w, http.StatusBadRequest, "No fields provided for update")
 			return
 		}
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -2374,11 +2374,11 @@ func UpdateMember(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&oldRoleID, &oldUserID, &oldSlotOrder, &oldIsActive,
 		); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "Member not found")
+				api.Error(w, http.StatusNotFound, "Member not found")
 				return
 			}
 			msg, status := getUserFriendlyApprovalMatrixError(err, "Fetch member failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		allowed := map[string]bool{
@@ -2396,7 +2396,7 @@ func UpdateMember(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No valid updatable fields found")
+			api.Error(w, http.StatusBadRequest, "No valid updatable fields found")
 			return
 		}
 		args = append(args, req.MemberID)
@@ -2404,7 +2404,7 @@ func UpdateMember(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			logDBError(err, "UpdateMember exec")
 			msg, status := getUserFriendlyApprovalMatrixError(err, "Update member failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if _, err := tx.Exec(ctx, `
@@ -2417,15 +2417,15 @@ func UpdateMember(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		); err != nil {
 			logDBError(err, "UpdateMember audit")
 			msg, status := getUserFriendlyApprovalMatrixError(err, constants.ErrMemberAuditFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			logDBError(err, "UpdateMember commit")
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{"member_id": req.MemberID, "requested_by": userEmail})
+		api.Success(w, http.StatusOK, map[string]any{"member_id": req.MemberID, "requested_by": userEmail}, "")
 		api.LogInfo("Member updated: member_id=%s by=%s", req.MemberID, userEmail)
 	}
 }
@@ -2438,22 +2438,22 @@ func DeleteMember(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason    string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.MemberIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "member_ids cannot be empty")
+			api.Error(w, http.StatusBadRequest, "member_ids cannot be empty")
 			return
 		}
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -2462,7 +2462,7 @@ func DeleteMember(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.MemberIDs,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrLookupFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrLookupFailed)
 			return
 		}
 		type memberRec struct{ eyeID, matrixID string }
@@ -2495,10 +2495,10 @@ func DeleteMember(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := tx.Commit(ctx); err != nil {
 			logDBError(err, "DeleteMember commit")
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
 			return
 		}
-		api.RespondWithPayload(w, true, "", results)
+		api.Success(w, http.StatusOK, results, "")
 		api.LogInfo("DeleteMember: %d IDs by=%s", len(req.MemberIDs), userEmail)
 	}
 }

@@ -1,6 +1,7 @@
 package push
 
 import (
+	"CimplrCorpSaas/api"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -41,27 +42,21 @@ func userIDFromCtx(r *http.Request) string {
 	return r.URL.Query().Get("user_id")
 }
 
-// writeJSON is the low-level JSON writer — always sets Content-Type.
+// writeJSON is the low-level JSON writer - always sets Content-Type.
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
-// writeOK writes a standard success envelope: {"success":true, "data":{...}}
+// writeOK writes a standard success envelope.
 func writeOK(w http.ResponseWriter, data interface{}) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"row":     data,
-	})
+	api.Success(w, http.StatusOK, data, "")
 }
 
-// writeErr writes a standard error envelope: {"success":false, "error":"..."}
+// writeErr writes a standard error envelope.
 func writeErr(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]interface{}{
-		"success": false,
-		"error":   msg,
-	})
+	api.Error(w, status, msg)
 }
 
 // pushCountSSE queries the unread count and pushes it to the user's SSE stream.
@@ -317,7 +312,7 @@ func handleMarkRead(pool *pgxpool.Pool) http.HandlerFunc {
 			catalog.MarkSystemNotifRead(userID, body.ID)
 		}
 		go pushCountSSE(r.Context(), pool, userID)
-		writeOK(w, map[string]interface{}{"message": "notification marked as read"})
+		api.Success(w, http.StatusOK, map[string]interface{}{}, "notification marked as read")
 	}
 }
 
@@ -355,10 +350,9 @@ func handleMarkAllRead(pool *pgxpool.Pool) http.HandlerFunc {
 		// Also mark all in-memory system notifications as read
 		catalog.MarkSystemNotifsRead(userID)
 		go pushCountSSE(r.Context(), pool, userID)
-		writeOK(w, map[string]interface{}{
-			"message": "all notifications marked as read",
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"updated": tag.RowsAffected(),
-		})
+		}, "all notifications marked as read")
 	}
 }
 
@@ -402,6 +396,6 @@ func handleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		go pushCountSSE(r.Context(), pool, userID)
-		writeOK(w, map[string]interface{}{"message": "notification deleted"})
+		api.Success(w, http.StatusOK, map[string]interface{}{}, "notification deleted")
 	}
 }

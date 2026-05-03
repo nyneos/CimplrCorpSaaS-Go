@@ -1,6 +1,7 @@
 package permissions
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"database/sql"
@@ -19,12 +20,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
-	})
+	api.Error(w, status, errMsg)
 }
 
 // ---------------------------------------------------------------------------
@@ -37,7 +33,7 @@ func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
 			RoleName string `json:"roleName"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"success":false,"error":"invalid request"}`, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, "invalid request")
 			return
 		}
 
@@ -47,7 +43,7 @@ func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
 				SELECT id FROM public.roles WHERE LOWER(name) = LOWER($1) AND LOWER(status) = 'approved'
 			),
 			page_json AS (
-				SELECT 
+				SELECT
 					p.page_name,
 					jsonb_build_object(
 						'pagePermissions',
@@ -65,7 +61,7 @@ func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
 							COALESCE((
 								SELECT jsonb_object_agg(tab_group.tab_name, tab_group.tab_actions)
 								FROM (
-									SELECT 
+									SELECT
 										subp2.tab_name,
 										jsonb_object_agg(subp2.action, COALESCE(subrp2.allowed, false)) AS tab_actions
 									FROM public.permissions subp2
@@ -88,20 +84,18 @@ func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
 		`, req.RoleName).Scan(&jsonResult)
 
 		if err == sql.ErrNoRows {
-			http.Error(w, `{"success":false,"error":"role not found"}`, http.StatusNotFound)
+			api.Error(w, http.StatusNotFound, "role not found")
 			return
 		} else if err != nil {
-			http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
 		resp := map[string]interface{}{
-			"success":  true,
 			"roleName": req.RoleName,
 			"pages":    json.RawMessage(jsonResult),
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, resp, "")
 	}
 }
 
@@ -208,15 +202,15 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 
 		rows, err := tx.Query(`
 			WITH input_data AS (
-				SELECT 
+				SELECT
 					UNNEST($1::text[]) AS page_name,
 					UNNEST($2::text[]) AS tab_name,
 					UNNEST($3::text[]) AS action
 			),
 			inserted AS (
 				INSERT INTO public.permissions (page_name, tab_name, action)
-				SELECT 
-					page_name, 
+				SELECT
+					page_name,
 					NULLIF(NULLIF(tab_name, ''), 'NULL') AS tab_name,
 					action
 				FROM input_data
@@ -342,11 +336,9 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			"success": true,
-			"count":   len(perms),
-		})
+		api.Success(w, http.StatusOK, map[string]any{
+			"count": len(perms),
+		}, "")
 	}
 }
 
@@ -363,7 +355,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 			RoleName string `json:"roleName,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"success":false,"error":constants.ErrInvalidRequestBody}`, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 
@@ -373,7 +365,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 				req.UserID = ctxUserID
 			}
 			if req.UserID == "" {
-				http.Error(w, `{"success":false,"error":constants.ErrUserIDRequired}`, http.StatusBadRequest)
+				api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 				return
 			}
 			sessions := auth.GetActiveSessions()
@@ -384,7 +376,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 				}
 			}
 			if roleName == "" {
-				http.Error(w, `{"success":false,"error":"Role not found in session"}`, http.StatusUnauthorized)
+				api.Error(w, http.StatusUnauthorized, "Role not found in session")
 				return
 			}
 		}
@@ -392,9 +384,9 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 		var roleID string
 		if err := db.QueryRow(`SELECT id FROM roles WHERE name = $1`, roleName).Scan(&roleID); err != nil {
 			if err == sql.ErrNoRows {
-				http.Error(w, `{"success":false,"error":"Role not found"}`, http.StatusNotFound)
+				api.Error(w, http.StatusNotFound, "Role not found")
 			} else {
-				http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+				api.Error(w, http.StatusInternalServerError, err.Error())
 			}
 			return
 		}
@@ -443,7 +435,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 
 		var pagesJSON sql.NullString
 		if err := db.QueryRow(query, roleID).Scan(&pagesJSON); err != nil {
-			http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -456,13 +448,12 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 		}
 		if pagesJSON.Valid {
 			if err := json.Unmarshal([]byte(pagesJSON.String), &resp.Pages); err != nil {
-				http.Error(w, `{"success":false,"error":"invalid json returned"}`, http.StatusInternalServerError)
+				api.Error(w, http.StatusInternalServerError, "invalid json returned")
 				return
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, resp, "")
 	}
 }
 
@@ -660,14 +651,12 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"action":     action,
 			"actionedBy": req.UserID,
 			"count":      len(targets),
 			"changes":    audits,
-		})
+		}, "")
 	}
 }
 
@@ -812,12 +801,10 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 			result = append(result, rg)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":      true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"statusFilter": statusFilter,
 			"roles":        result,
-		})
+		}, "")
 	}
 }
 
@@ -831,7 +818,7 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			http.Error(w, `{"success":false,"error":constants.ErrUserIDRequired}`, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -861,7 +848,7 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 
 		rows, err := db.Query(query, req.UserID)
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -878,11 +865,9 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"pages":   pages,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"pages": pages,
+		}, "")
 	}
 }
 
@@ -1119,13 +1104,11 @@ func GetAllPermissionRequests(db *sql.DB) http.HandlerFunc {
 			sfLabel = "all"
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":      true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"statusFilter": sfLabel,
 			"total":        len(requests),
 			"requests":     requests,
-		})
+		}, "")
 	}
 }
 
@@ -1430,11 +1413,9 @@ func GetRolePermissionAuditTable(db *sql.DB) http.HandlerFunc {
 			result = append(result, roleMap[name])
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"totalRoles": len(result),
 			"roles":      result,
-		})
+		}, "")
 	}
 }

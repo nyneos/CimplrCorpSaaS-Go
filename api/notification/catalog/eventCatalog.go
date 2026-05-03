@@ -23,9 +23,20 @@ import (
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errMsg})
+	api.Error(w, status, errMsg)
+}
+
+func respondPayloadError(w http.ResponseWriter, errMsg string) {
+	status := http.StatusInternalServerError
+	switch {
+	case strings.Contains(errMsg, "duplicate"), strings.Contains(errMsg, "invalid"), strings.Contains(errMsg, "required"):
+		status = http.StatusBadRequest
+	case strings.Contains(errMsg, "limit exceeded"), strings.Contains(errMsg, "validation"):
+		status = http.StatusUnprocessableEntity
+	case strings.Contains(errMsg, "unauthorized"), strings.Contains(errMsg, "session"):
+		status = http.StatusUnauthorized
+	}
+	api.Error(w, status, errMsg)
 }
 
 func getRequesterEmail() string {
@@ -179,8 +190,7 @@ func CreateEventSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Seed one notification_config row per channel for this new event
 		seedNotifConfigForEvents(ctx, pgxPool, []string{eventID}, userEmail)
 
-		resp := map[string]any{constants.ValueSuccess: true, "event_id": eventID, "requested": userEmail}
-		api.RespondWithPayload(w, true, "", resp)
+		api.Success(w, http.StatusOK, map[string]interface{}{"event_id": eventID, "requested": userEmail}, "")
 		api.LogInfo("Event created: ID=%s, Code=%s", eventID, req.EventCode)
 	}
 }
@@ -308,7 +318,7 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Seed notification_config rows for all newly created events
 		seedNotifConfigForEvents(ctx, pgxPool, eventIDs, userEmail)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"inserted": inserted})
+		api.Success(w, http.StatusOK, map[string]interface{}{"inserted": inserted}, "")
 		api.LogInfo("Bulk events created: %d", len(inserted))
 	}
 }
@@ -395,7 +405,7 @@ func UpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"event_id": req.EventID, "requested": userEmail})
+		api.Success(w, http.StatusOK, map[string]interface{}{"event_id": req.EventID, "requested": userEmail}, "")
 		api.LogInfo("Event update requested: ID=%s by %s", req.EventID, userEmail)
 	}
 }
@@ -559,7 +569,7 @@ func BulkApproveEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"approved_count": len(req.EventIDs), "checker": userEmail})
+		api.Success(w, http.StatusOK, map[string]interface{}{"approved_count": len(req.EventIDs), "checker": userEmail}, "")
 		api.LogInfo("Bulk event approvals: %d by %s", len(req.EventIDs), userEmail)
 	}
 }
@@ -608,7 +618,7 @@ func BulkRejectEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"rejected_count": len(req.EventIDs), "checker": userEmail})
+		api.Success(w, http.StatusOK, map[string]interface{}{"rejected_count": len(req.EventIDs), "checker": userEmail}, "")
 		api.LogInfo("Bulk event rejections: %d by %s", len(req.EventIDs), userEmail)
 	}
 }
@@ -683,7 +693,7 @@ func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, rows.Err().Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -766,7 +776,7 @@ func GetEventAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			}
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -842,7 +852,7 @@ func DeleteEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"requested": userEmail, "requested_count": len(req.EventIDs)})
+		api.Success(w, http.StatusOK, map[string]interface{}{"requested": userEmail, "requested_count": len(req.EventIDs)}, "")
 		api.LogInfo("Delete requests created for events: %d", len(req.EventIDs))
 	}
 }
@@ -935,7 +945,12 @@ func BulkUpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		allResults := append(success, errorsList...)
-		api.RespondWithPayload(w, api.IsBulkSuccess(allResults), "", allResults)
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(api.APIResponse{
+			Success: api.IsBulkSuccess(allResults),
+			Data:    allResults,
+		})
 	}
 }
 
@@ -1060,7 +1075,7 @@ func GetEventsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("Retrieved %d events with audit data", len(out))
 	}
 }
@@ -1123,7 +1138,7 @@ func GetEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"entity_name":        entityName,
 			"audits":             auditsVal,
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1235,7 +1250,7 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			valueArgs = append(valueArgs, module, sub, code, name, desc, route, isActive, nullStr(entityName))
 		}
 		if len(valueStrings) == 0 {
-			api.RespondWithPayload(w, false, "no valid rows to insert", nil)
+			respondPayloadError(w, "no valid rows to insert")
 			return
 		}
 
@@ -1287,7 +1302,7 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Seed notification_config rows for all newly uploaded events
 		seedNotifConfigForEvents(ctx, pgxPool, eventIDs, userEmail)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"inserted": inserted})
+		api.Success(w, http.StatusOK, map[string]interface{}{"inserted": inserted}, "")
 		api.LogInfo("UploadEventSimple: inserted %d rows from file %s", len(inserted), handler.Filename)
 	}
 }

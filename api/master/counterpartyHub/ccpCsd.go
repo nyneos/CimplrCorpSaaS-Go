@@ -78,11 +78,11 @@ func CreateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CcpCsdInput
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if err := validateCcpCsdInput(req.CcpCsdInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.Error(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -94,7 +94,7 @@ func CreateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -102,7 +102,7 @@ func CreateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -119,7 +119,7 @@ func CreateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.MarginCallFrequency,
 		).Scan(&ccpID); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "CCP/CSD insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -127,13 +127,13 @@ func CreateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO apibox.audit_ccp_csd (ccp_csd_id, action_type, processing_status, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, ccpID, userEmail); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -156,9 +156,8 @@ func CreateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 		}(ccpID, userEmail)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			constants.ValueSuccess: true, "ccp_csd_id": ccpID, "requested": userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "ccp_csd_id": ccpID, "requested": userEmail}, "")
 		api.LogInfo("CCP/CSD created: ID=%s by=%s", ccpID, userEmail)
 	}
 }
@@ -172,11 +171,11 @@ func CreateCcpCsdBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []CcpCsdInput `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
 			return
 		}
 
@@ -188,7 +187,7 @@ func CreateCcpCsdBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -210,7 +209,7 @@ func CreateCcpCsdBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "ccp_csd_id": id})
 		}
 
-		api.RespondWithPayload(w, len(inserted) > 0, "", append(inserted, errList...))
+		api.Success(w, http.StatusOK, append(inserted, errList...), "")
 	}
 }
 
@@ -257,11 +256,11 @@ func UpdateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason   string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.CcpCsdID == "" || len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "ccp_csd_id and fields are required")
+			api.Error(w, http.StatusBadRequest, "ccp_csd_id and fields are required")
 			return
 		}
 
@@ -273,7 +272,7 @@ func UpdateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -281,7 +280,7 @@ func UpdateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -292,11 +291,11 @@ func UpdateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM apibox.ccp_csd_master WHERE ccp_csd_id=$1 FOR UPDATE`, req.CcpCsdID,
 		).Scan(&oldSubType, &oldLEI, &oldParticipantID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "CCP/CSD record not found")
+				api.Error(w, http.StatusNotFound, "CCP/CSD record not found")
 				return
 			}
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -312,7 +311,7 @@ func UpdateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if k == "clearing_acct_kms_ref" {
 				if s, ok := v.(string); ok {
 					if err := validateKMSPath("clearing_acct_kms_ref", s); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.Error(w, http.StatusBadRequest, err.Error())
 						return
 					}
 				}
@@ -322,13 +321,13 @@ func UpdateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pos++
 		}
 		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No valid updatable fields")
+			api.Error(w, http.StatusBadRequest, "No valid updatable fields")
 			return
 		}
 		args = append(args, req.CcpCsdID)
 		if _, err := tx.Exec(ctx, fmt.Sprintf("UPDATE apibox.ccp_csd_master SET %s WHERE ccp_csd_id=$%d", strings.Join(sets, ","), pos), args...); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Update failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -339,16 +338,16 @@ func UpdateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6)`,
 			req.CcpCsdID, req.Reason, userEmail, oldSubType, oldLEI, oldParticipantID); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true, "ccp_csd_id": req.CcpCsdID})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "ccp_csd_id": req.CcpCsdID}, "")
 	}
 }
 
@@ -362,11 +361,11 @@ func BulkApproveCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.CcpCsdIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCCPCSDIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoCCPCSDIDsProvided)
 			return
 		}
 
@@ -378,7 +377,7 @@ func BulkApproveCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -386,7 +385,7 @@ func BulkApproveCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -398,7 +397,7 @@ func BulkApproveCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FOR UPDATE`, req.CcpCsdIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch audits failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		type ar struct{ AuditID, ID, ActionType, ReqBy string }
@@ -428,10 +427,10 @@ func BulkApproveCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, len(success) > 0, "", append(success, errList...))
+		api.Success(w, http.StatusOK, append(success, errList...), "")
 	}
 }
 
@@ -445,11 +444,11 @@ func BulkRejectCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.CcpCsdIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCCPCSDIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoCCPCSDIDsProvided)
 			return
 		}
 
@@ -461,7 +460,7 @@ func BulkRejectCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -469,7 +468,7 @@ func BulkRejectCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -480,15 +479,15 @@ func BulkRejectCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userEmail, req.Comment, req.CcpCsdIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, res.RowsAffected() > 0, "", map[string]interface{}{constants.ValueSuccess: true, "rejected_count": res.RowsAffected()})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "rejected_count": res.RowsAffected()}, "")
 	}
 }
 
@@ -502,11 +501,11 @@ func BulkDeleteCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason    string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.CcpCsdIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCCPCSDIDsProvided)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoCCPCSDIDsProvided)
 			return
 		}
 
@@ -518,7 +517,7 @@ func BulkDeleteCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -526,7 +525,7 @@ func BulkDeleteCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -543,15 +542,15 @@ func BulkDeleteCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO apibox.audit_ccp_csd (ccp_csd_id, action_type, processing_status, reason, requested_by, requested_at)
 			VALUES %s`, strings.Join(auditVals, ",")), auditArgs...); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true, "submitted_count": len(req.CcpCsdIDs)})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "submitted_count": len(req.CcpCsdIDs)}, "")
 	}
 }
 
@@ -611,7 +610,7 @@ func GetCcpCsdAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -630,7 +629,7 @@ func GetCcpCsdAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -654,7 +653,7 @@ func GetCcpCsdAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -673,7 +672,7 @@ func GetCcpCsdAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -693,7 +692,7 @@ func GetCcpCsdApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -712,7 +711,7 @@ func GetCcpCsdApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": out}, "")
 	}
 }
 
@@ -721,7 +720,7 @@ func GetCcpCsdDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		id := r.URL.Query().Get("ccp_csd_id")
 		if id == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "ccp_csd_id is required")
+			api.Error(w, http.StatusBadRequest, "ccp_csd_id is required")
 			return
 		}
 		q := `SELECT ccp_csd_id, counterparty_id, entity_code, entity_sub_type, lei, regulatory_body,
@@ -731,17 +730,17 @@ func GetCcpCsdDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var isDeleted bool
 		if err := pgxPool.QueryRow(ctx, q, id).Scan(&cid, &cpid, &ecode, &esubtype, &lei, &regBody, &participantID, &kmsRef, &mcf, &isDeleted); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "CCP/CSD record not found")
+				api.Error(w, http.StatusNotFound, "CCP/CSD record not found")
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "data": map[string]interface{}{
 			"ccp_csd_id": cid, "counterparty_id": cpid, "entity_code": ecode, "entity_sub_type": esubtype,
 			"lei": lei, "regulatory_body": regBody, "participant_id": participantID,
 			"clearing_acct_kms_ref": kmsRef, "margin_call_frequency": mcf, "is_deleted": isDeleted,
-		}})
+		}}, "")
 	}
 }

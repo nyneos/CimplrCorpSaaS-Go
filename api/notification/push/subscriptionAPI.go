@@ -17,6 +17,7 @@ package push
 //      → { "message": "unsubscribed" }
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"fmt"
@@ -131,7 +132,7 @@ func handleSubscribe(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool)
 		return
 	}
 
-	writeOK(w, map[string]string{"id": id, "message": "subscription registered"})
+	api.Success(w, http.StatusOK, map[string]string{"id": id}, "subscription registered")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -163,5 +164,5 @@ func handleUnsubscribe(w http.ResponseWriter, r *http.Request, pool *pgxpool.Poo
 		 WHERE user_id = $1 AND endpoint = $2
 	`, userID, req.Endpoint)
 
-	writeOK(w, map[string]string{"message": "unsubscribed"})
+	api.Success(w, http.StatusOK, map[string]interface{}{}, "unsubscribed")
 }

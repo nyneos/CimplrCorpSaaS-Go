@@ -180,7 +180,7 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = tmp.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		userName := ""
@@ -191,19 +191,19 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "user not in active sessions")
+			api.Error(w, http.StatusUnauthorized, "user not in active sessions")
 			return
 		}
 
 		// parse multipart
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrFailedToParseForm)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No file uploaded")
+			api.Error(w, http.StatusBadRequest, "No file uploaded")
 			return
 		}
 
@@ -225,13 +225,13 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, fh := range files {
 			f, err := fh.Open()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
+				api.Error(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
 				return
 			}
 			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
 			f.Close()
 			if err != nil || len(records) < 2 {
-				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidOrEmptyFile)
+				api.Error(w, http.StatusBadRequest, constants.ErrInvalidOrEmptyFile)
 				return
 			}
 
@@ -252,7 +252,7 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			mandatories := []string{"scheme_name", "isin", "amc_name", "internal_scheme_code", "internal_risk_rating", "erp_gl_account"}
 			for _, m := range mandatories {
 				if !slices.Contains(validCols, m) {
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("CSV must include column: %s", m))
+					api.Error(w, http.StatusBadRequest, fmt.Sprintf("CSV must include column: %s", m))
 					return
 				}
 			}
@@ -283,7 +283,7 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !found {
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("AMC not found or not approved/active: %s", an))
+					api.Error(w, http.StatusBadRequest, fmt.Sprintf("AMC not found or not approved/active: %s", an))
 					return
 				}
 			}
@@ -319,7 +319,7 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailed)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			committed := false
@@ -333,7 +333,7 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"investment", "masterscheme"}, validCols, pgx.CopyFromRows(copyRows)); err != nil {
 				msg, status := getUserFriendlySchemeError(err, "COPY failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 
@@ -345,7 +345,7 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					WHERE isin = ANY($1)
 				`, isinList); err != nil {
 					msg, status := getUserFriendlySchemeError(err, "Failed to set source")
-					api.RespondWithError(w, status, msg)
+					api.Error(w, status, msg)
 					return
 				}
 			}
@@ -360,14 +360,14 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				`, userName, isinList)
 				if err != nil {
 					msg, status := getUserFriendlySchemeError(err, constants.ErrAuditInsertFailed)
-					api.RespondWithError(w, status, msg)
+					api.Error(w, status, msg)
 					return
 				}
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				msg, status := getUserFriendlySchemeError(err, constants.ErrCommitFailedCapitalized)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			committed = true
@@ -375,7 +375,7 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, UploadSchemeResult{Success: true, BatchID: uuid.New().String()})
 		}
 
-		api.RespondWithPayload(w, true, "", results)
+		api.Success(w, http.StatusOK, results, "")
 	}
 }
 
@@ -386,7 +386,7 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateSchemeRequestSingle
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		// Validate required
@@ -395,7 +395,7 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			strings.TrimSpace(req.InternalSchemeCode) == "" ||
 			strings.TrimSpace(req.InternalRiskRating) == "" ||
 			strings.TrimSpace(req.ErpGlAccount) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Missing required scheme fields")
+			api.Error(w, http.StatusBadRequest, "Missing required scheme fields")
 			return
 		}
 
@@ -408,7 +408,7 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -424,7 +424,7 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !found {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+req.AmcName)
+			api.Error(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+req.AmcName)
 			return
 		}
 
@@ -433,7 +433,7 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var tmp int
 			err := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, req.ISIN).Scan(&tmp)
 			if err == nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Scheme with ISIN already exists")
+				api.Error(w, http.StatusBadRequest, "Scheme with ISIN already exists")
 				return
 			}
 		}
@@ -441,7 +441,7 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -450,7 +450,7 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		allowed := map[string]bool{"FIFO": true, "LIFO": true, "WEIGHTED_AVERAGE": true}
 		m := strings.ToUpper(strings.TrimSpace(req.Method))
 		if m != "" && !allowed[m] {
-			api.RespondWithError(w, http.StatusBadRequest, "method must be FIFO, LIFO or WEIGHTED_AVERAGE")
+			api.Error(w, http.StatusBadRequest, "method must be FIFO, LIFO or WEIGHTED_AVERAGE")
 			return
 		}
 
@@ -468,7 +468,7 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.InternalRiskRating, req.ErpGlAccount, req.AmfiSchemeCode, defaultIfEmpty(req.Status, "Active"), m,
 		).Scan(&schemeID); err != nil {
 			msg, status := getUserFriendlySchemeError(err, "Insert failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -478,23 +478,17 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 		`, schemeID, userEmail); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrCommitFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{
-			"scheme_id":        schemeID,
-			"scheme_name":      req.SchemeName,
-			"amfi_scheme_code": req.AmfiSchemeCode,
-			"source":           "Manual",
-			"method":           m,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"scheme_id": schemeID, "scheme_name": req.SchemeName, "amfi_scheme_code": req.AmfiSchemeCode, "source": "Manual", "method": m}, "")
 	}
 }
 
@@ -505,15 +499,15 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UpdateSchemeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if strings.TrimSpace(req.SchemeID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "scheme_id required")
+			api.Error(w, http.StatusBadRequest, "scheme_id required")
 			return
 		}
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFieldsToUpdateUser)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoFieldsToUpdateUser)
 			return
 		}
 
@@ -525,7 +519,7 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -533,7 +527,7 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -551,7 +545,7 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9],
 		); err != nil {
 			msg, status := getUserFriendlySchemeError(err, "fetch failed")
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -580,7 +574,7 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					allowed := map[string]bool{"FIFO": true, "LIFO": true, "WEIGHTED_AVERAGE": true}
 					mm := strings.ToUpper(strings.TrimSpace(fmt.Sprint(v)))
 					if mm != "" && !allowed[mm] {
-						api.RespondWithError(w, http.StatusBadRequest, "method must be FIFO, LIFO or WEIGHTED_AVERAGE")
+						api.Error(w, http.StatusBadRequest, "method must be FIFO, LIFO or WEIGHTED_AVERAGE")
 						return
 					}
 					v = mm
@@ -597,7 +591,7 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 					}
 					if !found {
-						api.RespondWithError(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+amcName)
+						api.Error(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+amcName)
 						return
 					}
 				}
@@ -608,7 +602,7 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						var exists int
 						err := tx.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false AND scheme_id <> $2 LIMIT 1`, newIsin, req.SchemeID).Scan(&exists)
 						if err == nil {
-							api.RespondWithError(w, http.StatusBadRequest, "ISIN already exists for another scheme")
+							api.Error(w, http.StatusBadRequest, "ISIN already exists for another scheme")
 							return
 						}
 					}
@@ -621,7 +615,7 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "no valid updatable fields found")
+			api.Error(w, http.StatusBadRequest, "no valid updatable fields found")
 			return
 		}
 
@@ -629,7 +623,7 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, req.SchemeID)
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrUpdateFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
@@ -639,20 +633,17 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
 		`, req.SchemeID, req.Reason, userEmail); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrCommitFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{
-			"scheme_id": req.SchemeID,
-			"requested": userEmail,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"scheme_id": req.SchemeID, "requested": userEmail}, "")
 	}
 }
 
@@ -667,11 +658,11 @@ func DeleteScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason    string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if len(req.SchemeIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "scheme_ids required")
+			api.Error(w, http.StatusBadRequest, "scheme_ids required")
 			return
 		}
 
@@ -683,7 +674,7 @@ func DeleteScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -691,7 +682,7 @@ func DeleteScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -702,17 +693,17 @@ func DeleteScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())
 			`, id, req.Reason, requestedBy); err != nil {
 				msg, status := getUserFriendlySchemeError(err, "insert failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrCommitFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.SchemeIDs})
+		api.Success(w, http.StatusOK, map[string]interface{}{"delete_requested": req.SchemeIDs}, "")
 	}
 }
 
@@ -729,7 +720,7 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -740,7 +731,7 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -748,7 +739,7 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -762,7 +753,7 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := tx.Query(ctx, sel, req.SchemeIDs)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -794,10 +785,18 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(toApprove) == 0 && len(toDeleteActionIDs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrNoApprovableActions, map[string]any{
-				"approved_action_ids": []string{},
-				"deleted_schemes":     []string{},
-			})
+			{
+				apiErrMsg := constants.ErrNoApprovableActions
+				apiErrStatus := http.StatusInternalServerError
+				if strings.Contains(apiErrMsg, "duplicate") || strings.Contains(apiErrMsg, "invalid") || strings.Contains(apiErrMsg, "required") {
+					apiErrStatus = http.StatusBadRequest
+				} else if strings.Contains(apiErrMsg, "limit exceeded") || strings.Contains(apiErrMsg, "validation") {
+					apiErrStatus = http.StatusUnprocessableEntity
+				} else if strings.Contains(apiErrMsg, "unauthorized") || strings.Contains(apiErrMsg, "session") {
+					apiErrStatus = http.StatusUnauthorized
+				}
+				api.Error(w, apiErrStatus, apiErrMsg)
+			}
 			return
 		}
 
@@ -808,7 +807,7 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toApprove); err != nil {
 				msg, status := getUserFriendlySchemeError(err, "approve update failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
@@ -820,7 +819,7 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toDeleteActionIDs); err != nil {
 				msg, status := getUserFriendlySchemeError(err, "mark deleted failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			if _, err := tx.Exec(ctx, `
@@ -829,21 +828,18 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE scheme_id = ANY($1)
 			`, deleteMasterIDs); err != nil {
 				msg, status := getUserFriendlySchemeError(err, "master soft-delete failed")
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrCommitFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{
-			"approved_action_ids": toApprove,
-			"deleted_schemes":     deleteMasterIDs,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"approved_action_ids": toApprove, "deleted_schemes": deleteMasterIDs}, "")
 	}
 }
 
@@ -858,7 +854,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -869,7 +865,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -877,7 +873,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailedCapitalized)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -891,7 +887,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := tx.Query(ctx, sel, req.SchemeIDs)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -926,7 +922,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if len(cannotReject) > 0 {
 				msg += fmt.Sprintf("cannot reject already approved scheme_ids: %v", cannotReject)
 			}
-			api.RespondWithError(w, http.StatusBadRequest, msg)
+			api.Error(w, http.StatusBadRequest, msg)
 			return
 		}
 
@@ -936,17 +932,17 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE action_id = ANY($3)
 		`, checkerBy, req.Comment, actionIDs); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrUpdateFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrCommitFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})
+		api.Success(w, http.StatusOK, map[string]interface{}{"rejected_action_ids": actionIDs}, "")
 	}
 }
 
@@ -979,7 +975,7 @@ func GetApprovedActiveSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -991,7 +987,7 @@ func GetApprovedActiveSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"scheme_id": id, "scheme_name": name, "isin": isin, "internal_scheme_code": code, "amc_name": amc, "amfi_scheme_code": amfiCode, "method": method,
 			})
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1052,7 +1048,7 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1062,7 +1058,7 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var id, name, isin, code, amc, amfiCode, method string
 			if err := rows.Scan(&id, &name, &isin, &code, &amc, &amfiCode, &method); err != nil {
 				msg, status := getUserFriendlySchemeError(err, constants.ErrScanFailedPrefix)
-				api.RespondWithError(w, status, msg)
+				api.Error(w, status, msg)
 				return
 			}
 			out = append(out, map[string]interface{}{
@@ -1076,7 +1072,7 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1133,7 +1129,7 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
+			api.Error(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1154,11 +1150,11 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -1186,11 +1182,11 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateSchemeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "rows required")
+			api.Error(w, http.StatusBadRequest, "rows required")
 			return
 		}
 
@@ -1202,7 +1198,7 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1323,7 +1319,7 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		api.Success(w, http.StatusOK, results, "")
 	}
 }
 
@@ -1338,7 +1334,7 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -1350,7 +1346,7 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1497,6 +1493,6 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		api.Success(w, http.StatusOK, results, "")
 	}
 }

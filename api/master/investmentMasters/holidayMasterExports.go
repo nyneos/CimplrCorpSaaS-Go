@@ -230,7 +230,7 @@ func ExportCalendarICS(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID     string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.CalendarID) == "" {
-			api.RespondWithError(w, 400, constants.ErrCalendarIDRequiredUser)
+			api.Error(w, 400, constants.ErrCalendarIDRequiredUser)
 			return
 		}
 
@@ -242,19 +242,19 @@ func ExportCalendarICS(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if user == "" {
-			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			api.Error(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := r.Context()
 		cal, err := fetchApprovedActiveCalendar(ctx, pgxPool, req.CalendarID)
 		if err != nil {
-			api.RespondWithError(w, 404, "calendar not found or not approved/active")
+			api.Error(w, 404, "calendar not found or not approved/active")
 			return
 		}
 		hols, err := fetchApprovedActiveHolidays(ctx, pgxPool, req.CalendarID, cal.EffFrom, cal.EffTo)
 		if err != nil {
-			api.RespondWithError(w, 500, "fetch holidays failed: "+err.Error())
+			api.Error(w, 500, "fetch holidays failed: "+err.Error())
 			return
 		}
 
@@ -300,20 +300,20 @@ func CalendarFeedICS(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID     string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.CalendarID) == "" {
-			api.RespondWithError(w, 400, constants.ErrCalendarIDRequiredUser)
+			api.Error(w, 400, constants.ErrCalendarIDRequiredUser)
 			return
 		}
 
 		ctx := r.Context()
 		cal, err := fetchApprovedActiveCalendar(ctx, pgxPool, req.CalendarID)
 		if err != nil {
-			api.RespondWithError(w, 404, "calendar not found or not approved/active")
+			api.Error(w, 404, "calendar not found or not approved/active")
 			return
 		}
 
 		hols, err := fetchApprovedActiveHolidays(ctx, pgxPool, req.CalendarID, cal.EffFrom, cal.EffTo)
 		if err != nil {
-			api.RespondWithError(w, 500, "fetch holidays failed")
+			api.Error(w, 500, "fetch holidays failed")
 			return
 		}
 
@@ -345,14 +345,14 @@ func ShareLinksCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID     string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.CalendarID) == "" {
-			api.RespondWithError(w, 400, constants.ErrCalendarIDRequiredUser)
+			api.Error(w, 400, constants.ErrCalendarIDRequiredUser)
 			return
 		}
 
 		ctx := r.Context()
 		cal, err := fetchApprovedActiveCalendar(ctx, pgxPool, req.CalendarID)
 		if err != nil {
-			api.RespondWithError(w, 404, "calendar not approved/active")
+			api.Error(w, 404, "calendar not approved/active")
 			return
 		}
 
@@ -369,7 +369,7 @@ func ShareLinksCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"latest_audit_status":      cal.Processing,
 		}
 
-		api.RespondWithPayload(w, true, "", resp)
+		api.Success(w, http.StatusOK, resp, "")
 	}
 }
 

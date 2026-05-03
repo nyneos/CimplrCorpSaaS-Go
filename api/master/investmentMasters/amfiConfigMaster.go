@@ -29,7 +29,7 @@ func GetAMFISchemeMasterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -47,7 +47,7 @@ func GetAMFISchemeMasterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -73,7 +73,7 @@ func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -95,7 +95,7 @@ func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -128,7 +128,7 @@ ORDER BY a.amc_name;
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch AMC names: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch AMC names: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -144,7 +144,7 @@ ORDER BY a.amc_name;
 			})
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -170,7 +170,7 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, amcQuery)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch AMCs: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch AMCs: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -187,7 +187,7 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			amcs = append(amcs, a)
 		}
 		if len(amcs) == 0 {
-			api.RespondWithPayload(w, true, "No approved active AMCs found", []map[string]any{})
+			api.Success(w, http.StatusOK, []map[string]any{}, "No approved active AMCs found")
 			return
 		}
 
@@ -223,7 +223,7 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		schemeRows, err := pgxPool.Query(ctx, schemeQuery, amcNames)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch schemes: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch schemes: "+err.Error())
 			return
 		}
 		defer schemeRows.Close()
@@ -255,10 +255,10 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if schemeRows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Scheme scan error: "+schemeRows.Err().Error())
+			api.Error(w, http.StatusInternalServerError, "Scheme scan error: "+schemeRows.Err().Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }

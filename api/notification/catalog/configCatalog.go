@@ -113,17 +113,17 @@ func UpsertNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			PriorityLevel   *int   `json:"priority_level"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		req.Channel = strings.ToUpper(strings.TrimSpace(req.Channel))
 		if req.EventID == "" || req.Channel == "" {
-			api.RespondWithPayload(w, false, "event_id and channel are required", nil)
+			respondPayloadError(w, "event_id and channel are required")
 			return
 		}
 		validChannels := map[string]bool{"EMAIL": true, "SMS": true, "PUSH": true, "WHATSAPP": true}
 		if !validChannels[req.Channel] {
-			api.RespondWithPayload(w, false, "channel must be one of EMAIL, SMS, PUSH, WHATSAPP", nil)
+			respondPayloadError(w, "channel must be one of EMAIL, SMS, PUSH, WHATSAPP")
 			return
 		}
 
@@ -204,11 +204,11 @@ func UpsertNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&configID, &eventID, &channel, &isEnabledOut,
 			&retryMaxOut, &retryBackoffOut, &priorityLevelOut, &updatedBy, &updatedAt,
 		); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"config_id":          configID,
 			"event_id":           eventID,
 			"channel":            channel,
@@ -218,7 +218,7 @@ func UpsertNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"priority_level":     priorityLevelOut,
 			"updated_by":         updatedBy,
 			"updated_at":         updatedAt,
-		})
+		}, "")
 	}
 }
 
@@ -334,7 +334,7 @@ func GetNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -354,10 +354,10 @@ func GetNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if rows.Err() != nil {
-			api.RespondWithPayload(w, false, "row scan error: "+rows.Err().Error(), nil)
+			respondPayloadError(w, "row scan error: "+rows.Err().Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -401,11 +401,11 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithPayload(w, false, "rows required", nil)
+			respondPayloadError(w, "rows required")
 			return
 		}
 
@@ -417,7 +417,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -531,17 +531,20 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
+			respondPayloadError(w, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, api.IsBulkSuccess(func() []map[string]interface{} {
-			out := make([]map[string]interface{}, len(results))
-			for i, r := range results {
-				out[i] = map[string]interface{}{"success": r.Success}
-			}
-			return out
-		}()), "", results)
+		bulkResults := make([]map[string]interface{}, len(results))
+		for i, r := range results {
+			bulkResults[i] = map[string]interface{}{"success": r.Success}
+		}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(api.APIResponse{
+			Success: api.IsBulkSuccess(bulkResults),
+			Data:    results,
+		})
 	}
 }
 
@@ -558,11 +561,11 @@ func BulkApproveNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		if len(req.ConfigIDs) == 0 {
-			api.RespondWithPayload(w, false, "config_ids required", nil)
+			respondPayloadError(w, "config_ids required")
 			return
 		}
 
@@ -574,7 +577,7 @@ func BulkApproveNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -601,19 +604,19 @@ func BulkApproveNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, checker, req.Comment, req.ConfigIDs)
 		}
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
+			respondPayloadError(w, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"approved_count": tag.RowsAffected(),
 			"checker":        checker,
-		})
+		}, "")
 		api.LogInfo("BulkApproveNotifConfig: %d rows by %s", tag.RowsAffected(), checker)
 	}
 }
@@ -632,11 +635,11 @@ func BulkRejectNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
+			respondPayloadError(w, constants.ErrInvalidRequestBody)
 			return
 		}
 		if len(req.ConfigIDs) == 0 {
-			api.RespondWithPayload(w, false, "config_ids required", nil)
+			respondPayloadError(w, "config_ids required")
 			return
 		}
 
@@ -648,7 +651,7 @@ func BulkRejectNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -670,7 +673,7 @@ func BulkRejectNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND processing_status LIKE '%PENDING%'
 		`, req.ConfigIDs)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 		var rollbacks []rollbackRow
@@ -707,7 +710,7 @@ func BulkRejectNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, checker, req.Comment, req.ConfigIDs)
 		}
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondPayloadError(w, err.Error())
 			return
 		}
 
@@ -752,15 +755,15 @@ func BulkRejectNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
+			respondPayloadError(w, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"rejected_count": tag.RowsAffected(),
 			"checker":        checker,
 			"rolled_back":    len(rollbacks),
-		})
+		}, "")
 		api.LogInfo("BulkRejectNotifConfig: %d rows, %d rolled back by %s", tag.RowsAffected(), len(rollbacks), checker)
 	}
 }

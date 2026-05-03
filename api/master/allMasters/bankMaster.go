@@ -107,14 +107,14 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req BankMasterRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
 		// // Get pre-validated context values
 		// session := middlewares.GetSessionFromContext(r.Context())
 		// if session == nil {
-		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// 	api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 		// 	return
 		// }
 		// createdBy := session.Name
@@ -128,27 +128,27 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 
 		// Validate required fields
 		if req.BankName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.FormatMissingFieldError("bank_name"))
+			api.Error(w, http.StatusBadRequest, constants.FormatMissingFieldError("bank_name"))
 			return
 		}
 		if req.CountryOfHeadquarters == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.FormatMissingFieldError("country_of_headquarters"))
+			api.Error(w, http.StatusBadRequest, constants.FormatMissingFieldError("country_of_headquarters"))
 			return
 		}
 		if req.ConnectivityType == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.FormatMissingFieldError("connectivity_type"))
+			api.Error(w, http.StatusBadRequest, constants.FormatMissingFieldError("connectivity_type"))
 			return
 		}
 		ctx := r.Context()
 		tx, txErr := pgxPool.Begin(ctx)
 		if txErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		var bankID string
@@ -182,13 +182,11 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if statusCode == http.StatusOK {
 				// Known error - return 200 with success: false
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: false,
-					"error":                errMsg,
-				})
+				api.Success(w, http.StatusOK, map[string]interface{}{
+					constants.ValueSuccess: false}, "")
 			} else {
 				// Unknown/server error - return error status code
-				api.RespondWithError(w, statusCode, errMsg)
+				api.Error(w, statusCode, errMsg)
 			}
 			return
 		}
@@ -204,17 +202,15 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		)
 		if auditErr != nil {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditLogFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrAuditLogFailed)
 			return
 		}
 		if commitErr := tx.Commit(ctx); commitErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionCommitFailed)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTransactionCommitFailed)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"bank_id":              bankID,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "bank_id": bankID}, "")
 	}
 }
 
@@ -224,7 +220,7 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 		// Get created_by from session
@@ -237,7 +233,7 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 
@@ -264,7 +260,7 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyBankError(err, "Failed to retrieve banks")
-			api.RespondWithError(w, statusCode, errMsg)
+			api.Error(w, statusCode, errMsg)
 			return
 		}
 		defer rows.Close()
@@ -531,16 +527,14 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if anyError != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
+			api.Error(w, http.StatusInternalServerError, anyError.Error())
 			return
 		}
 		if banks == nil {
 			banks = make([]map[string]interface{}, 0)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 banks,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "data": banks}, "")
 	}
 }
 
@@ -551,7 +545,7 @@ func GetBankNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		query := `
@@ -578,7 +572,7 @@ func GetBankNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyBankError(err, "Failed to retrieve banks")
-			api.RespondWithError(w, statusCode, errMsg)
+			api.Error(w, statusCode, errMsg)
 			return
 		}
 		defer rows.Close()
@@ -604,16 +598,14 @@ func GetBankNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if anyError != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
+			api.Error(w, http.StatusInternalServerError, anyError.Error())
 			return
 		}
 		if results == nil {
 			results = make([]map[string]interface{}, 0)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"results":              results,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "data": results}, "")
 	}
 }
 
@@ -627,14 +619,14 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				UserID string `json:"user_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-				api.RespondWithError(w, http.StatusBadRequest, "user_id required in body")
+				api.Error(w, http.StatusBadRequest, "user_id required in body")
 				return
 			}
 			userID = req.UserID
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
-				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+				api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 				return
 			}
 		}
@@ -642,7 +634,7 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Get pre-validated context values
 		// session := middlewares.GetSessionFromContext(r.Context())
 		// if session == nil {
-		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// 	api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 		// 	return
 		// }
 		// userName := session.Name
@@ -656,31 +648,31 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
+			api.Error(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 		batchIDs := make([]string, 0, len(files))
 		for _, fh := range files {
 			f, err := fh.Open()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file: "+fh.Filename)
+				api.Error(w, http.StatusBadRequest, "Failed to open file: "+fh.Filename)
 				return
 			}
 			ext := getFileExt(fh.Filename)
 			records, err := parseCashFlowCategoryFile(f, ext)
 			f.Close()
 			if err != nil || len(records) < 2 {
-				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
+				api.Error(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
 				return
 			}
 			headerRow := records[0]
@@ -723,7 +715,7 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyBankError(err, "Transaction failed")
-				api.RespondWithError(w, statusCode, errMsg)
+				api.Error(w, statusCode, errMsg)
 				return
 			}
 			committed := false
@@ -737,13 +729,13 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_bank_table"}, columns, pgx.CopyFromRows(copyRows))
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyBankError(err, "Failed to stage data")
-				api.RespondWithError(w, statusCode, errMsg)
+				api.Error(w, statusCode, errMsg)
 				return
 			} // read mapping
 			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_bank`)
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error")
+				api.Error(w, http.StatusInternalServerError, "Mapping error")
 				return
 			}
 			mapping := make(map[string]string)
@@ -769,7 +761,7 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					tgtCols = append(tgtCols, t)
 				} else {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(constants.ErrNoMappingForSourceColumn, h))
+					api.Error(w, http.StatusBadRequest, fmt.Sprintf(constants.ErrNoMappingForSourceColumn, h))
 					return
 				}
 			}
@@ -793,7 +785,7 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				tx.Rollback(ctx)
 				errMsg, statusCode := getUserFriendlyBankError(err, "Insert failed")
-				api.RespondWithError(w, statusCode, errMsg)
+				api.Error(w, statusCode, errMsg)
 				return
 			}
 			var newIDs []string
@@ -810,7 +802,7 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
 					tx.Rollback(ctx)
 					errMsg, statusCode := getUserFriendlyBankError(err, "Audit log failed")
-					api.RespondWithError(w, statusCode, errMsg)
+					api.Error(w, statusCode, errMsg)
 					return
 				}
 			}
@@ -818,14 +810,14 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.Commit(ctx); err != nil {
 				tx.Rollback(ctx)
 				errMsg, statusCode := getUserFriendlyBankError(err, constants.ErrTxCommitFailed)
-				api.RespondWithError(w, statusCode, errMsg)
+				api.Error(w, statusCode, errMsg)
 				return
 			}
 			committed = true
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
+		api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs}, "")
 	}
 } // Bulk update handler for bank master
 func UpdateBankMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -838,14 +830,14 @@ func UpdateBankMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"banks"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
 		// Get pre-validated context values
 		// session := middlewares.GetSessionFromContext(r.Context())
 		// if session == nil {
-		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// 	api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 		// 	return
 		// }
 		// updatedBy := session.Name
@@ -858,7 +850,7 @@ func UpdateBankMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 		var results []map[string]interface{}
@@ -1062,10 +1054,8 @@ func UpdateBankMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		finalSuccess := api.IsBulkSuccess(results)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: finalSuccess,
-			"results":              results,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: finalSuccess, "data": results}, "")
 	}
 }
 
@@ -1078,14 +1068,14 @@ func BulkDeleteBankAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason  string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.BankIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
+			api.Error(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
 
 		// Get pre-validated context values
 		// session := middlewares.GetSessionFromContext(r.Context())
 		// if session == nil {
-		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// 	api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 		// 	return
 		// }
 		requestedBy := ""
@@ -1098,7 +1088,7 @@ func BulkDeleteBankAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 		// requestedBy := session.Name
@@ -1114,10 +1104,8 @@ func BulkDeleteBankAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"created":              results,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "created": results}, "")
 	}
 }
 
@@ -1130,14 +1118,14 @@ func BulkRejectBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.BankIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
+			api.Error(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
 
 		// Get pre-validated context values
 		// session := middlewares.GetSessionFromContext(r.Context())
 		// if session == nil {
-		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// 	api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 		// 	return
 		// }
 		checkerBy := ""
@@ -1150,7 +1138,7 @@ func BulkRejectBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 		// checkerBy := session.Name
@@ -1158,7 +1146,7 @@ func BulkRejectBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.BankIDs))
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyBankError(err, "Failed to reject audit actions")
-			api.RespondWithError(w, statusCode, errMsg)
+			api.Error(w, statusCode, errMsg)
 			return
 		}
 		defer rows.Close()
@@ -1169,10 +1157,8 @@ func BulkRejectBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			updated = append(updated, id, bankID)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"updated":              updated,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "updated": updated}, "")
 	}
 }
 
@@ -1185,14 +1171,14 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.BankIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
+			api.Error(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
 
 		// Get pre-validated context values
 		// log.Printf("Approving bank audit actions for user: %s, bank_ids: %v", session.Name, req.BankIDs)
 		// if session == nil {
-		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// 	api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 		// 	log.Printf("Unauthorized access to approve bank audit actions: %v", req)
 		// 	return
 		// }
@@ -1206,7 +1192,7 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 		// checkerBy := session.Name
@@ -1235,7 +1221,7 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.BankIDs))
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyBankError(err, "Failed to approve audit actions")
-			api.RespondWithError(w, statusCode, errMsg)
+			api.Error(w, statusCode, errMsg)
 			return
 		}
 		defer rows.Close()
@@ -1246,10 +1232,7 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			updated = append(updated, id, bankID)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"updated":              updated,
-			"deleted":              deleted,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			constants.ValueSuccess: true, "updated": updated, "deleted": deleted}, "")
 	}
 }
