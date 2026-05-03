@@ -2,6 +2,7 @@ package bankstatement
 
 import (
 	"CimplrCorpSaas/api/constants"
+	apipreval "CimplrCorpSaas/api/middlewares"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -97,6 +98,11 @@ func GetStagingBatchHandler(db *sql.DB) http.Handler {
 			return
 		}
 		ctx := r.Context()
+		sessionUID := apipreval.GetUserIDFromContext(ctx)
+		if sessionUID == "" {
+			respondWithError(w, nil, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 
 		var (
 			batchID        string
@@ -112,8 +118,8 @@ func GetStagingBatchHandler(db *sql.DB) http.Handler {
 			SELECT batch_id, user_id, source_filename, status,
 			       total_files, processed_files, failed_files, created_at
 			FROM cimplrcorpsaas.pdf_staging_batch
-			WHERE batch_id = $1
-		`, body.BatchID).Scan(&batchID, &userID, &sourceFilename, &status,
+			WHERE batch_id = $1 AND user_id = $2
+		`, body.BatchID, sessionUID).Scan(&batchID, &userID, &sourceFilename, &status,
 			&totalFiles, &processed, &failed, &createdAt)
 		if err == sql.ErrNoRows {
 			respondWithError(w, nil, "batch not found", http.StatusNotFound)
@@ -129,6 +135,8 @@ func GetStagingBatchHandler(db *sql.DB) http.Handler {
 			       committed_bs_id, created_at
 			FROM cimplrcorpsaas.pdf_staging_statement
 			WHERE batch_id = $1
+			  AND (committed_bs_id IS NULL OR trim(committed_bs_id::text) = '')
+			  AND lower(coalesce(status, '')) <> 'committed'
 			ORDER BY created_at
 		`, batchID)
 		if err != nil {
@@ -168,17 +176,6 @@ func GetStagingBatchHandler(db *sql.DB) http.Handler {
 			stmts = append(stmts, s)
 		}
 
-		allStmtsCommitted := len(stmts) > 0
-		for _, st := range stmts {
-			if st.Status != "committed" {
-				allStmtsCommitted = false
-				break
-			}
-		}
-		if allStmtsCommitted {
-			status = "committed"
-		}
-
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
@@ -210,6 +207,11 @@ func GetStagingStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 		ctx := r.Context()
+		sessionUID := apipreval.GetUserIDFromContext(ctx)
+		if sessionUID == "" {
+			respondWithError(w, nil, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 
 		var (
 			stagingID   string
@@ -223,11 +225,14 @@ func GetStagingStatementHandler(db *sql.DB) http.Handler {
 			createdAt   time.Time
 		)
 		err := db.QueryRowContext(ctx, `
-			SELECT staging_id, batch_id, original_filename, csv_url,
-			       raw_statement, status, error_message, committed_bs_id, created_at
-			FROM cimplrcorpsaas.pdf_staging_statement
-			WHERE staging_id = $1
-		`, body.StagingID).Scan(&stagingID, &batchID, &filename, &csvURL,
+			SELECT s.staging_id, s.batch_id, s.original_filename, s.csv_url,
+			       s.raw_statement, s.status, s.error_message, s.committed_bs_id, s.created_at
+			FROM cimplrcorpsaas.pdf_staging_statement s
+			INNER JOIN cimplrcorpsaas.pdf_staging_batch b ON b.batch_id = s.batch_id
+			WHERE s.staging_id = $1 AND b.user_id = $2
+			  AND (s.committed_bs_id IS NULL OR trim(s.committed_bs_id::text) = '')
+			  AND lower(coalesce(s.status, '')) <> 'committed'
+		`, body.StagingID, sessionUID).Scan(&stagingID, &batchID, &filename, &csvURL,
 			&rawStmt, &status, &errMsg, &committedID, &createdAt)
 		if err == sql.ErrNoRows {
 			respondWithError(w, nil, "statement not found", http.StatusNotFound)
@@ -266,26 +271,17 @@ func GetStagingStatementHandler(db *sql.DB) http.Handler {
 	})
 }
 
-// ListStagingByUserHandler returns all staged batches and their statement summaries
-// for a given user_id. Supports GET ?user_id=... or POST {"user_id":"..."}.
+// ListStagingByUserHandler returns staged batches and non-committed statement summaries
+// for the authenticated user only (user_id from session / prevalidation context).
+// Committed statements are omitted; batches where every statement is committed are omitted entirely.
 func ListStagingByUserHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var userID string
-		if r.Method == http.MethodGet {
-			userID = r.URL.Query().Get("user_id")
-		} else {
-			var body struct {
-				UserID string `json:"user_id"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
-				userID = body.UserID
-			}
-		}
+		ctx := r.Context()
+		userID := apipreval.GetUserIDFromContext(ctx)
 		if userID == "" {
-			respondWithError(w, nil, "user_id is required", http.StatusBadRequest)
+			respondWithError(w, nil, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		ctx := r.Context()
 
 		rows, err := db.QueryContext(ctx, `
 			SELECT b.batch_id, b.source_filename, b.status,
@@ -293,7 +289,9 @@ func ListStagingByUserHandler(db *sql.DB) http.Handler {
 			       s.staging_id, s.original_filename, s.csv_url, s.status,
 			       s.error_message, s.committed_bs_id, s.created_at
 			FROM cimplrcorpsaas.pdf_staging_batch b
-			LEFT JOIN cimplrcorpsaas.pdf_staging_statement s ON s.batch_id = b.batch_id
+			INNER JOIN cimplrcorpsaas.pdf_staging_statement s ON s.batch_id = b.batch_id
+			  AND (s.committed_bs_id IS NULL OR trim(s.committed_bs_id::text) = '')
+			  AND lower(coalesce(s.status, '')) <> 'committed'
 			WHERE b.user_id = $1
 			ORDER BY b.created_at DESC, s.created_at ASC
 		`, userID)
@@ -360,7 +358,7 @@ func ListStagingByUserHandler(db *sql.DB) http.Handler {
 				s := stmtRow{
 					StagingID: stagingID.String,
 					Filename:  stmtFilename.String,
-					Status:    stmtStatus.String,
+					Status:    stagingStatementDisplayStatus(stmtStatus.String, committedID),
 				}
 				if csvURL.Valid {
 					s.CSVUrl = csvURL.String
@@ -371,7 +369,6 @@ func ListStagingByUserHandler(db *sql.DB) http.Handler {
 				if committedID.Valid {
 					s.CommittedID = committedID.String
 				}
-				s.Status = stagingStatementDisplayStatus(s.Status, committedID)
 				if stmtCreatedAt.Valid {
 					s.CreatedAt = stmtCreatedAt.Time.Format(time.RFC3339)
 				}
@@ -382,15 +379,8 @@ func ListStagingByUserHandler(db *sql.DB) http.Handler {
 		batches := make([]*batchRow, 0, len(batchOrder))
 		for _, id := range batchOrder {
 			b := batchMap[id]
-			allCommitted := len(b.Statements) > 0
-			for _, st := range b.Statements {
-				if st.Status != "committed" {
-					allCommitted = false
-					break
-				}
-			}
-			if allCommitted {
-				b.Status = "committed"
+			if len(b.Statements) == 0 {
+				continue
 			}
 			batches = append(batches, b)
 		}
@@ -422,11 +412,18 @@ func UpdateStagingStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 		ctx := r.Context()
+		sessionUID := apipreval.GetUserIDFromContext(ctx)
+		if sessionUID == "" {
+			respondWithError(w, nil, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 		res, err := db.ExecContext(ctx, `
-			UPDATE cimplrcorpsaas.pdf_staging_statement
+			UPDATE cimplrcorpsaas.pdf_staging_statement st
 			   SET raw_statement = $1, status = 'parsed', updated_at = now()
-			 WHERE staging_id = $2 AND status != 'committed'
-		`, raw, body.StagingID)
+			  FROM cimplrcorpsaas.pdf_staging_batch b
+			 WHERE st.staging_id = $2 AND st.batch_id = b.batch_id AND b.user_id = $3
+			   AND st.status != 'committed'
+		`, raw, body.StagingID, sessionUID)
 		if err != nil {
 			respondWithError(w, err, "failed to update statement", http.StatusInternalServerError)
 			return
@@ -459,11 +456,19 @@ func DeleteStagingStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 		ctx := r.Context()
+		sessionUID := apipreval.GetUserIDFromContext(ctx)
+		if sessionUID == "" {
+			respondWithError(w, nil, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 
 		var batchID sql.NullString
 		err := db.QueryRowContext(ctx, `
-			SELECT batch_id::text FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1
-		`, sid).Scan(&batchID)
+			SELECT s.batch_id::text
+			  FROM cimplrcorpsaas.pdf_staging_statement s
+			  INNER JOIN cimplrcorpsaas.pdf_staging_batch b ON b.batch_id = s.batch_id
+			 WHERE s.staging_id = $1 AND b.user_id = $2
+		`, sid, sessionUID).Scan(&batchID)
 		if err == sql.ErrNoRows {
 			respondWithError(w, nil, "statement not found", http.StatusNotFound)
 			return
@@ -524,6 +529,11 @@ func DeleteStagingBatchHandler(db *sql.DB) http.Handler {
 			return
 		}
 		ctx := r.Context()
+		sessionUID := apipreval.GetUserIDFromContext(ctx)
+		if sessionUID == "" {
+			respondWithError(w, nil, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
@@ -532,7 +542,7 @@ func DeleteStagingBatchHandler(db *sql.DB) http.Handler {
 		}
 
 		var batchExists int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1`, bid).Scan(&batchExists); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1 AND user_id = $2`, bid, sessionUID).Scan(&batchExists); err != nil {
 			_ = tx.Rollback()
 			respondWithError(w, err, "failed to verify batch", http.StatusInternalServerError)
 			return

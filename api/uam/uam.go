@@ -8,6 +8,7 @@ import (
 	"CimplrCorpSaas/api/uam/permissions" // <-- Import permissions
 	"CimplrCorpSaas/api/uam/role"        // <-- Import role
 	"CimplrCorpSaas/api/uam/user"        // <-- Import user
+	"CimplrCorpSaas/internal/dbutil"
 	"context"
 	"database/sql"
 	"fmt"
@@ -28,7 +29,8 @@ func StartUAMService(db *sql.DB, port string) {
 		host := os.Getenv("DB_HOST")
 		port := os.Getenv("DB_PORT")
 		name := os.Getenv("DB_NAME")
-		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+		sslMode := dbutil.EffectiveSSLMode(host)
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
 		pool, err := pgxpool.New(context.Background(), dsn)
 		if err != nil {
 			log.Fatalf("UAM: failed to connect to pgxpool DB: %v", err)

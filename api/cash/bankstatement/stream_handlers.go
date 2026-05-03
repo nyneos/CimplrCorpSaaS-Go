@@ -2,6 +2,7 @@ package bankstatement
 
 import (
 	"CimplrCorpSaas/api/constants"
+	apipreval "CimplrCorpSaas/api/middlewares"
 	notif "CimplrCorpSaas/api/notification/catalog"
 	"archive/zip"
 	"bytes"
@@ -592,7 +593,10 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 
 	// Launch background processing for any PDFs found in the ZIP.
 	if len(pdfEntries) > 0 {
-		userID := r.FormValue("user_id")
+		userID := apipreval.GetUserIDFromContext(ctx)
+		if userID == "" {
+			userID = strings.TrimSpace(r.FormValue("user_id"))
+		}
 		bID, batchErr := insertStagingBatch(ctx, db, userID, header.Filename, len(pdfEntries))
 		if batchErr != nil {
 			log.Printf("[ZIP-PDF] failed to create staging batch: %v", batchErr)
@@ -671,8 +675,8 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 		uploadZipResults = append(uploadZipResults, zipPreviewRowToUploadZipResult(row))
 	}
 
-	uploadUserID := ""
-	if r.MultipartForm != nil && r.MultipartForm.Value != nil {
+	uploadUserID := apipreval.GetUserIDFromContext(ctx)
+	if uploadUserID == "" && r.MultipartForm != nil && r.MultipartForm.Value != nil {
 		if vals := r.MultipartForm.Value["user_id"]; len(vals) > 0 {
 			uploadUserID = vals[0]
 		}
@@ -729,11 +733,14 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		fh := r.MultipartForm.File["file"][0]
 		ext := strings.ToLower(filepath.Ext(fh.Filename))
 		log.Printf("[BANK-PREVIEW] uploaded filename=%s ext=%s", fh.Filename, ext)
-		// try to log user_id field if present
-		uploadUserID := ""
-		if vals := r.MultipartForm.Value["user_id"]; len(vals) > 0 {
-			uploadUserID = vals[0]
-			log.Printf("[BANK-PREVIEW] user_id=%s", vals[0])
+		uploadUserID := apipreval.GetUserIDFromContext(ctx)
+		if uploadUserID == "" && r.MultipartForm != nil && r.MultipartForm.Value != nil {
+			if vals := r.MultipartForm.Value["user_id"]; len(vals) > 0 {
+				uploadUserID = vals[0]
+			}
+		}
+		if uploadUserID != "" {
+			log.Printf("[BANK-PREVIEW] user_id=%s", uploadUserID)
 		}
 		if ext == ".zip" {
 			log.Printf("[BANK-PREVIEW] zip upload detected filename=%s", fh.Filename)
@@ -1158,12 +1165,29 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 			},
 		}
 
-		// Persist recalculated payload back to staging when staging_id is set (preferred), or legacy user_id = staging_id.
+		// Persist recalculated payload back to staging when staging_id is set (scoped to batch owner).
 		sidPersist := stagingRecalc
 		if sidPersist == "" {
 			sidPersist = strings.TrimSpace(input.UserID)
 		}
-		if sidPersist != "" {
+		if stagingRecalc != "" {
+			rawStatement := map[string]interface{}{
+				"clean":  output.Clean,
+				"status": "preview",
+			}
+			if raw, merr := json.Marshal(rawStatement); merr == nil {
+				uid := apipreval.GetUserIDFromContext(r.Context())
+				if _, uerr := db.ExecContext(r.Context(), `
+					UPDATE cimplrcorpsaas.pdf_staging_statement st
+					   SET raw_statement = $1, status = 'parsed', updated_at = now()
+					  FROM cimplrcorpsaas.pdf_staging_batch b
+					 WHERE st.staging_id = $2 AND st.batch_id = b.batch_id AND b.user_id = $3
+					   AND st.status != 'committed'
+				`, raw, stagingRecalc, uid); uerr != nil {
+					log.Printf("[RECALCULATE] failed to persist staging statement %s: %v", stagingRecalc, uerr)
+				}
+			}
+		} else if sidPersist != "" {
 			rawStatement := map[string]interface{}{
 				"clean":  output.Clean,
 				"status": "preview",
@@ -1198,17 +1222,32 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 
 		ctx := r.Context()
 		stagingID := strings.TrimSpace(payload.StagingID)
+		sessionUser := apipreval.GetUserIDFromContext(ctx)
 
 		// Idempotent commit for PDF staging: same staging_id returns the existing bank_statement_id.
 		if stagingID != "" {
 			var prevStatus string
 			var prevBS sql.NullString
+			var stagingOwner string
 			err := db.QueryRowContext(ctx, `
-				SELECT status, committed_bs_id::text
-				  FROM cimplrcorpsaas.pdf_staging_statement
-				 WHERE staging_id = $1
-			`, stagingID).Scan(&prevStatus, &prevBS)
-			if err == nil && prevStatus == "committed" && prevBS.Valid && strings.TrimSpace(prevBS.String) != "" {
+				SELECT s.status, s.committed_bs_id::text, b.user_id
+				  FROM cimplrcorpsaas.pdf_staging_statement s
+				  INNER JOIN cimplrcorpsaas.pdf_staging_batch b ON b.batch_id = s.batch_id
+				 WHERE s.staging_id = $1
+			`, stagingID).Scan(&prevStatus, &prevBS, &stagingOwner)
+			if err == sql.ErrNoRows {
+				respondWithError(w, nil, "staging_id not found", http.StatusNotFound)
+				return
+			}
+			if err != nil {
+				respondWithError(w, err, "Failed to resolve staging statement", http.StatusInternalServerError)
+				return
+			}
+			if sessionUser != "" && stagingOwner != sessionUser {
+				respondWithError(w, nil, "You do not have access to this staged statement.", http.StatusForbidden)
+				return
+			}
+			if prevStatus == "committed" && prevBS.Valid && strings.TrimSpace(prevBS.String) != "" {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"success": true,
@@ -1295,9 +1334,14 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 
 		if stagingID != "" {
 			var st string
+			var batchUserID string
 			qErr := tx.QueryRowContext(ctx, `
-				SELECT status FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1 FOR UPDATE
-			`, stagingID).Scan(&st)
+				SELECT s.status, b.user_id
+				  FROM cimplrcorpsaas.pdf_staging_statement s
+				  INNER JOIN cimplrcorpsaas.pdf_staging_batch b ON b.batch_id = s.batch_id
+				 WHERE s.staging_id = $1
+				 FOR UPDATE OF s
+			`, stagingID).Scan(&st, &batchUserID)
 			if qErr == sql.ErrNoRows {
 				tx.Rollback()
 				respondWithError(w, nil, "staging_id not found", http.StatusNotFound)
@@ -1306,6 +1350,11 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			if qErr != nil {
 				tx.Rollback()
 				respondWithError(w, qErr, "Failed to lock staging statement", http.StatusInternalServerError)
+				return
+			}
+			if sessionUser != "" && batchUserID != sessionUser {
+				tx.Rollback()
+				respondWithError(w, nil, "You do not have access to this staged statement.", http.StatusForbidden)
 				return
 			}
 			if st == "committed" {
