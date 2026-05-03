@@ -74,7 +74,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -85,7 +85,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		// ── Resolve fd_ref_no, bank_id, entity_name, bank_name from fd_master ──
 		var fdRefNo, bankID, entityName, bankName string
@@ -207,13 +207,13 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		// Simple query with basic joins + audit history
 		sql := `
@@ -368,13 +368,13 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -486,13 +486,13 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		// If tds_id provided, resolve receipt_id (may be NULL) and fd_id fallback
 		if req.TDSID != "" && req.ReceiptID == "" {

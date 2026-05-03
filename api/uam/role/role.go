@@ -1,7 +1,7 @@
 package role
 
 import (
-	// "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/utils"
 
@@ -45,15 +44,7 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "name, rolecode, and user_id are required")
 			return
 		}
-		// Get created_by from session
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				createdBy = s.Email
-				break
-			}
-		}
+		createdBy := api.GetUserEmailFromCtx(r.Context())
 		if createdBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -164,7 +155,7 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 		// Get role_id from user_roles for user_id
 		rolesPerms := map[string]interface{}{}
 		var roleId int
-		err := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
+		err := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 AND COALESCE(is_deleted, false) = false LIMIT 1", req.UserID).Scan(&roleId)
 		if err == nil {
 			permRows, err := db.Query(`
                 SELECT p.page_name, p.tab_name, p.action, rp.allowed
@@ -205,7 +196,7 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Count total
-		total, _ := utils.CountTotal(db, "SELECT COUNT(*) FROM roles")
+		total, _ := utils.CountTotal(db, "SELECT COUNT(*) FROM roles WHERE COALESCE(is_deleted, false) = false")
 		pagination.SetPaginationStats(total)
 
 		// Get roles with pagination
@@ -213,6 +204,7 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 		// so the most recently created/approved/edited roles appear first.
 		rows, err := db.Query(
 			`SELECT * FROM roles
+								 WHERE COALESCE(is_deleted, false) = false
 								 ORDER BY GREATEST(
 									 COALESCE(created_at, '1970-01-01'::timestamp),
 									 COALESCE(approved_at, '1970-01-01'::timestamp),
@@ -324,9 +316,9 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 			"deleted":  []map[string]interface{}{},
 			"approved": []map[string]interface{}{},
 		}
-		// Delete roles
+		// Delete roles (Soft Delete)
 		if len(toDelete) > 0 {
-			delRows, err := db.Query(`DELETE FROM roles WHERE id = ANY($1) RETURNING *`, pq.Array(toDelete))
+			delRows, err := db.Query(`UPDATE roles SET is_deleted = true, status = 'Deleted', edited_at = NOW() WHERE id = ANY($1) RETURNING *`, pq.Array(toDelete))
 			if err == nil {
 				defer delRows.Close()
 				cols, _ := delRows.Columns()
@@ -345,15 +337,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 				}
 			}
 		}
-		// Get approved_by from session
-		approvedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				approvedBy = s.Email
-				break
-			}
-		}
+		approvedBy := api.GetUserEmailFromCtx(r.Context())
 		if approvedBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -402,15 +386,7 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }
-		// Find editor for auditing
-		editor := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				editor = s.Email
-				break
-			}
-		}
+		editor := api.GetUserEmailFromCtx(r.Context())
 		if editor == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -469,15 +445,7 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }
-		// Get rejected_by from session
-		rejectedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				rejectedBy = s.Email
-				break
-			}
-		}
+		rejectedBy := api.GetUserEmailFromCtx(r.Context())
 		if rejectedBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -529,16 +497,18 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 				SELECT DISTINCT r.name
 				FROM roles r
 				WHERE (r.status = 'approved' OR r.status = 'Approved')
+				  AND COALESCE(r.is_deleted, false) = false
 				  AND EXISTS (
 					SELECT 1
 					FROM user_roles ur
 					JOIN user_entity_mappings uem ON uem.user_id = ur.user_id
 					WHERE ur.role_id = r.id
 					  AND uem.entity_name = $1
+					  AND COALESCE(ur.is_deleted, false) = false
 				)
 			`, req.EntityName)
 		} else {
-			rows, err = db.Query("SELECT DISTINCT name FROM roles WHERE status = 'approved' OR status = 'Approved'")
+			rows, err = db.Query("SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND COALESCE(is_deleted, false) = false")
 		}
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -563,7 +533,7 @@ func GetJustRolesPERMISSIONapproved(db *sql.DB) http.HandlerFunc {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req) // Not required for this query
 
-		rows, err := db.Query("SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND (roles_permission_status = 'approved' OR roles_permission_status = 'Approved')")
+		rows, err := db.Query("SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND (roles_permission_status = 'approved' OR roles_permission_status = 'Approved') AND COALESCE(is_deleted, false) = false")
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -593,7 +563,7 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 		// Get role_id from user_roles for user_id
 		rolesPerms := map[string]interface{}{}
 		var roleId int
-		err := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
+		err := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 AND COALESCE(is_deleted, false) = false LIMIT 1", req.UserID).Scan(&roleId)
 		if err == nil {
 			permRows, err := db.Query(`
                 SELECT p.page_name, p.tab_name, p.action, rp.allowed
@@ -632,12 +602,12 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		totalPendingQuery := "SELECT COUNT(*) FROM roles WHERE status IN ($1, $2, $3)"
+		totalPendingQuery := "SELECT COUNT(*) FROM roles WHERE status IN ($1, $2, $3) AND COALESCE(is_deleted, false) = false"
 		totalPending, _ := utils.CountTotal(db, totalPendingQuery, "pending", constants.StatusCodeAwaitingApproval, constants.StatusCodeDeleteApproval)
 		pagination.SetPaginationStats(totalPending)
 
 		// Fetch paginated pending roles
-		rows, err := db.Query("SELECT * FROM roles WHERE status IN ($1, $2, $3) ORDER BY id LIMIT $4 OFFSET $5", "pending", constants.StatusCodeAwaitingApproval, constants.StatusCodeDeleteApproval, pagination.Limit, pagination.Offset)
+		rows, err := db.Query("SELECT * FROM roles WHERE status IN ($1, $2, $3) AND COALESCE(is_deleted, false) = false ORDER BY id LIMIT $4 OFFSET $5", "pending", constants.StatusCodeAwaitingApproval, constants.StatusCodeDeleteApproval, pagination.Limit, pagination.Offset)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -705,15 +675,7 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Find editor email from active sessions; fall back to userID if not found
-		editor := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				editor = s.Email
-				break
-			}
-		}
+		editor := api.GetUserEmailFromCtx(r.Context())
 		if editor == "" {
 			editor = userID
 		}

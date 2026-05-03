@@ -4,7 +4,6 @@ import (
 	"CimplrCorpSaas/api"
 	exposures "CimplrCorpSaas/api/fx/exposures"
 	middlewares "CimplrCorpSaas/api/middlewares"
-	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -1098,7 +1097,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 		checkerBy := session.Name
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
@@ -1200,7 +1199,7 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 		checkerBy := session.Name
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())

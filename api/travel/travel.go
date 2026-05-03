@@ -67,7 +67,7 @@ func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 
 		if id != "" {
 			var pkgBytes []byte
-			err := db.QueryRow(`SELECT package_json FROM travel.packages WHERE id = $1`, id).Scan(&pkgBytes)
+			err := db.QueryRow(`SELECT package_json FROM travel.packages WHERE id = $1 AND COALESCE(is_deleted, false) = false`, id).Scan(&pkgBytes)
 			if err == sql.ErrNoRows {
 				http.NotFound(w, r)
 				return
@@ -81,7 +81,7 @@ func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`SELECT id, package_json FROM travel.packages ORDER BY created_at DESC LIMIT 100`)
+		rows, err := db.Query(`SELECT id, package_json FROM travel.packages WHERE COALESCE(is_deleted, false) = false ORDER BY created_at DESC LIMIT 100`)
 		if err != nil {
 			log.Printf("failed to list packages: %v", err)
 			http.Error(w, "failed to list packages", http.StatusInternalServerError)
@@ -118,7 +118,7 @@ func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// DeletePackageHandler deletes a package by id. Supports:
+// DeletePackageHandler deletes a package by id (soft delete). Supports:
 // - DELETE /...?id=<id>
 // - POST /cash/package/delete with JSON body {"id":"..."} (for clients that can't send DELETE)
 func DeletePackageHandler(db *sql.DB) http.HandlerFunc {
@@ -147,9 +147,10 @@ func DeletePackageHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		res, err := db.Exec(`DELETE FROM travel.packages WHERE id = $1`, id)
+		// Soft delete: set is_deleted = true
+		res, err := db.Exec(`UPDATE travel.packages SET is_deleted = true, updated_at = now() WHERE id = $1`, id)
 		if err != nil {
-			log.Printf("failed to delete package %s: %v", id, err)
+			log.Printf("failed to soft delete package %s: %v", id, err)
 			http.Error(w, "failed to delete", http.StatusInternalServerError)
 			return
 		}
@@ -164,3 +165,4 @@ func DeletePackageHandler(db *sql.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]any{"deleted": true, "id": id})
 	}
 }
+

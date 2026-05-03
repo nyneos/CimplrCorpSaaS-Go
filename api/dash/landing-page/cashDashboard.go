@@ -108,7 +108,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			filterAsOnDate = cleanFilter(r.URL.Query().Get("as_on_date"))
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 
 		// ── Determine date window ──

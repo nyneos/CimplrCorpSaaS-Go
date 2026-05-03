@@ -3,7 +3,6 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	middlewares "CimplrCorpSaas/api/middlewares"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1037,7 +1036,7 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		checkerBy := session.Name
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
@@ -1137,7 +1136,7 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		checkerBy := session.Name
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())

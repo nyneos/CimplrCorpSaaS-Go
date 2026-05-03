@@ -1,7 +1,7 @@
 package permissions
 
 import (
-	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
@@ -376,13 +376,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 				http.Error(w, `{"success":false,"error":constants.ErrUserIDRequired}`, http.StatusBadRequest)
 				return
 			}
-			sessions := auth.GetActiveSessions()
-			for _, s := range sessions {
-				if s.UserID == req.UserID {
-					roleName = s.Role
-					break
-				}
-			}
+			roleName = api.GetUserRoleFromCtx(r.Context())
 			if roleName == "" {
 				http.Error(w, `{"success":false,"error":"Role not found in session"}`, http.StatusUnauthorized)
 				return

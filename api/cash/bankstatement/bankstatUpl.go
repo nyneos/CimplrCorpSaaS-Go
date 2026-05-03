@@ -849,7 +849,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if pool == nil {
 				return
 			}
-			nctx := context.Background()
+			nctx := r.Context()
 			for _, row := range notifRows {
 				bid, _ := row["bankstatementid"].(string)
 				atype, _ := row["action_type"].(string)
@@ -982,7 +982,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if pool == nil || len(rejectedIDs) == 0 {
 				return
 			}
-			nctx := context.Background()
+			nctx := r.Context()
 			payload := BuildBankStatementNotifPayload(nctx, pool, rejectedIDs, "REJECT", uID)
 			payload["Comment"] = comment
 			catalog.TriggerNotification(nctx, pool, "/cash/bank-statements/v2/reject",
