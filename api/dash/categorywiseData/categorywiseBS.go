@@ -217,7 +217,7 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		allowedCurrenciesNorm := normalizeUpperTrimSlice(api.GetCurrencyCodesFromCtx(ctx))
 
 		if len(allowedEntityIDs) == 0 || len(allowedAccountNumbers) == 0 || len(allowedBanksNorm) == 0 || len(allowedCurrenciesNorm) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -249,12 +249,12 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if entityF != "" {
 			if !api.IsEntityAllowed(ctx, entityF) {
-				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 			eid, ok := api.ResolveEntityIDForFilter(ctx, entityF)
 			if !ok {
-				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 			filters = append(filters, fmt.Sprintf("bs.entity_id = $%d", arg))
@@ -263,7 +263,7 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if bankF != "" {
 			if !api.IsBankAllowed(ctx, bankF) {
-				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 			if bid, ok := api.ResolveBankIDForFilter(ctx, bankF); ok {
@@ -273,7 +273,7 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				bankNorm, ok := api.ResolveBankNameNormForFilter(ctx, bankF)
 				if !ok {
-					http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+					api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 					return
 				}
 				filters = append(filters, fmt.Sprintf("(lower(trim(COALESCE(mba.bank_name,''))) = $%d OR lower(trim(COALESCE(mb.bank_name,''))) = $%d)", arg, arg))
@@ -283,12 +283,12 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if currencyF != "" {
 			if !api.IsCurrencyAllowed(ctx, currencyF) {
-				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 			currCode, ok := api.ResolveCurrencyCodeUpperForFilter(ctx, currencyF)
 			if !ok {
-				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 			filters = append(filters, fmt.Sprintf("upper(trim(COALESCE(mba.currency,''))) = $%d", arg))
@@ -329,7 +329,7 @@ ORDER BY inflow DESC, outflow DESC;
 
 		catRows, err := pgxPool.Query(ctx, categorySQL, args...)
 		if err != nil {
-			http.Error(w, "error querying category aggregation: "+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "error querying category aggregation: "+err.Error())
 			return
 		}
 		defer catRows.Close()
@@ -423,7 +423,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 
 		entityRows, err := pgxPool.Query(ctx, entitySQL, args...)
 		if err != nil {
-			http.Error(w, "error querying entity breakdown: "+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "error querying entity breakdown: "+err.Error())
 			return
 		}
 		defer entityRows.Close()
@@ -494,7 +494,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 
 		txnRows, err := pgxPool.Query(ctx, txnSQL, args...)
 		if err != nil {
-			http.Error(w, "error querying transactions: "+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "error querying transactions: "+err.Error())
 			return
 		}
 		defer txnRows.Close()
@@ -554,7 +554,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 			} else {
 				bankNorm, ok := api.ResolveBankNameNormForFilter(ctx, bankF)
 				if !ok {
-					http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+					api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 					return
 				}
 				kpiFilters = append(kpiFilters, fmt.Sprintf("lower(trim(COALESCE(b.bank_name, ''))) = $%d", kArg))
@@ -565,7 +565,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		if currencyF != "" {
 			currCode, ok := api.ResolveCurrencyCodeUpperForFilter(ctx, currencyF)
 			if !ok {
-				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 			kpiFilters = append(kpiFilters, fmt.Sprintf("upper(trim(COALESCE(b.currency_code, ''))) = $%d", kArg))
@@ -601,7 +601,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		var highestBank *BankBalanceKPI
 		highestRows, err := pgxPool.Query(ctx, highestSQL, kpiArgs...)
 		if err != nil {
-			http.Error(w, "error querying highest contributing bank: "+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "error querying highest contributing bank: "+err.Error())
 			return
 		}
 		defer highestRows.Close()
@@ -638,7 +638,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		var lowestAcct *LowestBalanceAccount
 		lowestRows, err := pgxPool.Query(ctx, lowestSQL, kpiArgs...)
 		if err != nil {
-			http.Error(w, "error querying lowest balance account: "+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "error querying lowest balance account: "+err.Error())
 			return
 		}
 		defer lowestRows.Close()
@@ -797,7 +797,7 @@ LIMIT ` + strconv.Itoa(txnLimit) + `;
 
 		misclassifiedRows, err := pgxPool.Query(ctx, misclassifiedSQL, args...)
 		if err != nil {
-			http.Error(w, "error querying misclassified transactions: "+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "error querying misclassified transactions: "+err.Error())
 			return
 		}
 		defer misclassifiedRows.Close()
@@ -908,6 +908,6 @@ LIMIT ` + strconv.Itoa(txnLimit) + `;
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		_ = json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, resp, "")
 	}
 }

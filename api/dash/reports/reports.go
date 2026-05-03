@@ -59,22 +59,19 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		// User verification via middleware
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
 		expRows, err := db.Query(`SELECT exposure_header_id, company_code, entity, entity1, entity2, entity3, exposure_type, document_id, value_date, counterparty_name, currency, total_original_amount, total_open_amount, value_date FROM exposure_headers WHERE entity = ANY($1)`, pq.Array(buNames))
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch exposures"})
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch exposures")
 			return
 		}
 
@@ -83,14 +80,14 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 		for expRows.Next() {
 			var e Exposure
 			err := expRows.Scan(&e.ExposureHeaderID, &e.CompanyCode, &e.Entity, &e.Entity1, &e.Entity2, &e.Entity3, &e.ExposureType, &e.DocumentID, &e.DocumentDate, &e.CounterpartyName, &e.Currency, &e.TotalOriginalAmount, &e.TotalOpenAmount, &e.ValueDate)
-				if err == nil {
-					// Skip exposures whose currency is not approved by PreValidation
-					if !api.CtxHasApprovedCurrency(r.Context(), e.Currency) {
-						continue
-					}
-					exposures = append(exposures, e)
-					exposureIds = append(exposureIds, e.ExposureHeaderID)
+			if err == nil {
+				// Skip exposures whose currency is not approved by PreValidation
+				if !api.CtxHasApprovedCurrency(r.Context(), e.Currency) {
+					continue
 				}
+				exposures = append(exposures, e)
+				exposureIds = append(exposureIds, e.ExposureHeaderID)
+			}
 		}
 		expRows.Close()
 		// 4. Fetch all hedged values in one query
@@ -167,7 +164,7 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 			})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"summary": summary})
+		api.Success(w, http.StatusOK, map[string]interface{}{"summary": summary}, "")
 	}
 }
 
@@ -246,9 +243,9 @@ func fetchForwardBookings(ctx context.Context, db *sql.DB, buNames []string) ([]
 		FROM forward_bookings
 		WHERE entity_level_0 = ANY($1)
 	`, pq.Array(buNames))
-		if err != nil {
-			return nil, err
-		}
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 
 	var list []ForwardBooking
@@ -349,42 +346,37 @@ func GetLinkedSummaryByCategory(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			http.Error(w, `{constants.ValueError:constants.ErrUserIDRequired}`, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, `{constants.ValueError:constants.ErrUserIDRequired}`)
 			return
 		}
 
 		// Authorized business units from middleware
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, `{constants.ValueError:constants.ErrNoAccessibleBusinessUnit}`, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, `{constants.ValueError:constants.ErrNoAccessibleBusinessUnit}`)
 			return
 		}
 
 		bookings, err := fetchForwardBookings(r.Context(), db, buNames)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch forward bookings", "detail": err.Error()})
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch forward bookings")
 			return
 		}
 
 		rollovers, err := fetchForwardRollovers(db, buNames)
 		if err != nil {
-			http.Error(w, `{constants.ValueError:"Failed to fetch forward rollovers"}`, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, `{constants.ValueError:"Failed to fetch forward rollovers"}`)
 			return
 		}
 
 		cancellations, err := fetchForwardCancellations(db, buNames)
 		if err != nil {
-			http.Error(w, `{constants.ValueError:"Failed to fetch forward cancellations"}`, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, `{constants.ValueError:"Failed to fetch forward cancellations"}`)
 			return
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"Fwd Booking":      bookings,
-			"Fwd Rollovers":    rollovers,
-			"Fwd Cancellation": cancellations,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"Fwd Booking": bookings, "Fwd Rollovers": rollovers, "Fwd Cancellation": cancellations}, "")
 	}
 }

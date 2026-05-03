@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
@@ -33,13 +32,7 @@ var rates = map[string]float64{
 }
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
+	api.Error(w, status, errMsg)
 }
 
 func abs(x float64) float64 {
@@ -186,7 +179,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 
@@ -301,6 +294,6 @@ func GetForwardBookingsDashboard(db *sql.DB) http.HandlerFunc {
 		if result == nil {
 			result = []ForwardRow{}
 		}
-		api.RespondWithPayload(w, true, "", result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }

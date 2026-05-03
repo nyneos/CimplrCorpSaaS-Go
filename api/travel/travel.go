@@ -1,6 +1,7 @@
 package travel
 
 import (
+	"CimplrCorpSaas/api"
 	"database/sql"
 	"encoding/json"
 	"log"
@@ -13,19 +14,19 @@ import (
 func CreatePackageHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 
 		var payload map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			http.Error(w, "invalid json payload", http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, "invalid json payload")
 			return
 		}
 
 		idVal, ok := payload["id"].(string)
 		if !ok || idVal == "" {
-			http.Error(w, "missing id in payload", http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, "missing id in payload")
 			return
 		}
 
@@ -33,7 +34,7 @@ func CreatePackageHandler(db *sql.DB) http.HandlerFunc {
 		pkgBytes, err := json.Marshal(payload)
 		if err != nil {
 			log.Printf("failed to marshal payload: %v", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 
@@ -42,13 +43,11 @@ func CreatePackageHandler(db *sql.DB) http.HandlerFunc {
 
 		if _, err := db.Exec(stmt, idVal, pkgBytes); err != nil {
 			log.Printf("failed to upsert package %s: %v", idVal, err)
-			http.Error(w, "failed to save package", http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "failed to save package")
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		w.Write(pkgBytes)
+		api.Success(w, http.StatusCreated, json.RawMessage(pkgBytes), "")
 	}
 }
 
@@ -58,33 +57,32 @@ func CreatePackageHandler(db *sql.DB) http.HandlerFunc {
 func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 
 		id := r.URL.Query().Get("id")
-		w.Header().Set("Content-Type", "application/json")
 
 		if id != "" {
 			var pkgBytes []byte
 			err := db.QueryRow(`SELECT package_json FROM travel.packages WHERE id = $1`, id).Scan(&pkgBytes)
 			if err == sql.ErrNoRows {
-				http.NotFound(w, r)
+				api.Error(w, http.StatusNotFound, "404 page not found")
 				return
 			}
 			if err != nil {
 				log.Printf("failed to fetch package %s: %v", id, err)
-				http.Error(w, "failed to fetch package", http.StatusInternalServerError)
+				api.Error(w, http.StatusInternalServerError, "failed to fetch package")
 				return
 			}
-			w.Write(pkgBytes)
+			api.Success(w, http.StatusOK, json.RawMessage(pkgBytes), "")
 			return
 		}
 
 		rows, err := db.Query(`SELECT id, package_json FROM travel.packages ORDER BY created_at DESC LIMIT 100`)
 		if err != nil {
 			log.Printf("failed to list packages: %v", err)
-			http.Error(w, "failed to list packages", http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "failed to list packages")
 			return
 		}
 		defer rows.Close()
@@ -112,9 +110,7 @@ func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 			log.Printf("rows error: %v", err)
 		}
 
-		if err := json.NewEncoder(w).Encode(out); err != nil {
-			log.Printf("failed to write response: %v", err)
-		}
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -125,7 +121,7 @@ func DeletePackageHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// accept DELETE or POST (for compatibility)
 		if r.Method != http.MethodDelete && r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 
@@ -134,7 +130,7 @@ func DeletePackageHandler(db *sql.DB) http.HandlerFunc {
 			// try body
 			var body map[string]interface{}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				http.Error(w, "missing id", http.StatusBadRequest)
+				api.Error(w, http.StatusBadRequest, "missing id")
 				return
 			}
 			if v, ok := body["id"].(string); ok {
@@ -143,24 +139,22 @@ func DeletePackageHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		if id == "" {
-			http.Error(w, "missing id", http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, "missing id")
 			return
 		}
 
 		res, err := db.Exec(`DELETE FROM travel.packages WHERE id = $1`, id)
 		if err != nil {
 			log.Printf("failed to delete package %s: %v", id, err)
-			http.Error(w, "failed to delete", http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "failed to delete")
 			return
 		}
 		rows, _ := res.RowsAffected()
 		if rows == 0 {
-			http.NotFound(w, r)
+			api.Error(w, http.StatusNotFound, "404 page not found")
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{"deleted": true, "id": id})
+		api.Success(w, http.StatusOK, map[string]any{"deleted": true, "id": id}, "")
 	}
 }

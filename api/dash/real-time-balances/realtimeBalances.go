@@ -1,9 +1,9 @@
 package realtimebalances
 
 import (
-	"bytes"
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -205,7 +205,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		allowedBanksNorm := normalizeLowerTrimSlice(api.GetBankNamesFromCtx(ctx))
 		allowedCurrenciesNorm := normalizeUpperTrimSlice(api.GetCurrencyCodesFromCtx(ctx))
 		if len(allowedEntityIDs) == 0 || len(allowedAccountNumbers) == 0 || len(allowedBanksNorm) == 0 || len(allowedCurrenciesNorm) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -223,22 +223,22 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			"as_on_date", "asOnDate", "snapshot_date", "snapshotDate")
 
 		if entity != "" && !api.IsEntityAllowed(ctx, entity) {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		if bank != "" && !api.IsBankAllowed(ctx, bank) {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		if currency != "" && !api.IsCurrencyAllowed(ctx, currency) {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		bankNorm := ""
 		if bank != "" {
 			bn, ok := api.ResolveBankNameNormForFilter(ctx, bank)
 			if !ok {
-				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 			bankNorm = bn
@@ -247,7 +247,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		if currency != "" {
 			cc, ok := api.ResolveCurrencyCodeUpperForFilter(ctx, currency)
 			if !ok {
-				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 			currencyNorm = cc
@@ -260,7 +260,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			evalAsOn = time.Now().Format(constants.DateFormat)
 		}
 		if _, err := time.Parse(constants.DateFormat, evalAsOn); err != nil {
-			http.Error(w, fmt.Sprintf(constants.ErrInvalidDateFormat, "as_on_date"), http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, fmt.Sprintf(constants.ErrInvalidDateFormat, "as_on_date"))
 			return
 		}
 
@@ -310,7 +310,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		if entity != "" {
 			eid, ok := api.ResolveEntityIDForFilter(ctx, entity)
 			if !ok {
-				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 			extraFilters = append(extraFilters, "mba.entity_id = $"+strconv.Itoa(argIdx))
@@ -345,7 +345,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 
 		txn, err := db.BeginTx(ctx, &sql.TxOptions{})
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		committed := false
@@ -357,12 +357,12 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 
 		_, err = txn.ExecContext(ctx, `DROP TABLE IF EXISTS `+tempTx+`; DROP TABLE IF EXISTS `+tempAb)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		_, err = txn.ExecContext(ctx, `CREATE TEMP TABLE `+tempTx+` ON COMMIT DROP AS `+warmTxSelect, args...)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 
@@ -441,7 +441,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		`
 		_, err = txn.ExecContext(ctx, approvedFromTempSQL, evalAsOn)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 
@@ -454,7 +454,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			GROUP BY mec.entity_name, b.bank_name
 			ORDER BY value DESC`)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		for vbRows.Next() {
@@ -473,7 +473,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			GROUP BY currency_code
 			ORDER BY value DESC`)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		for dRows.Next() {
@@ -555,7 +555,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 
 		aggRows, err := txn.QueryContext(ctx, aggSQL)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 
@@ -678,7 +678,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		`, evalAsOn)
 		var acctCnt int64
 		if err := kpiRow.Scan(&kpi.TotalBalance, &kpi.Opening, &kpi.Closing, &acctCnt, &dayChangeAbs, &yesterdayClosing); err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		kpi.Delta = kpi.Closing - kpi.Opening
@@ -763,7 +763,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 
 		stmt2Rows, err := txn.QueryContext(ctx, stmtSQL2)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		for stmt2Rows.Next() {
@@ -795,22 +795,13 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		stmt2Rows.Close()
 
 		if err := txn.Commit(); err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		committed = true
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":         true,
-			"data":            kpi,
-			"trends":          trends,
-			"accountBalances": accountBalances,
-			"varianceBars":    varianceBars,
-			"donutSlices":     donutSlices,
-			"entityRows":      entityRows,
-			"topCurrencies":   topCurrencies,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"data": kpi, "trends": trends, "accountBalances": accountBalances, "varianceBars": varianceBars, "donutSlices": donutSlices, "entityRows": entityRows, "topCurrencies": topCurrencies}, "")
 	})
 }

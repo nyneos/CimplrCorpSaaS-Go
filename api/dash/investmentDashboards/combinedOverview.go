@@ -20,7 +20,7 @@ import (
 func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -34,7 +34,7 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		var allowedEntities interface{} = nil
@@ -93,7 +93,7 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, masterPortfolioQuery, nullIfEmpty(entityFilter), allowedEntities)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "portfolio query failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "portfolio query failed: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -143,7 +143,7 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var inflows, outflows float64
 		if err := pgxPool.QueryRow(ctx, flowsQ, fyStart, nullIfEmpty(entityFilter), allowedEntities).Scan(&inflows, &outflows); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "flows query failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "flows query failed: "+err.Error())
 			return
 		}
 
@@ -338,44 +338,37 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"period_end":      today.Format(constants.DateFormat),
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.Success(w, http.StatusOK, map[string]interface{}{"generated_at": time.Now().UTC().Format(time.RFC3339), "kpis": map[string]interface{}{
+			"cards":              cards,
+			"details":            detailsMap,
+			"aum_detail":         portfolioDetail,
+			"transaction_detail": transactionDetail,
+		}, "consolidated": map[string]interface{}{
+			"generated_at":     time.Now().UTC().Format(time.RFC3339),
+			"high_value":       highValue,
+			"lcr":              lcr,
+			"low_value":        lowValue,
+			"medium_value":     mediumValue,
+			"portfolio_detail": portfolioDetail,
+			"total_value":      totalAUM,
+		}, "top": map[string]interface{}{
+			"portfolio_detail": portfolioDetail,
+			"rows":             topRows,
+			"generated_at":     time.Now().UTC().Format(time.RFC3339),
+		}, "aum": map[string]interface{}{
+			"amc_names":        amcNames,
+			"fy_label":         "FY 2025-26",
+			"generated_at":     time.Now().UTC().Format(time.RFC3339),
+			"portfolio_detail": portfolioDetail,
+			"rows":             aumRows,
+		}, "market": map[string]interface{}{
+			"mutual_funds":     ticker,
+			"portfolio_detail": portfolioDetail,
+			"summary": map[string]interface{}{
+				"total_schemes": len(ticker),
+				"total_value":   totalAUM,
+			},
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
-			"kpis": map[string]interface{}{
-				"cards":              cards,
-				"details":            detailsMap,
-				"aum_detail":         portfolioDetail,
-				"transaction_detail": transactionDetail,
-			},
-			"consolidated": map[string]interface{}{
-				"generated_at":     time.Now().UTC().Format(time.RFC3339),
-				"high_value":       highValue,
-				"lcr":              lcr,
-				"low_value":        lowValue,
-				"medium_value":     mediumValue,
-				"portfolio_detail": portfolioDetail,
-				"total_value":      totalAUM,
-			},
-			"top": map[string]interface{}{
-				"portfolio_detail": portfolioDetail,
-				"rows":             topRows,
-				"generated_at":     time.Now().UTC().Format(time.RFC3339),
-			},
-			"aum": map[string]interface{}{
-				"amc_names":        amcNames,
-				"fy_label":         "FY 2025-26",
-				"generated_at":     time.Now().UTC().Format(time.RFC3339),
-				"portfolio_detail": portfolioDetail,
-				"rows":             aumRows,
-			},
-			"market": map[string]interface{}{
-				"mutual_funds":     ticker,
-				"portfolio_detail": portfolioDetail,
-				"summary": map[string]interface{}{
-					"total_schemes": len(ticker),
-					"total_value":   totalAUM,
-				},
-				"generated_at": time.Now().UTC().Format(time.RFC3339),
-			},
-		})
+		}}, "")
 	}
 }

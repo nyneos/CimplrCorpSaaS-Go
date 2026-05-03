@@ -42,7 +42,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithResult(w, false, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -50,7 +50,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+			api.Error(w, http.StatusBadRequest, constants.ErrMissingUserID)
 			return
 		}
 
@@ -76,7 +76,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	`
 		rows, err := pgxPool.Query(ctx, payQ)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		for rows.Next() {
@@ -119,7 +119,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	`
 		rows2, err := pgxPool.Query(ctx, recQ)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		for rows2.Next() {
@@ -147,7 +147,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows2.Close()
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -155,14 +155,14 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithResult(w, false, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var body struct {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+			api.Error(w, http.StatusBadRequest, constants.ErrMissingUserID)
 			return
 		}
 
@@ -369,6 +369,6 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": resp})
+		api.Success(w, http.StatusOK, resp, "")
 	}
 }

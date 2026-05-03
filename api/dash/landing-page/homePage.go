@@ -48,14 +48,14 @@ func GetHomePageDashboard(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req HomePageRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 
 		ctx := r.Context()
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 		if len(allowedEntities) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 
@@ -67,14 +67,14 @@ func GetHomePageDashboard(db *sql.DB) http.HandlerFunc {
 		// Liquidity block
 		gl, err := buildGlobalLiquidity(ctx, db, allowedEntities, horizon)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("liquidity: %v", err))
+			api.Error(w, http.StatusInternalServerError, fmt.Sprintf("liquidity: %v", err))
 			return
 		}
 
 		// Portfolio block
 		pi, err := buildPortfolioInvestments(ctx, db, allowedEntities)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("portfolio: %v", err))
+			api.Error(w, http.StatusInternalServerError, fmt.Sprintf("portfolio: %v", err))
 			return
 		}
 
@@ -82,7 +82,7 @@ func GetHomePageDashboard(db *sql.DB) http.HandlerFunc {
 		// Risk & leverage: homepage-specific computation (do not alter FX Ops dashboard endpoint).
 		fxPayload, err := computeHomeRiskLeverage(ctx, db, allowedEntities)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("fx-ops: %v", err))
+			api.Error(w, http.StatusInternalServerError, fmt.Sprintf("fx-ops: %v", err))
 			return
 		}
 
@@ -91,7 +91,7 @@ func GetHomePageDashboard(db *sql.DB) http.HandlerFunc {
 			PortfolioInvestments: pi,
 			RiskAndLeverage:      fxPayload,
 		}
-		api.RespondWithPayload(w, true, "", resp)
+		api.Success(w, http.StatusOK, resp, "")
 	}
 }
 

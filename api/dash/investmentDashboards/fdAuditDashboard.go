@@ -49,7 +49,7 @@ type fdAuditDashRequest struct {
 func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1786,6 +1786,6 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"transaction_trace":  get("transaction_trace"),
 		}
 
-		api.RespondWithPayload(w, true, "", payload)
+		api.Success(w, http.StatusOK, payload, "")
 	}
 }

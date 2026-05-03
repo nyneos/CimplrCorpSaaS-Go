@@ -131,11 +131,11 @@ func GetStatementStatusHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		allowedCurrencyCodesNorm := normalizeUpperTrimSlice(api.GetCurrencyCodesFromCtx(ctx))
 
 		if len(allowedEntityIDs) == 0 || len(allowedAccountNumbers) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		if len(allowedBankNamesNorm) == 0 || len(allowedCurrencyCodesNorm) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -203,15 +203,15 @@ func GetStatementStatusHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		filterCurrency := clean(req.Currency)
 
 		if filterEntity != "" && !api.IsEntityAllowed(ctx, filterEntity) {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		if filterBank != "" && !api.IsBankAllowed(ctx, filterBank) {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		if filterCurrency != "" && !api.IsCurrencyAllowed(ctx, filterCurrency) {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -280,7 +280,7 @@ func GetStatementStatusHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if filterEntity != "" {
 			eid, ok := api.ResolveEntityIDForFilter(ctx, filterEntity)
 			if !ok {
-				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 			effectiveEntityIDs = []string{eid}
@@ -295,7 +295,7 @@ func GetStatementStatusHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				bn, ok := api.ResolveBankNameNormForFilter(ctx, filterBank)
 				if !ok {
-					http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+					api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 					return
 				}
 				effectiveBankNorms = []string{bn}
@@ -305,7 +305,7 @@ func GetStatementStatusHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if filterCurrency != "" {
 			cc, ok := api.ResolveCurrencyCodeUpperForFilter(ctx, filterCurrency)
 			if !ok {
-				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 			effectiveCurrNorms = []string{cc}
@@ -420,7 +420,7 @@ WHERE mba.is_deleted = false
 
 		rows, err := pgxPool.Query(ctx, accountsSQL, accArgs...)
 		if err != nil {
-			http.Error(w, "error querying accounts: "+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "error querying accounts: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -501,7 +501,7 @@ ORDER BY percent DESC;
 		}
 		bankRows, err := pgxPool.Query(ctx, bankSQL, bankArgs...)
 		if err != nil {
-			http.Error(w, "error querying bank compliance: "+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "error querying bank compliance: "+err.Error())
 			return
 		}
 		defer bankRows.Close()
@@ -565,7 +565,7 @@ ORDER BY percent DESC;
 		}
 		entityRows, err := pgxPool.Query(ctx, entitySQL, entArgs...)
 		if err != nil {
-			http.Error(w, "error querying entity completeness: "+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "error querying entity completeness: "+err.Error())
 			return
 		}
 		defer entityRows.Close()
@@ -596,7 +596,7 @@ ORDER BY percent DESC;
 		enc := json.NewEncoder(w)
 		enc.SetEscapeHTML(false)
 		if err := enc.Encode(resp); err != nil {
-			http.Error(w, "error encoding response: "+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "error encoding response: "+err.Error())
 			return
 		}
 	}

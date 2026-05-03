@@ -1,6 +1,7 @@
 package forecastVsActual
 
 import (
+	"CimplrCorpSaas/api"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -62,12 +63,12 @@ func GetForecastVsActualRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -75,12 +76,11 @@ func GetForecastVsActualRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastVsActualRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, rows, "")
 	}
 }
 
@@ -93,12 +93,12 @@ func GetForecastVsActualKPIHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -106,12 +106,11 @@ func GetForecastVsActualKPIHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		k, err := GetForecastVsActualKPIs(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "kpis": k}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, map[string]interface{}{"kpis": k}, "")
 	}
 }
 func GetForecastVsActualByDateHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -123,12 +122,12 @@ func GetForecastVsActualByDateHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -136,12 +135,11 @@ func GetForecastVsActualByDateHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastVsActualByDateRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, rows, "")
 	}
 }
 
@@ -155,12 +153,12 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -168,12 +166,11 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastVsActualByMonthRows(pgxPool, req.Horizon, req.EntityName, req.Currency, req.AccountID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, rows, "")
 	}
 }
 

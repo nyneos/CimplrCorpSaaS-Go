@@ -25,7 +25,7 @@ type KPIResponse struct {
 func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithResult(w, false, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -33,7 +33,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Add filter fields here if needed (entity, department, status, etc.)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+			api.Error(w, http.StatusBadRequest, constants.ErrMissingUserID)
 			return
 		}
 
@@ -55,7 +55,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// 1) Total proposals
 		if err := pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM cashflow_proposal`).Scan(&resp.TotalProposals); err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 
@@ -69,7 +69,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE processing_status LIKE 'PENDING%'
 		`
 		if err := pgxPool.QueryRow(ctx, pendingQ).Scan(&resp.PendingApproval); err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 
@@ -82,7 +82,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := pgxPool.Query(ctx, sumQ)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -112,12 +112,12 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND EXTRACT(YEAR FROM checker_at) = $1
 			  AND EXTRACT(MONTH FROM checker_at) = $2
 		`, year, month).Scan(&resp.ApprovedThisMonth); err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "kpi": resp})
+		api.Success(w, http.StatusOK, map[string]interface{}{"kpi": resp}, "")
 	}
 }
 
@@ -152,7 +152,7 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithResult(w, false, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -160,7 +160,7 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+			api.Error(w, http.StatusBadRequest, constants.ErrMissingUserID)
 			return
 		}
 
@@ -183,7 +183,7 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY a.requested_at DESC NULLS LAST, p.proposal_id, i.item_id
 		`)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -235,7 +235,7 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 
@@ -271,14 +271,14 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithResult(w, false, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var body struct {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+			api.Error(w, http.StatusBadRequest, constants.ErrMissingUserID)
 			return
 		}
 
@@ -296,7 +296,7 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -357,6 +357,6 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": out})
+		api.Success(w, http.StatusOK, out, "")
 	}
 }

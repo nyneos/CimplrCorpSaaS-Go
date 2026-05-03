@@ -244,9 +244,9 @@ func GetIndexList() http.HandlerFunc {
 			} else {
 				result["sectors_error"] = err2.Error()
 			}
-			api.RespondWithPayload(w, true, "", result)
+			api.Success(w, http.StatusOK, result, "")
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
+			api.Error(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -255,7 +255,7 @@ func GetIndexList() http.HandlerFunc {
 func GetIndexSeries() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -265,14 +265,14 @@ func GetIndexSeries() http.HandlerFunc {
 			Flag     string `json:"flag"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if req.Provider == "" {
 			req.Provider = "nse"
 		}
 		if req.Index == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrIndexRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrIndexRequired)
 			return
 		}
 		if req.Flag == "" {
@@ -284,19 +284,13 @@ func GetIndexSeries() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetGraphChart(ctx, req.Index, req.Flag)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 			normalized := normalizeNSEGraphData(body)
-			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"provider":   "nse",
-				"index":      req.Index,
-				"flag":       req.Flag,
-				"normalized": normalized,
-				"raw":        json.RawMessage(body),
-			})
+			api.Success(w, http.StatusOK, map[string]interface{}{"provider": "nse", "index": req.Index, "flag": req.Flag, "normalized": normalized, "raw": json.RawMessage(body)}, "")
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
+			api.Error(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -305,7 +299,7 @@ func GetIndexSeries() http.HandlerFunc {
 func GetIndexSnapshot() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -314,14 +308,14 @@ func GetIndexSnapshot() http.HandlerFunc {
 			Index    string `json:"index"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if req.Provider == "" {
 			req.Provider = "nse"
 		}
 		if req.Index == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrIndexRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrIndexRequired)
 			return
 		}
 
@@ -330,16 +324,12 @@ func GetIndexSnapshot() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetIndicesData(ctx, req.Index)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"provider": "nse",
-				"index":    req.Index,
-				"raw":      json.RawMessage(body),
-			})
+			api.Success(w, http.StatusOK, map[string]interface{}{"provider": "nse", "index": req.Index, "raw": json.RawMessage(body)}, "")
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
+			api.Error(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -348,7 +338,7 @@ func GetIndexSnapshot() http.HandlerFunc {
 func GetIndexConstituents() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -357,14 +347,14 @@ func GetIndexConstituents() http.HandlerFunc {
 			Index    string `json:"index"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if req.Provider == "" {
 			req.Provider = "nse"
 		}
 		if req.Index == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrIndexRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrIndexRequired)
 			return
 		}
 
@@ -373,16 +363,12 @@ func GetIndexConstituents() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetIndexConstituents(ctx, req.Index)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"provider": "nse",
-				"index":    req.Index,
-				"raw":      json.RawMessage(body),
-			})
+			api.Success(w, http.StatusOK, map[string]interface{}{"provider": "nse", "index": req.Index, "raw": json.RawMessage(body)}, "")
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
+			api.Error(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -391,7 +377,7 @@ func GetIndexConstituents() http.HandlerFunc {
 func GetMarketMovers() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -400,7 +386,7 @@ func GetMarketMovers() http.HandlerFunc {
 			Index    string `json:"index"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if req.Provider == "" {
@@ -415,16 +401,12 @@ func GetMarketMovers() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetGainerLoser(ctx, req.Index)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"provider": "nse",
-				"index":    req.Index,
-				"raw":      json.RawMessage(body),
-			})
+			api.Success(w, http.StatusOK, map[string]interface{}{"provider": "nse", "index": req.Index, "raw": json.RawMessage(body)}, "")
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
+			api.Error(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -442,15 +424,12 @@ func GetMarketStatus() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetMarketStatus(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"provider": "nse",
-				"raw":      json.RawMessage(body),
-			})
+			api.Success(w, http.StatusOK, map[string]interface{}{"provider": "nse", "raw": json.RawMessage(body)}, "")
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
+			api.Error(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -472,16 +451,12 @@ func GetMarketHeatmap() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetMarketHeatMap(ctx, heatmapType)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"provider": "nse",
-				"type":     heatmapType,
-				"raw":      json.RawMessage(body),
-			})
+			api.Success(w, http.StatusOK, map[string]interface{}{"provider": "nse", "type": heatmapType, "raw": json.RawMessage(body)}, "")
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
+			api.Error(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -499,15 +474,12 @@ func GetAdvanceDeclines() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetAdvanceDeclines(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"provider": "nse",
-				"raw":      json.RawMessage(body),
-			})
+			api.Success(w, http.StatusOK, map[string]interface{}{"provider": "nse", "raw": json.RawMessage(body)}, "")
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
+			api.Error(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -539,9 +511,9 @@ func GetMarqueeData() http.HandlerFunc {
 			} else {
 				result["nifty_indices_error"] = err2.Error()
 			}
-			api.RespondWithPayload(w, true, "", result)
+			api.Success(w, http.StatusOK, result, "")
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
+			api.Error(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -559,15 +531,12 @@ func Get52WeekHighLow() http.HandlerFunc {
 		case "nse":
 			body, err := nseGet52WeekHighLow(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"provider": "nse",
-				"raw":      json.RawMessage(body),
-			})
+			api.Success(w, http.StatusOK, map[string]interface{}{"provider": "nse", "raw": json.RawMessage(body)}, "")
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
+			api.Error(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -585,15 +554,12 @@ func GetMarketTurnover() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetMarketTurnoverChart(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"provider": "nse",
-				"raw":      json.RawMessage(body),
-			})
+			api.Success(w, http.StatusOK, map[string]interface{}{"provider": "nse", "raw": json.RawMessage(body)}, "")
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
+			api.Error(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package landingpage
 
 import (
+	"CimplrCorpSaas/api"
 	"context"
 	"encoding/json"
 	"log"
@@ -55,25 +56,24 @@ func cleanFilter(val string) string {
 func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	type reqBody struct {
 		UserID   string `json:"user_id"`
-		Horizon  string `json:"horizon,omitempty"`   // "7", "30", "90", "Year to Date", etc.
-		FromDate string `json:"from_date,omitempty"` // YYYY-MM-DD
-		ToDate   string `json:"to_date,omitempty"`   // YYYY-MM-DD
+		Horizon  string `json:"horizon,omitempty"`    // "7", "30", "90", "Year to Date", etc.
+		FromDate string `json:"from_date,omitempty"`  // YYYY-MM-DD
+		ToDate   string `json:"to_date,omitempty"`    // YYYY-MM-DD
 		AsOnDate string `json:"as_on_date,omitempty"` // YYYY-MM-DD — snapshot date for balances
 		Bank     string `json:"bank,omitempty"`
 		Account  string `json:"account,omitempty"`
-		Entity   string `json:"entity,omitempty"`    // entity_id
+		Entity   string `json:"entity,omitempty"` // entity_id
 		Currency string `json:"currency,omitempty"`
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid json body"})
+			api.Error(w, http.StatusBadRequest, "invalid json body")
 			return
 		}
 
@@ -85,21 +85,24 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			horizon = n
 		} else {
 			switch strings.ToLower(h) {
-			case "last 7 days", "7 days",  "7":  horizon = 7
-			case "last 30 days", "30 days", "30": horizon = 30
-			case "last 90 days", "90 days", "90": horizon = 90
+			case "last 7 days", "7 days", "7":
+				horizon = 7
+			case "last 30 days", "30 days", "30":
+				horizon = 30
+			case "last 90 days", "90 days", "90":
+				horizon = 90
 			case "year to date", "ytd":
 				// from Jan 1 of current year to today
 				now := time.Now().UTC()
 				horizon = int(now.Sub(time.Date(now.Year(), 1, 1, 0, 0, 0, 0, time.UTC)).Hours()/24) + 1
-			// leave horizon = 70 for any other string
+				// leave horizon = 70 for any other string
 			}
 		}
 
 		// Normalise filters — treat "all" the same as blank (= no filter).
-		filterBank     := cleanFilter(req.Bank)
-		filterAccount  := cleanFilter(req.Account)
-		filterEntity   := cleanFilter(req.Entity) // entity_id UUID
+		filterBank := cleanFilter(req.Bank)
+		filterAccount := cleanFilter(req.Account)
+		filterEntity := cleanFilter(req.Entity) // entity_id UUID
 		filterCurrency := cleanFilter(req.Currency)
 		filterAsOnDate := cleanFilter(req.AsOnDate) // snapshot date for balances
 
@@ -109,7 +112,6 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := context.Background()
-
 
 		// ── Determine date window ──
 		// Always backward-looking: end = today (or to_date), start = end - horizon (or from_date).
@@ -128,16 +130,15 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if start.IsZero() || end.IsZero() {
 			// Backward-looking window from horizon: end = today, start = today - (horizon-1).
-			end   = time.Now().UTC().Truncate(24 * time.Hour)
+			end = time.Now().UTC().Truncate(24 * time.Hour)
 			start = end.AddDate(0, 0, -(horizon - 1))
 		}
 		startStr := start.Format(constants.DateFormat)
-		endStr   := end.Format(constants.DateFormat)
+		endStr := end.Format(constants.DateFormat)
 
 		// Balance date filter always applied — both horizon and custom ranges restrict as_of_date.
 		balDateStart := startStr
-		balDateEnd   := endStr
-
+		balDateEnd := endStr
 
 		// ── 1) Fetch balance per account ──
 		//   • as_on_date provided → last transaction's running balance on/before that date (from statement transactions)
@@ -231,8 +232,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, qArgs...)
 
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -259,10 +259,10 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── Aggregate totals ──
 		var totalINR float64
 		currencySums := map[string]float64{}
-		bankSums     := map[string]float64{}
-		entitySums   := map[string]float64{}
-		accountSums  := map[string]float64{}
-		countrySums  := map[string]float64{}
+		bankSums := map[string]float64{}
+		entitySums := map[string]float64{}
+		accountSums := map[string]float64{}
+		countrySums := map[string]float64{}
 
 		for _, r0 := range balRows {
 			v := toINR(r0.Balance, r0.Currency)
@@ -276,11 +276,21 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rd2 := func(v float64) float64 { return math.Round(v*100) / 100 }
 		totalINR = rd2(totalINR)
-		for k, v := range currencySums { currencySums[k] = rd2(v) }
-		for k, v := range bankSums     { bankSums[k]     = rd2(v) }
-		for k, v := range entitySums   { entitySums[k]   = rd2(v) }
-		for k, v := range accountSums  { accountSums[k]  = rd2(v) }
-		for k, v := range countrySums  { countrySums[k]  = rd2(v) }
+		for k, v := range currencySums {
+			currencySums[k] = rd2(v)
+		}
+		for k, v := range bankSums {
+			bankSums[k] = rd2(v)
+		}
+		for k, v := range entitySums {
+			entitySums[k] = rd2(v)
+		}
+		for k, v := range accountSums {
+			accountSums[k] = rd2(v)
+		}
+		for k, v := range countrySums {
+			countrySums[k] = rd2(v)
+		}
 
 		topKPIs := []map[string]interface{}{
 			{"title": "Total Cash & Equivalents", "value": totalINR},
@@ -293,8 +303,8 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				return s
 			}()},
-			{"title": "Total Bank Balances",   "value": totalINR},
-			{"title": "Total Entity Balances",  "value": totalINR},
+			{"title": "Total Bank Balances", "value": totalINR},
+			{"title": "Total Entity Balances", "value": totalINR},
 		}
 
 		// ── 2) Transaction date window (already computed above) ──
@@ -317,10 +327,9 @@ WHERE t.value_date BETWEEN $1 AND $2
 GROUP BY COALESCE(NULLIF(m.currency,''),'INR')`
 		}
 
-
 		// ── 3) Projection KPIs ──
 		monthStartKey := start.Year()*12 + int(start.Month())
-		monthEndKey   := end.Year()*12 + int(end.Month())
+		monthEndKey := end.Year()*12 + int(end.Month())
 		log.Printf("[DEBUG] projection month keys start=%d end=%d", monthStartKey, monthEndKey)
 
 		var rawCount int
@@ -359,7 +368,7 @@ GROUP BY COALESCE(NULLIF(cpi.currency_code,''), COALESCE(cp.base_currency_code,'
 				var si, so float64
 				var cur string
 				if err := aggRows.Scan(&si, &so, &cur); err == nil {
-					projectedInflowsINR  += toINR(si, cur)
+					projectedInflowsINR += toINR(si, cur)
 					projectedOutflowsINR += toINR(so, cur)
 				}
 			}
@@ -382,7 +391,7 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
   AND ($3 = '' OR me.entity_id::text = $3)
   AND ($4 = '' OR UPPER(TRIM(COALESCE(cp.base_currency_code,''))) = UPPER(TRIM($4)))`
 
-		projectedDailyInflow  := map[string]float64{}
+		projectedDailyInflow := map[string]float64{}
 		projectedDailyOutflow := map[string]float64{}
 		if projRows, err := pgxPool.Query(ctx, projDetailQ, monthStartKey, monthEndKey, filterEntity, filterCurrency); err != nil {
 			log.Printf("[DEBUG] projection detail error: %v", err)
@@ -415,17 +424,17 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 			projRows.Close()
 		}
 
-		projectedInflowsINR  = rd2(projectedInflowsINR)
+		projectedInflowsINR = rd2(projectedInflowsINR)
 		projectedOutflowsINR = rd2(projectedOutflowsINR)
-		projectedClosing     := rd2(totalINR + (projectedInflowsINR - projectedOutflowsINR))
-		liquidityGap         := rd2(math.Abs(projectedClosing - totalINR))
+		projectedClosing := rd2(totalINR + (projectedInflowsINR - projectedOutflowsINR))
+		liquidityGap := rd2(math.Abs(projectedClosing - totalINR))
 
 		forecastKPIs := []map[string]interface{}{
-			{"title": "Current Balance",    "value": totalINR},
-			{"title": "Projected Inflows",  "value": projectedInflowsINR},
+			{"title": "Current Balance", "value": totalINR},
+			{"title": "Projected Inflows", "value": projectedInflowsINR},
 			{"title": "Projected Outflows", "value": projectedOutflowsINR},
-			{"title": "Projected Closing",  "value": projectedClosing},
-			{"title": "Liquidity Gap",      "value": liquidityGap},
+			{"title": "Projected Closing", "value": projectedClosing},
+			{"title": "Liquidity Gap", "value": liquidityGap},
 		}
 
 		// ── 4) Pie datasets ──
@@ -460,11 +469,11 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 			}
 			countryStatement = append(countryStatement, StatementRow{Title: k, Inflow: v})
 		}
-		accountToBank     := map[string]string{}
+		accountToBank := map[string]string{}
 		accountToNickname := map[string]string{}
 		for _, br := range balRows {
 			if br.Account != "" {
-				accountToBank[br.Account]     = br.Bank
+				accountToBank[br.Account] = br.Bank
 				accountToNickname[br.Account] = br.Nickname
 			}
 		}
@@ -479,9 +488,13 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 
 		// ── 6) Weekwise forecast vs actual ──
 		totalDays := int(end.Sub(start).Hours()/24) + 1
-		numWeeks  := (totalDays + 6) / 7
-		if numWeeks <= 0  { numWeeks = 10 }
-		if numWeeks > 52  { numWeeks = 52 }
+		numWeeks := (totalDays + 6) / 7
+		if numWeeks <= 0 {
+			numWeeks = 10
+		}
+		if numWeeks > 52 {
+			numWeeks = 52
+		}
 
 		weeks := make([]map[string]interface{}, 0, numWeeks)
 		for i := 0; i < numWeeks; i++ {
@@ -494,13 +507,13 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 			weStr := we.Format(constants.DateFormat)
 
 			filters := txnRangeFilters{Bank: filterBank, Account: filterAccount, Entity: filterEntity, Currency: filterCurrency}
-			aIn  := sumTxnRange(ctx, pgxPool, txnFilter("t.deposit_amount"),   wsStr, weStr, filters)
+			aIn := sumTxnRange(ctx, pgxPool, txnFilter("t.deposit_amount"), wsStr, weStr, filters)
 			aOut := sumTxnRange(ctx, pgxPool, txnFilter("t.withdrawal_amount"), wsStr, weStr, filters)
 
 			var fIn, fOut float64
 			for d := ws; !d.After(we); d = d.AddDate(0, 0, 1) {
 				key := d.Format(constants.DateFormat)
-				fIn  += projectedDailyInflow[key]
+				fIn += projectedDailyInflow[key]
 				fOut += projectedDailyOutflow[key]
 			}
 
@@ -517,18 +530,7 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"top_kpis":             topKPIs,
-			"forecast_kpis":        forecastKPIs,
-			"currency_pie":         currencyPie,
-			"bank_pie":             bankPie,
-			"entity_pie":           entityPie,
-			"country_statement":    countryStatement,
-			"account_statement":    accountStatement,
-			"currency_statement":   currencyStatement,
-			"weekwise":             weeks,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"top_kpis": topKPIs, "forecast_kpis": forecastKPIs, "currency_pie": currencyPie, "bank_pie": bankPie, "entity_pie": entityPie, "country_statement": countryStatement, "account_statement": accountStatement, "currency_statement": currencyStatement, "weekwise": weeks}, "")
 	}
 }
 

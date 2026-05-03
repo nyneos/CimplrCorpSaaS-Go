@@ -1,6 +1,7 @@
 package plannedinflowoutflowdash
 
 import (
+	"CimplrCorpSaas/api"
 	"context"
 	"encoding/json"
 	"log"
@@ -61,8 +62,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var body reqBody
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrMissingUserID})
+			api.Error(w, http.StatusBadRequest, constants.ErrMissingUserID)
 			return
 		}
 		ctx := context.Background()
@@ -99,8 +99,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`
 			rows, err := pgxPool.Query(ctx, entityQ, dr.Start, dr.End)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 
@@ -156,8 +155,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`
 			rows2, err := pgxPool.Query(ctx, cashflowQ, dr.Start, dr.End)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 
@@ -201,7 +199,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": out})
+		api.Success(w, http.StatusOK, out, "")
 	}
 }
 

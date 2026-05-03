@@ -1,6 +1,7 @@
 package ticker
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"fmt"
@@ -258,7 +259,7 @@ func GetTickerHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// enforce POST at the HTTP entrypoint
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		tickerHandler(w, r)
@@ -269,7 +270,7 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req TickerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		api.Error(w, http.StatusBadRequest, `{"error":"invalid json"}`)
 		return
 	}
 
@@ -310,7 +311,7 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
-		json.NewEncoder(w).Encode(result)
+		api.Success(w, http.StatusOK, result, "")
 		return
 	}
 
@@ -361,8 +362,8 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
 	// If only one base requested, return its value directly to preserve previous behavior
 	if len(bases) == 1 {
-		json.NewEncoder(w).Encode(baseResults[bases[0]])
+		api.Success(w, http.StatusOK, baseResults[bases[0]], "")
 		return
 	}
-	json.NewEncoder(w).Encode(baseResults)
+	api.Success(w, http.StatusOK, baseResults, "")
 }

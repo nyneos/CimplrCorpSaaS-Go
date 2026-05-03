@@ -84,11 +84,11 @@ func GetTransactionPoolHandler(db *sql.DB) http.HandlerFunc {
 		}
 		transactions, err := FetchConsolidatedTransactionPool(ctx, db, q)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(transactions)
+		api.Success(w, http.StatusOK, transactions, "")
 	}
 }
 

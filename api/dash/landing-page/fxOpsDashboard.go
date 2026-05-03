@@ -79,7 +79,7 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req FXOpsDashboardRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid request format")
+			api.Error(w, http.StatusBadRequest, "Invalid request format")
 			return
 		}
 
@@ -176,7 +176,7 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 			BankLimits:        bankLimits,
 		}
 
-		api.RespondWithPayload(w, true, "", response)
+		api.Success(w, http.StatusOK, response, "")
 	}
 }
 

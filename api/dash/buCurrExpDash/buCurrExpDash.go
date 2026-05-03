@@ -5,18 +5,11 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
-	"log"
 	"net/http"
 )
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
+	api.Error(w, status, errMsg)
 }
 
 // Handler: GetDashboard
@@ -71,8 +64,7 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
@@ -82,8 +74,7 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 		}
 		rows, err := db.Query(query)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Server error"})
+			api.Error(w, http.StatusInternalServerError, "Server error")
 			return
 		}
 		defer rows.Close()
@@ -116,7 +107,7 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{"dashboards": dashboards})
+		api.Success(w, http.StatusOK, map[string]interface{}{"dashboards": dashboards}, "")
 	}
 }
 

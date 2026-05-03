@@ -46,7 +46,7 @@ type fdTreasuryDashRequest struct {
 func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -671,7 +671,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"period_start": periodStart.Format(constants.DateFormat),
 		}
 
-		api.RespondWithPayload(w, true, "", payload)
+		api.Success(w, http.StatusOK, payload, "")
 	}
 }
 

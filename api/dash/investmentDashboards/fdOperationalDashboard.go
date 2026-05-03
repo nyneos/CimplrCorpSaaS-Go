@@ -46,7 +46,7 @@ type fdOperationalDashRequest struct {
 func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -878,18 +878,18 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"end_date":   endDateStr,
 			},
 			"kpis": map[string]interface{}{
-				"booking_requests_pending": bookingCount,
-				"confirmations_pending":    confirmCount,
-				"confirmations_overdue":    confirmOverdue,
-				"unmatched_receipts":       unmatchedCount,
-				"tds_pending_count":        tdsCount,
-				"tds_pending_amount":       getNestedFloat(get("tds_pending"), "total_amount"),
-				"exceptions_open":              excCount,
-				"exceptions_impact":            getNestedFloat(get("exceptions"), "impact"),
-				"failed_posting_batches":       failedPostings,
-				"receipts_pending_approval":    receiptsPendingCount,
-				"tds_pending_approval":         tdsPendingApprovalCount,
-				"total_work_items":             bookingCount + confirmCount + unmatchedCount + tdsCount + excCount + receiptsPendingCount + tdsPendingApprovalCount,
+				"booking_requests_pending":  bookingCount,
+				"confirmations_pending":     confirmCount,
+				"confirmations_overdue":     confirmOverdue,
+				"unmatched_receipts":        unmatchedCount,
+				"tds_pending_count":         tdsCount,
+				"tds_pending_amount":        getNestedFloat(get("tds_pending"), "total_amount"),
+				"exceptions_open":           excCount,
+				"exceptions_impact":         getNestedFloat(get("exceptions"), "impact"),
+				"failed_posting_batches":    failedPostings,
+				"receipts_pending_approval": receiptsPendingCount,
+				"tds_pending_approval":      tdsPendingApprovalCount,
+				"total_work_items":          bookingCount + confirmCount + unmatchedCount + tdsCount + excCount + receiptsPendingCount + tdsPendingApprovalCount,
 			},
 			"tables": map[string]interface{}{
 				"booking_requests":      get("booking_requests"),
@@ -906,7 +906,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"sla_distribution": get("sla_distribution"),
 		}
 
-		api.RespondWithPayload(w, true, "", payload)
+		api.Success(w, http.StatusOK, payload, "")
 	}
 }
 

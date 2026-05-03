@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"net/http"
 	"strings"
@@ -17,13 +16,7 @@ import (
 )
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
+	api.Error(w, status, errMsg)
 }
 
 func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
@@ -95,7 +88,7 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
 			avgMaturity = int(weightedSum/totalAmount + 0.5)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"avgForwardMaturity": avgMaturity})
+		api.Success(w, http.StatusOK, map[string]interface{}{"avgForwardMaturity": avgMaturity}, "")
 	}
 }
 
@@ -169,10 +162,7 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"buyForwardsUSD":  format2f(buyTotal),
-			"sellForwardsUSD": format2f(sellTotal),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"buyForwardsUSD": format2f(buyTotal), "sellForwardsUSD": format2f(sellTotal)}, "")
 	}
 }
 
@@ -198,8 +188,8 @@ func GetUserCurrency(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		// json.NewEncoder(w).Encode(map[string]interface{}{"defaultCurrency": defaultCurrency})
-		json.NewEncoder(w).Encode(map[string]any{"defaultCurrency": defaultCurrency})
+		// api.Success(w, http.StatusOK, map[string]interface{}{"defaultCurrency": defaultCurrency}, "")
+		api.Success(w, http.StatusOK, map[string]interface{}{"defaultCurrency": defaultCurrency}, "")
 	}
 }
 
@@ -228,7 +218,7 @@ func GetActiveForwardsCount(db *sql.DB) http.HandlerFunc {
 			// Route: dash/cfo/fwd/active-forwards-count
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"ActiveForward": count})
+		api.Success(w, http.StatusOK, map[string]interface{}{"ActiveForward": count}, "")
 	}
 }
 
@@ -364,7 +354,7 @@ func GetRecentTradesDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(response)
+		api.Success(w, http.StatusOK, response, "")
 	}
 }
 
@@ -442,9 +432,7 @@ func GetTotalUsdSumDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"totalUsdSum": format2f(totalUsd),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"totalUsdSum": format2f(totalUsd)}, "")
 	}
 }
 
@@ -548,11 +536,7 @@ func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"openToBookingRatio": format2f(ratio),
-			"openAmountUsd":      format2f(openUsd),
-			"totalBookedUsd":     format2f(totalUsd),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"openToBookingRatio": format2f(ratio), "openAmountUsd": format2f(openUsd), "totalBookedUsd": format2f(totalUsd)}, "")
 	}
 }
 
@@ -627,7 +611,7 @@ func GetTotalUsdSumByCurrencyDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 
@@ -758,7 +742,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 
@@ -808,7 +792,7 @@ func GetRolloverCountsByCurrency(db *sql.DB) http.HandlerFunc {
 		// Add total at the top
 		data = append([]map[string]string{{"label": "Total Rollovers:", "value": fmt.Sprintf("%d", total)}}, data...)
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(data)
+		api.Success(w, http.StatusOK, data, "")
 	}
 }
 
@@ -916,7 +900,7 @@ func GetBankTradesData(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(forwardsData)
+		api.Success(w, http.StatusOK, forwardsData, "")
 	}
 }
 
@@ -1023,7 +1007,7 @@ func GetMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(response)
+		api.Success(w, http.StatusOK, response, "")
 	}
 }
 
@@ -1061,7 +1045,7 @@ func GetTotalBankMarginFromForwardBookings(db *sql.DB) http.HandlerFunc {
 			totalBankMargin += margin * rate
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]float64{"totalBankmargin": totalBankMargin})
+		api.Success(w, http.StatusOK, map[string]float64{"totalBankmargin": totalBankMargin}, "")
 	}
 }
 
@@ -1114,8 +1098,6 @@ func GetOpenAmountToBookingRatioSimple(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"ratio": fmt.Sprintf("%.3f", ratio),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"ratio": fmt.Sprintf("%.3f", ratio)}, "")
 	}
 }

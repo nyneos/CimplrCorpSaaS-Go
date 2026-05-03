@@ -95,7 +95,7 @@ func periodStartDate(period string, now time.Time) time.Time {
 func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -657,23 +657,23 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			defer rows.Close()
 			type fdRow struct {
-				FDID            string  `json:"fd_id"`
-				Entity          string  `json:"entity"`
-				EntityID        string  `json:"entity_id"`
-				Bank            string  `json:"bank"`
-				BankFDRefNo     string  `json:"bank_fd_ref_no"`
-				Principal       float64 `json:"principal"`
-				Rate            float64 `json:"rate"`
-				InterestTypeCode string `json:"interest_type_code"`
-				StartDate       string  `json:"start_date"`
-				TenureDays      int     `json:"tenure_days"`
-				MaturityDate    string  `json:"maturity_date"`
-				InterestAccrued float64 `json:"interest_accrued"`
-				Status          string  `json:"status"`
-				BookingID       string  `json:"booking_id"`
-				BookingStatus   string  `json:"booking_status"`
-				ClosureType     string  `json:"closure_type"`
-				ClosureStatus   string  `json:"closure_status"`
+				FDID             string  `json:"fd_id"`
+				Entity           string  `json:"entity"`
+				EntityID         string  `json:"entity_id"`
+				Bank             string  `json:"bank"`
+				BankFDRefNo      string  `json:"bank_fd_ref_no"`
+				Principal        float64 `json:"principal"`
+				Rate             float64 `json:"rate"`
+				InterestTypeCode string  `json:"interest_type_code"`
+				StartDate        string  `json:"start_date"`
+				TenureDays       int     `json:"tenure_days"`
+				MaturityDate     string  `json:"maturity_date"`
+				InterestAccrued  float64 `json:"interest_accrued"`
+				Status           string  `json:"status"`
+				BookingID        string  `json:"booking_id"`
+				BookingStatus    string  `json:"booking_status"`
+				ClosureType      string  `json:"closure_type"`
+				ClosureStatus    string  `json:"closure_status"`
 			}
 			var out []fdRow
 			for rows.Next() {
@@ -774,6 +774,6 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"fd_list": get("fd_list"),
 		}
 
-		api.RespondWithPayload(w, true, "", payload)
+		api.Success(w, http.StatusOK, payload, "")
 	}
 }

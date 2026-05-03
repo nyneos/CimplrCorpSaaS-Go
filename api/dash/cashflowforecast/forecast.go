@@ -1,6 +1,7 @@
 package cashflowforecast
 
 import (
+	"CimplrCorpSaas/api"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -64,12 +65,12 @@ func GetCashflowForecastHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -78,21 +79,20 @@ func GetCashflowForecastHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		kpis, err := GetForecastKPIs(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		rows, err := GetForecastRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		resp := map[string]interface{}{
-			constants.ValueSuccess: true,
-			"kpis":                 kpis,
-			"rows":                 rows,
+			"kpis": kpis,
+			"rows": rows,
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, resp, "")
 	}
 }
 
@@ -480,12 +480,12 @@ func GetForecastDailyHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -493,12 +493,11 @@ func GetForecastDailyHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastDailyRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, rows, "")
 	}
 }
 
@@ -513,12 +512,12 @@ func GetForecastKPIsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -526,12 +525,11 @@ func GetForecastKPIsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		kpis, err := GetForecastKPIs(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "kpis": kpis}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, map[string]interface{}{"kpis": kpis}, "")
 	}
 }
 
@@ -545,12 +543,12 @@ func GetForecastRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -558,12 +556,11 @@ func GetForecastRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, rows, "")
 	}
 }
 
@@ -627,12 +624,12 @@ func GetForecastCategorySumsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -640,11 +637,10 @@ func GetForecastCategorySumsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		sums, err := GetForecastCategorySums(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "category_sums": sums}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, map[string]interface{}{"category_sums": sums}, "")
 	}
 }

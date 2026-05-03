@@ -1,6 +1,7 @@
 package liqsnap
 
 import (
+	"CimplrCorpSaas/api"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,22 +21,22 @@ type UserRequest struct {
 func TotalCashBalanceByEntityHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req UserRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		// You can use req.UserID for filtering if needed
 		balances, err := TotalCashBalanceByEntity(pgxPool)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(balances)
+		api.Success(w, http.StatusOK, balances, "")
 	}
 }
 
@@ -43,22 +44,22 @@ func TotalCashBalanceByEntityHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func LiquidityCoverageRatioHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req UserRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		// You can use req.UserID for filtering if needed
 		ratio, err := LiquidityCoverageRatio(pgxPool)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]float64{"liquidity_coverage_ratio": ratio})
+		api.Success(w, http.StatusOK, map[string]float64{"liquidity_coverage_ratio": ratio}, "")
 	}
 }
 
@@ -66,7 +67,7 @@ func LiquidityCoverageRatioHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func EntityCurrencyWiseCashHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req struct {
@@ -75,17 +76,17 @@ func EntityCurrencyWiseCashHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Currency   string `json:"currency,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		// You can use req.UserID for session/middleware; now accept optional filters
 		data, err := entitycurrencywiseCash(pgxPool, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(data)
+		api.Success(w, http.StatusOK, data, "")
 	}
 }
 
@@ -280,12 +281,12 @@ func KpiCardsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -293,11 +294,11 @@ func KpiCardsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		kpi, err := GetKpiCards(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(kpi)
+		api.Success(w, http.StatusOK, kpi, "")
 	}
 }
 
@@ -310,12 +311,12 @@ func DetailedDailyCashFlowHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -323,11 +324,11 @@ func DetailedDailyCashFlowHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := DetailedDailyCashFlowRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(rows)
+		api.Success(w, http.StatusOK, rows, "")
 	}
 }
 

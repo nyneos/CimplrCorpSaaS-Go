@@ -5,7 +5,6 @@ package fxops
 import (
 	"CimplrCorpSaas/api"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -35,13 +34,7 @@ var rates = map[string]float64{
 }
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
+	api.Error(w, status, errMsg)
 }
 
 // Endpoint: Top Currencies from Headers
@@ -49,13 +42,13 @@ func GetTopCurrenciesFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrFailedToQuery)
 			return
 		}
 		defer rows.Close()
@@ -98,7 +91,7 @@ func GetTopCurrenciesFromHeaders(db *sql.DB) http.HandlerFunc {
 			})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(topCurrencies)
+		api.Success(w, http.StatusOK, topCurrencies, "")
 	}
 }
 
@@ -107,14 +100,14 @@ func GetForwardBookingsMaturingTodayCount(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `SELECT COUNT(*) FROM forward_bookings WHERE entity_level_0 = ANY($1) AND maturity_date = CURRENT_DATE AND (processing_status = 'Approved' OR processing_status = 'approved')`
 		var count sql.NullInt64
 		err := db.QueryRowContext(r.Context(), query, pq.Array(buNames)).Scan(&count)
 		if err != nil {
-			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrFailedToQuery)
 			return
 		}
 		result := int64(0)
@@ -122,7 +115,7 @@ func GetForwardBookingsMaturingTodayCount(db *sql.DB) http.HandlerFunc {
 			result = count.Int64
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]int64{"maturingTodayCount": result})
+		api.Success(w, http.StatusOK, map[string]int64{"maturingTodayCount": result}, "")
 	}
 }
 
@@ -130,7 +123,7 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `
@@ -143,7 +136,7 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrFailedToQuery)
 			return
 		}
 		defer rows.Close()
@@ -158,7 +151,7 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 			var txnDate sql.NullTime
 
 			if err := rows.Scan(&amount, &currency, &txnDate); err != nil {
-				http.Error(w, "Error scanning row", http.StatusInternalServerError)
+				api.Error(w, http.StatusInternalServerError, "Error scanning row")
 				return
 			}
 
@@ -188,7 +181,7 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 
 		// Check if rows.Next() had any errors
 		if err := rows.Err(); err != nil {
-			http.Error(w, "Error iterating over rows", http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "Error iterating over rows")
 			return
 		}
 
@@ -202,10 +195,10 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 			return fmt.Sprintf("$%.0f", amt)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]string{
+		api.Success(w, http.StatusOK, map[string]string{
 			"todayBookingAmountSumUsd":     formatAmount(todaySum),
 			"yesterdayBookingAmountSumUsd": formatAmount(yesterdaySum),
-		})
+		}, "")
 	}
 }
 
@@ -324,8 +317,6 @@ func GetMaturityBucketsByCurrencyPair(db *sql.DB) http.HandlerFunc {
 
 		// Send the response as JSON
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"items": items,
-		})
+		api.Success(w, http.StatusOK, items, "")
 	}
 }

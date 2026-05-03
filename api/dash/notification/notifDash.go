@@ -16,6 +16,7 @@
 package notification
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
@@ -31,13 +32,11 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {
-	w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+	api.Success(w, code, v, "")
 }
 
 func errResp(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]interface{}{"success": false, "error": msg})
+	api.Error(w, code, msg)
 }
 
 // filterRequest is the common filter body shared by all endpoints.

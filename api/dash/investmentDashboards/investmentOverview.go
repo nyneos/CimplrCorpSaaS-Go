@@ -91,7 +91,7 @@ type KPICard struct {
 func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -105,7 +105,7 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Validate entity from context if not provided
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 
@@ -333,7 +333,7 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&totalAUM, &lastMonthAUM, &fyStartAUM, &prevFyAUM, &ytdBuys, &ytdSells, &totalCash, &sellableMF)
 
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "KPI query failed: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "KPI query failed: "+err.Error())
 			return
 		}
 
@@ -430,7 +430,7 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"aum_detail":         aumDetails,
 			"transaction_detail": rawTransactions,
 		}
-		api.RespondWithPayload(w, true, "", resp)
+		api.Success(w, http.StatusOK, resp, "")
 	}
 }
 
@@ -924,7 +924,7 @@ type EntityPerformanceRow struct {
 func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req struct {
@@ -941,7 +941,7 @@ func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1008,7 +1008,7 @@ func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, fyStart.Format(constants.DateFormat), nullIfEmpty(entityFilter), nullIfEmpty(req.AMCName), allowedParam, req.Limit)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1029,12 +1029,7 @@ func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// RAW TABULAR DATA: YTD transactions contributing to performance
 		rawTransactions := fetchRawTransactionDetails(ctx, pgxPool, entityFilter, allowedEntities, fyStart)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rows":               out,
-			"portfolio_detail":   aumDetails,
-			"transaction_detail": rawTransactions,
-			"generated_at":       time.Now().UTC().Format(time.RFC3339),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"rows": out, "portfolio_detail": aumDetails, "transaction_detail": rawTransactions, "generated_at": time.Now().UTC().Format(time.RFC3339)}, "")
 	}
 }
 
@@ -1054,7 +1049,7 @@ type ConsolidatedRiskRow struct {
 func GetConsolidatedRisk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1068,7 +1063,7 @@ func GetConsolidatedRisk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1113,7 +1108,7 @@ func GetConsolidatedRisk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var out ConsolidatedRiskRow
 		if err := row.Scan(&out.LCR, &out.TotalValue, &out.LowValue, &out.MediumValue, &out.HighValue); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -1122,18 +1117,15 @@ func GetConsolidatedRisk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// RAW TABULAR DATA: Portfolio details with risk ratings
 		aumDetails := fetchAUMDetailsWithRisk(ctx, pgxPool, entityFilter, allowedEntities)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rows": map[string]interface{}{
-				"generated_at":     out.GeneratedAt,
-				"high_value":       out.HighValue,
-				"lcr":              out.LCR,
-				"low_value":        out.LowValue,
-				"medium_value":     out.MediumValue,
-				"portfolio_detail": aumDetails,
-				"total_value":      out.TotalValue,
-			},
-			"success": true,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"generated_at":     out.GeneratedAt,
+			"high_value":       out.HighValue,
+			"lcr":              out.LCR,
+			"low_value":        out.LowValue,
+			"medium_value":     out.MediumValue,
+			"portfolio_detail": aumDetails,
+			"total_value":      out.TotalValue,
+		}, "")
 	}
 }
 
@@ -1149,7 +1141,7 @@ type WaterfallRow struct {
 func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1166,7 +1158,7 @@ func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1237,7 +1229,7 @@ func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, nullIfEmpty(entityFilter), req.PeriodStart, req.PeriodEnd, allowedParam)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1287,13 +1279,7 @@ func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// RAW TABULAR DATA: Portfolio snapshot rows that create the waterfall
 		aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rows":             out,
-			"opening_total":    openingTotal,
-			"closing_total":    closingTotal,
-			"portfolio_detail": aumDetails,
-			"generated_at":     time.Now().UTC().Format(time.RFC3339),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"rows": out, "opening_total": openingTotal, "closing_total": closingTotal, "portfolio_detail": aumDetails, "generated_at": time.Now().UTC().Format(time.RFC3339)}, "")
 	}
 }
 
@@ -1310,7 +1296,7 @@ type AMCPerfRow struct {
 func GetAMCPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req struct {
@@ -1324,7 +1310,7 @@ func GetAMCPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1361,7 +1347,7 @@ func GetAMCPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, nullIfEmpty(entityFilter), req.Limit, allowedParam)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1395,11 +1381,7 @@ func GetAMCPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// RAW TABULAR DATA: Portfolio snapshot rows that create AMC performance numbers
 		aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rows":             out,
-			"portfolio_detail": aumDetails,
-			"generated_at":     time.Now().UTC().Format(time.RFC3339),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"rows": out, "portfolio_detail": aumDetails, "generated_at": time.Now().UTC().Format(time.RFC3339)}, "")
 	}
 }
 
@@ -1415,7 +1397,7 @@ type TopAssetRow struct {
 func GetTopPerformingAssets(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1430,7 +1412,7 @@ func GetTopPerformingAssets(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1473,7 +1455,7 @@ func GetTopPerformingAssets(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, nullIfEmpty(entityFilter), req.Limit, allowedParam)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1510,11 +1492,7 @@ func GetTopPerformingAssets(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// RAW TABULAR DATA: Full portfolio snapshot for top performers
 		aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rows":             out,
-			"portfolio_detail": aumDetails,
-			"generated_at":     time.Now().UTC().Format(time.RFC3339),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"rows": out, "portfolio_detail": aumDetails, "generated_at": time.Now().UTC().Format(time.RFC3339)}, "")
 	}
 }
 
@@ -1536,7 +1514,7 @@ func formatPercent(v float64) string {
 func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1551,7 +1529,7 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1617,9 +1595,7 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(months) == 0 {
-			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"rows": []interface{}{}, "amc_names": []string{}, "fy_label": fmt.Sprintf(constants.FormatFiscalYear, req.Year, (req.Year+1)%100), "generated_at": time.Now().UTC().Format(time.RFC3339),
-			})
+			api.Success(w, http.StatusOK, map[string]interface{}{"rows": []interface{}{}, "amc_names": []string{}, "fy_label": fmt.Sprintf(constants.FormatFiscalYear, req.Year, (req.Year+1)%100), "generated_at": time.Now().UTC().Format(time.RFC3339)}, "")
 			return
 		}
 
@@ -1692,7 +1668,7 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, batchQuery, nullIfEmpty(entityFilter), monthDates, allowedParam)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1748,16 +1724,13 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// RAW TABULAR DATA: Full portfolio snapshot with AMC breakdown
 		aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rows": map[string]interface{}{
-				"amc_names":        amcNames,
-				"fy_label":         fmt.Sprintf(constants.FormatFiscalYear, req.Year, (req.Year+1)%100),
-				"generated_at":     time.Now().UTC().Format(time.RFC3339),
-				"portfolio_detail": aumDetails,
-				"rows":             outRows,
-			},
-			"success": true,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"amc_names":        amcNames,
+			"fy_label":         fmt.Sprintf(constants.FormatFiscalYear, req.Year, (req.Year+1)%100),
+			"generated_at":     time.Now().UTC().Format(time.RFC3339),
+			"portfolio_detail": aumDetails,
+			"rows":             outRows,
+		}, "")
 	}
 }
 
@@ -1788,7 +1761,7 @@ type AUMMovementData struct {
 func GetAUMMovementWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1804,7 +1777,7 @@ func GetAUMMovementWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1901,7 +1874,7 @@ func GetAUMMovementWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		err := pgxPool.QueryRow(ctx, waterfallQuery, nullIfEmpty(entityFilter), openingDate, req.PeriodStart, req.PeriodEnd, allowedParam).
 			Scan(&openingAUM, &inflows, &outflows, &income, &closingAUM)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -1928,13 +1901,7 @@ func GetAUMMovementWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 		rawTransactions := fetchRawTransactionDetails(ctx, pgxPool, entityFilter, allowedEntities, fyStart)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"opening": openingAUM, "inflows": inflows, "market_gains_losses": marketGainsLosses,
-			"income": income, "outflows": outflows, "closing": closingAUM,
-			"waterfall": waterfall, "portfolio_detail": aumDetails, "transaction_detail": rawTransactions,
-			"period_start": req.PeriodStart, "period_end": req.PeriodEnd,
-			"generated_at": time.Now().UTC().Format(time.RFC3339),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"opening": openingAUM, "inflows": inflows, "market_gains_losses": marketGainsLosses, "income": income, "outflows": outflows, "closing": closingAUM, "waterfall": waterfall, "portfolio_detail": aumDetails, "transaction_detail": rawTransactions, "period_start": req.PeriodStart, "period_end": req.PeriodEnd, "generated_at": time.Now().UTC().Format(time.RFC3339)}, "")
 	}
 }
 
@@ -1951,7 +1918,7 @@ type AUMBreakdownItem struct {
 func GetAUMBreakdown(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1966,7 +1933,7 @@ func GetAUMBreakdown(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -2025,7 +1992,7 @@ func GetAUMBreakdown(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -2057,10 +2024,7 @@ func GetAUMBreakdown(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// RAW TABULAR DATA: Portfolio snapshot that creates the breakdown
 		aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"breakdown": breakdownWithPct, "total": total, "group_by": req.GroupBy,
-			"portfolio_detail": aumDetails, "generated_at": time.Now().UTC().Format(time.RFC3339),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"breakdown": breakdownWithPct, "total": total, "group_by": req.GroupBy, "portfolio_detail": aumDetails, "generated_at": time.Now().UTC().Format(time.RFC3339)}, "")
 	}
 }
 
@@ -2077,7 +2041,7 @@ type AttributionItem struct {
 func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -2087,7 +2051,7 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Benchmark  string `json:"benchmark,omitempty"` // e.g., constants.Nifty50, "NIFTY 100"
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -2116,7 +2080,7 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -2144,7 +2108,7 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		txnRows, err := pgxPool.Query(ctx, txnQuery, nullIfEmpty(entityFilter), fyStart, fyEnd, allowedEntities)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer txnRows.Close()
@@ -2222,7 +2186,7 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		catRows, err := pgxPool.Query(ctx, categoryQuery, nullIfEmpty(entityFilter), allowedEntities)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer catRows.Close()
@@ -2374,7 +2338,7 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"generated_at":       time.Now().UTC().Format(time.RFC3339),
 		}
 
-		api.RespondWithPayload(w, true, "", response)
+		api.Success(w, http.StatusOK, response, "")
 	}
 }
 
@@ -2393,7 +2357,7 @@ type HeatmapCell struct {
 func GetDailyPnLHeatmap(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -2408,7 +2372,7 @@ func GetDailyPnLHeatmap(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -2472,7 +2436,7 @@ func GetDailyPnLHeatmap(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, nullIfEmpty(entityFilter), allowedEntities)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -2542,7 +2506,7 @@ func GetDailyPnLHeatmap(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
 		}
 
-		api.RespondWithPayload(w, true, "", response)
+		api.Success(w, http.StatusOK, response, "")
 	}
 }
 
@@ -2560,7 +2524,7 @@ type BenchmarkPoint struct {
 func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -2576,7 +2540,7 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -2621,11 +2585,7 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(monthDates) == 0 {
-			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"series":         []BenchmarkPoint{{Month: "Apr", Portfolio: 100, Benchmark: 100}},
-				"benchmark_name": req.Benchmark, "financial_year": fmt.Sprintf(constants.FormatFiscalYear, req.Year, req.Year+1),
-				"generated_at": time.Now().UTC().Format(time.RFC3339),
-			})
+			api.Success(w, http.StatusOK, map[string]interface{}{"series": []BenchmarkPoint{{Month: "Apr", Portfolio: 100, Benchmark: 100}}, "benchmark_name": req.Benchmark, "financial_year": fmt.Sprintf(constants.FormatFiscalYear, req.Year, req.Year+1), "generated_at": time.Now().UTC().Format(time.RFC3339)}, "")
 			return
 		}
 
@@ -2668,7 +2628,7 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, batchQuery, nullIfEmpty(entityFilter), monthDates, allowedParam)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -2745,18 +2705,12 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// RAW TABULAR DATA: Portfolio snapshot for comparison
 		aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"series": points, "benchmark_name": req.Benchmark,
-			"portfolio_detail": aumDetails,
-			"summary": map[string]interface{}{
-				"portfolio_return": math.Round(portfolioReturn*100) / 100,
-				"benchmark_return": math.Round(benchmarkReturn*100) / 100,
-				"alpha":            math.Round((portfolioReturn-benchmarkReturn)*100) / 100,
-				"outperforming":    portfolioReturn > benchmarkReturn,
-			},
-			"financial_year": fmt.Sprintf(constants.FormatFiscalYear, req.Year, req.Year+1),
-			"generated_at":   time.Now().UTC().Format(time.RFC3339),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"series": points, "benchmark_name": req.Benchmark, "portfolio_detail": aumDetails, "summary": map[string]interface{}{
+			"portfolio_return": math.Round(portfolioReturn*100) / 100,
+			"benchmark_return": math.Round(benchmarkReturn*100) / 100,
+			"alpha":            math.Round((portfolioReturn-benchmarkReturn)*100) / 100,
+			"outperforming":    portfolioReturn > benchmarkReturn,
+		}, "financial_year": fmt.Sprintf(constants.FormatFiscalYear, req.Year, req.Year+1), "generated_at": time.Now().UTC().Format(time.RFC3339)}, "")
 	}
 }
 
@@ -2782,7 +2736,7 @@ type MutualFundTickerRow struct {
 func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -2797,7 +2751,7 @@ func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+			api.Error(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -2872,7 +2826,7 @@ func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, nullIfEmpty(entityFilter), req.Limit, allowedParam)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -2909,19 +2863,14 @@ func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// RAW TABULAR DATA: Full portfolio snapshot for market rates
 		aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"mutual_funds":     ticker,
-			"portfolio_detail": aumDetails,
-			"summary": map[string]interface{}{
-				"total_schemes": len(ticker),
-				"total_value":   math.Round(totalValue*100) / 100,
-				"total_mtm":     math.Round(totalMTM*100) / 100,
-				"gainers":       gainers,
-				"losers":        losers,
-				"unchanged":     len(ticker) - gainers - losers,
-			},
-			"generated_at": time.Now().UTC().Format(time.RFC3339),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{"mutual_funds": ticker, "portfolio_detail": aumDetails, "summary": map[string]interface{}{
+			"total_schemes": len(ticker),
+			"total_value":   math.Round(totalValue*100) / 100,
+			"total_mtm":     math.Round(totalMTM*100) / 100,
+			"gainers":       gainers,
+			"losers":        losers,
+			"unchanged":     len(ticker) - gainers - losers,
+		}, "generated_at": time.Now().UTC().Format(time.RFC3339)}, "")
 	}
 }
 
@@ -2943,7 +2892,7 @@ type MarketRateTickerLiteRow struct {
 func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -3017,7 +2966,7 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, req.Limit)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -3198,6 +3147,6 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			}
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.Success(w, http.StatusOK, out, "")
 	}
 }

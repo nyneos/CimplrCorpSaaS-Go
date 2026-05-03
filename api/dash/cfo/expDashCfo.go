@@ -3,7 +3,6 @@ package cfo
 import (
 	// "context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -46,19 +45,19 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
-		//     http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		//     api.Error(w, http.StatusUnauthorized, "Unauthorized")
 		//     return
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		log.Printf("%v", pq.Array(buNames))
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrFailedToQuery)
 			return
 		}
 		defer rows.Close()
@@ -81,7 +80,7 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *sql.DB) http.HandlerFunc {
 			}
 			totalUsd += val * rate
 		}
-		json.NewEncoder(w).Encode(map[string]float64{"totalUsd": totalUsd})
+		api.Success(w, http.StatusOK, map[string]float64{"totalUsd": totalUsd}, "")
 	}
 }
 
@@ -90,18 +89,18 @@ func GetPayablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
-		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	api.Error(w, http.StatusUnauthorized, "Unauthorized")
 		// 	return
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'PO' OR exposure_type = 'creditors' OR exposure_type = 'grn') AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrFailedToQuery)
 			return
 		}
 		defer rows.Close()
@@ -128,7 +127,7 @@ func GetPayablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 		for cur, amt := range currencyTotals {
 			payablesData = append(payablesData, Payable{cur, "$" + formatK(amt)})
 		}
-		json.NewEncoder(w).Encode(payablesData)
+		api.Success(w, http.StatusOK, payablesData, "")
 	}
 }
 
@@ -137,18 +136,18 @@ func GetReceivablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
-		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	api.Error(w, http.StatusUnauthorized, "Unauthorized")
 		// 	return
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'SO' OR exposure_type = 'LC' OR exposure_type = 'debitors') AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrFailedToQuery)
 			return
 		}
 		defer rows.Close()
@@ -175,7 +174,7 @@ func GetReceivablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 		for cur, amt := range currencyTotals {
 			receivablesData = append(receivablesData, Receivable{cur, "$" + formatK(amt)})
 		}
-		json.NewEncoder(w).Encode(receivablesData)
+		api.Success(w, http.StatusOK, receivablesData, "")
 	}
 }
 
@@ -184,18 +183,18 @@ func GetAmountByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
-		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	api.Error(w, http.StatusUnauthorized, "Unauthorized")
 		// 	return
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrFailedToQuery)
 			return
 		}
 		defer rows.Close()
@@ -222,7 +221,7 @@ func GetAmountByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 		for cur, amt := range currencyTotals {
 			payablesData = append(payablesData, Amount{cur, "$" + formatK(amt)})
 		}
-		json.NewEncoder(w).Encode(payablesData)
+		api.Success(w, http.StatusOK, payablesData, "")
 	}
 }
 
@@ -231,18 +230,18 @@ func GetBusinessUnitCurrencySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
-		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	api.Error(w, http.StatusUnauthorized, "Unauthorized")
 		// 	return
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `SELECT entity, currency, total_open_amount FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrFailedToQuery)
 			return
 		}
 		defer rows.Close()
@@ -291,7 +290,7 @@ func GetBusinessUnitCurrencySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 			}
 			output = append(output, Output{bu, "$" + formatK(total), currs})
 		}
-		json.NewEncoder(w).Encode(output)
+		api.Success(w, http.StatusOK, output, "")
 	}
 }
 
@@ -300,18 +299,18 @@ func GetMaturityExpirySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
-		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	api.Error(w, http.StatusUnauthorized, "Unauthorized")
 		// 	return
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `SELECT total_open_amount, currency, value_date FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrFailedToQuery)
 			return
 		}
 		defer rows.Close()
@@ -354,7 +353,7 @@ func GetMaturityExpirySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 			{"label": "Next 30 Days", "value": "$" + formatK(sum30)},
 			{"label": "Total Upcoming", "value": "$" + formatK(sumTotal)},
 		}
-		json.NewEncoder(w).Encode(output)
+		api.Success(w, http.StatusOK, output, "")
 	}
 }
 
@@ -378,18 +377,18 @@ func GetAvgExposureMaturity(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
-		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	api.Error(w, http.StatusUnauthorized, "Unauthorized")
 		// 	return
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `SELECT total_original_amount AS amount, currency, value_date, ABS(CAST(value_date AS date) - CURRENT_DATE) AS days_to_maturity FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, "Error calculating Avg Exposure Maturity", http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "Error calculating Avg Exposure Maturity")
 			return
 		}
 		defer rows.Close()
@@ -419,7 +418,7 @@ func GetAvgExposureMaturity(db *sql.DB) http.HandlerFunc {
 			avgMaturity = int(math.Round(weightedSum / totalAmount))
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]int{"avgExposureMaturity": avgMaturity})
+		api.Success(w, http.StatusOK, map[string]int{"avgExposureMaturity": avgMaturity}, "")
 	}
 }
 
@@ -428,13 +427,13 @@ func GetMaturityExpiryCount7DaysFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `SELECT value_date FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrFailedToQuery)
 			return
 		}
 		defer rows.Close()
@@ -454,6 +453,6 @@ func GetMaturityExpiryCount7DaysFromHeaders(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]int{"value": count7})
+		api.Success(w, http.StatusOK, map[string]int{"value": count7}, "")
 	}
 }
