@@ -29,27 +29,27 @@ func getUserFriendlyCostProfitCenterError(err error, context string) (string, in
 
 	errStr := err.Error()
 
-	// Duplicate centre name - Known error, return 200 for frontend to show message
+	// Duplicate centre name - known validation error
 	if strings.Contains(errStr, "unique_centre_name_not_deleted") {
 		return "Centre name already exists. Please use a different name.", http.StatusOK
 	}
 
-	// Duplicate centre code - Known error, return 200
+	// Duplicate centre code - known validation error
 	if strings.Contains(errStr, "unique_centre_code_not_deleted") {
 		return "Centre code already exists. Please use a different code.", http.StatusOK
 	}
 
-	// Duplicate parent-child relationship - Known error, return 200
+	// Duplicate parent-child relationship - known validation error
 	if strings.Contains(errStr, "uq_parent_child_code") {
 		return "This parent-child relationship already exists.", http.StatusOK
 	}
 
-	// Generic duplicate key - Known error, return 200
+	// Generic duplicate key - known validation error
 	if strings.Contains(errStr, constants.ErrDuplicateKey) || strings.Contains(errStr, "unique") {
 		return "This cost/profit centre already exists in the system.", http.StatusOK
 	}
 
-	// Foreign key violations - Known error, return 200
+	// Foreign key violations - known validation error
 	if strings.Contains(errStr, "foreign key") || strings.Contains(errStr, "fkey") {
 		if strings.Contains(errStr, "auditactioncostprofitcenter_fk") {
 			return "Cannot perform this operation. Centre is referenced in audit actions.", http.StatusOK
@@ -57,7 +57,7 @@ func getUserFriendlyCostProfitCenterError(err error, context string) (string, in
 		return "Invalid reference. The related record does not exist.", http.StatusOK
 	}
 
-	// Check constraint violations - Known error, return 200
+	// Check constraint violations - known validation error
 	if strings.Contains(errStr, constants.CheckConstraint) {
 		if strings.Contains(errStr, "centre_type_check") || strings.Contains(errStr, "mastercostprofitcenter_type_check") {
 			return "Invalid centre type. Must be 'Cost Centre' or 'Profit Centre'.", http.StatusOK
@@ -80,7 +80,7 @@ func getUserFriendlyCostProfitCenterError(err error, context string) (string, in
 		return "Invalid data provided. Please check your input.", http.StatusOK
 	}
 
-	// Not null violations - Known error, return 200
+	// Not null violations - known validation error
 	if strings.Contains(errStr, "null value") || strings.Contains(errStr, "violates not-null") {
 		if strings.Contains(errStr, "centre_code") {
 			return "Centre code is required.", http.StatusOK
@@ -901,8 +901,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+					api.Error(w, http.StatusUnprocessableEntity, errMsg)
 				} else {
 					api.Error(w, statusCode, errMsg)
 				}
@@ -1048,8 +1047,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to read relationship inputs")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+					api.Error(w, http.StatusUnprocessableEntity, errMsg)
 				} else {
 					api.Error(w, statusCode, errMsg)
 				}
@@ -1130,8 +1128,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.Commit(ctx); err != nil {
 				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to commit upload transaction")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+					api.Error(w, http.StatusUnprocessableEntity, errMsg)
 				} else {
 					api.Error(w, statusCode, errMsg)
 				}
@@ -1328,8 +1325,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to fetch centre hierarchy")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1695,8 +1691,7 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to fetch parent centres")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1920,8 +1915,7 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1935,8 +1929,7 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to reject centre actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1961,8 +1954,7 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := tx.Commit(ctx); err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrCommitFailedCapitalized)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -2067,8 +2059,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -2082,8 +2073,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to approve centre actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -2109,8 +2099,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			if _, err := tx.Exec(ctx, updQ, deleteIDs); err != nil {
 				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to mark centres as deleted")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+					api.Error(w, http.StatusUnprocessableEntity, errMsg)
 				} else {
 					api.Error(w, statusCode, errMsg)
 				}
@@ -2127,8 +2116,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		if err := tx.Commit(ctx); err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrCommitFailedCapitalized)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}

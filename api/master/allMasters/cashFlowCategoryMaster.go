@@ -35,22 +35,22 @@ func getUserFriendlyCashFlowCategoryError(err error, context string) (string, in
 
 	errStr := err.Error()
 
-	// Duplicate category name - Known error, return 200 for frontend to show message
+	// Duplicate category name - known validation error
 	if strings.Contains(errStr, "unique_category_name_not_deleted") {
 		return "Category name already exists. Please use a different name.", http.StatusOK
 	}
 
-	// Duplicate relationship - Known error, return 200
+	// Duplicate relationship - known validation error
 	if strings.Contains(errStr, "uq_cashflow_name_rel") {
 		return "This parent-child relationship already exists.", http.StatusOK
 	}
 
-	// Generic duplicate key - Known error, return 200
+	// Generic duplicate key - known validation error
 	if strings.Contains(errStr, constants.ErrDuplicateKey) || strings.Contains(errStr, "unique") {
 		return "This cash flow category already exists in the system.", http.StatusOK
 	}
 
-	// Foreign key violations - Known error, return 200
+	// Foreign key violations - known validation error
 	if strings.Contains(errStr, "foreign key") || strings.Contains(errStr, "fkey") {
 		if strings.Contains(errStr, "auditactioncashflowcategory_category_id_fkey") {
 			return "Cannot perform this operation. Category is referenced in audit actions.", http.StatusOK
@@ -58,7 +58,7 @@ func getUserFriendlyCashFlowCategoryError(err error, context string) (string, in
 		return "Invalid reference. The related record does not exist.", http.StatusOK
 	}
 
-	// Check constraint violations - Known error, return 200
+	// Check constraint violations - known validation error
 	if strings.Contains(errStr, constants.CheckConstraint) {
 		if strings.Contains(errStr, "category_type_check") {
 			return "Invalid category type. Must be 'Inflow' or 'Outflow'.", http.StatusOK
@@ -87,7 +87,7 @@ func getUserFriendlyCashFlowCategoryError(err error, context string) (string, in
 		return "Invalid data provided. Please check your input.", http.StatusOK
 	}
 
-	// Not null violations - Known error, return 200
+	// Not null violations - known validation error
 	if strings.Contains(errStr, "null value") || strings.Contains(errStr, "violates not-null") {
 		if strings.Contains(errStr, "category_name") {
 			return "Category name is required.", http.StatusOK
@@ -589,8 +589,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to fetch categories")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -779,8 +778,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to fetch relationships")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -908,8 +906,7 @@ func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to find parent categories")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -923,8 +920,7 @@ func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := rows.Scan(&name, &id, &categoryType); err != nil {
 				errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to scan category data")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+					api.Error(w, http.StatusUnprocessableEntity, errMsg)
 				} else {
 					api.Error(w, statusCode, errMsg)
 				}
@@ -936,8 +932,7 @@ func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := rows.Err(); err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Error iterating categories")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -973,8 +968,7 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to fetch categories")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1317,8 +1311,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, constants.ErrFailedToFetchCategoryRelationships)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1368,8 +1361,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1387,8 +1379,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx.Rollback(ctx)
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, constants.ErrFailedToFetchCategoryRelationships)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1411,8 +1402,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx.Rollback(ctx)
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to create delete audit records")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1454,8 +1444,7 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, constants.ErrFailedToFetchCategoryRelationships)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1525,8 +1514,7 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to reject category actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1592,8 +1580,7 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, constants.ErrFailedToFetchCategoryRelationships)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1646,8 +1633,7 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to start transaction for approval")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1666,8 +1652,7 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			tx.Rollback(ctx)
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to approve category actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -1857,8 +1842,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to start transaction for upload")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+					api.Error(w, http.StatusUnprocessableEntity, errMsg)
 				} else {
 					api.Error(w, statusCode, errMsg)
 				}
@@ -1880,8 +1864,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to stage upload data")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+					api.Error(w, http.StatusUnprocessableEntity, errMsg)
 				} else {
 					api.Error(w, statusCode, errMsg)
 				}
@@ -2088,8 +2071,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.Commit(ctx); err != nil {
 				errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to commit upload transaction")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+					api.Error(w, http.StatusUnprocessableEntity, errMsg)
 				} else {
 					api.Error(w, statusCode, errMsg)
 				}
@@ -2129,8 +2111,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "No file uploaded")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}

@@ -1116,7 +1116,7 @@ func GetProjectionBulkDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(files) == 0 {
-			api.Error(w, http.StatusOK, "no downloadable files found")
+			api.Error(w, http.StatusNotFound, "no downloadable files found")
 			return
 		}
 

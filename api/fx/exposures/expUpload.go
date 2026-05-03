@@ -1331,7 +1331,7 @@ func normalizeBulkIDs(ids []string) []string {
 
 func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
 	if len(files) == 0 {
-		api.Error(w, http.StatusOK, "no downloadable files found")
+		api.Error(w, http.StatusNotFound, "no downloadable files found")
 		return
 	}
 	respondWithSuccess(w, http.StatusOK, map[string]interface{}{

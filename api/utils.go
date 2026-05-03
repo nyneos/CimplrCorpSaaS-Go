@@ -2,7 +2,6 @@ package api
 
 import (
 	"CimplrCorpSaas/api/constants"
-	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -65,63 +64,56 @@ func IsBulkSuccess(results []map[string]interface{}) bool {
 // Error response helper
 func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
 	log.Println("[ERROR]", errMsg)
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
+	Error(w, status, errMsg)
 }
 
 // RespondWithResult sends a consistent JSON response for success or error
 func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	if success {
-		w.WriteHeader(http.StatusOK) // 200
 		log.Println("[INFO] RespondWithResult success")
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true})
+		Success(w, http.StatusOK, map[string]interface{}{}, "")
 	} else {
 		// Set appropriate error status code based on error type
+		status := http.StatusInternalServerError
 		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
-			w.WriteHeader(http.StatusBadRequest) // 400
+			status = http.StatusBadRequest // 400
 		} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
-			w.WriteHeader(http.StatusUnprocessableEntity) // 422
+			status = http.StatusUnprocessableEntity // 422
 		} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
-			w.WriteHeader(http.StatusUnauthorized) // 401
-		} else {
-			w.WriteHeader(http.StatusInternalServerError) // 500
+			status = http.StatusUnauthorized // 401
 		}
 		log.Println("[ERROR] RespondWithResult", errMsg)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg})
+		Error(w, status, errMsg)
 	}
 }
 
 // RespondWithPayload sends a consistent JSON response and includes an arbitrary payload
 func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payload interface{}) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	resp := map[string]interface{}{constants.ValueSuccess: success}
-	if !success && errMsg != "" {
-		resp[constants.ValueError] = errMsg
-		log.Println("[ERROR] RespondWithPayload", errMsg)
-		// Set appropriate error status code
-		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
-			w.WriteHeader(http.StatusBadRequest) // 400
-		} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
-			w.WriteHeader(http.StatusUnprocessableEntity) // 422
-		} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
-			w.WriteHeader(http.StatusUnauthorized) // 401
-		} else {
-			w.WriteHeader(http.StatusInternalServerError) // 500
+	if !success {
+		status := http.StatusOK
+		if errMsg != "" {
+			log.Println("[ERROR] RespondWithPayload", errMsg)
+			// Set appropriate error status code
+			status = http.StatusInternalServerError
+			if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
+				status = http.StatusBadRequest // 400
+			} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
+				status = http.StatusUnprocessableEntity // 422
+			} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
+				status = http.StatusUnauthorized // 401
+			}
 		}
-	} else {
-		w.WriteHeader(http.StatusOK) // 200
+		Error(w, status, errMsg)
+		return
 	}
-	if payload != nil {
-		// use a conventional key `rows` for list payloads
-		resp["rows"] = payload
+	if payload == nil {
+		payload = map[string]interface{}{}
+	} else {
 		log.Println("[INFO] RespondWithPayload payload included")
 	}
-	json.NewEncoder(w).Encode(resp)
+	Success(w, http.StatusOK, payload, "")
 }
 
 // LogInfo logs an informational message (wrapper for consistent logging)

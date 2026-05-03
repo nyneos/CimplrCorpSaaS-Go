@@ -14,6 +14,9 @@ type APIResponse struct {
 }
 
 func Success(w http.ResponseWriter, status int, data interface{}, message string) {
+	if data == nil {
+		data = map[string]interface{}{}
+	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(APIResponse{

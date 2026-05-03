@@ -331,8 +331,7 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to fetch currency data")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -648,8 +647,7 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to reject currency actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -748,8 +746,7 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to approve currency actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -841,8 +838,7 @@ func GetActiveApprovedCurrencyCodes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to fetch active currency codes")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}

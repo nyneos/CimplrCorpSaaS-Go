@@ -28,32 +28,32 @@ func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
 
 	errStr := err.Error()
 
-	// Duplicate counterparty name - Known error, return 200 for frontend to show message
+	// Duplicate counterparty name - known validation error
 	if strings.Contains(errStr, "unique_counterparty_name_not_deleted") {
 		return "Counterparty name already exists. Please use a different name.", http.StatusOK
 	}
 
-	// Duplicate counterparty code - Known error, return 200
+	// Duplicate counterparty code - known validation error
 	if strings.Contains(errStr, "unique_counterparty_code_not_deleted") {
 		return "Counterparty code already exists. Please use a different code.", http.StatusOK
 	}
 
-	// Generic duplicate key - Known error, return 200
+	// Generic duplicate key - known validation error
 	if strings.Contains(errStr, constants.ErrDuplicateKey) {
 		return "This counterparty already exists in the system.", http.StatusOK
 	}
 
-	// Foreign key violation - Known error, return 200
+	// Foreign key violation - known validation error
 	if strings.Contains(errStr, "mastercounterpartybanks_counterparty_fkey") {
 		return "Invalid counterparty. The counterparty does not exist.", http.StatusOK
 	}
 
-	// Generic foreign key violations - Known error, return 200
+	// Generic foreign key violations - known validation error
 	if strings.Contains(errStr, "foreign key") || strings.Contains(errStr, "fkey") {
 		return "Invalid reference. The related record does not exist.", http.StatusOK
 	}
 
-	// Check constraint violations - Known error, return 200
+	// Check constraint violations - known validation error
 	if strings.Contains(errStr, constants.CheckConstraint) {
 		if strings.Contains(errStr, "actiontype_check") {
 			return "Invalid action type. Must be CREATE, EDIT, or DELETE.", http.StatusOK
@@ -64,7 +64,7 @@ func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
 		return "Invalid data provided. Please check your input.", http.StatusOK
 	}
 
-	// Not null violations - Known error, return 200
+	// Not null violations - known validation error
 	if strings.Contains(errStr, "null value") || strings.Contains(errStr, "violates not-null") {
 		if strings.Contains(errStr, "counterparty_name") {
 			return "Counterparty name is required.", http.StatusOK
@@ -549,8 +549,7 @@ func GetCounterpartyBanks(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}
@@ -590,8 +589,7 @@ func GetCounterpartyBanks(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := rows.Err(); err != nil {
 			errMsg, statusCode := getUserFriendlyCounterpartyError(err, "Failed to process data")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				api.Error(w, statusCode, errMsg)
 			}

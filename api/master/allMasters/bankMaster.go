@@ -30,22 +30,22 @@ func getUserFriendlyBankError(err error, context string) (string, int) {
 
 	errStr := err.Error()
 
-	// Duplicate bank name - Known error, return 200 for frontend to show message
+	// Duplicate bank name - known validation error
 	if strings.Contains(errStr, "unique_bank_name_not_deleted") {
 		return "Bank name already exists. Please use a different name.", http.StatusOK
 	}
 
-	// Generic duplicate key - Known error, return 200
+	// Generic duplicate key - known validation error
 	if strings.Contains(errStr, constants.ErrDuplicateKey) || strings.Contains(errStr, "unique") {
 		return "This bank already exists in the system.", http.StatusOK
 	}
 
-	// Foreign key violations - Known error, return 200
+	// Foreign key violations - known validation error
 	if strings.Contains(errStr, "foreign key") || strings.Contains(errStr, "fkey") {
 		return "Invalid reference. The related record does not exist.", http.StatusOK
 	}
 
-	// Check constraint violations - Known error, return 200
+	// Check constraint violations - known validation error
 	if strings.Contains(errStr, constants.CheckConstraint) {
 		if strings.Contains(errStr, "actiontype_check") {
 			return "Invalid action type. Must be CREATE, EDIT, or DELETE.", http.StatusOK
@@ -56,7 +56,7 @@ func getUserFriendlyBankError(err error, context string) (string, int) {
 		return "Invalid data provided. Please check your input.", http.StatusOK
 	}
 
-	// Not null violations - Known error, return 200
+	// Not null violations - known validation error
 	if strings.Contains(errStr, "null value") || strings.Contains(errStr, "violates not-null") {
 		if strings.Contains(errStr, "bank_name") {
 			return "Bank name is required.", http.StatusOK
@@ -180,10 +180,7 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx.Rollback(ctx)
 			errMsg, statusCode := getUserFriendlyBankError(err, "")
 			if statusCode == http.StatusOK {
-				// Known error - return 200 with success: false
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				api.Success(w, http.StatusOK, map[string]interface{}{
-					constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusUnprocessableEntity, errMsg)
 			} else {
 				// Unknown/server error - return error status code
 				api.Error(w, statusCode, errMsg)

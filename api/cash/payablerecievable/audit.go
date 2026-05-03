@@ -30,7 +30,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var req transactionAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.TransactionID) == "" || strings.TrimSpace(req.TransactionType) == "" {
-			api.Error(w, http.StatusOK, "transaction_type and transaction_id are required")
+			api.Error(w, http.StatusBadRequest, "transaction_type and transaction_id are required")
 			return
 		}
 
@@ -45,7 +45,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tableName = "auditactionreceivable"
 			idColumn = "receivable_id"
 		default:
-			api.Error(w, http.StatusOK, "transaction_type must be PAYABLE or RECEIVABLE")
+			api.Error(w, http.StatusBadRequest, "transaction_type must be PAYABLE or RECEIVABLE")
 			return
 		}
 
@@ -67,7 +67,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY requested_at ASC, action_id ASC
 		`, req.TransactionID)
 		if err != nil {
-			api.Error(w, http.StatusOK, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -79,26 +79,26 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var checkerBy, checkerComment, reason *string
 			var checkerAt *time.Time
 			if err := rows.Scan(&actionID, &entityID, &action, &status, &performedBy, &performedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
-				api.Error(w, http.StatusOK, "failed to read transaction audit history")
+				api.Error(w, http.StatusInternalServerError, "failed to read transaction audit history")
 				return
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"action_id":      actionID,
-				"entity_id":      entityID,
-				"action_type":    action,
+				"action_id":         actionID,
+				"entity_id":         entityID,
+				"action_type":       action,
 				"processing_status": status,
-				"requested_by":   performedBy,
-				"requested_at":   performedAt,
-				"checker_by":     stringPointerValue(checkerBy),
-				"checker_at":     timePointerValue(checkerAt),
-				"checker_comment": stringPointerValue(checkerComment),
-				"reason":         stringPointerValue(reason),
-				"change_summary": buildTransactionChangeSummary(ctx, pgxPool, txType, req.TransactionID, action, actionID),
+				"requested_by":      performedBy,
+				"requested_at":      performedAt,
+				"checker_by":        stringPointerValue(checkerBy),
+				"checker_at":        timePointerValue(checkerAt),
+				"checker_comment":   stringPointerValue(checkerComment),
+				"reason":            stringPointerValue(reason),
+				"change_summary":    buildTransactionChangeSummary(ctx, pgxPool, txType, req.TransactionID, action, actionID),
 			})
 		}
 		if err := rows.Err(); err != nil {
-			api.Error(w, http.StatusOK, "failed to read transaction audit history")
+			api.Error(w, http.StatusInternalServerError, "failed to read transaction audit history")
 			return
 		}
 
@@ -109,7 +109,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY requested_at ASC, download_audit_id ASC
 		`, txType, req.TransactionID)
 		if err != nil {
-			api.Error(w, http.StatusOK, "failed to read transaction download audit history")
+			api.Error(w, http.StatusInternalServerError, "failed to read transaction download audit history")
 			return
 		}
 		defer downloadRows.Close()
@@ -119,27 +119,27 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var requestedAt sql.NullTime
 			var fileName, uploadKey sql.NullString
 			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &fileName, &uploadKey); err != nil {
-				api.Error(w, http.StatusOK, "failed to read transaction download audit history")
+				api.Error(w, http.StatusInternalServerError, "failed to read transaction download audit history")
 				return
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"entity_id":     entityID,
-				"action_type":   "DOWNLOAD",
+				"entity_id":         entityID,
+				"action_type":       "DOWNLOAD",
 				"processing_status": "COMPLETED",
-				"requested_by":  strings.TrimSpace(requestedBy),
-				"requested_at":  timePointerValue(&requestedAt.Time),
-				"checker_by":    "",
-				"checker_at":    nil,
-				"checker_comment": "",
-				"reason":        "",
-				"file_name":     fileName.String,
-				"upload_s3_key": uploadKey.String,
-				"source":        txType,
+				"requested_by":      strings.TrimSpace(requestedBy),
+				"requested_at":      timePointerValue(&requestedAt.Time),
+				"checker_by":        "",
+				"checker_at":        nil,
+				"checker_comment":   "",
+				"reason":            "",
+				"file_name":         fileName.String,
+				"upload_s3_key":     uploadKey.String,
+				"source":            txType,
 			})
 		}
 		if err := downloadRows.Err(); err != nil {
-			api.Error(w, http.StatusOK, "failed to read transaction download audit history")
+			api.Error(w, http.StatusInternalServerError, "failed to read transaction download audit history")
 			return
 		}
 
@@ -164,13 +164,13 @@ func buildTransactionChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, t
 
 func buildPayableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, payableID, actionID string) []map[string]interface{} {
 	var (
-		oldEntity, newEntity         sql.NullString
-		oldCounter, newCounter       sql.NullString
-		oldInvoice, newInvoice       sql.NullString
-		oldInvDate, newInvDate       sql.NullString
-		oldDueDate, newDueDate       sql.NullString
-		oldAmount, newAmount         sql.NullString
-		oldCurrency, newCurrency     sql.NullString
+		oldEntity, newEntity     sql.NullString
+		oldCounter, newCounter   sql.NullString
+		oldInvoice, newInvoice   sql.NullString
+		oldInvDate, newInvDate   sql.NullString
+		oldDueDate, newDueDate   sql.NullString
+		oldAmount, newAmount     sql.NullString
+		oldCurrency, newCurrency sql.NullString
 	)
 
 	err := pgxPool.QueryRow(ctx, `
@@ -217,13 +217,13 @@ func buildPayableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, payab
 
 func buildReceivableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, receivableID, actionID string) []map[string]interface{} {
 	var (
-		oldEntity, newEntity         sql.NullString
-		oldCounter, newCounter       sql.NullString
-		oldInvoice, newInvoice       sql.NullString
-		oldInvDate, newInvDate       sql.NullString
-		oldDueDate, newDueDate       sql.NullString
-		oldAmount, newAmount         sql.NullString
-		oldCurrency, newCurrency     sql.NullString
+		oldEntity, newEntity     sql.NullString
+		oldCounter, newCounter   sql.NullString
+		oldInvoice, newInvoice   sql.NullString
+		oldInvDate, newInvDate   sql.NullString
+		oldDueDate, newDueDate   sql.NullString
+		oldAmount, newAmount     sql.NullString
+		oldCurrency, newCurrency sql.NullString
 	)
 
 	err := pgxPool.QueryRow(ctx, `

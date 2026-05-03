@@ -483,9 +483,7 @@ func writeJSONError(w http.ResponseWriter, msg string) {
 	w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
 	w.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
 	w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
-	w.Header().Set(headerContentType, contentTypeJSON)
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]any{"success": false, "error": msg})
+	Error(w, http.StatusOK, msg)
 }
 
 func hexDecode(s string) ([]byte, error) {
@@ -561,7 +559,7 @@ func StartGateway(port string, pathPrefix string) {
 	// Debug endpoint to force logout a user via SSE (for testing only)
 	mux.HandleFunc("/debug/force-logout", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req struct {
@@ -570,12 +568,11 @@ func StartGateway(port string, pathPrefix string) {
 			NewIP  string `json:"new_ip"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			http.Error(w, "invalid body, require {user_id}", http.StatusBadRequest)
+			Error(w, http.StatusBadRequest, "invalid body, require {user_id}")
 			return
 		}
 		dashboard.SendForceLogout(req.UserID, req.Reason, req.NewIP)
-		w.Header().Set(headerContentType, contentTypeJSON)
-		w.Write([]byte(`{"ok":true}`))
+		Success(w, http.StatusOK, map[string]interface{}{}, "ok")
 	}))
 
 	// Debug endpoint to list connected SSE clients
@@ -764,8 +761,7 @@ func StartGateway(port string, pathPrefix string) {
 	mux.HandleFunc("/notification/", createReverseProxy("http://localhost:9111"))
 
 	mux.HandleFunc("/health", withCORS(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("API Gateway is active"))
+		Success(w, http.StatusOK, map[string]interface{}{}, "API Gateway is active")
 	}))
 
 	mux.HandleFunc("/health/db", withCORS(func(w http.ResponseWriter, r *http.Request) {
@@ -818,8 +814,7 @@ func StartGateway(port string, pathPrefix string) {
 		} else {
 			log.Println(msg)
 		}
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte("404 - Route not found"))
+		Error(w, http.StatusNotFound, "404 - Route not found")
 	}))
 	
 	u := os.Getenv("PORT")

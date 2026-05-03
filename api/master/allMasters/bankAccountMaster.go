@@ -145,7 +145,7 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer func() {
 			if p := recover(); p != nil {
 				tx.Rollback(ctx)
-				api.Success(w, http.StatusInternalServerError, map[string]interface{}{constants.ValueSuccess: false}, "")
+				api.Error(w, http.StatusInternalServerError, "internal server error")
 			}
 		}()
 		var accountID string
@@ -262,12 +262,12 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"accounts"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.Success(w, http.StatusBadRequest, map[string]interface{}{constants.ValueSuccess: false}, "")
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		userID := req.UserID
 		if userID == "" {
-			api.Success(w, http.StatusBadRequest, map[string]interface{}{constants.ValueSuccess: false}, "")
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		updatedBy := ""
@@ -279,7 +279,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			api.Success(w, http.StatusBadRequest, map[string]interface{}{constants.ValueSuccess: false}, "")
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 

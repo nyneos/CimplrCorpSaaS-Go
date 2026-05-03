@@ -73,7 +73,7 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 
 			if userID == "" {
 				LogError("Missing user_id in request (cash middleware)")
-				RespondWithPayload(w, false, constants.ErrMissingUserID, nil)
+				Error(w, http.StatusBadRequest, constants.ErrMissingUserID)
 				return
 			}
 
@@ -88,7 +88,7 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 			}
 			if !found {
 				LogError("Invalid session for user_id: %s", userID)
-				RespondWithPayload(w, false, constants.ErrInvalidSessionShort, nil)
+				Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 				return
 			}
 
@@ -97,7 +97,7 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 				`SELECT entity_id FROM user_entity_mappings WHERE user_id = $1`, userID)
 			if mappingErr != nil {
 				LogError("Failed to query user_entity_mappings for user_id: %s error: %v", userID, mappingErr)
-				RespondWithPayload(w, false, constants.ErrNoAccessibleBusinessUnit, nil)
+				Error(w, http.StatusInternalServerError, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 			var rootEntityIds []string
@@ -110,7 +110,7 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 			mappingRows.Close()
 			if len(rootEntityIds) == 0 {
 				LogError("No entity mappings found for user_id: %s", userID)
-				RespondWithPayload(w, false, constants.ErrNoAccessibleBusinessUnit, nil)
+				Error(w, http.StatusInternalServerError, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 
@@ -120,7 +120,7 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 
 			for _, rootEntityId := range rootEntityIds {
 				LogError("Processing root entity_id: %s for user_id: %s", rootEntityId, userID)
-			buRows, buErr := pgxPool.Query(r.Context(), `
+				buRows, buErr := pgxPool.Query(r.Context(), `
              WITH RECURSIVE descendants AS (
     -- Start from the root entity
     SELECT 
@@ -168,7 +168,7 @@ FROM descendants;
             `, rootEntityId)
 				if buErr != nil {
 					LogError("Descendants query execution failed for rootEntityId: %s, error: %v", rootEntityId, buErr)
-					RespondWithPayload(w, false, fmt.Sprintf("Failed to fetch descendants: %v", buErr), nil)
+					Error(w, http.StatusInternalServerError, fmt.Sprintf("Failed to fetch descendants: %v", buErr))
 					return
 				}
 				for buRows.Next() {
@@ -183,7 +183,7 @@ FROM descendants;
 			} // end rootEntityIds loop
 			if len(buNames) == 0 {
 				LogError("No accessible business units found for user_id: %s", userID)
-				RespondWithPayload(w, false, constants.ErrNoAccessibleBusinessUnit, nil)
+				Error(w, http.StatusInternalServerError, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 
@@ -299,7 +299,7 @@ ORDER BY a.account_number;
 			if len(bankAccounts) == 0 {
 				// Friendly error: no accessible bank accounts for user's business units
 				LogError("No accessible bank accounts for business units: %v", buEntityIDs)
-				RespondWithPayload(w, false, "No accessible bank accounts found for your business units", nil)
+				Error(w, http.StatusInternalServerError, "No accessible bank accounts found for your business units")
 				return
 			}
 

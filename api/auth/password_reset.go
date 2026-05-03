@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"crypto/rand"
 	"database/sql"
@@ -156,7 +157,7 @@ func generateShortID() string {
 func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -164,7 +165,7 @@ func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 			Email string `json:"email"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Email) == "" {
-			writeResetJSON(w, http.StatusBadRequest, false, "Email is required")
+			api.Error(w, http.StatusBadRequest, "Email is required")
 			return
 		}
 		email := strings.TrimSpace(strings.ToLower(req.Email))
@@ -172,7 +173,7 @@ func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 
 		// Rate limit: 1 request per email per 60 seconds
 		if isRateLimited(email) {
-			writeResetJSON(w, http.StatusTooManyRequests, false, "Please wait before requesting another reset link")
+			api.Error(w, http.StatusTooManyRequests, "Please wait before requesting another reset link")
 			return
 		}
 
@@ -181,14 +182,14 @@ func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 		err := db.QueryRow(`SELECT id, COALESCE(employee_name, '') FROM users WHERE LOWER(email) = $1`, email).Scan(&userID, &employeeName)
 		if err != nil {
 			LogSecurityEvent(db, "", "forgot_password_unknown", email, clientIP)
-			writeResetJSON(w, http.StatusOK, true, "If the email is registered, a reset link has been sent.")
+			api.Success(w, http.StatusOK, map[string]interface{}{}, "If the email is registered, a reset link has been sent.")
 			return
 		}
 
 		// Generate secure token
 		token, err := generateResetToken()
 		if err != nil {
-			writeResetJSON(w, http.StatusInternalServerError, false, "Failed to generate reset token")
+			api.Error(w, http.StatusInternalServerError, "Failed to generate reset token")
 			return
 		}
 
@@ -203,7 +204,7 @@ func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 			userID, token, expiresAt,
 		)
 		if err != nil {
-			writeResetJSON(w, http.StatusInternalServerError, false, "Failed to create reset token")
+			api.Error(w, http.StatusInternalServerError, "Failed to create reset token")
 			return
 		}
 
@@ -232,7 +233,7 @@ func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		writeResetJSON(w, http.StatusOK, true, "If the email is registered, a reset link has been sent.")
+		api.Success(w, http.StatusOK, map[string]interface{}{}, "If the email is registered, a reset link has been sent.")
 	}
 }
 
@@ -241,7 +242,7 @@ func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 func ResetPasswordHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -250,7 +251,7 @@ func ResetPasswordHandler(db *sql.DB) http.HandlerFunc {
 			NewPassword string `json:"new_password"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeResetJSON(w, http.StatusBadRequest, false, "Invalid request body")
+			api.Error(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
 
@@ -258,14 +259,14 @@ func ResetPasswordHandler(db *sql.DB) http.HandlerFunc {
 		newPassword := req.NewPassword
 
 		if token == "" || newPassword == "" {
-			writeResetJSON(w, http.StatusBadRequest, false, "Token and new_password are required")
+			api.Error(w, http.StatusBadRequest, "Token and new_password are required")
 			return
 		}
 
 		clientIP := extractClientIPFromRequest(r)
 
 		if len(newPassword) < 8 {
-			writeResetJSON(w, http.StatusBadRequest, false, "Password must be at least 8 characters")
+			api.Error(w, http.StatusBadRequest, "Password must be at least 8 characters")
 			return
 		}
 
@@ -279,53 +280,53 @@ func ResetPasswordHandler(db *sql.DB) http.HandlerFunc {
 		).Scan(&userID, &expiresAt, &used)
 		if err != nil {
 			LogSecurityEvent(db, "", "reset_password_invalid_token", "", clientIP)
-			writeResetJSON(w, http.StatusBadRequest, false, "Invalid or expired reset token")
+			api.Error(w, http.StatusBadRequest, "Invalid or expired reset token")
 			return
 		}
 
 		if used {
 			LogSecurityEvent(db, userID, "reset_password_reused_token", "", clientIP)
-			writeResetJSON(w, http.StatusBadRequest, false, "This reset token has already been used")
+			api.Error(w, http.StatusBadRequest, "This reset token has already been used")
 			return
 		}
 
 		if time.Now().After(expiresAt) {
 			LogSecurityEvent(db, userID, "reset_password_expired_token", "", clientIP)
-			writeResetJSON(w, http.StatusBadRequest, false, "Reset token has expired")
+			api.Error(w, http.StatusBadRequest, "Reset token has expired")
 			return
 		}
 
 		// Hash new password
 		hashed, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 		if err != nil {
-			writeResetJSON(w, http.StatusInternalServerError, false, "Failed to hash password")
+			api.Error(w, http.StatusInternalServerError, "Failed to hash password")
 			return
 		}
 
 		// Update password + mark token used in one transaction
 		tx, err := db.Begin()
 		if err != nil {
-			writeResetJSON(w, http.StatusInternalServerError, false, "Internal error")
+			api.Error(w, http.StatusInternalServerError, "Internal error")
 			return
 		}
 		defer tx.Rollback()
 
 		if _, err := tx.Exec(`UPDATE users SET password = $1 WHERE id = $2`, string(hashed), userID); err != nil {
-			writeResetJSON(w, http.StatusInternalServerError, false, "Failed to update password")
+			api.Error(w, http.StatusInternalServerError, "Failed to update password")
 			return
 		}
 		if _, err := tx.Exec(`UPDATE password_reset_tokens SET used = true WHERE token = $1`, token); err != nil {
-			writeResetJSON(w, http.StatusInternalServerError, false, "Failed to invalidate token")
+			api.Error(w, http.StatusInternalServerError, "Failed to invalidate token")
 			return
 		}
 		if err := tx.Commit(); err != nil {
-			writeResetJSON(w, http.StatusInternalServerError, false, "Internal error")
+			api.Error(w, http.StatusInternalServerError, "Internal error")
 			return
 		}
 
 		LogSecurityEvent(db, userID, "reset_password_success", "", clientIP)
 
-		writeResetJSON(w, http.StatusOK, true, "Password has been reset successfully")
+		api.Success(w, http.StatusOK, map[string]interface{}{}, "Password has been reset successfully")
 	}
 }
 
@@ -334,7 +335,7 @@ func ResetPasswordHandler(db *sql.DB) http.HandlerFunc {
 func ValidateResetTokenHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -342,7 +343,7 @@ func ValidateResetTokenHandler(db *sql.DB) http.HandlerFunc {
 			Token string `json:"token"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Token) == "" {
-			writeResetJSON(w, http.StatusBadRequest, false, "Token is required")
+			api.Error(w, http.StatusBadRequest, "Token is required")
 			return
 		}
 
@@ -354,17 +355,17 @@ func ValidateResetTokenHandler(db *sql.DB) http.HandlerFunc {
 			strings.TrimSpace(req.Token),
 		).Scan(&userID, &expiresAt, &used)
 		if err != nil {
-			writeResetJSON(w, http.StatusBadRequest, false, "Invalid reset token")
+			api.Error(w, http.StatusBadRequest, "Invalid reset token")
 			return
 		}
 
 		if used {
-			writeResetJSON(w, http.StatusBadRequest, false, "This reset token has already been used")
+			api.Error(w, http.StatusBadRequest, "This reset token has already been used")
 			return
 		}
 
 		if time.Now().After(expiresAt) {
-			writeResetJSON(w, http.StatusBadRequest, false, "Reset token has expired")
+			api.Error(w, http.StatusBadRequest, "Reset token has expired")
 			return
 		}
 

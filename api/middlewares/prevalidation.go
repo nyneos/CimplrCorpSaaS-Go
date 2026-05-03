@@ -48,7 +48,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			if err != nil {
 				le := strings.ToLower(err.Error())
 				if err == http.ErrMissingFile || strings.Contains(le, "no business") || strings.Contains(le, "no entity") || strings.Contains(le, "no accessible") {
-					api.Error(w, http.StatusOK, "No accessible business units found for this user")
+					api.Error(w, http.StatusForbidden, "No accessible business units found for this user")
 					return
 				}
 				api.Error(w, http.StatusUnauthorized, "Validation failed: "+err.Error())
@@ -58,7 +58,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			entityIDs, entityNames, err := resolveEntityHierarchyMulti(ctx, db, validationResult.RootEntityIDs)
 			if err != nil {
 				if err == http.ErrMissingFile {
-					api.Error(w, http.StatusOK, "No accessible business units found")
+					api.Error(w, http.StatusForbidden, "No accessible business units found")
 					return
 				}
 				api.Error(w, http.StatusInternalServerError, "Failed to resolve entity hierarchy: "+err.Error())
@@ -821,4 +821,3 @@ func loadApprovedDemats(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 
 	return demats, nil
 }
-
