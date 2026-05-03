@@ -4,6 +4,8 @@ import (
 	api "CimplrCorpSaas/api"
 	exposures "CimplrCorpSaas/api/fx/exposures"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/utils"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1545,7 +1547,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							continue
 						}
 						if s, ok := v.(string); ok {
-							norm := exposures.NormalizeDate(s)
+							norm := utils.NormalizeDateString(s)
 							if norm == "" {
 								newCopyRows[i][colIdx+1] = nil
 							} else {
