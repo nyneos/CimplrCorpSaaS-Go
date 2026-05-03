@@ -2,7 +2,7 @@ package allMaster
 
 import (
 	api "CimplrCorpSaas/api"
-	exposures "CimplrCorpSaas/api/fx/exposures"
+	"CimplrCorpSaas/api/utils"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -1523,7 +1523,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							continue
 						}
 						if s, ok := v.(string); ok {
-							norm := exposures.NormalizeDate(s)
+							norm := utils.NormalizeDateString(s)
 							if norm == "" {
 								newCopyRows[i][colIdx+1] = nil
 							} else {

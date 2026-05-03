@@ -104,7 +104,12 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		bookRows, err := db.Query(`SELECT system_transaction_id, entity_level_0, order_type, currency_pair, maturity_date, booking_amount, counterparty, total_rate, value_local_currency FROM forward_bookings WHERE processing_status = 'approved' OR processing_status = 'Approved'`)
+		bookRows, err := db.Query(`
+			SELECT system_transaction_id, entity_level_0, order_type, currency_pair, maturity_date, booking_amount, counterparty, total_rate, value_local_currency
+			FROM forward_bookings
+			WHERE (processing_status = 'approved' OR processing_status = 'Approved')
+			  AND COALESCE(is_deleted, false) = false
+		`)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch bookings")
 			return
@@ -283,7 +288,12 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		headRows, err := db.Query(`SELECT exposure_header_id, entity, exposure_type, currency, value_date, total_open_amount, counterparty_name FROM exposure_headers WHERE approval_status = 'Approved' OR approval_status = 'approved'`)
+		headRows, err := db.Query(`
+			SELECT exposure_header_id, entity, exposure_type, currency, value_date, total_open_amount, counterparty_name
+			FROM exposure_headers
+			WHERE (approval_status = 'Approved' OR approval_status = 'approved' OR approval_status = 'APPROVED')
+			  AND COALESCE(is_deleted, false) = false
+		`)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure headers")
 			return
@@ -476,7 +486,7 @@ func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 		}
 		// Get booking amount
 		var bookingAmount float64
-		_ = db.QueryRow("SELECT Booking_Amount FROM forward_bookings WHERE system_transaction_id = $1", req.BookingID).Scan(&bookingAmount)
+		_ = db.QueryRow("SELECT Booking_Amount FROM forward_bookings WHERE system_transaction_id = $1 AND COALESCE(is_deleted, false) = false", req.BookingID).Scan(&bookingAmount)
 		// Sum previous actions
 		var totalUtilized float64
 		sumQuery := `SELECT COALESCE(SUM(amount_changed), 0) FROM forward_booking_ledger WHERE booking_id = $1 AND action_type IN ('UTILIZATION', 'CANCELLATION', 'ROLLOVER')`

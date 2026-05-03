@@ -2,8 +2,9 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	exposures "CimplrCorpSaas/api/fx/exposures"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/api/utils"
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -1103,12 +1104,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
+		defer tx.Rollback(ctx)
 
 		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
@@ -1175,7 +1171,6 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		committed = true
 
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
@@ -1205,12 +1200,7 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
+		defer tx.Rollback(ctx)
 		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, actiontype, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
 		if err != nil {
@@ -1291,7 +1281,6 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		committed = true
 
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
@@ -1460,7 +1449,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						tgt := mappedTargets[k]
 						if v != nil {
 							if s, ok := v.(string); ok && dateCols[tgt] {
-								norm := exposures.NormalizeDate(s)
+								norm := utils.NormalizeDateString(s)
 								if norm == "" {
 									vals[k+1] = nil
 								} else {
