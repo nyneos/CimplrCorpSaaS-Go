@@ -2,8 +2,8 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	exposures "CimplrCorpSaas/api/fx/exposures"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/api/utils"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1449,7 +1449,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						tgt := mappedTargets[k]
 						if v != nil {
 							if s, ok := v.(string); ok && dateCols[tgt] {
-								norm := exposures.NormalizeDate(s)
+								norm := utils.NormalizeDateString(s)
 								if norm == "" {
 									vals[k+1] = nil
 								} else {
