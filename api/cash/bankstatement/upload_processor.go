@@ -7,17 +7,17 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // ProcessBankStatementFromJSON reads bank.json and processes it like Excel upload.
 // This is a placeholder for future PDF OCR integration.
 func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]interface{}, error) {
-	log.Println("[PDF_PROCESSOR] Reading bank.json file")
+	logger.LogInfo("[PDF_PROCESSOR] Reading bank.json file")
 
 	possiblePaths := []string{
 		"api/cash/bankstatement/bank.json",
@@ -33,7 +33,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 		jsonBytes, err = os.ReadFile(jsonPath)
 		if err == nil {
 			foundPath = jsonPath
-			log.Printf("[PDF_PROCESSOR] Found bank.json at: %s", foundPath)
+			logger.LogInfo("[PDF_PROCESSOR] Found bank.json at: %s", foundPath)
 			break
 		}
 	}
@@ -47,7 +47,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 		return nil, fmt.Errorf("failed to parse bank.json: %w", err)
 	}
 
-	log.Printf("[PDF_PROCESSOR] Parsed JSON: Account=%s, Bank=%s, Period=%s to %s, Transactions=%d",
+	logger.LogInfo("[PDF_PROCESSOR] Parsed JSON: Account=%s, Bank=%s, Period=%s to %s, Transactions=%d",
 		pdfData.AccountNumber, pdfData.BankName, pdfData.PeriodStart, pdfData.PeriodEnd, len(pdfData.Transactions))
 
 	var structured StructuredBankStatement
@@ -123,12 +123,12 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 	for i, txn := range input.Transactions {
 		txnDate, err := time.Parse(constants.DateFormat, txn.TransactionDate)
 		if err != nil {
-			log.Printf("[STRUCTURED_PROCESSOR] Warning: failed to parse transaction_date %s, skipping", txn.TransactionDate)
+			logger.LogError("[STRUCTURED_PROCESSOR] Warning: failed to parse transaction_date %s, skipping", txn.TransactionDate)
 			continue
 		}
 		valDate, err := time.Parse(constants.DateFormat, txn.ValueDate)
 		if err != nil {
-			log.Printf("[STRUCTURED_PROCESSOR] Warning: failed to parse value_date %s, skipping", txn.ValueDate)
+			logger.LogError("[STRUCTURED_PROCESSOR] Warning: failed to parse value_date %s, skipping", txn.ValueDate)
 			continue
 		}
 		if IsStatementOpeningCarryRow(txn.Description) {

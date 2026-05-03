@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
+
 )
 
 // getUserFriendlyBankError converts database errors to user-friendly messages
@@ -1166,10 +1167,10 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get pre-validated context values
-		// log.Printf("Approving bank audit actions for user: %s, bank_ids: %v", session.Name, req.BankIDs)
+		// logger.LogInfo("Approving bank audit actions for user: %s, bank_ids: %v", session.Name, req.BankIDs)
 		// if session == nil {
 		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
-		// 	log.Printf("Unauthorized access to approve bank audit actions: %v", req)
+		// 	logger.LogInfo("Unauthorized access to approve bank audit actions: %v", req)
 		// 	return
 		// }
 		session := api.GetSessionFromCtx(r.Context())

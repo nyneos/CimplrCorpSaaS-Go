@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
@@ -23,7 +22,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 type itemInfoV2 struct {
 	ID        string
@@ -56,13 +56,13 @@ type itemInfoV2 struct {
 func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		log.Printf("[UploadCashflowProposalV2] Start %s %s", r.Method, r.URL.Path)
+		logger.LogInfo("[UploadCashflowProposalV2] Start %s %s", r.Method, r.URL.Path)
 		defer func() {
 			if rec := recover(); rec != nil {
-				log.Printf("[UploadCashflowProposalV2] Panic recovered: %v", rec)
+				logger.LogError("[UploadCashflowProposalV2] Panic recovered: %v", rec)
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 			}
-			log.Printf("[UploadCashflowProposalV2] Finished in %s", time.Since(start))
+			logger.LogInfo("[UploadCashflowProposalV2] Finished in %s", time.Since(start))
 		}()
 
 		ctx := r.Context()
@@ -121,7 +121,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		fileBytes, err := io.ReadAll(fileForHash)
 		if closeErr := fileForHash.Close(); closeErr != nil {
-			log.Printf("[UploadCashflowProposalV2] failed to close upload stream: %v", closeErr)
+			logger.LogError("[UploadCashflowProposalV2] failed to close upload stream: %v", closeErr)
 		}
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
@@ -177,7 +177,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				_ = tx.Rollback(ctx)
 				if s3Uploaded && s3Key != "" {
 					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
-						log.Printf("[UploadCashflowProposalV2] cleanup failed for key=%s: %v", s3Key, cleanupErr)
+						logger.LogError("[UploadCashflowProposalV2] cleanup failed for key=%s: %v", s3Key, cleanupErr)
 					}
 				}
 			}
@@ -194,7 +194,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnprocessableEntity, parseConstraintError(err))
 			return
 		}
-		log.Printf("Created V2 proposal %s", proposalID)
+		logger.LogInfo("Created V2 proposal %s", proposalID)
 
 		if s3storage.IsS3UploadEnabled() {
 			folder := s3storage.GetStoragePrefix("projection")
@@ -412,7 +412,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"message":              "V2 Proposal, items, projections & audit committed successfully",
 		}
 		json.NewEncoder(w).Encode(resp)
-		log.Printf("Committed V2 proposal %s (%d items, %d monthly rows)", proposalID, len(itemInfos), len(itemInfos)*12)
+		logger.LogInfo("Committed V2 proposal %s (%d items, %d monthly rows)", proposalID, len(itemInfos), len(itemInfos)*12)
 		// Notify: FULL proposal data for rich templates
 		capturedProposalID := proposalID
 		capturedUser := userID

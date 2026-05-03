@@ -4,11 +4,11 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // StartAutoRenewalWorker runs daily and processes FDs with auto_renewal=true
 // whose maturity_date has passed. It creates a ROLLOVER closure request (type
@@ -35,7 +35,7 @@ func runAutoRenewal(db *pgxpool.Pool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	log.Printf("[AutoRenewal] Starting auto-renewal run at %s", time.Now().Format(time.RFC3339))
+	logger.LogInfo("[AutoRenewal] Starting auto-renewal run at %s", time.Now().Format(time.RFC3339))
 
 	// Fetch all ACTIVE FDs with auto_renewal=true and maturity_date <= today
 	// that don't already have a non-rejected / non-cancelled closure request.
@@ -75,7 +75,7 @@ func runAutoRenewal(db *pgxpool.Pool) {
 		  )
 	`)
 	if err != nil {
-		log.Printf("[AutoRenewal] Query error: %v", err)
+		logger.LogError("[AutoRenewal] Query error: %v", err)
 		return
 	}
 	defer rows.Close()
@@ -99,7 +99,7 @@ func runAutoRenewal(db *pgxpool.Pool) {
 			&f.PrincipalAmount, &f.MaturityDate, &f.TenorDays,
 			&f.AccruedInterest, &f.TDSDeducted,
 		); sErr != nil {
-			log.Printf("[AutoRenewal] Scan error: %v", sErr)
+			logger.LogError("[AutoRenewal] Scan error: %v", sErr)
 			continue
 		}
 		fds = append(fds, f)
@@ -123,7 +123,7 @@ func runAutoRenewal(db *pgxpool.Pool) {
 			TDSDeducted: fd.TDSDeducted, RolloverAmount: rolloverAmount,
 			MaturityDate: fd.MaturityDate, TenorDays: fd.TenorDays,
 		}); processErr != nil {
-			log.Printf("[AutoRenewal] Failed for FD %s: %v", fd.FDID, processErr)
+			logger.LogError("[AutoRenewal] Failed for FD %s: %v", fd.FDID, processErr)
 			_, _ = db.Exec(ctx, `
 				INSERT INTO investment.fd_auto_renewal_log (
 				  fd_id, renewal_date, renewal_status, new_tenor_days,
@@ -136,7 +136,7 @@ func runAutoRenewal(db *pgxpool.Pool) {
 		processed++
 	}
 
-	log.Printf("[AutoRenewal] Run complete — processed=%d failed=%d total=%d at %s",
+	logger.LogError("[AutoRenewal] Run complete — processed=%d failed=%d total=%d at %s",
 		processed, failed, len(fds), time.Now().Format(time.RFC3339))
 }
 
@@ -272,12 +272,12 @@ func processAutoRenewalFD(ctx context.Context, p AutoRenewalFDParams) error {
 		closureRequestID,
 	).Scan(&newBookingID)
 	if bookErr != nil {
-		log.Printf("[AutoRenewal] fd_booking_request insert failed for FD %s closure %s: %v", fdID, closureRequestID, bookErr)
+		logger.LogError("[AutoRenewal] fd_booking_request insert failed for FD %s closure %s: %v", fdID, closureRequestID, bookErr)
 	} else if newBookingID != "" {
 		_, _ = db.Exec(ctx,
 			`UPDATE investment.fd_closure_rollover SET new_fd_booking_id=$1 WHERE closure_request_id=$2`,
 			newBookingID, closureRequestID)
-		log.Printf("[AutoRenewal] Created booking_request %s (BOOKING_PENDING) for closure %s FD %s", newBookingID, closureRequestID, fdID)
+		logger.LogInfo("[AutoRenewal] Created booking_request %s (BOOKING_PENDING) for closure %s FD %s", newBookingID, closureRequestID, fdID)
 	}
 
 	// Link closure request on fd_master
@@ -296,10 +296,10 @@ func processAutoRenewalFD(ctx context.Context, p AutoRenewalFDParams) error {
 		) VALUES ($1,$2,CURRENT_DATE,'INITIATED',$3,$4,NOW())`,
 		fdID, closureRequestID, tenorDays, rolloverAmount)
 	if err != nil {
-		log.Printf("[AutoRenewal] fd_auto_renewal_log insert failed for FD %s: %v", fdID, err)
+		logger.LogError("[AutoRenewal] fd_auto_renewal_log insert failed for FD %s: %v", fdID, err)
 	}
 
-	log.Printf("[AutoRenewal] Created closure %s for FD %s (ROLLOVER/auto-renewal, principal=%.2f accrued=%.2f tds=%.2f rollover=%.2f tenor=%d days)",
+	logger.LogInfo("[AutoRenewal] Created closure %s for FD %s (ROLLOVER/auto-renewal, principal=%.2f accrued=%.2f tds=%.2f rollover=%.2f tenor=%d days)",
 		closureRequestID, fdID, principalAmount, accruedInterest, tdsDeducted, rolloverAmount, tenorDays)
 	return nil
 }

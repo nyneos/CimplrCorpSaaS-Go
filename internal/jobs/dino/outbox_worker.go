@@ -38,7 +38,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net/http"
 	"os"
@@ -47,7 +46,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public entry point
@@ -58,7 +58,7 @@ import (
 //	go jobs.StartOutboxWorker(rootCtx, pgxPool)
 func StartOutboxWorker(ctx context.Context, pool *pgxpool.Pool) {
 	if !owGetenvBool("OUTBOX_WORKER_ENABLED", true) {
-		log.Println("[outbox-worker] disabled via OUTBOX_WORKER_ENABLED=false")
+		logger.LogInfo("[outbox-worker] disabled via OUTBOX_WORKER_ENABLED=false")
 		return
 	}
 
@@ -66,14 +66,14 @@ func StartOutboxWorker(ctx context.Context, pool *pgxpool.Pool) {
 	target := resolveRoute()
 
 	if target == "" {
-		log.Println("[outbox-worker] route not configured")
+		logger.LogInfo("[outbox-worker] route not configured")
 		return
 	}
 
 	pollInterval := time.Duration(owGetenvInt("OUTBOX_WORKER_POLL_SECS", 10)) * time.Second
 	batchSize := owGetenvInt("OUTBOX_WORKER_BATCH_SIZE", 50)
 
-	log.Printf("[outbox-worker] started (poll=%s batch=%d route=****)", pollInterval, batchSize)
+	logger.LogInfo("[outbox-worker] started (poll=%s batch=%d route=****)", pollInterval, batchSize)
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -81,7 +81,7 @@ func StartOutboxWorker(ctx context.Context, pool *pgxpool.Pool) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[outbox-worker] stopped (context cancelled)")
+			logger.LogInfo("[outbox-worker] stopped (context cancelled)")
 			return
 		case <-ticker.C:
 			owProcessBatch(ctx, pool, target, batchSize)
@@ -163,14 +163,14 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		log.Printf("[outbox-worker] begin tx: %v", err)
+		logger.LogError("[outbox-worker] begin tx: %v", err)
 		return
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	rows, err := tx.Query(ctx, selectQ, batchSize)
 	if err != nil {
-		log.Printf("[outbox-worker] fetch batch: %v", err)
+		logger.LogError("[outbox-worker] fetch batch: %v", err)
 		return
 	}
 
@@ -186,7 +186,7 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 			&r.RetryCount, &r.PriorityLevel,
 			&r.EventID, &auditID, &correlationID, &recipientUserID,
 		); err != nil {
-			log.Printf("[outbox-worker] scan row: %v", err)
+			logger.LogError("[outbox-worker] scan row: %v", err)
 			continue
 		}
 		owDeref(&r.RecipientName, recipientName)
@@ -199,19 +199,19 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 	}
 	rows.Close()
 	if rows.Err() != nil {
-		log.Printf("[outbox-worker] rows iteration error: %v", rows.Err())
+		logger.LogError("[outbox-worker] rows iteration error: %v", rows.Err())
 	}
 
 	// Commit the SELECT (releases the FOR UPDATE lock after we read the IDs)
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("[outbox-worker] commit read tx: %v", err)
+		logger.LogError("[outbox-worker] commit read tx: %v", err)
 		return
 	}
 
 	if len(batch) == 0 {
 		return // nothing to do this tick
 	}
-	log.Printf("[outbox-worker] picked up %d rows", len(batch))
+	logger.LogInfo("[outbox-worker] picked up %d rows", len(batch))
 
 	// Step 2 — Claim each row by atomically flipping it to PROCESSING.
 	// Individual UPDATEs (not batch) so a race on any single row doesn't
@@ -224,7 +224,7 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 			  WHERE outbox_id = $1 AND processing_status = 'PENDING'`,
 			row.OutboxID)
 		if err != nil || n == 0 {
-			log.Printf("[outbox-worker] outbox_id=%s already claimed or error: %v", row.OutboxID, err)
+			logger.LogError("[outbox-worker] outbox_id=%s already claimed or error: %v", row.OutboxID, err)
 			continue
 		}
 		toSend = append(toSend, row)
@@ -269,7 +269,7 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 				  WHERE outbox_id = $1`,
 				row.OutboxID)
 			owInsertHistory(ctx, pool, row, "SENT", res.MessageID, res.MessageID, row.RetryCount+1)
-			log.Printf("[outbox-worker] SENT outbox_id=%s to=%s", row.OutboxID, row.RecipientEmail)
+			logger.LogInfo("[outbox-worker] SENT outbox_id=%s to=%s", row.OutboxID, row.RecipientEmail)
 		} else {
 			owHandleFailure(ctx, pool, row, res.Error)
 		}
@@ -285,7 +285,7 @@ func owCallEndpoint(ctx context.Context, endpointURL string, payloads []owSendPa
 
 	body, err := json.Marshal(payloads)
 	if err != nil {
-		log.Printf("[outbox-worker] marshal payload: %v", err)
+		logger.LogError("[outbox-worker] marshal payload: %v", err)
 		return resultMap
 	}
 
@@ -294,7 +294,7 @@ func owCallEndpoint(ctx context.Context, endpointURL string, payloads []owSendPa
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
 	if err != nil {
-		log.Printf("[outbox-worker] build HTTP request: %v", err)
+		logger.LogError("[outbox-worker] build HTTP request: %v", err)
 		return resultMap
 	}
 	req.Header.Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -304,21 +304,21 @@ func owCallEndpoint(ctx context.Context, endpointURL string, payloads []owSendPa
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[outbox-worker] POST **** failed: %v", err)
+		logger.LogError("[outbox-worker] POST **** failed: %v", err)
 		return resultMap
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[outbox-worker] endpoint returned HTTP %d: %s",
+		logger.LogInfo("[outbox-worker] endpoint returned HTTP %d: %s",
 			resp.StatusCode, owTruncate(string(respBody), 300))
 		return resultMap
 	}
 
 	var bulk owBulkResponse
 	if err := json.Unmarshal(respBody, &bulk); err != nil {
-		log.Printf("[outbox-worker] decode response: %v", err)
+		logger.LogError("[outbox-worker] decode response: %v", err)
 		return resultMap
 	}
 
@@ -347,7 +347,7 @@ func owHandleFailure(ctx context.Context, pool *pgxpool.Pool, row owOutboxRow, e
 			        scheduled_at      = $3
 			  WHERE outbox_id = $1`,
 			row.OutboxID, errMsg, nextScheduled)
-		log.Printf("[outbox-worker] RETRY outbox_id=%s attempt=%d next_at=%s err=%s",
+		logger.LogError("[outbox-worker] RETRY outbox_id=%s attempt=%d next_at=%s err=%s",
 			row.OutboxID, row.RetryCount+1, nextScheduled.Format(time.RFC3339), owTruncate(errMsg, 120))
 	} else {
 		_ = owExec(ctx, pool,
@@ -357,7 +357,7 @@ func owHandleFailure(ctx context.Context, pool *pgxpool.Pool, row owOutboxRow, e
 			        last_error        = $2
 			  WHERE outbox_id = $1`,
 			row.OutboxID, errMsg)
-		log.Printf("[outbox-worker] DEAD outbox_id=%s after %d attempts err=%s",
+		logger.LogError("[outbox-worker] DEAD outbox_id=%s after %d attempts err=%s",
 			row.OutboxID, row.RetryCount+1, owTruncate(errMsg, 120))
 	}
 	owInsertHistory(ctx, pool, row, "FAILED", errMsg, "", row.RetryCount+1)
@@ -400,7 +400,7 @@ func owInsertHistory(
 		row.OutboxID, status, providerResponse, providerMessageID, attemptNumber,
 	)
 	if err != nil {
-		log.Printf("[outbox-worker] send_history update outbox_id=%s: %v", row.OutboxID, err)
+		logger.LogError("[outbox-worker] send_history update outbox_id=%s: %v", row.OutboxID, err)
 		return
 	}
 	if n > 0 {
@@ -426,7 +426,7 @@ func owInsertHistory(
 		row.RenderedSubject, row.RenderedBody,
 	)
 	if err != nil {
-		log.Printf("[outbox-worker] send_history insert outbox_id=%s: %v", row.OutboxID, err)
+		logger.LogError("[outbox-worker] send_history insert outbox_id=%s: %v", row.OutboxID, err)
 	}
 }
 

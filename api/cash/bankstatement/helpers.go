@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"regexp"
 	"strconv"
@@ -16,7 +15,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/lib/pq"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func pqUserFriendlyMessage(err error) string {
 	if err == nil {
@@ -436,7 +436,7 @@ func userFriendlyUploadError(err error) string {
 	if errors.As(err, &pqErr) && pqErr.Code == "22003" {
 		return "Some transaction amounts/balances in this statement are too large to be saved. Please try uploading the Excel version, or contact support with this file."
 	}
-	log.Println("Debug raw mesage", msg)
+	logger.LogInfo("Debug raw mesage", msg)
 	if strings.Contains(msg, "failed to begin db transaction") ||
 		strings.Contains(msg, "failed to insert bank statement") ||
 		strings.Contains(msg, "failed to upsert bank_balances_manual") ||

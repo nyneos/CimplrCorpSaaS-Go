@@ -2,7 +2,6 @@ package plannedinflowoutflowdash
 
 import (
 	"encoding/json"
-	"log"
 	"math"
 	"net/http"
 	"time"
@@ -10,7 +9,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // Currency conversion rates to USD
 var rates = map[string]float64{
@@ -31,7 +31,7 @@ func getCurrencyRate(currency string) float64 {
 	if rate, ok := rates[currency]; ok {
 		return rate
 	}
-	log.Printf("Unknown currency encountered: %s, using default rate 1.0", currency)
+	logger.LogInfo("Unknown currency encountered: %s, using default rate 1.0", currency)
 	return 1.0
 }
 

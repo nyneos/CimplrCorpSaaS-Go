@@ -3,7 +3,6 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -226,7 +225,7 @@ func ProcessApprovedSweeps(db *pgxpool.Pool, batchSize int) error {
 			&s.parentOldCredits, &s.parentOldDebits,
 		)
 		if err != nil {
-			log.Printf("Error scanning sweep row: %v", err)
+			logger.LogError("Error scanning sweep row: %v", err)
 			continue
 		}
 		sweeps = append(sweeps, s)
@@ -237,11 +236,11 @@ func ProcessApprovedSweeps(db *pgxpool.Pool, batchSize int) error {
 	}
 
 	if len(sweeps) == 0 {
-		log.Printf("No approved sweeps found for execution at %s", now.Format("15:04:05"))
+		logger.LogInfo("No approved sweeps found for execution at %s", now.Format("15:04:05"))
 		return nil
 	}
 
-	log.Printf("Found %d sweeps ready for execution", len(sweeps))
+	logger.LogInfo("Found %d sweeps ready for execution", len(sweeps))
 
 	// OPTIMIZATION 4: Parallel processing with semaphore to limit concurrency
 	const maxConcurrent = 10
@@ -261,7 +260,7 @@ func ProcessApprovedSweeps(db *pgxpool.Pool, batchSize int) error {
 			// Frequency validation (still needed for weekly/monthly)
 			shouldExecute, err := shouldExecuteSweepByFrequency(sweep.frequency, sweep.requestedAt, now)
 			if err != nil {
-				log.Printf("Error checking sweep %s frequency: %v", sweep.sweepID, err)
+				logger.LogError("Error checking sweep %s frequency: %v", sweep.sweepID, err)
 				mu.Lock()
 				failCount++
 				mu.Unlock()
@@ -269,14 +268,14 @@ func ProcessApprovedSweeps(db *pgxpool.Pool, batchSize int) error {
 			}
 
 			if !shouldExecute {
-				log.Printf("Sweep %s skipped: Frequency check failed", sweep.sweepID)
+				logger.LogError("Sweep %s skipped: Frequency check failed", sweep.sweepID)
 				return
 			}
 
-			log.Printf("Executing sweep %s...", sweep.sweepID)
+			logger.LogInfo("Executing sweep %s...", sweep.sweepID)
 			err = ExecuteSweepOptimized(ctx, db, sweep)
 			if err != nil {
-				log.Printf("Sweep %s failed: %v", sweep.sweepID, err)
+				logger.LogError("Sweep %s failed: %v", sweep.sweepID, err)
 				mu.Lock()
 				failCount++
 				mu.Unlock()
@@ -289,7 +288,7 @@ func ProcessApprovedSweeps(db *pgxpool.Pool, batchSize int) error {
 	}
 
 	wg.Wait()
-	log.Printf("Sweep execution completed: %d success, %d failed out of %d total", successCount, failCount, len(sweeps))
+	logger.LogError("Sweep execution completed: %d success, %d failed out of %d total", successCount, failCount, len(sweeps))
 
 	return nil
 }
@@ -324,7 +323,7 @@ func shouldExecuteSweepByFrequency(frequency string, requestedAt, now time.Time)
 		return true, nil
 
 	default:
-		log.Printf("Unknown frequency '%s' - skipping", frequency)
+		logger.LogInfo("Unknown frequency '%s' - skipping", frequency)
 		return false, nil
 	}
 }
@@ -422,10 +421,10 @@ func ExecuteSweep(ctx context.Context, db *pgxpool.Pool, p ExecuteSweepParams) e
 			sweepAmount = currentBalance - buffer
 			// Contextual logging: prefer 'Standalone' message when configured as such
 			if strings.Contains(strings.ToLower(p.SweepType), "stand") {
-				log.Printf("[SWEEP %s] Standalone sweep: %.2f - %.2f = %.2f",
+				logger.LogInfo("[SWEEP %s] Standalone sweep: %.2f - %.2f = %.2f",
 					p.SweepID, currentBalance, buffer, sweepAmount)
 			} else {
-				log.Printf("[SWEEP %s] Target balance sweep: %.2f - %.2f = %.2f",
+				logger.LogInfo("[SWEEP %s] Target balance sweep: %.2f - %.2f = %.2f",
 					p.SweepID, currentBalance, buffer, sweepAmount)
 			}
 		} else {
@@ -466,7 +465,7 @@ func ExecuteSweep(ctx context.Context, db *pgxpool.Pool, p ExecuteSweepParams) e
 	`, newBalance, sweepAmount, balanceID)
 
 	if err != nil {
-		log.Printf("Error updating source account %s: %v", p.BankAccount, err)
+		logger.LogError("Error updating source account %s: %v", p.BankAccount, err)
 		return fmt.Errorf("unable to update source account balance")
 	}
 
@@ -478,7 +477,7 @@ func ExecuteSweep(ctx context.Context, db *pgxpool.Pool, p ExecuteSweepParams) e
 	`, balanceID, fmt.Sprintf("Auto sweep execution: %s", p.SweepID))
 
 	if err != nil {
-		log.Printf("Error creating audit record for source account %s: %v", p.BankAccount, err)
+		logger.LogError("Error creating audit record for source account %s: %v", p.BankAccount, err)
 		return fmt.Errorf("unable to create audit record for source account")
 	}
 
@@ -495,7 +494,7 @@ func ExecuteSweep(ctx context.Context, db *pgxpool.Pool, p ExecuteSweepParams) e
 	`, p.ParentAccount).Scan(&parentBalanceID, &parentCurrentBalance)
 
 	if err != nil {
-		log.Printf("Error fetching parent account %s: %v", p.ParentAccount, err)
+		logger.LogError("Error fetching parent account %s: %v", p.ParentAccount, err)
 		return fmt.Errorf("parent account %s not found or has no balance records", p.ParentAccount)
 	}
 
@@ -516,7 +515,7 @@ func ExecuteSweep(ctx context.Context, db *pgxpool.Pool, p ExecuteSweepParams) e
 	`, parentNewBalance, sweepAmount, parentBalanceID)
 
 	if err != nil {
-		log.Printf("Error updating parent account %s: %v", p.ParentAccount, err)
+		logger.LogError("Error updating parent account %s: %v", p.ParentAccount, err)
 		return fmt.Errorf(constants.ErrUnableToUpdateParentAccountBalance)
 	}
 
@@ -528,7 +527,7 @@ func ExecuteSweep(ctx context.Context, db *pgxpool.Pool, p ExecuteSweepParams) e
 	`, parentBalanceID, fmt.Sprintf("Auto sweep receipt: %s", p.SweepID))
 
 	if err != nil {
-		log.Printf("Error creating audit record for parent account %s: %v", p.ParentAccount, err)
+		logger.LogError("Error creating audit record for parent account %s: %v", p.ParentAccount, err)
 		return fmt.Errorf("unable to create audit record for parent account")
 	}
 
@@ -541,16 +540,16 @@ func ExecuteSweep(ctx context.Context, db *pgxpool.Pool, p ExecuteSweepParams) e
 	`, p.SweepID, sweepAmount, p.BankAccount, p.ParentAccount, currentBalance, newBalance)
 
 	if err != nil {
-		log.Printf("Error logging sweep execution for %s: %v", p.SweepID, err)
+		logger.LogError("Error logging sweep execution for %s: %v", p.SweepID, err)
 		return fmt.Errorf(constants.ErrUnableToLogSweepExecution)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("Error committing sweep transaction for %s: %v", p.SweepID, err)
+		logger.LogError("Error committing sweep transaction for %s: %v", p.SweepID, err)
 		return fmt.Errorf("unable to complete sweep transaction")
 	}
 
-	log.Printf("Sweep executed: %s | Amount: %.2f | From: %s | To: %s",
+	logger.LogInfo("Sweep executed: %s | Amount: %.2f | From: %s | To: %s",
 		p.SweepID, sweepAmount, p.BankAccount, p.ParentAccount)
 
 	return nil
@@ -577,7 +576,7 @@ func executeReverseSweep(ctx context.Context, db *pgxpool.Pool, p ReverseSweepPa
 	`, p.ParentAccount).Scan(&parentBalanceID, &parentCurrentBalance)
 
 	if err != nil {
-		log.Printf("Error fetching parent account %s for reverse sweep: %v", p.ParentAccount, err)
+		logger.LogError("Error fetching parent account %s for reverse sweep: %v", p.ParentAccount, err)
 		return fmt.Errorf("parent account %s not found", p.ParentAccount)
 	}
 
@@ -612,7 +611,7 @@ func executeReverseSweep(ctx context.Context, db *pgxpool.Pool, p ReverseSweepPa
 	`, parentNewBalance, p.AmountNeeded, parentBalanceID)
 
 	if err != nil {
-		log.Printf("Error updating parent account %s in reverse sweep: %v", p.ParentAccount, err)
+		logger.LogError("Error updating parent account %s in reverse sweep: %v", p.ParentAccount, err)
 		return fmt.Errorf(constants.ErrUnableToUpdateParentAccountBalance)
 	}
 
@@ -623,7 +622,7 @@ func executeReverseSweep(ctx context.Context, db *pgxpool.Pool, p ReverseSweepPa
 		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system', NOW())
 	`, parentBalanceID, fmt.Sprintf("Reverse sweep (concentration funding): %s", p.SweepID))
 	if err != nil {
-		log.Printf("Error creating audit record for parent account %s in reverse sweep: %v", p.ParentAccount, err)
+		logger.LogError("Error creating audit record for parent account %s in reverse sweep: %v", p.ParentAccount, err)
 		return fmt.Errorf("unable to create audit record for parent account")
 	}
 
@@ -644,7 +643,7 @@ func executeReverseSweep(ctx context.Context, db *pgxpool.Pool, p ReverseSweepPa
 	`, childNewBalance, p.AmountNeeded, p.ChildBalanceID)
 
 	if err != nil {
-		log.Printf("Error updating child account %s in reverse sweep: %v", p.ChildAccount, err)
+		logger.LogError("Error updating child account %s in reverse sweep: %v", p.ChildAccount, err)
 		return fmt.Errorf("unable to update child account balance")
 	}
 
@@ -655,7 +654,7 @@ func executeReverseSweep(ctx context.Context, db *pgxpool.Pool, p ReverseSweepPa
 		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system', NOW())
 	`, p.ChildBalanceID, fmt.Sprintf("Reverse sweep receipt (concentration funding): %s", p.SweepID))
 	if err != nil {
-		log.Printf("Error creating audit record for child account %s in reverse sweep: %v", p.ChildAccount, err)
+		logger.LogError("Error creating audit record for child account %s in reverse sweep: %v", p.ChildAccount, err)
 		return fmt.Errorf("unable to create audit record for child account")
 	}
 
@@ -667,16 +666,16 @@ func executeReverseSweep(ctx context.Context, db *pgxpool.Pool, p ReverseSweepPa
 		) VALUES ($1, $2, $3, $4, 'SUCCESS', $5, $6)
 	`, p.SweepID, p.AmountNeeded, p.ParentAccount, p.ChildAccount, parentCurrentBalance, parentNewBalance)
 	if err != nil {
-		log.Printf("Error logging reverse sweep execution for %s: %v", p.SweepID, err)
+		logger.LogError("Error logging reverse sweep execution for %s: %v", p.SweepID, err)
 		return fmt.Errorf(constants.ErrUnableToLogSweepExecution)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("Error committing reverse sweep transaction for %s: %v", p.SweepID, err)
+		logger.LogError("Error committing reverse sweep transaction for %s: %v", p.SweepID, err)
 		return fmt.Errorf("unable to complete reverse sweep transaction")
 	}
 
-	log.Printf("Reverse sweep executed: %s | Amount: %.2f | From: %s | To: %s",
+	logger.LogInfo("Reverse sweep executed: %s | Amount: %.2f | From: %s | To: %s",
 		p.SweepID, p.AmountNeeded, p.ParentAccount, p.ChildAccount)
 
 	return nil
@@ -685,7 +684,7 @@ func executeReverseSweep(ctx context.Context, db *pgxpool.Pool, p ReverseSweepPa
 // ExecuteSweepOptimized performs the sweep using pre-loaded balance data (eliminates SELECT queries)
 func ExecuteSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep SweepData) error {
 	currentBalance := sweep.childClosing
-	log.Printf("[SWEEP %s] Starting execution - Type: %s, Child Balance: %.2f, Buffer: %.2f",
+	logger.LogInfo("[SWEEP %s] Starting execution - Type: %s, Child Balance: %.2f, Buffer: %.2f",
 		sweep.sweepID, sweep.sweepType, currentBalance,
 		func() float64 {
 			if sweep.bufferAmount != nil {
@@ -715,12 +714,12 @@ func ExecuteSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep SweepDat
 	case "concentration":
 		if currentBalance > buffer {
 			sweepAmount = currentBalance - buffer
-			log.Printf("[SWEEP %s] Concentration sweep: %.2f - %.2f = %.2f",
+			logger.LogInfo("[SWEEP %s] Concentration sweep: %.2f - %.2f = %.2f",
 				sweep.sweepID, currentBalance, buffer, sweepAmount)
 		} else {
 			// Reverse sweep
 			sweepAmount = buffer - currentBalance
-			log.Printf("[SWEEP %s] Reverse concentration sweep needed: %.2f - %.2f = %.2f",
+			logger.LogInfo("[SWEEP %s] Reverse concentration sweep needed: %.2f - %.2f = %.2f",
 				sweep.sweepID, buffer, currentBalance, sweepAmount)
 			return executeReverseSweepOptimized(ctx, db, sweep, sweepAmount)
 		}
@@ -728,9 +727,9 @@ func ExecuteSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep SweepDat
 	case "zero balance", "zerobalance":
 		if currentBalance >= buffer {
 			sweepAmount = currentBalance
-			log.Printf("[SWEEP %s] Zero balance sweep: %.2f", sweep.sweepID, sweepAmount)
+			logger.LogInfo("[SWEEP %s] Zero balance sweep: %.2f", sweep.sweepID, sweepAmount)
 		} else {
-			log.Printf("[SWEEP %s] Skipped - balance %.2f below buffer %.2f",
+			logger.LogInfo("[SWEEP %s] Skipped - balance %.2f below buffer %.2f",
 				sweep.sweepID, currentBalance, buffer)
 			return nil
 		}
@@ -740,14 +739,14 @@ func ExecuteSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep SweepDat
 			sweepAmount = currentBalance - buffer
 			// Use a combined message depending on configured type
 			if strings.Contains(strings.ToLower(sweep.sweepType), "stand") {
-				log.Printf("[SWEEP %s] Standalone sweep: %.2f - %.2f = %.2f",
+				logger.LogInfo("[SWEEP %s] Standalone sweep: %.2f - %.2f = %.2f",
 					sweep.sweepID, currentBalance, buffer, sweepAmount)
 			} else {
-				log.Printf("[SWEEP %s] Target balance sweep: %.2f - %.2f = %.2f",
+				logger.LogInfo("[SWEEP %s] Target balance sweep: %.2f - %.2f = %.2f",
 					sweep.sweepID, currentBalance, buffer, sweepAmount)
 			}
 		} else {
-			log.Printf("[SWEEP %s] Skipped - balance %.2f at or below buffer/target %.2f",
+			logger.LogInfo("[SWEEP %s] Skipped - balance %.2f at or below buffer/target %.2f",
 				sweep.sweepID, currentBalance, buffer)
 			return nil
 		}
@@ -785,7 +784,7 @@ func ExecuteSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep SweepDat
 	`, newBalance, sweepAmount, sweep.bankAccount)
 
 	if err != nil {
-		log.Printf("Error updating source account %s: %v", sweep.bankAccount, err)
+		logger.LogError("Error updating source account %s: %v", sweep.bankAccount, err)
 		return fmt.Errorf("unable to update source account balance")
 	}
 
@@ -801,7 +800,7 @@ func ExecuteSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep SweepDat
 	`, fmt.Sprintf("Auto sweep execution: %s", sweep.sweepID), sweep.bankAccount)
 
 	if err != nil {
-		log.Printf("Error creating audit record for source account %s: %v", sweep.bankAccount, err)
+		logger.LogError("Error creating audit record for source account %s: %v", sweep.bankAccount, err)
 		return fmt.Errorf(constants.ErrAuditInsertFailedUser)
 	}
 
@@ -823,7 +822,7 @@ func ExecuteSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep SweepDat
 	`, parentNewBalance, sweepAmount, sweep.parentAccount)
 
 	if err != nil {
-		log.Printf("Error updating parent account %s: %v", sweep.parentAccount, err)
+		logger.LogError("Error updating parent account %s: %v", sweep.parentAccount, err)
 		return fmt.Errorf(constants.ErrUnableToUpdateParentAccountBalance)
 	}
 
@@ -839,7 +838,7 @@ func ExecuteSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep SweepDat
 	`, fmt.Sprintf("Auto sweep receipt: %s", sweep.sweepID), sweep.parentAccount)
 
 	if err != nil {
-		log.Printf("Error creating audit record for parent account %s: %v", sweep.parentAccount, err)
+		logger.LogError("Error creating audit record for parent account %s: %v", sweep.parentAccount, err)
 		return fmt.Errorf(constants.ErrAuditInsertFailedUser)
 	}
 
@@ -852,16 +851,16 @@ func ExecuteSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep SweepDat
 	`, sweep.sweepID, sweepAmount, sweep.bankAccount, sweep.parentAccount, currentBalance, newBalance)
 
 	if err != nil {
-		log.Printf("Error logging sweep execution for %s: %v", sweep.sweepID, err)
+		logger.LogError("Error logging sweep execution for %s: %v", sweep.sweepID, err)
 		return fmt.Errorf(constants.ErrUnableToLogSweepExecution)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("[SWEEP %s] Error committing transaction: %v", sweep.sweepID, err)
+		logger.LogError("[SWEEP %s] Error committing transaction: %v", sweep.sweepID, err)
 		return fmt.Errorf("unable to complete sweep transaction")
 	}
 
-	log.Printf("[SWEEP %s] ✓ SUCCESS | Amount: %.2f | From: %s (new bal: %.2f) | To: %s (new bal: %.2f)",
+	logger.LogInfo("[SWEEP %s] ✓ SUCCESS | Amount: %.2f | From: %s (new bal: %.2f) | To: %s (new bal: %.2f)",
 		sweep.sweepID, sweepAmount, sweep.bankAccount, newBalance, sweep.parentAccount, sweep.parentClosing+sweepAmount)
 
 	return nil
@@ -872,12 +871,12 @@ func executeReverseSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep S
 	parentCurrentBalance := sweep.parentClosing
 	currentBalance := sweep.childClosing
 
-	log.Printf("[SWEEP %s] Reverse sweep - Need: %.2f, Parent has: %.2f, Child has: %.2f",
+	logger.LogInfo("[SWEEP %s] Reverse sweep - Need: %.2f, Parent has: %.2f, Child has: %.2f",
 		sweep.sweepID, amountNeeded, parentCurrentBalance, currentBalance)
 
 	// Check if parent has sufficient funds
 	if parentCurrentBalance < amountNeeded {
-		log.Printf("[SWEEP %s] ✗ INSUFFICIENT_FUNDS in parent account", sweep.sweepID)
+		logger.LogInfo("[SWEEP %s] ✗ INSUFFICIENT_FUNDS in parent account", sweep.sweepID)
 		err := logSweepExecution(ctx, db, SweepLogEntry{
 			SweepID:       sweep.sweepID,
 			FromAccount:   sweep.parentAccount,
@@ -889,7 +888,7 @@ func executeReverseSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep S
 			BalanceAfter:  parentCurrentBalance,
 		})
 		if err != nil {
-			log.Printf("Error logging INSUFFICIENT_FUNDS for sweep %s: %v", sweep.sweepID, err)
+			logger.LogError("Error logging INSUFFICIENT_FUNDS for sweep %s: %v", sweep.sweepID, err)
 		}
 		return fmt.Errorf("insufficient funds in parent account")
 	}
@@ -918,7 +917,7 @@ func executeReverseSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep S
 	`, parentNewBalance, amountNeeded, sweep.parentAccount)
 
 	if err != nil {
-		log.Printf("Error updating parent account %s in reverse sweep: %v", sweep.parentAccount, err)
+		logger.LogError("Error updating parent account %s in reverse sweep: %v", sweep.parentAccount, err)
 		return fmt.Errorf(constants.ErrUnableToUpdateParentAccountBalance)
 	}
 
@@ -934,7 +933,7 @@ func executeReverseSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep S
 	`, fmt.Sprintf("Reverse sweep (concentration funding): %s", sweep.sweepID), sweep.parentAccount)
 
 	if err != nil {
-		log.Printf("Error creating audit record for parent account %s in reverse sweep: %v", sweep.parentAccount, err)
+		logger.LogError("Error creating audit record for parent account %s in reverse sweep: %v", sweep.parentAccount, err)
 		return fmt.Errorf(constants.ErrAuditInsertFailedUser)
 	}
 
@@ -956,7 +955,7 @@ func executeReverseSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep S
 	`, childNewBalance, amountNeeded, sweep.bankAccount)
 
 	if err != nil {
-		log.Printf("Error updating child account %s in reverse sweep: %v", sweep.bankAccount, err)
+		logger.LogError("Error updating child account %s in reverse sweep: %v", sweep.bankAccount, err)
 		return fmt.Errorf("unable to update child account balance")
 	}
 
@@ -972,7 +971,7 @@ func executeReverseSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep S
 	`, fmt.Sprintf("Reverse sweep receipt (concentration funding): %s", sweep.sweepID), sweep.bankAccount)
 
 	if err != nil {
-		log.Printf("Error creating audit record for child account %s in reverse sweep: %v", sweep.bankAccount, err)
+		logger.LogError("Error creating audit record for child account %s in reverse sweep: %v", sweep.bankAccount, err)
 		return fmt.Errorf(constants.ErrAuditInsertFailedUser)
 	}
 
@@ -985,16 +984,16 @@ func executeReverseSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep S
 	`, sweep.sweepID, amountNeeded, sweep.parentAccount, sweep.bankAccount, parentCurrentBalance, parentNewBalance)
 
 	if err != nil {
-		log.Printf("Error logging reverse sweep execution for %s: %v", sweep.sweepID, err)
+		logger.LogError("Error logging reverse sweep execution for %s: %v", sweep.sweepID, err)
 		return fmt.Errorf(constants.ErrUnableToLogSweepExecution)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("[SWEEP %s] Error committing reverse sweep transaction: %v", sweep.sweepID, err)
+		logger.LogError("[SWEEP %s] Error committing reverse sweep transaction: %v", sweep.sweepID, err)
 		return fmt.Errorf("unable to complete reverse sweep transaction")
 	}
 
-	log.Printf("[SWEEP %s] ✓ REVERSE SUCCESS | Amount: %.2f | From: %s (new bal: %.2f) | To: %s (new bal: %.2f)",
+	logger.LogInfo("[SWEEP %s] ✓ REVERSE SUCCESS | Amount: %.2f | From: %s (new bal: %.2f) | To: %s (new bal: %.2f)",
 		sweep.sweepID, amountNeeded, sweep.parentAccount, parentCurrentBalance-amountNeeded,
 		sweep.bankAccount, currentBalance+amountNeeded)
 

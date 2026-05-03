@@ -12,7 +12,8 @@ import (
 	"time"
 
 	"github.com/lib/pq"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // ---------------------------------------------------------------------------
 // Helper: send JSON error response
@@ -325,7 +326,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 				`, roleIDs[i], pid, oldValArg, newVal, req.UserID)
 				if insErr != nil {
 					// Non-fatal: log but don't fail the whole upsert
-					log.Printf("warn: failed to stage permission request role=%s perm=%d: %v", roleIDs[i], pid, insErr)
+					logger.LogError("warn: failed to stage permission request role=%s perm=%d: %v", roleIDs[i], pid, insErr)
 				}
 			}
 		}

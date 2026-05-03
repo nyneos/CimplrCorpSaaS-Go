@@ -6,14 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
 	// "time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // ---------------------------
 // Journal Entry Generator Wrapper
@@ -536,7 +536,7 @@ func generateCorporateActionJournalInTx(ctx context.Context, tx DBExecutor, sett
 
 // generateFVOJournalInTx generates journal entries for FVO within existing transaction
 func generateFVOJournalInTx(ctx context.Context, tx DBExecutor, settings *SettingsCache, activityID string) error {
-	log.Printf("[DEBUG FVO] Starting generateFVOJournalInTx for activity: %s", activityID)
+	logger.LogInfo("[DEBUG FVO] Starting generateFVOJournalInTx for activity: %s", activityID)
 	rows, err := tx.Query(ctx, `
 		SELECT f.fvo_id, f.scheme_id, COALESCE(f.market_nav, 0) as market_nav, 
 		       f.override_nav, COALESCE(f.variance, 0) as variance, 
@@ -549,7 +549,7 @@ func generateFVOJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 	if err != nil {
 		return fmt.Errorf("fetch FVO data failed: %w", err)
 	}
-	log.Printf("[DEBUG FVO] Query executed successfully")
+	logger.LogInfo("[DEBUG FVO] Query executed successfully")
 
 	// Read all rows into memory first, then close rows to free the connection
 	// This prevents "conn busy" errors when GenerateJournalEntryForFVO queries other tables
@@ -575,7 +575,7 @@ func generateFVOJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 		})
 	}
 	rows.Close()
-	log.Printf("[DEBUG FVO] Read %d FVO records, rows closed", len(fvoRecords))
+	logger.LogInfo("[DEBUG FVO] Read %d FVO records, rows closed", len(fvoRecords))
 
 	if err := rows.Err(); err != nil {
 		return err
@@ -584,20 +584,20 @@ func generateFVOJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 	// Now process the records - connection is free for other queries
 	for _, data := range fvoRecords {
 		fvoID := data["fvo_id"].(string)
-		log.Printf("[DEBUG FVO] Processing fvo_id: %s", fvoID)
+		logger.LogInfo("[DEBUG FVO] Processing fvo_id: %s", fvoID)
 
 		je, err := GenerateJournalEntryForFVO(ctx, tx, settings, activityID, data)
 		if err != nil {
-			log.Printf("[DEBUG FVO] GenerateJournalEntryForFVO failed: %v", err)
+			logger.LogError("[DEBUG FVO] GenerateJournalEntryForFVO failed: %v", err)
 			return fmt.Errorf("generate FVO journal failed: %w", err)
 		}
-		log.Printf("[DEBUG FVO] Journal entry generated, calling SaveJournalEntry")
+		logger.LogInfo("[DEBUG FVO] Journal entry generated, calling SaveJournalEntry")
 
 		if err := SaveJournalEntry(ctx, tx, je); err != nil {
-			log.Printf("[DEBUG FVO] SaveJournalEntry failed: %v", err)
+			logger.LogError("[DEBUG FVO] SaveJournalEntry failed: %v", err)
 			return fmt.Errorf("save FVO journal failed: %w", err)
 		}
-		log.Printf("[DEBUG FVO] Journal entry saved successfully for fvo_id: %s", fvoID)
+		logger.LogInfo("[DEBUG FVO] Journal entry saved successfully for fvo_id: %s", fvoID)
 	}
 
 	return nil
@@ -1149,15 +1149,15 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Generate journal entries WITHIN SAME TRANSACTION (atomic operation)
 			// If journal generation fails, entire approval rolls back
-			log.Printf("[DEBUG APPROVAL] Starting journal generation for %d activities", len(toApproveActivityIDs))
+			logger.LogInfo("[DEBUG APPROVAL] Starting journal generation for %d activities", len(toApproveActivityIDs))
 			for _, actID := range toApproveActivityIDs {
-				log.Printf("[DEBUG APPROVAL] Generating journal for activity: %s (tx type: %T)", actID, tx)
+				logger.LogInfo("[DEBUG APPROVAL] Generating journal for activity: %s (tx type: %T)", actID, tx)
 				if err := GenerateAndSaveJournalEntriesInTx(ctx, tx, actID); err != nil {
-					log.Printf("[DEBUG APPROVAL] Journal generation failed for %s: %v", actID, err)
+					logger.LogError("[DEBUG APPROVAL] Journal generation failed for %s: %v", actID, err)
 					api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("journal generation failed for activity %s: %v", actID, err))
 					return
 				}
-				log.Printf("[DEBUG APPROVAL] Journal generation completed for activity: %s", actID)
+				logger.LogInfo("[DEBUG APPROVAL] Journal generation completed for activity: %s", actID)
 			}
 		}
 

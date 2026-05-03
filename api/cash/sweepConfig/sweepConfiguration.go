@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,7 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // CreateSweepConfiguration inserts a sweep configuration and creates a CREATE audit action (PENDING_APPROVAL)
 func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -852,7 +852,7 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 	}
 
 	// Debug: log what we're checking and how many approved accounts are loaded
-	log.Printf("[CTX-ACC-CHECK] checking account=%s expectedBank=%s expectedEntity=%s approved_count=%d",
+	logger.LogInfo("[CTX-ACC-CHECK] checking account=%s expectedBank=%s expectedEntity=%s approved_count=%d",
 		accountNumber, expectedBankName, expectedEntityName, len(accounts))
 
 	for _, a := range accounts {
@@ -866,7 +866,7 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		// Account must belong to an entity the user is allowed for.
 		if strings.TrimSpace(accEntity) != "" {
 			if !api.IsEntityAllowed(ctx, accEntity) {
-				log.Printf("[CTX-ACC-CHECK] account=%s found but entity='%s' not allowed by context", accountNumber, accEntity)
+				logger.LogInfo("[CTX-ACC-CHECK] account=%s found but entity='%s' not allowed by context", accountNumber, accEntity)
 				return false
 			}
 		}
@@ -874,7 +874,7 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		// If caller provided an expected entity, enforce match.
 		if expectedEntityName != "" && accEntity != "" {
 			if !strings.EqualFold(accEntity, expectedEntityName) {
-				log.Printf("[CTX-ACC-CHECK] account=%s entity mismatch: account_entity='%s' expected='%s'", accountNumber, accEntity, expectedEntityName)
+				logger.LogInfo("[CTX-ACC-CHECK] account=%s entity mismatch: account_entity='%s' expected='%s'", accountNumber, accEntity, expectedEntityName)
 				return false
 			}
 		}
@@ -882,15 +882,15 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		// If caller provided an expected bank, enforce match.
 		if expectedBankName != "" && accBank != "" {
 			if !strings.EqualFold(accBank, expectedBankName) {
-				log.Printf("[CTX-ACC-CHECK] account=%s bank mismatch: account_bank='%s' expected='%s'", accountNumber, accBank, expectedBankName)
+				logger.LogInfo("[CTX-ACC-CHECK] account=%s bank mismatch: account_bank='%s' expected='%s'", accountNumber, accBank, expectedBankName)
 				return false
 			}
 		}
 
-		log.Printf("[CTX-ACC-CHECK] account=%s OK matched bank='%s' entity='%s'", accountNumber, accBank, accEntity)
+		logger.LogInfo("[CTX-ACC-CHECK] account=%s OK matched bank='%s' entity='%s'", accountNumber, accBank, accEntity)
 		return true
 	}
 
-	log.Printf("[CTX-ACC-CHECK] account=%s not found in ApprovedBankAccounts", accountNumber)
+	logger.LogInfo("[CTX-ACC-CHECK] account=%s not found in ApprovedBankAccounts", accountNumber)
 	return false
 }

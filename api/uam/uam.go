@@ -11,12 +11,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func StartUAMService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
@@ -35,7 +35,7 @@ func StartUAMService(db *sql.DB, port string) {
 		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
 		pool, err := pgxpool.New(context.Background(), dsn)
 		if err != nil {
-			log.Fatalf("UAM: failed to connect to pgxpool DB: %v", err)
+			logger.LogError("UAM: failed to connect to pgxpool DB: %v", err)
 		}
 		return pool
 	}()
@@ -98,9 +98,9 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.Handle("/uam/permissions/requests/role-summary",
 		api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolePermissionAuditTable(db))))
 
-	log.Printf("UAM Service started on :%s", port)
+	logger.LogInfo("UAM Service started on :%s", port)
 	err := http.ListenAndServe(":"+port, mux)
 	if err != nil {
-		log.Fatalf("UAM Service failed: %v", err)
+		logger.LogError("UAM Service failed: %v", err)
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -14,7 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UUID, userName string) error {
 	ctx := context.Background()
@@ -92,7 +92,7 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 		if err := rows.Scan(&stagingID, &transactionType, &rawPayload); err != nil {
 			errorMsg := fmt.Sprintf("Failed to scan staging record ID %s: %v", stagingID, err)
 			scanErrors = append(scanErrors, errorMsg)
-			log.Printf(constants.FormatSQLError, errorMsg)
+			logger.LogError(constants.FormatSQLError, errorMsg)
 			continue // Continue processing other records but track errors
 		}
 
@@ -100,7 +100,7 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 		if err := json.Unmarshal(rawPayload, &rawData); err != nil {
 			errorMsg := fmt.Sprintf("Failed to unmarshal payload for staging ID %s: %v", stagingID, err)
 			scanErrors = append(scanErrors, errorMsg)
-			log.Printf(constants.FormatSQLError, errorMsg)
+			logger.LogError(constants.FormatSQLError, errorMsg)
 			continue
 		}
 
@@ -120,10 +120,10 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 	}
 
 	if len(allRecords) == 0 {
-		log.Printf("No pending staging records found for batch %s", batchID)
+		logger.LogInfo("No pending staging records found for batch %s", batchID)
 		return nil
 	}
-	log.Printf("PERFORMANCE: Loaded %d staging transaction records for processing", len(allRecords))
+	logger.LogInfo("PERFORMANCE: Loaded %d staging transaction records for processing", len(allRecords))
 
 	// OPTIMIZATION 3: Prepare batch inserts
 	processedIDs := []uuid.UUID{}
@@ -136,7 +136,7 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 	for _, record := range allRecords {
 		mappings, exists := allMappings[record.TransactionType]
 		if !exists {
-			log.Printf("No mappings found for transaction type %s", record.TransactionType)
+			logger.LogInfo("No mappings found for transaction type %s", record.TransactionType)
 			continue
 		}
 
@@ -226,7 +226,7 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 			var payableID string
 			err := batchResults.QueryRow().Scan(&payableID)
 			if err != nil {
-				log.Printf("Error executing payables batch item %d: %v", i, err)
+				logger.LogError("Error executing payables batch item %d: %v", i, err)
 			} else {
 				insertCount++
 				payableIDs = append(payableIDs, payableID)
@@ -235,7 +235,7 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 			var receivableID string
 			err := batchResults.QueryRow().Scan(&receivableID)
 			if err != nil {
-				log.Printf("Error executing receivables batch item %d: %v", i, err)
+				logger.LogError("Error executing receivables batch item %d: %v", i, err)
 			} else {
 				insertCount++
 				receivableIDs = append(receivableIDs, receivableID)
@@ -243,7 +243,7 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 		} else {
 			_, err := batchResults.Exec()
 			if err != nil {
-				log.Printf("Error executing batch item %d: %v", i, err)
+				logger.LogError("Error executing batch item %d: %v", i, err)
 			} else {
 				insertCount++
 			}
@@ -259,7 +259,7 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 		auditSQL := "INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
 		_, auditErr := pool.Exec(ctx, auditSQL)
 		if auditErr != nil {
-			log.Printf("Error inserting audit actions for payables: %v", auditErr)
+			logger.LogError("Error inserting audit actions for payables: %v", auditErr)
 		}
 	}
 
@@ -272,7 +272,7 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 		auditSQL := "INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
 		_, auditErr := pool.Exec(ctx, auditSQL)
 		if auditErr != nil {
-			log.Printf("Error inserting audit actions for receivables: %v", auditErr)
+			logger.LogError("Error inserting audit actions for receivables: %v", auditErr)
 		}
 	}
 
@@ -288,16 +288,16 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 			SET status = 'processed' 
 			WHERE staging_id = ANY($1)`, processedIDStrings)
 		if err != nil {
-			log.Printf("Error updating staging record status: %v", err)
+			logger.LogError("Error updating staging record status: %v", err)
 		}
 	}
 
 	processingTime := time.Since(startTime)
 	recordsPerSecond := float64(len(processedIDs)) / processingTime.Seconds()
 
-	log.Printf("PERFORMANCE COMPLETE: Processed %d transaction records in %v (%.2f records/sec)",
+	logger.LogInfo("PERFORMANCE COMPLETE: Processed %d transaction records in %v (%.2f records/sec)",
 		len(processedIDs), processingTime, recordsPerSecond)
-	log.Printf("PERFORMANCE TARGET: %v for 1000 records (Target: 5 seconds)",
+	logger.LogInfo("PERFORMANCE TARGET: %v for 1000 records (Target: 5 seconds)",
 		time.Duration(float64(time.Second)*1000.0/recordsPerSecond))
 
 	return nil
@@ -481,7 +481,7 @@ func getDateFromTransactionData(data map[string]interface{}, fieldNames []string
 
 // ProcessStagingTransactionsToCanonicalV2WithTx - Transaction-aware version for atomic operations
 func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.Tx, batchID uuid.UUID, userName string, uploadS3Key string) error {
-	log.Printf("PERFORMANCE: Starting transaction-aware batch processing for batch %s", batchID)
+	logger.LogInfo("PERFORMANCE: Starting transaction-aware batch processing for batch %s", batchID)
 
 	// Check for context cancellation before starting
 	select {
@@ -491,7 +491,7 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 	}
 
 	// Load upload mappings
-	log.Printf("PERFORMANCE: Loading transaction upload mappings...")
+	logger.LogInfo("PERFORMANCE: Loading transaction upload mappings...")
 	mappingRows, err := tx.Query(ctx, `
 		SELECT transaction_type, source_column_name, target_table_name, target_field_name 
 		FROM public.upload_mappings_transactions 
@@ -534,7 +534,7 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 	}
 
 	// Load staging records
-	log.Printf("PERFORMANCE: Loading all staging transaction records...")
+	logger.LogInfo("PERFORMANCE: Loading all staging transaction records...")
 	rows, err := tx.Query(ctx, `
 		SELECT staging_id, transaction_type, raw_payload 
 		FROM public.staging_transactions 
@@ -567,7 +567,7 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 		if err := rows.Scan(&stagingID, &transactionType, &rawPayload); err != nil {
 			errorMsg := fmt.Sprintf("Failed to scan staging record %s: %v", stagingID, err)
 			processingErrors = append(processingErrors, errorMsg)
-			log.Printf(constants.FormatSQLError, errorMsg)
+			logger.LogError(constants.FormatSQLError, errorMsg)
 			continue
 		}
 
@@ -575,7 +575,7 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 		if err := json.Unmarshal(rawPayload, &rawData); err != nil {
 			errorMsg := fmt.Sprintf("Failed to unmarshal payload for staging ID %s: %v", stagingID, err)
 			processingErrors = append(processingErrors, errorMsg)
-			log.Printf(constants.FormatSQLError, errorMsg)
+			logger.LogError(constants.FormatSQLError, errorMsg)
 			continue
 		}
 
@@ -596,7 +596,7 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 	}
 
 	if len(allRecords) == 0 {
-		log.Printf("No pending staging records found for batch %s", batchID)
+		logger.LogInfo("No pending staging records found for batch %s", batchID)
 		return nil
 	}
 

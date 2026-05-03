@@ -2,7 +2,6 @@ package exposures
 
 import (
 	"encoding/json"
-	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -15,7 +14,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 type ExposureResponse struct {
 	ExposureHeaderID    string     `json:"exposure_header_id"`
@@ -115,7 +115,7 @@ func StreamRowsAsPayload(w http.ResponseWriter, rows pgx.Rows, build func() (Nor
 	for rows.Next() {
 		item, err := build()
 		if err != nil {
-			log.Printf("[STREAM] build error: %v", err)
+			logger.LogError("[STREAM] build error: %v", err)
 			continue
 		}
 		if !first {
@@ -125,13 +125,13 @@ func StreamRowsAsPayload(w http.ResponseWriter, rows pgx.Rows, build func() (Nor
 		// encode without adding an extra newline between elements
 		b, jerr := json.Marshal(item)
 		if jerr != nil {
-			log.Printf("[STREAM] json marshal error: %v", jerr)
+			logger.LogError("[STREAM] json marshal error: %v", jerr)
 			continue
 		}
 		_, _ = w.Write(b)
 	}
 	if err := rows.Err(); err != nil {
-		log.Printf("[STREAM] rows error: %v", err)
+		logger.LogError("[STREAM] rows error: %v", err)
 	}
 
 	w.Write([]byte(`]}`))
@@ -201,7 +201,7 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		if allowed := api.GetEntityNamesFromCtx(ctx); len(allowed) > 0 {
 			query += ` AND entity = ANY($` + strconv.Itoa(len(args)+1) + `)`
 			args = append(args, allowed)
-			log.Printf("[FB-DASH] applying entity filter from prevalidation: %d allowed", len(allowed))
+			logger.LogInfo("[FB-DASH] applying entity filter from prevalidation: %d allowed", len(allowed))
 		}
 
 		rows, err := pool.Query(ctx, query, args...)
@@ -442,7 +442,7 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 			query += ` AND entity = ANY($` + strconv.Itoa(argIndex) + `)`
 			args = append(args, allowed)
 			argIndex++
-			log.Printf("[FB-DASH] applying entity filter (by year) from prevalidation: %d allowed", len(allowed))
+			logger.LogInfo("[FB-DASH] applying entity filter (by year) from prevalidation: %d allowed", len(allowed))
 		}
 
 		query += " ORDER BY value_date DESC"
@@ -671,7 +671,7 @@ func GetExposureUploadBatchesMinimal(pool *pgxpool.Pool) http.HandlerFunc {
 
 			err := rows.Scan(&nbatch, &nfileHash, &nfileName, &ningestion)
 			if err != nil {
-				log.Println("[SCAN ERROR]", err)
+				logger.LogError("[SCAN ERROR]", err)
 				continue
 			}
 

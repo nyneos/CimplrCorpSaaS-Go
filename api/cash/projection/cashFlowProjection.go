@@ -8,14 +8,14 @@ import (
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func ifaceToBool(v interface{}) bool {
 	switch val := v.(type) {
@@ -1258,7 +1258,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&it.EntityName, &it.OldEntityName, &it.DepartmentID, &it.OldDepartmentID,
 				&it.RecurrenceFrequency, &it.OldRecurrenceFrequency, &it.CounterpartyName, &it.OldCounterpartyName,
 			); err != nil {
-				log.Printf("row scan skip: %v", err)
+				logger.LogError("row scan skip: %v", err)
 				continue
 			}
 

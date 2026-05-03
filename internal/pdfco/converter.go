@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 const (
 	baseURL    = "https://api.pdf.co"
@@ -49,94 +49,94 @@ type ConvertMeta struct {
 // ConvertPDFToCSV uploads pdfBytes to pdf.co, converts to CSV, saves a local copy,
 // and returns the CSV bytes plus billing metadata. password may be empty.
 func ConvertPDFToCSV(ctx context.Context, pdfBytes []byte, originalFilename, password string) ([]byte, ConvertMeta, error) {
-	log.Printf("[PDFCO] ── starting conversion ──────────────────────")
-	log.Printf("[PDFCO] input file : %s (%d bytes)", originalFilename, len(pdfBytes))
+	logger.LogInfo("[PDFCO] ── starting conversion ──────────────────────")
+	logger.LogInfo("[PDFCO] input file : %s (%d bytes)", originalFilename, len(pdfBytes))
 
 	apiKey := os.Getenv("PDFCO_API_KEY")
 	if apiKey == "" {
 		return nil, ConvertMeta{}, fmt.Errorf("PDFCO_API_KEY environment variable not set")
 	}
-	log.Printf("[PDFCO] api key   : set (length=%d)", len(apiKey))
+	logger.LogInfo("[PDFCO] api key   : set (length=%d)", len(apiKey))
 
-	log.Printf("[PDFCO] step 1/3  : uploading PDF to pdf.co temp storage …")
+	logger.LogInfo("[PDFCO] step 1/3  : uploading PDF to pdf.co temp storage …")
 	fileURL, err := uploadFile(ctx, apiKey, pdfBytes, originalFilename)
 	if err != nil {
-		log.Printf("[PDFCO] step 1/3 FAILED: %v", err)
+		logger.LogError("[PDFCO] step 1/3 FAILED: %v", err)
 		return nil, ConvertMeta{}, fmt.Errorf("upload: %w", err)
 	}
-	log.Printf("[PDFCO] step 1/3  : upload OK → temp url=%s", fileURL)
+	logger.LogInfo("[PDFCO] step 1/3  : upload OK → temp url=%s", fileURL)
 
-	log.Printf("[PDFCO] step 2/3  : requesting PDF→CSV conversion …")
+	logger.LogInfo("[PDFCO] step 2/3  : requesting PDF→CSV conversion …")
 	csvURL, meta, err := convertToCSV(ctx, apiKey, fileURL, password)
 	if err != nil {
-		log.Printf("[PDFCO] step 2/3 FAILED: %v", err)
+		logger.LogError("[PDFCO] step 2/3 FAILED: %v", err)
 		return nil, ConvertMeta{}, fmt.Errorf("convert: %w", err)
 	}
-	log.Printf("[PDFCO] step 2/3  : conversion OK → csv url=%s (credits used=%d remaining=%d)", csvURL, meta.CreditsUsed, meta.RemainingCredits)
+	logger.LogInfo("[PDFCO] step 2/3  : conversion OK → csv url=%s (credits used=%d remaining=%d)", csvURL, meta.CreditsUsed, meta.RemainingCredits)
 
-	log.Printf("[PDFCO] step 3/3  : downloading CSV from pdf.co …")
+	logger.LogInfo("[PDFCO] step 3/3  : downloading CSV from pdf.co …")
 	csvBytes, err := downloadFile(ctx, csvURL)
 	if err != nil {
-		log.Printf("[PDFCO] step 3/3 FAILED: %v", err)
+		logger.LogError("[PDFCO] step 3/3 FAILED: %v", err)
 		return nil, meta, fmt.Errorf("download: %w", err)
 	}
-	log.Printf("[PDFCO] step 3/3  : download OK → csv size=%d bytes", len(csvBytes))
+	logger.LogInfo("[PDFCO] step 3/3  : download OK → csv size=%d bytes", len(csvBytes))
 
 	savedPath, saveErr := saveCSVLocally(csvBytes, originalFilename)
 	if saveErr != nil {
-		log.Printf("[PDFCO] warning   : could not save local CSV copy: %v", saveErr)
+		logger.LogError("[PDFCO] warning   : could not save local CSV copy: %v", saveErr)
 	} else {
-		log.Printf("[PDFCO] saved copy : %s", savedPath)
+		logger.LogInfo("[PDFCO] saved copy : %s", savedPath)
 	}
 
-	log.Printf("[PDFCO] ── conversion complete ────────────────────────")
+	logger.LogInfo("[PDFCO] ── conversion complete ────────────────────────")
 	return csvBytes, meta, nil
 }
 
 // ConvertPDFToXLSX uploads pdfBytes to pdf.co, converts to XLSX, saves a local copy,
 // and returns the XLSX bytes plus billing metadata. password may be empty.
 func ConvertPDFToXLSX(ctx context.Context, pdfBytes []byte, originalFilename, password string) ([]byte, ConvertMeta, error) {
-	log.Printf("[PDFCO] ── starting PDF→XLSX conversion ──────────────────")
-	log.Printf("[PDFCO] input file : %s (%d bytes)", originalFilename, len(pdfBytes))
+	logger.LogInfo("[PDFCO] ── starting PDF→XLSX conversion ──────────────────")
+	logger.LogInfo("[PDFCO] input file : %s (%d bytes)", originalFilename, len(pdfBytes))
 
 	apiKey := os.Getenv("PDFCO_API_KEY")
 	if apiKey == "" {
 		return nil, ConvertMeta{}, fmt.Errorf("PDFCO_API_KEY environment variable not set")
 	}
-	log.Printf("[PDFCO] api key   : set (length=%d)", len(apiKey))
+	logger.LogInfo("[PDFCO] api key   : set (length=%d)", len(apiKey))
 
-	log.Printf("[PDFCO] step 1/3  : uploading PDF to pdf.co temp storage …")
+	logger.LogInfo("[PDFCO] step 1/3  : uploading PDF to pdf.co temp storage …")
 	fileURL, err := uploadFile(ctx, apiKey, pdfBytes, originalFilename)
 	if err != nil {
-		log.Printf("[PDFCO] step 1/3 FAILED: %v", err)
+		logger.LogError("[PDFCO] step 1/3 FAILED: %v", err)
 		return nil, ConvertMeta{}, fmt.Errorf("upload: %w", err)
 	}
-	log.Printf("[PDFCO] step 1/3  : upload OK → temp url=%s", fileURL)
+	logger.LogInfo("[PDFCO] step 1/3  : upload OK → temp url=%s", fileURL)
 
-	log.Printf("[PDFCO] step 2/3  : requesting PDF→XLSX conversion …")
+	logger.LogInfo("[PDFCO] step 2/3  : requesting PDF→XLSX conversion …")
 	xlsxURL, meta, err := convertToXLSX(ctx, apiKey, fileURL, password)
 	if err != nil {
-		log.Printf("[PDFCO] step 2/3 FAILED: %v", err)
+		logger.LogError("[PDFCO] step 2/3 FAILED: %v", err)
 		return nil, ConvertMeta{}, fmt.Errorf("convert: %w", err)
 	}
-	log.Printf("[PDFCO] step 2/3  : conversion OK → xlsx url=%s (credits used=%d remaining=%d)", xlsxURL, meta.CreditsUsed, meta.RemainingCredits)
+	logger.LogInfo("[PDFCO] step 2/3  : conversion OK → xlsx url=%s (credits used=%d remaining=%d)", xlsxURL, meta.CreditsUsed, meta.RemainingCredits)
 
-	log.Printf("[PDFCO] step 3/3  : downloading XLSX from pdf.co …")
+	logger.LogInfo("[PDFCO] step 3/3  : downloading XLSX from pdf.co …")
 	xlsxBytes, err := downloadFile(ctx, xlsxURL)
 	if err != nil {
-		log.Printf("[PDFCO] step 3/3 FAILED: %v", err)
+		logger.LogError("[PDFCO] step 3/3 FAILED: %v", err)
 		return nil, meta, fmt.Errorf("download: %w", err)
 	}
-	log.Printf("[PDFCO] step 3/3  : download OK → xlsx size=%d bytes", len(xlsxBytes))
+	logger.LogInfo("[PDFCO] step 3/3  : download OK → xlsx size=%d bytes", len(xlsxBytes))
 
 	savedPath, saveErr := saveFileLocally(xlsxBytes, originalFilename, ".xlsx")
 	if saveErr != nil {
-		log.Printf("[PDFCO] warning   : could not save local XLSX copy: %v", saveErr)
+		logger.LogError("[PDFCO] warning   : could not save local XLSX copy: %v", saveErr)
 	} else {
-		log.Printf("[PDFCO] saved copy : %s", savedPath)
+		logger.LogInfo("[PDFCO] saved copy : %s", savedPath)
 	}
 
-	log.Printf("[PDFCO] ── XLSX conversion complete ──────────────────────")
+	logger.LogInfo("[PDFCO] ── XLSX conversion complete ──────────────────────")
 	return xlsxBytes, meta, nil
 }
 
@@ -156,7 +156,7 @@ func uploadFile(ctx context.Context, apiKey string, data []byte, filename string
 		return "", fmt.Errorf("close multipart writer: %w", err)
 	}
 
-	log.Printf("[PDFCO] upload    : POST %s%s multipart size=%d bytes", baseURL, uploadPath, buf.Len())
+	logger.LogInfo("[PDFCO] upload    : POST %s%s multipart size=%d bytes", baseURL, uploadPath, buf.Len())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+uploadPath, &buf)
 	if err != nil {
@@ -170,10 +170,10 @@ func uploadFile(ctx context.Context, apiKey string, data []byte, filename string
 		return "", fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
-	log.Printf("[PDFCO] upload    : HTTP %d", resp.StatusCode)
+	logger.LogInfo("[PDFCO] upload    : HTTP %d", resp.StatusCode)
 
 	body, _ := io.ReadAll(resp.Body)
-	log.Printf("[PDFCO] upload    : raw response=%s", string(body))
+	logger.LogInfo("[PDFCO] upload    : raw response=%s", string(body))
 
 	var result uploadResponse
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -201,7 +201,7 @@ func convertToXLSX(ctx context.Context, apiKey, fileURL, password string) (strin
 	if err != nil {
 		return "", ConvertMeta{}, fmt.Errorf("marshal payload: %w", err)
 	}
-	log.Printf("[PDFCO] convert   : POST %s%s payload=%s", baseURL, xlsxPath, string(payloadBytes))
+	logger.LogInfo("[PDFCO] convert   : POST %s%s payload=%s", baseURL, xlsxPath, string(payloadBytes))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+xlsxPath, bytes.NewReader(payloadBytes))
 	if err != nil {
@@ -215,10 +215,10 @@ func convertToXLSX(ctx context.Context, apiKey, fileURL, password string) (strin
 		return "", ConvertMeta{}, fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
-	log.Printf("[PDFCO] convert   : HTTP %d", resp.StatusCode)
+	logger.LogInfo("[PDFCO] convert   : HTTP %d", resp.StatusCode)
 
 	body, _ := io.ReadAll(resp.Body)
-	log.Printf("[PDFCO] convert   : raw response=%s", string(body))
+	logger.LogInfo("[PDFCO] convert   : raw response=%s", string(body))
 
 	var result convertResponse
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -246,7 +246,7 @@ func convertToCSV(ctx context.Context, apiKey, fileURL, password string) (string
 	if err != nil {
 		return "", ConvertMeta{}, fmt.Errorf("marshal payload: %w", err)
 	}
-	log.Printf("[PDFCO] convert   : POST %s%s payload=%s", baseURL, csvPath, string(payloadBytes))
+	logger.LogInfo("[PDFCO] convert   : POST %s%s payload=%s", baseURL, csvPath, string(payloadBytes))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+csvPath, bytes.NewReader(payloadBytes))
 	if err != nil {
@@ -260,10 +260,10 @@ func convertToCSV(ctx context.Context, apiKey, fileURL, password string) (string
 		return "", ConvertMeta{}, fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
-	log.Printf("[PDFCO] convert   : HTTP %d", resp.StatusCode)
+	logger.LogInfo("[PDFCO] convert   : HTTP %d", resp.StatusCode)
 
 	body, _ := io.ReadAll(resp.Body)
-	log.Printf("[PDFCO] convert   : raw response=%s", string(body))
+	logger.LogInfo("[PDFCO] convert   : raw response=%s", string(body))
 
 	var result convertResponse
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -295,7 +295,7 @@ func GetRemainingCredits(ctx context.Context) (int, error) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	log.Printf("[PDFCO] credits   : HTTP %d raw=%s", resp.StatusCode, string(body))
+	logger.LogInfo("[PDFCO] credits   : HTTP %d raw=%s", resp.StatusCode, string(body))
 	var result struct {
 		RemainingCredits int    `json:"remainingCredits"`
 		Credits          int    `json:"credits"`
@@ -315,7 +315,7 @@ func GetRemainingCredits(ctx context.Context) (int, error) {
 }
 
 func downloadFile(ctx context.Context, fileURL string) ([]byte, error) {
-	log.Printf("[PDFCO] download  : GET %s", fileURL)
+	logger.LogInfo("[PDFCO] download  : GET %s", fileURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
@@ -325,7 +325,7 @@ func downloadFile(ctx context.Context, fileURL string) ([]byte, error) {
 		return nil, fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
-	log.Printf("[PDFCO] download  : HTTP %d", resp.StatusCode)
+	logger.LogInfo("[PDFCO] download  : HTTP %d", resp.StatusCode)
 	return io.ReadAll(resp.Body)
 }
 
@@ -348,7 +348,7 @@ func saveFileLocally(data []byte, originalFilename string, ext string) (string, 
 	filename := fmt.Sprintf("%s_%s%s", timestamp, nameNoExt, ext)
 	destPath := filepath.Join(outputDir, filename)
 
-	log.Printf("[PDFCO] save      : writing %d bytes → %s", len(data), destPath)
+	logger.LogInfo("[PDFCO] save      : writing %d bytes → %s", len(data), destPath)
 	if err := os.WriteFile(destPath, data, 0o644); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}

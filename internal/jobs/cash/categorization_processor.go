@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -95,7 +94,7 @@ func RunCategorizationScheduler(cfg *CategorizationConfig, db *pgxpool.Pool) err
 		err := ProcessUncategorizedTransactions(db, cfg.BatchSize)
 		if err != nil {
 			logger.GlobalLogger.LogAudit(fmt.Sprintf("Auto-categorization job failed: %v", err))
-			log.Printf("ERROR: Auto-categorization job failed: %v", err)
+			logger.LogError("ERROR: Auto-categorization job failed: %v", err)
 		} else {
 			logger.GlobalLogger.LogAudit("Auto-categorization job completed successfully")
 		}
@@ -107,7 +106,7 @@ func RunCategorizationScheduler(cfg *CategorizationConfig, db *pgxpool.Pool) err
 
 	c.Start()
 	logger.GlobalLogger.LogAudit(fmt.Sprintf("Auto-categorization scheduler started with schedule: %s (timezone: %s)", cfg.Schedule, cfg.TimeZone))
-	log.Printf("[AUDIT] Auto-categorization scheduler started: %s (%s)", cfg.Schedule, cfg.TimeZone)
+	logger.LogAudit("Auto-categorization scheduler started: %s (%s)", cfg.Schedule, cfg.TimeZone)
 
 	return nil
 }
@@ -157,10 +156,10 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		logger.GlobalLogger.LogAudit("No transactions found for recategorization")
 		return nil
 	}
-	log.Printf("[AUDIT] Total transactions to consider for recategorization: %d", totalCount)
+	logger.LogAudit("Total transactions to consider for recategorization: %d", totalCount)
 
 	// Load all rules once
-	log.Println("[AUDIT] Loading all active categorization rules for recategorization...")
+	logger.LogAudit("Loading all active categorization rules for recategorization...")
 	allRules, err := loadAllCategoryRules(ctx, sqlDB)
 	if err != nil {
 		return fmt.Errorf("failed to load category rules: %w", err)
@@ -270,7 +269,7 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 
 		// small progress log
 		if time.Since(startTime) > 30*time.Second {
-			log.Printf("[AUDIT] Recategorization progress: processed %d/%d, updated %d", totalProcessed, totalCount, totalUpdated)
+			logger.LogAudit("Recategorization progress: processed %d/%d, updated %d", totalProcessed, totalCount, totalUpdated)
 			startTime = time.Now()
 		}
 	}

@@ -4,14 +4,14 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
-	"log"
 	"math"
 	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // DBExecutor is an interface that both pgx.Tx and pgxpool.Pool implement
 type DBExecutor interface {
@@ -649,19 +649,19 @@ func GenerateJournalEntryForDividend(ctx context.Context, executor DBExecutor, s
 
 // GenerateJournalEntryForFVO creates journal entry for Fair Value Override
 func GenerateJournalEntryForFVO(ctx context.Context, executor DBExecutor, settings *SettingsCache, activityID string, fvoData map[string]interface{}) (*JournalEntry, error) {
-	log.Printf("[DEBUG FVO GEN] GenerateJournalEntryForFVO called (executor type: %T)", executor)
+	logger.LogInfo("[DEBUG FVO GEN] GenerateJournalEntryForFVO called (executor type: %T)", executor)
 	variance := parseFloat(fvoData["variance"])
 	schemeID := parseString(fvoData["scheme_id"])
 
 	// Get scheme name from database
-	log.Printf("[DEBUG FVO GEN] About to query masterscheme for scheme_id: %s", schemeID)
+	logger.LogInfo("[DEBUG FVO GEN] About to query masterscheme for scheme_id: %s", schemeID)
 	var schemeName string
 	row := executor.QueryRow(ctx, `SELECT scheme_name FROM investment.masterscheme WHERE scheme_id = $1`, schemeID)
 	if err := row.Scan(&schemeName); err != nil {
-		log.Printf("[DEBUG FVO GEN] Scheme query failed: %v, using scheme_id as name", err)
+		logger.LogError("[DEBUG FVO GEN] Scheme query failed: %v, using scheme_id as name", err)
 		schemeName = schemeID
 	}
-	log.Printf("[DEBUG FVO GEN] Scheme name resolved: %s", schemeName)
+	logger.LogInfo("[DEBUG FVO GEN] Scheme name resolved: %s", schemeName)
 
 	je := &JournalEntry{
 		ActivityID: activityID,
@@ -741,13 +741,13 @@ func GenerateJournalEntryForCorporateAction(ctx context.Context, executor DBExec
 
 // SaveJournalEntry persists a journal entry to the database
 func SaveJournalEntry(ctx context.Context, tx DBExecutor, je *JournalEntry) error {
-	log.Printf("[DEBUG SAVE] SaveJournalEntry called for activity_id: %s, entry_type: %s", je.ActivityID, je.EntryType)
+	logger.LogInfo("[DEBUG SAVE] SaveJournalEntry called for activity_id: %s, entry_type: %s", je.ActivityID, je.EntryType)
 
 	// Validate balanced entry
 	if je.TotalDebit != je.TotalCredit {
 		return fmt.Errorf("journal entry not balanced: debit=%.2f, credit=%.2f", je.TotalDebit, je.TotalCredit)
 	}
-	log.Printf("[DEBUG SAVE] Journal entry validated (balanced)")
+	logger.LogInfo("[DEBUG SAVE] Journal entry validated (balanced)")
 
 	// Insert master journal entry
 	entryQuery := `
@@ -757,7 +757,7 @@ func SaveJournalEntry(ctx context.Context, tx DBExecutor, je *JournalEntry) erro
 		RETURNING entry_id
 	`
 
-	log.Printf("[DEBUG SAVE] About to execute INSERT query using tx (type: %T)", tx)
+	logger.LogInfo("[DEBUG SAVE] About to execute INSERT query using tx (type: %T)", tx)
 	var entryID string
 	err := tx.QueryRow(ctx, entryQuery,
 		je.ActivityID,
@@ -774,10 +774,10 @@ func SaveJournalEntry(ctx context.Context, tx DBExecutor, je *JournalEntry) erro
 	).Scan(&entryID)
 
 	if err != nil {
-		log.Printf("[DEBUG SAVE] INSERT failed: %v", err)
+		logger.LogError("[DEBUG SAVE] INSERT failed: %v", err)
 		return fmt.Errorf("failed to insert journal entry: %w", err)
 	}
-	log.Printf("[DEBUG SAVE] INSERT successful, entry_id: %s", entryID)
+	logger.LogInfo("[DEBUG SAVE] INSERT successful, entry_id: %s", entryID)
 
 	// Insert line items
 	lineQuery := `
@@ -806,7 +806,7 @@ func SaveJournalEntry(ctx context.Context, tx DBExecutor, je *JournalEntry) erro
 		}
 	}
 
-	log.Printf("Journal entry created: entry_id=%s, type=%s, entity=%s, amount=%.2f",
+	logger.LogInfo("Journal entry created: entry_id=%s, type=%s, entity=%s, amount=%.2f",
 		entryID, je.EntryType, je.EntityID, je.TotalDebit)
 
 	return nil

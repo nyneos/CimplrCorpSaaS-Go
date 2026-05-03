@@ -4,13 +4,13 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
-	"log"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 type FDRecord struct {
 	FDID                    string
@@ -2408,40 +2408,40 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 	}
 
 	tg := time.Now()
-	log.Printf("[CFGEN][%s] ► start bankConfigID=%q tdsID=%q freqID=%q itCode=%q dcCode=%q",
+	logger.LogInfo("[CFGEN][%s] ► start bankConfigID=%q tdsID=%q freqID=%q itCode=%q dcCode=%q",
 		fd.ConfirmationID, fd.BankConfigID, fd.TDSPlanID,
 		firstNonEmpty(fd.CompoundingFrequency, fd.InterestPayoutFrequency, fd.FrequencyID),
 		fd.InterestTypeCode, fd.DayCountConvention)
 
 	cfg, _ := loadBankConfig(ctx, exec, fd.BankConfigID)
-	log.Printf("[CFGEN][%s] ✓ loadBankConfig (+%s) calCode=%q dcCode=%q", fd.ConfirmationID, time.Since(tg).Round(time.Millisecond), cfg.HolidayCalendarCode, cfg.DayCountCode)
+	logger.LogInfo("[CFGEN][%s] ✓ loadBankConfig (+%s) calCode=%q dcCode=%q", fd.ConfirmationID, time.Since(tg).Round(time.Millisecond), cfg.HolidayCalendarCode, cfg.DayCountCode)
 
 	t1 := time.Now()
 	freq, _ := loadCompoundingFreq(ctx, exec, firstNonEmpty(fd.CompoundingFrequency, fd.InterestPayoutFrequency, fd.FrequencyID))
-	log.Printf("[CFGEN][%s] ✓ loadCompoundingFreq (+%s)", fd.ConfirmationID, time.Since(t1).Round(time.Millisecond))
+	logger.LogInfo("[CFGEN][%s] ✓ loadCompoundingFreq (+%s)", fd.ConfirmationID, time.Since(t1).Round(time.Millisecond))
 
 	t2 := time.Now()
 	tds, _ := loadTDSConfig(ctx, exec, fd.TDSPlanID)
-	log.Printf("[CFGEN][%s] ✓ loadTDSConfig (+%s)", fd.ConfirmationID, time.Since(t2).Round(time.Millisecond))
+	logger.LogInfo("[CFGEN][%s] ✓ loadTDSConfig (+%s)", fd.ConfirmationID, time.Since(t2).Round(time.Millisecond))
 
 	// Resolve day count convention from master — prefer fd's day_count_code, fall back to bank config's.
 	dcRef := firstNonEmpty(fd.DayCountConvention, cfg.DayCountCode)
 	t3 := time.Now()
 	dcInfo := loadDayCountConvention(ctx, exec, dcRef)
-	log.Printf("[CFGEN][%s] ✓ loadDayCountConvention (+%s)", fd.ConfirmationID, time.Since(t3).Round(time.Millisecond))
+	logger.LogInfo("[CFGEN][%s] ✓ loadDayCountConvention (+%s)", fd.ConfirmationID, time.Since(t3).Round(time.Millisecond))
 
 	// Resolve interest type calculation method from master.
 	t4 := time.Now()
 	itInfo := loadInterestType(ctx, exec, fd.InterestTypeCode)
-	log.Printf("[CFGEN][%s] ✓ loadInterestType (+%s)", fd.ConfirmationID, time.Since(t4).Round(time.Millisecond))
+	logger.LogInfo("[CFGEN][%s] ✓ loadInterestType (+%s)", fd.ConfirmationID, time.Since(t4).Round(time.Millisecond))
 
 	// Load holiday calendar from bank config's holiday_calendar_code.
 	t5 := time.Now()
 	calInfo := loadHolidayCalendar(ctx, exec, cfg.HolidayCalendarCode, fd.ValueDate, fd.MaturityDate)
-	log.Printf("[CFGEN][%s] ✓ loadHolidayCalendar (+%s) holidays=%d", fd.ConfirmationID, time.Since(t5).Round(time.Millisecond), len(calInfo.HolidayDates))
+	logger.LogInfo("[CFGEN][%s] ✓ loadHolidayCalendar (+%s) holidays=%d", fd.ConfirmationID, time.Since(t5).Round(time.Millisecond), len(calInfo.HolidayDates))
 
 	rows := generateCashflowSchedule(CashflowScheduleParams{FD: fd, Cfg: cfg, Freq: freq, TDSCfg: tds, DCInfo: dcInfo, ITInfo: itInfo, CalInfo: calInfo})
-	log.Printf("[CFGEN][%s] ✓ generateCashflowSchedule → %d rows TOTAL (+%s)", fd.ConfirmationID, len(rows), time.Since(tg).Round(time.Millisecond))
+	logger.LogInfo("[CFGEN][%s] ✓ generateCashflowSchedule → %d rows TOTAL (+%s)", fd.ConfirmationID, len(rows), time.Since(tg).Round(time.Millisecond))
 
 	// Mirror the simulator path: apply grace period and stamp cumulative fields
 	// so that CF, S1 (simulate), and S2 (diff) all carry identical rows.

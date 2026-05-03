@@ -4,7 +4,6 @@ import (
 	"CimplrCorpSaas/api"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -14,7 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // getUserFriendlyGLAccountError returns a user-friendly error message and HTTP status code
 func getUserFriendlyGLAccountError(err error, context string) (string, int) {
@@ -1978,7 +1978,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert into masterglaccount: "+err.Error())
 				return
 			}
-			log.Printf("UploadGLAccountSimple: COPY inserted %d rows in %v", len(copyRowsMaster), time.Since(tStartCopy))
+			logger.LogInfo("UploadGLAccountSimple: COPY inserted %d rows in %v", len(copyRowsMaster), time.Since(tStartCopy))
 
 			// Collect gl_account_code values we inserted to look up IDs for audit
 			codes := make([]string, 0, len(copyRowsMaster))
@@ -2026,7 +2026,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// open a new transaction for sync and audit
 				tx2, err := pgxPool.Begin(ctx2)
 				if err != nil {
-					log.Printf("UploadGLAccountSimple: async sync begin failed: %v", err)
+					logger.LogError("UploadGLAccountSimple: async sync begin failed: %v", err)
 					return
 				}
 				defer func() {
@@ -2070,24 +2070,24 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ON CONFLICT (parent_gl_account_id, child_gl_account_id) DO NOTHING;
 			`
 				if _, err := tx2.Exec(ctx2, syncSQL); err != nil {
-					log.Printf("UploadGLAccountSimple: async sync failed: %v", err)
+					logger.LogError("UploadGLAccountSimple: async sync failed: %v", err)
 					return
 				}
 
 				if len(codesForAudit) > 0 {
 					auditSQL := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT gl_account_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterglaccount WHERE gl_account_code = ANY($2)`
 					if _, err := tx2.Exec(ctx2, auditSQL, userName, codesForAudit); err != nil {
-						log.Printf("UploadGLAccountSimple: async audit insert failed: %v", err)
+						logger.LogError("UploadGLAccountSimple: async audit insert failed: %v", err)
 						// continue to commit/close
 					}
 				}
 
 				if err := tx2.Commit(ctx2); err != nil {
-					log.Printf("UploadGLAccountSimple: async commit failed: %v", err)
+					logger.LogError("UploadGLAccountSimple: async commit failed: %v", err)
 					return
 				}
 				tx2 = nil
-				log.Printf("UploadGLAccountSimple: async sync+audit finished for %d codes", len(codesForAudit))
+				logger.LogInfo("UploadGLAccountSimple: async sync+audit finished for %d codes", len(codesForAudit))
 			}(newCodes)
 		}
 

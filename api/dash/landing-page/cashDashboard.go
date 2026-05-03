@@ -3,7 +3,6 @@ package landingpage
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -14,7 +13,8 @@ import (
 	"CimplrCorpSaas/api/dash/ticker"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // toINR converts an amount in `currency` to INR using the ticker package.
 func toINR(amount float64, currency string) float64 {
@@ -321,16 +321,16 @@ GROUP BY COALESCE(NULLIF(m.currency,''),'INR')`
 		// ── 3) Projection KPIs ──
 		monthStartKey := start.Year()*12 + int(start.Month())
 		monthEndKey   := end.Year()*12 + int(end.Month())
-		log.Printf("[DEBUG] projection month keys start=%d end=%d", monthStartKey, monthEndKey)
+		logger.LogInfo("[DEBUG] projection month keys start=%d end=%d", monthStartKey, monthEndKey)
 
 		var rawCount int
 		if err := pgxPool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM cimplrcorpsaas.cashflow_projection_monthly cpm WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2`,
 			monthStartKey, monthEndKey,
 		).Scan(&rawCount); err != nil {
-			log.Printf("[DEBUG] diag raw count error: %v", err)
+			logger.LogError("[DEBUG] diag raw count error: %v", err)
 		} else {
-			log.Printf("[DEBUG] projection raw rows: %d", rawCount)
+			logger.LogInfo("[DEBUG] projection raw rows: %d", rawCount)
 		}
 
 		projAggQ := `SELECT
@@ -353,7 +353,7 @@ GROUP BY COALESCE(NULLIF(cpi.currency_code,''), COALESCE(cp.base_currency_code,'
 
 		var projectedInflowsINR, projectedOutflowsINR float64
 		if aggRows, err := pgxPool.Query(ctx, projAggQ, monthStartKey, monthEndKey, filterEntity, filterCurrency); err != nil {
-			log.Printf("[DEBUG] projection agg error: %v", err)
+			logger.LogError("[DEBUG] projection agg error: %v", err)
 		} else {
 			for aggRows.Next() {
 				var si, so float64
@@ -385,7 +385,7 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 		projectedDailyInflow  := map[string]float64{}
 		projectedDailyOutflow := map[string]float64{}
 		if projRows, err := pgxPool.Query(ctx, projDetailQ, monthStartKey, monthEndKey, filterEntity, filterCurrency); err != nil {
-			log.Printf("[DEBUG] projection detail error: %v", err)
+			logger.LogError("[DEBUG] projection detail error: %v", err)
 		} else {
 			for projRows.Next() {
 				var yr, mon int

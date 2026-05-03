@@ -3,9 +3,9 @@ package travel
 import (
 	"database/sql"
 	"encoding/json"
-	"log"
 	"net/http"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // CreatePackageHandler accepts a JSON body for a travel package and
 // inserts it into the `travel.packages` table. If a package with the same
@@ -32,7 +32,7 @@ func CreatePackageHandler(db *sql.DB) http.HandlerFunc {
 		// Store the full JSON payload in package_json
 		pkgBytes, err := json.Marshal(payload)
 		if err != nil {
-			log.Printf("failed to marshal payload: %v", err)
+			logger.LogError("failed to marshal payload: %v", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -41,7 +41,7 @@ func CreatePackageHandler(db *sql.DB) http.HandlerFunc {
                  ON CONFLICT (id) DO UPDATE SET package_json = EXCLUDED.package_json, updated_at = now()`
 
 		if _, err := db.Exec(stmt, idVal, pkgBytes); err != nil {
-			log.Printf("failed to upsert package %s: %v", idVal, err)
+			logger.LogError("failed to upsert package %s: %v", idVal, err)
 			http.Error(w, "failed to save package", http.StatusInternalServerError)
 			return
 		}
@@ -73,7 +73,7 @@ func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			if err != nil {
-				log.Printf("failed to fetch package %s: %v", id, err)
+				logger.LogError("failed to fetch package %s: %v", id, err)
 				http.Error(w, "failed to fetch package", http.StatusInternalServerError)
 				return
 			}
@@ -83,7 +83,7 @@ func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 
 		rows, err := db.Query(`SELECT id, package_json FROM travel.packages WHERE COALESCE(is_deleted, false) = false ORDER BY created_at DESC LIMIT 100`)
 		if err != nil {
-			log.Printf("failed to list packages: %v", err)
+			logger.LogError("failed to list packages: %v", err)
 			http.Error(w, "failed to list packages", http.StatusInternalServerError)
 			return
 		}
@@ -94,7 +94,7 @@ func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 			var id string
 			var pkgBytes []byte
 			if err := rows.Scan(&id, &pkgBytes); err != nil {
-				log.Printf("row scan error: %v", err)
+				logger.LogError("row scan error: %v", err)
 				continue
 			}
 			var obj map[string]interface{}
@@ -109,11 +109,11 @@ func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		if err := rows.Err(); err != nil {
-			log.Printf("rows error: %v", err)
+			logger.LogError("rows error: %v", err)
 		}
 
 		if err := json.NewEncoder(w).Encode(out); err != nil {
-			log.Printf("failed to write response: %v", err)
+			logger.LogError("failed to write response: %v", err)
 		}
 	}
 }
@@ -150,7 +150,7 @@ func DeletePackageHandler(db *sql.DB) http.HandlerFunc {
 		// Soft delete: set is_deleted = true
 		res, err := db.Exec(`UPDATE travel.packages SET is_deleted = true, updated_at = now() WHERE id = $1`, id)
 		if err != nil {
-			log.Printf("failed to soft delete package %s: %v", id, err)
+			logger.LogError("failed to soft delete package %s: %v", id, err)
 			http.Error(w, "failed to delete", http.StatusInternalServerError)
 			return
 		}

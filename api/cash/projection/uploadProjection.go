@@ -5,24 +5,24 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		log.Printf("[UploadCashflowProposalSimple] Start %s %s", r.Method, r.URL.Path)
+		logger.LogInfo("[UploadCashflowProposalSimple] Start %s %s", r.Method, r.URL.Path)
 		defer func() {
 			if rec := recover(); rec != nil {
-				log.Printf("[UploadCashflowProposalSimple] Panic recovered: %v", rec)
+				logger.LogError("[UploadCashflowProposalSimple] Panic recovered: %v", rec)
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 			}
-			log.Printf("[UploadCashflowProposalSimple] Finished in %s", time.Since(start))
+			logger.LogInfo("[UploadCashflowProposalSimple] Finished in %s", time.Since(start))
 		}()
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {

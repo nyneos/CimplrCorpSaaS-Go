@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 type contextKey string
 
@@ -347,12 +347,12 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			ct := r.Header.Get(constants.ContentTypeText)
 
 			// Debug: log every request hitting the middleware so we can trace timing.
-			log.Printf("[BUMiddleware] %s %s ct=%q", r.Method, r.URL.Path, ct)
+			logger.LogInfo("[BUMiddleware] %s %s ct=%q", r.Method, r.URL.Path, ct)
 
 			if strings.HasPrefix(ct, constants.ContentTypeJSON) && (r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" || r.Method == "PATCH") {
 				var bodyMap map[string]interface{}
 				if decErr := json.NewDecoder(r.Body).Decode(&bodyMap); decErr != nil {
-					log.Printf("[BUMiddleware] body decode error for %s %s: %v", r.Method, r.URL.Path, decErr)
+					logger.LogError("[BUMiddleware] body decode error for %s %s: %v", r.Method, r.URL.Path, decErr)
 				}
 				if uid, ok := bodyMap[constants.KeyUserID].(string); ok {
 					userID = uid
@@ -371,7 +371,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				}
 			} else if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" || r.Method == "PATCH" {
 				// Content-Type was not JSON — try to read body anyway for user_id
-				log.Printf("[BUMiddleware] WARNING: %s %s missing Content-Type:application/json — will fall back to query param for user_id", r.Method, r.URL.Path)
+				logger.LogInfo("[BUMiddleware] WARNING: %s %s missing Content-Type:application/json — will fall back to query param for user_id", r.Method, r.URL.Path)
 			}
 			// For GET/HEAD/OPTIONS or when body didn't contain user_id, fall back to query param
 			if userID == "" {
@@ -379,7 +379,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			}
 
 			if userID == "" {
-				log.Printf("[BUMiddleware] BLOCKED %s %s — missing user_id (ct=%q)", r.Method, r.URL.Path, ct)
+				logger.LogInfo("[BUMiddleware] BLOCKED %s %s — missing user_id (ct=%q)", r.Method, r.URL.Path, ct)
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				w.WriteHeader(http.StatusUnauthorized)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -398,7 +398,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				}
 			}
 			if matchedSession == nil {
-				log.Printf("[BUMiddleware] BLOCKED %s %s — invalid session for user_id=%s", r.Method, r.URL.Path, userID)
+				logger.LogError("[BUMiddleware] BLOCKED %s %s — invalid session for user_id=%s", r.Method, r.URL.Path, userID)
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				w.WriteHeader(http.StatusUnauthorized)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -429,7 +429,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			}
 
 			if len(rootEntityIds) == 0 {
-				log.Printf("[BUMiddleware] BLOCKED %s %s — no entity mapping for user_id=%s", r.Method, r.URL.Path, userID)
+				logger.LogInfo("[BUMiddleware] BLOCKED %s %s — no entity mapping for user_id=%s", r.Method, r.URL.Path, userID)
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				w.WriteHeader(http.StatusForbidden)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -471,7 +471,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 						}
 					}
 				} else {
-					log.Printf("[WARN] masterentitycash recursive query failed for root=%s: %v", rootEntityId, err1)
+					logger.LogError("[WARN] masterentitycash recursive query failed for root=%s: %v", rootEntityId, err1)
 				}
 
 				rows2, err2 := db.Query(`
@@ -499,12 +499,12 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 						}
 					}
 				} else {
-					log.Printf("[WARN] masterentity recursive query failed for root=%s: %v", rootEntityId, err2)
+					logger.LogError("[WARN] masterentity recursive query failed for root=%s: %v", rootEntityId, err2)
 				}
 			}
 
 			if len(buNames) == 0 {
-				log.Printf("[ERROR] No accessible business units found for user_id: %s", userID)
+				logger.LogError("No accessible business units found for user_id: %s", userID)
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					constants.ValueSuccess: false,

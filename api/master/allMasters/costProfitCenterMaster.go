@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -17,7 +16,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // getUserFriendlyCostProfitCenterError converts database errors to user-friendly messages
 // Returns (error message, HTTP status code)
@@ -283,7 +283,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				defer func() {
 					if !committed {
 						if rerr := tx.Rollback(ctx); rerr != nil {
-							log.Println("rollback failed:", rerr)
+							logger.LogError("rollback failed:", rerr)
 						}
 					}
 				}()
@@ -1235,7 +1235,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[DEBUG] GetCostProfitCenterHierarchy - UserID: %s, Accessible Entities: %v, Requested Entity: %s, Requested Currency: %s",
+		logger.LogInfo("[DEBUG] GetCostProfitCenterHierarchy - UserID: %s, Accessible Entities: %v, Requested Entity: %s, Requested Currency: %s",
 			req.UserID, entities, req.Entity, req.Currency)
 
 		// Build WHERE clause with filters
@@ -1254,7 +1254,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			if !hasAccess {
-				log.Printf("[DEBUG] User %s does not have access to entity: %s", req.UserID, req.Entity)
+				logger.LogInfo("[DEBUG] User %s does not have access to entity: %s", req.UserID, req.Entity)
 				api.RespondWithError(w, http.StatusForbidden, "You don't have access to the requested entity")
 				return
 			}
@@ -1281,8 +1281,8 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		whereClause := strings.Join(whereClauses, " AND ")
 
-		log.Printf("[DEBUG] WHERE clause: %s", whereClause)
-		log.Printf("[DEBUG] Query args: %v", args)
+		logger.LogInfo("[DEBUG] WHERE clause: %s", whereClause)
+		logger.LogInfo("[DEBUG] Query args: %v", args)
 
 		query := fmt.Sprintf(`
             SELECT 
@@ -1635,8 +1635,8 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		log.Printf("[DEBUG] GetCostProfitCenterHierarchy - Total centres in entityMap: %d, Top-level centres: %d", len(entityMap), len(topLevel))
-		log.Printf("[DEBUG] GetCostProfitCenterHierarchy - Returning %d top-level items", len(topLevel))
+		logger.LogInfo("[DEBUG] GetCostProfitCenterHierarchy - Total centres in entityMap: %d, Top-level centres: %d", len(entityMap), len(topLevel))
+		logger.LogInfo("[DEBUG] GetCostProfitCenterHierarchy - Returning %d top-level items", len(topLevel))
 
 		api.RespondWithPayload(w, true, "", topLevel)
 	}
@@ -1667,7 +1667,7 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[DEBUG] FindParentCostProfitCenterAtLevel - UserID: %s, Level: %d, Accessible Entities: %v", req.UserID, req.Level, entities)
+		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - UserID: %s, Level: %d, Accessible Entities: %v", req.UserID, req.Level, entities)
 
 		// Build entity filter
 		args := []interface{}{req.Level - 1}
@@ -1688,8 +1688,8 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND %s
 		`, entityFilter)
 
-		log.Printf("[DEBUG] FindParentCostProfitCenterAtLevel - Query: %s", q)
-		log.Printf("[DEBUG] FindParentCostProfitCenterAtLevel - Args: %v", args)
+		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - Query: %s", q)
+		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - Args: %v", args)
 
 		rows, err := pgxPool.Query(context.Background(), q, args...)
 		if err != nil {
@@ -1716,7 +1716,7 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		log.Printf("[DEBUG] FindParentCostProfitCenterAtLevel - Found %d results", len(results))
+		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - Found %d results", len(results))
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
@@ -2275,7 +2275,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer tx.Rollback(ctx)
 
 			if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'"); err != nil {
-				log.Printf("warning: failed to set local statement_timeout: %v", err)
+				logger.LogError("warning: failed to set local statement_timeout: %v", err)
 			}
 
 			_, err = tx.CopyFrom(ctx, pgx.Identifier{"mastercostprofitcenter"}, validCols, pgx.CopyFromRows(copyRows))
@@ -2294,7 +2294,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ctx2 := context.Background()
 				tx2, err := pgxPool.Begin(ctx2)
 				if err != nil {
-					log.Printf("Async tx begin failed: %v", err)
+					logger.LogError("Async tx begin failed: %v", err)
 					return
 				}
 				defer tx2.Rollback(ctx2)
@@ -2329,7 +2329,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					ON CONFLICT DO NOTHING;
 				`)
 				if err != nil {
-					log.Printf("Hierarchy sync failed: %v", err)
+					logger.LogError("Hierarchy sync failed: %v", err)
 				}
 
 				// Insert audit rows for the centre_codes we just uploaded. Use centre_code to locate rows
@@ -2353,7 +2353,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						FROM mastercostprofitcenter
 						WHERE centre_code = ANY($2)
 						`, userName, uniqList); err != nil {
-							log.Printf("Audit insert failed: %v", err)
+							logger.LogError("Audit insert failed: %v", err)
 						}
 					}
 				}

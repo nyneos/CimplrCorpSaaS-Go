@@ -6,13 +6,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 type transactionAuditRequest struct {
 	UserID          string `json:"user_id"`
@@ -345,7 +345,7 @@ func insertTransactionDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, 
 		INSERT INTO auditactiontransactiondownloads (transaction_type, transaction_id, requested_by, requested_at, file_name, upload_s3_key)
 		VALUES ($1, $2, $3, now(), $4, $5)
 	`, transactionType, transactionID, requestedBy, transactionExtractAuditFileName(uploadS3Key), transactionNullIfEmpty(uploadS3Key)); err != nil {
-		log.Printf("failed to insert %s download audit for %s: %v", strings.ToLower(transactionType), transactionID, err)
+		logger.LogError("failed to insert %s download audit for %s: %v", strings.ToLower(transactionType), transactionID, err)
 	}
 }
 

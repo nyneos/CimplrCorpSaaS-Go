@@ -8,12 +8,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func StartMasterService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
@@ -29,7 +29,7 @@ func StartMasterService(db *sql.DB, port string) {
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
-		log.Fatalf("failed to connect to pgxpool DB: %v", err)
+		logger.LogError("failed to connect to pgxpool DB: %v", err)
 	}
 	// ensure pool is closed when service exits
 	defer pgxPool.Close()
@@ -352,9 +352,9 @@ func StartMasterService(db *sql.DB, port string) {
 	// Counterparty Hub Master routes
 	counterpartyHub.RegisterCounterpartyHubRoutes(mux, pgxPool, db)
 
-	log.Printf("Master Service started on :%s", port)
+	logger.LogInfo("Master Service started on :%s", port)
 	err = http.ListenAndServe(":"+port, mux)
 	if err != nil {
-		log.Fatalf("Master Service failed: %v", err)
+		logger.LogError("Master Service failed: %v", err)
 	}
 }

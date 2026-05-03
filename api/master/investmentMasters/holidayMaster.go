@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"regexp"
 	"slices"
@@ -18,7 +17,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 type CreateCalendarReq struct {
 	UserID             string `json:"user_id"`
@@ -760,7 +760,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE calendar_code = ANY($1) AND is_deleted=false
 			`, codes)
 			if err != nil {
-				log.Printf("[WARN] failed to fetch calendar mapping: %v", err)
+				logger.LogError("[WARN] failed to fetch calendar mapping: %v", err)
 			} else {
 				for rows.Next() {
 					var code, id string
