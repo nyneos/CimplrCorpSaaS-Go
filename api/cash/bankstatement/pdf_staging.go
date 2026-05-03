@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
@@ -523,21 +525,16 @@ func DeleteStagingStatementHandler(db *sql.DB) http.Handler {
 	})
 }
 
-// DeleteStagingBatchHandler deletes all pdf_staging_statement rows for a batch, then the batch row.
+// DeleteStagingBatchHandler deletes staging data for the authenticated user.
 // It does not touch committed bank statement tables.
 //
-// GET /cash/staging/batch/delete?batch_id=...
+// GET /cash/staging/batch/delete?batch_id=... — deletes every pdf_staging_statement in the batch, then the batch row.
+//
+// POST /cash/staging/batch/delete — JSON {"staging_ids":["..."],"reason":"...","user_id":"..."}.
+// Deletes only those statements that belong to the user's batches. If a batch has no statements left, the batch row is removed.
+// user_id is optional; when sent it must equal the session user id.
 func DeleteStagingBatchHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			respondWithError(w, nil, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
-			return
-		}
-		bid := strings.TrimSpace(r.URL.Query().Get("batch_id"))
-		if bid == "" {
-			respondWithError(w, nil, "batch_id query parameter is required", http.StatusBadRequest)
-			return
-		}
 		ctx := r.Context()
 		sessionUID := apipreval.GetUserIDFromContext(ctx)
 		if sessionUID == "" {
@@ -545,49 +542,190 @@ func DeleteStagingBatchHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			respondWithError(w, err, "failed to start transaction", http.StatusInternalServerError)
-			return
+		switch r.Method {
+		case http.MethodGet:
+			deleteStagingBatchGET(w, r, db, ctx, sessionUID)
+		case http.MethodPost:
+			deleteStagingBatchPOST(w, r, db, ctx, sessionUID)
+		default:
+			respondWithError(w, nil, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 		}
+	})
+}
 
-		var batchExists int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1 AND user_id = $2`, bid, sessionUID).Scan(&batchExists); err != nil {
+func deleteStagingBatchGET(w http.ResponseWriter, r *http.Request, db *sql.DB, ctx context.Context, sessionUID string) {
+	bid := strings.TrimSpace(r.URL.Query().Get("batch_id"))
+	if bid == "" {
+		respondWithError(w, nil, "batch_id query parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		respondWithError(w, err, "failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+
+	var batchExists int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1 AND user_id = $2`, bid, sessionUID).Scan(&batchExists); err != nil {
+		_ = tx.Rollback()
+		respondWithError(w, err, "failed to verify batch", http.StatusInternalServerError)
+		return
+	}
+	if batchExists == 0 {
+		_ = tx.Rollback()
+		respondWithError(w, nil, "batch not found", http.StatusNotFound)
+		return
+	}
+
+	resSt, err := tx.ExecContext(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE batch_id = $1`, bid)
+	if err != nil {
+		_ = tx.Rollback()
+		respondWithError(w, err, "failed to delete staged statements", http.StatusInternalServerError)
+		return
+	}
+	stRemoved, _ := resSt.RowsAffected()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1`, bid); err != nil {
+		_ = tx.Rollback()
+		respondWithError(w, err, "failed to delete staging batch", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		respondWithError(w, err, "failed to commit delete", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":            true,
+		"message":            "Staging batch and linked statements deleted",
+		"batch_id":           bid,
+		"statements_deleted": stRemoved,
+	})
+}
+
+func deleteStagingBatchPOST(w http.ResponseWriter, r *http.Request, db *sql.DB, ctx context.Context, sessionUID string) {
+	var body struct {
+		StagingIDs []string `json:"staging_ids"`
+		Reason     string   `json:"reason"`
+		UserID     string   `json:"user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respondWithError(w, err, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if trimmed := strings.TrimSpace(body.UserID); trimmed != "" && trimmed != strings.TrimSpace(sessionUID) {
+		respondWithError(w, nil, "user_id does not match authenticated user", http.StatusForbidden)
+		return
+	}
+
+	seen := make(map[string]struct{})
+	var ids []string
+	for _, id := range body.StagingIDs {
+		s := strings.TrimSpace(id)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		ids = append(ids, s)
+	}
+	if len(ids) == 0 {
+		respondWithError(w, nil, "staging_ids must contain at least one non-empty id", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		respondWithError(w, err, "failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+
+	delRows, err := tx.QueryContext(ctx, `
+		DELETE FROM cimplrcorpsaas.pdf_staging_statement s
+		USING cimplrcorpsaas.pdf_staging_batch b
+		WHERE s.batch_id = b.batch_id
+		  AND b.user_id = $1
+		  AND s.staging_id::text = ANY($2::text[])
+		RETURNING s.batch_id::text, s.staging_id::text
+	`, sessionUID, pq.Array(ids))
+	if err != nil {
+		_ = tx.Rollback()
+		respondWithError(w, err, "failed to delete staged statements", http.StatusInternalServerError)
+		return
+	}
+	defer delRows.Close()
+
+	type delRow struct {
+		batchID, stagingID string
+	}
+	var deleted []delRow
+	for delRows.Next() {
+		var batchID, stagingID string
+		if err := delRows.Scan(&batchID, &stagingID); err != nil {
 			_ = tx.Rollback()
-			respondWithError(w, err, "failed to verify batch", http.StatusInternalServerError)
+			respondWithError(w, err, "failed to read delete result", http.StatusInternalServerError)
 			return
 		}
-		if batchExists == 0 {
+		deleted = append(deleted, delRow{batchID, stagingID})
+	}
+	if err := delRows.Err(); err != nil {
+		_ = tx.Rollback()
+		respondWithError(w, err, "failed to delete staged statements", http.StatusInternalServerError)
+		return
+	}
+
+	if len(deleted) == 0 {
+		_ = tx.Rollback()
+		respondWithError(w, nil, "no staging statements deleted — check ids and ownership", http.StatusNotFound)
+		return
+	}
+
+	affectedBatches := make(map[string]struct{})
+	var deletedStagingIDs []string
+	for _, d := range deleted {
+		deletedStagingIDs = append(deletedStagingIDs, d.stagingID)
+		affectedBatches[d.batchID] = struct{}{}
+	}
+
+	var batchesRemoved []string
+	for bid := range affectedBatches {
+		var remaining int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.pdf_staging_statement WHERE batch_id = $1`, bid).Scan(&remaining); err != nil {
 			_ = tx.Rollback()
-			respondWithError(w, nil, "batch not found", http.StatusNotFound)
+			respondWithError(w, err, "failed to count remaining statements", http.StatusInternalServerError)
 			return
 		}
-
-		resSt, err := tx.ExecContext(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE batch_id = $1`, bid)
-		if err != nil {
-			_ = tx.Rollback()
-			respondWithError(w, err, "failed to delete staged statements", http.StatusInternalServerError)
-			return
+		if remaining < 1 {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1`, bid); err != nil {
+				_ = tx.Rollback()
+				respondWithError(w, err, "failed to delete empty staging batch", http.StatusInternalServerError)
+				return
+			}
+			batchesRemoved = append(batchesRemoved, bid)
 		}
-		stRemoved, _ := resSt.RowsAffected()
+	}
 
-		if _, err := tx.ExecContext(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1`, bid); err != nil {
-			_ = tx.Rollback()
-			respondWithError(w, err, "failed to delete staging batch", http.StatusInternalServerError)
-			return
-		}
+	if err := tx.Commit(); err != nil {
+		respondWithError(w, err, "failed to commit delete", http.StatusInternalServerError)
+		return
+	}
 
-		if err := tx.Commit(); err != nil {
-			respondWithError(w, err, "failed to commit delete", http.StatusInternalServerError)
-			return
-		}
+	if body.Reason != "" || len(deletedStagingIDs) > 0 {
+		log.Printf("pdf staging delete by ids: session_user=%s reason=%q deleted=%d batches_emptied=%d",
+			sessionUID, strings.TrimSpace(body.Reason), len(deletedStagingIDs), len(batchesRemoved))
+	}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":            true,
-			"message":            "Staging batch and linked statements deleted",
-			"batch_id":           bid,
-			"statements_deleted": stRemoved,
-		})
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":               true,
+		"message":               "Staging statements processed",
+		"deleted_staging_ids":   deletedStagingIDs,
+		"batches_deleted":       batchesRemoved,
+		"requested_staging_ids": ids,
 	})
 }
