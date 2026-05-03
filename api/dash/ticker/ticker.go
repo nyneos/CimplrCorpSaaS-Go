@@ -309,7 +309,7 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 				result[b] = map[string]interface{}{"base": b, "target": target, "rate": rate}
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 		json.NewEncoder(w).Encode(result)
 		return
 	}
@@ -358,7 +358,7 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 	// If only one base requested, return its value directly to preserve previous behavior
 	if len(bases) == 1 {
 		json.NewEncoder(w).Encode(baseResults[bases[0]])

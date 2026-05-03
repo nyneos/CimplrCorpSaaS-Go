@@ -8,7 +8,9 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"mime/multipart"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,6 +20,30 @@ import (
 
 	"github.com/lib/pq"
 )
+
+// MaxBankStatementZipBytes is the maximum allowed uncompressed upload size for a
+// bank-statement .zip file (multipart field "file").
+const MaxBankStatementZipBytes int64 = 5 << 20 // 5 MiB
+
+// readBankStatementZipBytes reads a zip upload and rejects bodies larger than MaxBankStatementZipBytes.
+func readBankStatementZipBytes(file multipart.File, header *multipart.FileHeader) ([]byte, error) {
+	const max = MaxBankStatementZipBytes
+	if header != nil && header.Size > 0 {
+		if header.Size > max {
+			return nil, fmt.Errorf("zip file exceeds the maximum size of 5 MB (%d bytes); uploaded file is %d bytes", max, header.Size)
+		}
+		return io.ReadAll(file)
+	}
+	limited := io.LimitReader(file, max+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("zip file exceeds the maximum size of 5 MB (%d bytes)", max)
+	}
+	return data, nil
+}
 
 func pqUserFriendlyMessage(err error) string {
 	if err == nil {

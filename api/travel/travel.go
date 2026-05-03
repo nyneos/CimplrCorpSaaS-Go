@@ -1,6 +1,7 @@
 package travel
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
 	"log"
@@ -46,7 +47,7 @@ func CreatePackageHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusCreated)
 		w.Write(pkgBytes)
 	}
@@ -63,7 +64,7 @@ func GetPackageHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		id := r.URL.Query().Get("id")
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 		if id != "" {
 			var pkgBytes []byte
@@ -159,7 +160,7 @@ func DeletePackageHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{"deleted": true, "id": id})
 	}

@@ -1513,7 +1513,8 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		if err := r.ParseMultipartForm(100 << 20); err != nil {
+		// Cap whole request slightly above max zip (5 MiB) so metadata fields still fit.
+		if err := r.ParseMultipartForm(8 << 20); err != nil {
 			http.Error(w, fmt.Sprintf("Failed to parse multipart form: %v", err), http.StatusBadRequest)
 			return
 		}
@@ -1556,8 +1557,12 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 		forceOverride := r.FormValue("force_override") == "true"
 		log.Printf("[ZIP-UPLOAD] Received %d account number(s) from form-data, force_override=%v", len(accountNumbers), forceOverride)
 
-		zipData, err := io.ReadAll(zipFile)
+		zipData, err := readBankStatementZipBytes(zipFile, zipHeader)
 		if err != nil {
+			if strings.Contains(err.Error(), "exceeds the maximum size") {
+				http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, fmt.Sprintf("Failed to read zip file: %v", err), http.StatusInternalServerError)
 			return
 		}

@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"bytes"
 	"context"
 	"database/sql"
@@ -74,7 +75,7 @@ func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, passwor
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
 
 	// Access token — env name intentionally unrelated to the backing service.
 	if tok := strings.TrimSpace(os.Getenv("CONVERT_SVC_KEY")); tok != "" {
@@ -205,10 +206,10 @@ func buildPreviewResponseFromTxnMaps(txns []map[string]interface{}, csvBytes []b
 
 	periodStartStr, periodEndStr := "", ""
 	if !periodStart.IsZero() {
-		periodStartStr = periodStart.Format("2006-01-02")
+		periodStartStr = periodStart.Format(constants.DateFormat)
 	}
 	if !periodEnd.IsZero() {
-		periodEndStr = periodEnd.Format("2006-01-02")
+		periodEndStr = periodEnd.Format(constants.DateFormat)
 	}
 
 	meta := Metadata{
@@ -265,7 +266,7 @@ func flatTxnToRecalculate(t map[string]interface{}) RecalculateTransaction {
 
 func normDateStr(v string) string {
 	if t, err := time.Parse(time.RFC3339, v); err == nil {
-		return t.Format("2006-01-02")
+		return t.Format(constants.DateFormat)
 	}
 	if len(v) >= 10 {
 		return v[:10]
@@ -282,7 +283,7 @@ func extractPeriodFromTxnMaps(txns []map[string]interface{}) (start, end time.Ti
 		var dt time.Time
 		if p, err := time.Parse(time.RFC3339, v); err == nil {
 			dt = p
-		} else if p, err := time.Parse("2006-01-02", v); err == nil {
+		} else if p, err := time.Parse(constants.DateFormat, v); err == nil {
 			dt = p
 		}
 		if dt.IsZero() {

@@ -49,6 +49,8 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 		}
 		defer file.Close()
 
+		extEarly := strings.ToLower(filepath.Ext(header.Filename))
+
 		// Check for custom mappings (same as upload handler)
 		useMapping := r.FormValue("useMapping") == "true"
 		var mappings *ColumnMappings
@@ -81,14 +83,27 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 			accountOverride = accountNums[0]
 		}
 
-		// Read file into memory
-		fileBytes, err := io.ReadAll(file)
-		if err != nil {
-			http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
-			return
+		// Read file into memory (zip uploads capped at MaxBankStatementZipBytes)
+		var fileBytes []byte
+		if extEarly == ".zip" {
+			fileBytes, err = readBankStatementZipBytes(file, header)
+			if err != nil {
+				if strings.Contains(err.Error(), "exceeds the maximum size") {
+					http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+					return
+				}
+				http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else {
+			fileBytes, err = io.ReadAll(file)
+			if err != nil {
+				http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 
-		ext := strings.ToLower(filepath.Ext(header.Filename))
+		ext := extEarly
 
 		var allTransactions []map[string]interface{}
 

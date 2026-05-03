@@ -245,7 +245,7 @@ func proxyStreamToFinPDF(w http.ResponseWriter, r *http.Request, fileBytes []byt
 		}
 	}
 	// ensure chunked streaming
-	w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 	w.WriteHeader(resp.StatusCode)
 
 	flusher, ok := w.(http.Flusher)
@@ -384,8 +384,12 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 	}
 	defer file.Close()
 
-	zipBytes, err := io.ReadAll(file)
+	zipBytes, err := readBankStatementZipBytes(file, header)
 	if err != nil {
+		if strings.Contains(err.Error(), "exceeds the maximum size") {
+			respondWithError(w, err, err.Error(), http.StatusRequestEntityTooLarge)
+			return
+		}
 		respondWithError(w, err, "Failed to read uploaded file", http.StatusInternalServerError)
 		return
 	}
@@ -617,7 +621,9 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 					stagingIDs, err := processPDFViaPDFCo(bgCtx, db, f.data, f.filename, bgBatchID, "")
 					if err != nil {
 						log.Printf("[ZIP-PDF-BG] failed %s: %v", f.filename, err)
-						_, _ = insertStagingStatement(bgCtx, db, bgBatchID, f.filename, "", nil, "failed", err.Error())
+						_, _ = insertStagingStatement(bgCtx, db, insertStagingStatementParams{
+							BatchID: bgBatchID, Filename: f.filename, CSVURL: "", RawStatement: nil, Status: "failed", ErrMsg: err.Error(),
+						})
 						failed++
 					} else {
 						if len(stagingIDs) == 0 {
@@ -855,7 +861,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			if len(stagingIDs) > 0 {
 				primaryStagingID = stagingIDs[0]
 			}
-			w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success":     true,
@@ -986,7 +992,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		}
 
 		// Send the single combined JSON response
-		w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(combinedResponse); err != nil {
 			log.Printf("failed to write response: %v", err)
@@ -1100,11 +1106,11 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 			// Compute running balance
 			if runningBalance != nil {
 				rb := *runningBalance
-				rb = math.Round((rb - withdrawal + deposit) * 100) / 100
+				rb = math.Round((rb-withdrawal+deposit)*100) / 100
 				runningBalance = &rb
 			} else if deposit > 0 || withdrawal > 0 {
 				// If no opening balance, start from first transaction
-				rb := math.Round((deposit - withdrawal) * 100) / 100
+				rb := math.Round((deposit-withdrawal)*100) / 100
 				runningBalance = &rb
 			}
 
@@ -1202,7 +1208,7 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 				}
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(output)
 	})
 }
@@ -1253,9 +1259,9 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 					"success": true,
 					"message": "This staged statement was already committed. No changes were applied.",
 					"data": map[string]interface{}{
-						"bank_statement_id":   prevBS.String,
-						"already_committed":   true,
-						"staging_id":          stagingID,
+						"bank_statement_id":           prevBS.String,
+						"already_committed":           true,
+						"staging_id":                  stagingID,
 						"transactions_uploaded_count": 0,
 					},
 				})
@@ -2101,7 +2107,9 @@ func processPDFViaPDFCo(ctx context.Context, db *sql.DB, pdfBytes []byte, filena
 		return nil, fmt.Errorf("build preview: no parsed statements")
 	}
 	for _, preview := range previews {
-		sid, serr := insertStagingStatement(ctx, db, batchID, filename, "", preview, "parsed", "")
+		sid, serr := insertStagingStatement(ctx, db, insertStagingStatementParams{
+			BatchID: batchID, Filename: filename, CSVURL: "", RawStatement: preview, Status: "parsed",
+		})
 		if serr != nil {
 			return nil, fmt.Errorf("stage statement: %w", serr)
 		}

@@ -27,24 +27,34 @@ func insertStagingBatch(ctx context.Context, db *sql.DB, userID, sourceFilename 
 	return batchID, err
 }
 
-// insertStagingStatement creates a statement row inside a batch. rawStatement
-// is the serialised RecalculateCleanData-shaped map (or nil if not yet parsed).
-func insertStagingStatement(ctx context.Context, db *sql.DB, batchID, filename, csvURL string, rawStatement interface{}, status, errMsg string) (string, error) {
-	raw, err := json.Marshal(rawStatement)
+// insertStagingStatementParams carries row data for insertStagingStatement.
+// RawStatement is the serialised RecalculateCleanData-shaped map (or nil if not yet parsed).
+type insertStagingStatementParams struct {
+	BatchID      string
+	Filename     string
+	CSVURL       string
+	RawStatement interface{}
+	Status       string
+	ErrMsg       string
+}
+
+// insertStagingStatement creates a statement row inside a batch.
+func insertStagingStatement(ctx context.Context, db *sql.DB, p insertStagingStatementParams) (string, error) {
+	raw, err := json.Marshal(p.RawStatement)
 	if err != nil {
 		return "", fmt.Errorf("marshal raw_statement: %w", err)
 	}
 	var stagingID string
 	var errMsgParam interface{}
-	if errMsg != "" {
-		errMsgParam = errMsg
+	if p.ErrMsg != "" {
+		errMsgParam = p.ErrMsg
 	}
 	err = db.QueryRowContext(ctx, `
 		INSERT INTO cimplrcorpsaas.pdf_staging_statement
 		    (batch_id, original_filename, csv_url, raw_statement, status, error_message)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING staging_id
-	`, batchID, filename, csvURL, raw, status, errMsgParam).Scan(&stagingID)
+	`, p.BatchID, p.Filename, p.CSVURL, raw, p.Status, errMsgParam).Scan(&stagingID)
 	return stagingID, err
 }
 
@@ -176,7 +186,7 @@ func GetStagingBatchHandler(db *sql.DB) http.Handler {
 			stmts = append(stmts, s)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
@@ -235,7 +245,7 @@ func GetStagingStatementHandler(db *sql.DB) http.Handler {
 		`, body.StagingID, sessionUID).Scan(&stagingID, &batchID, &filename, &csvURL,
 			&rawStmt, &status, &errMsg, &committedID, &createdAt)
 		if err == sql.ErrNoRows {
-			respondWithError(w, nil, "statement not found", http.StatusNotFound)
+			respondWithError(w, nil, constants.ErrStatementNotFound, http.StatusNotFound)
 			return
 		}
 		if err != nil {
@@ -253,7 +263,7 @@ func GetStagingStatementHandler(db *sql.DB) http.Handler {
 
 		displayStatus := stagingStatementDisplayStatus(status, committedID)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
@@ -385,7 +395,7 @@ func ListStagingByUserHandler(db *sql.DB) http.Handler {
 			batches = append(batches, b)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    batches,
@@ -433,7 +443,7 @@ func UpdateStagingStatementHandler(db *sql.DB) http.Handler {
 			respondWithError(w, nil, "statement not found or already committed", http.StatusNotFound)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 	})
 }
@@ -470,7 +480,7 @@ func DeleteStagingStatementHandler(db *sql.DB) http.Handler {
 			 WHERE s.staging_id = $1 AND b.user_id = $2
 		`, sid, sessionUID).Scan(&batchID)
 		if err == sql.ErrNoRows {
-			respondWithError(w, nil, "statement not found", http.StatusNotFound)
+			respondWithError(w, nil, constants.ErrStatementNotFound, http.StatusNotFound)
 			return
 		}
 		if err != nil {
@@ -484,7 +494,7 @@ func DeleteStagingStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			respondWithError(w, nil, "statement not found", http.StatusNotFound)
+			respondWithError(w, nil, constants.ErrStatementNotFound, http.StatusNotFound)
 			return
 		}
 
@@ -502,12 +512,12 @@ func DeleteStagingStatementHandler(db *sql.DB) http.Handler {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":             true,
-			"message":             "Staging statement deleted",
-			"staging_id":          sid,
-			"batch_deleted":       batchDeleted,
+			"success":            true,
+			"message":            "Staging statement deleted",
+			"staging_id":         sid,
+			"batch_deleted":      batchDeleted,
 			"remaining_in_batch": remaining,
 		})
 	})
@@ -572,11 +582,11 @@ func DeleteStagingBatchHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":              true,
-			"message":              "Staging batch and linked statements deleted",
-			"batch_id":             bid,
+			"success":            true,
+			"message":            "Staging batch and linked statements deleted",
+			"batch_id":           bid,
 			"statements_deleted": stRemoved,
 		})
 	})

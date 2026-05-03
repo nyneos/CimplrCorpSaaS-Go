@@ -66,6 +66,22 @@ func stripPathPrefix(next http.Handler, pathPrefix string) http.Handler {
 	})
 }
 
+// The prefix is read from environment variable PATH_PREFIX.
+// func stripPathPrefix(next http.Handler) http.Handler {
+// 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// 		pathPrefix := os.Getenv("PATH_PREFIX")
+
+//			prefix := strings.TrimRight(pathPrefix, "/")
+//			if prefix != "" && strings.HasPrefix(r.URL.Path, prefix+"/") {
+//				r.URL.Path = strings.TrimPrefix(r.URL.Path, prefix)
+//				if !strings.HasPrefix(r.URL.Path, "/") {
+//					r.URL.Path = "/" + r.URL.Path
+//				}
+//			}
+//			next.ServeHTTP(w, r)
+//		})
+//	}
+//
 // Global reference to AuthService (set from main or manager)
 var (
 	authService     *auth.AuthService
@@ -786,6 +802,7 @@ func StartGateway(port string, pathPrefix string) {
 	}
 	log.Printf("API Gateway listening on :%s (path prefix: %s)", port, pathPrefix)
 	handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux, pathPrefix))))
+	// handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux))))
 	cert := os.Getenv("TLS_CERT")
 	key := os.Getenv("TLS_KEY")
 	var err error

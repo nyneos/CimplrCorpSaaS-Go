@@ -11,6 +11,7 @@ const (
 	ErrInvalidJSONShort              = "Invalid JSON"
 	ErrInvalidJSONPrefix             = "invalid JSON: "
 	// ErrMissingUserID                 = "Missing or invalid user_id in body"
+	ErrStatementNotFound  = "statement not found"
 	ErrUserIDRequired     = "user_id required"
 	ErrDB                 = "DB error"
 	ErrDBPrefix           = "DB error: "
@@ -172,6 +173,7 @@ const (
 	ContentTypeText        = "Content-Type"
 	ContentTypeMultipart   = "multipart/form-data"
 	ErrFailedToPrepareFile = "Failed to prepare file for parsing"
+	ContentTypeJSONUTF8    = "application/json; charset=utf-8"
 )
 
 // Generic keys and small common tokens
