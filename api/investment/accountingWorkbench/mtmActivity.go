@@ -6,14 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // ---------------------------
 // Request/Response Types for MTM
@@ -156,7 +156,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DataSource       string `json:"data_source"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			log.Printf("CreateMTMBulk: invalid JSON request: %v", err)
+			logger.LogError("CreateMTMBulk: invalid JSON request: %v", err)
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
@@ -258,7 +258,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
-			log.Printf("CreateMTMBulk: invalid session for user_id=%s", req.UserID)
+			logger.LogError("CreateMTMBulk: invalid session for user_id=%s", req.UserID)
 			api.RespondWithError(w, http.StatusUnauthorized, "Invalid user session")
 			return
 		}
@@ -268,7 +268,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Single transaction for entire batch
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			log.Printf("CreateMTMBulk: failed to begin transaction: %v", err)
+			logger.LogError("CreateMTMBulk: failed to begin transaction: %v", err)
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
@@ -350,7 +350,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		holdingsRows, err := tx.Query(ctx, holdingsQuery, startDate)
 		if err != nil {
-			log.Printf("CreateMTMBulk: holdings query failed: %v", err)
+			logger.LogError("CreateMTMBulk: holdings query failed: %v", err)
 			api.RespondWithError(w, http.StatusInternalServerError, "Holdings fetch failed: "+err.Error())
 			return
 		}
@@ -372,7 +372,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for holdingsRows.Next() {
 			var h HoldingData
 			if err := holdingsRows.Scan(&h.FolioNumber, &h.DematAccNumber, &h.SchemeID, &h.SchemeName, &h.ISIN, &h.InternalCode, &h.Units, &h.AvgNAV); err != nil {
-				log.Printf("CreateMTMBulk: holdings scan failed: %v", err)
+				logger.LogError("CreateMTMBulk: holdings scan failed: %v", err)
 				api.RespondWithError(w, http.StatusInternalServerError, "Holdings scan failed: "+err.Error())
 				return
 			}
@@ -477,7 +477,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 						if parseErr != nil {
 							// If we cannot parse, log and mark as fetch error
-							log.Printf("CreateMTMBulk: unable to parse NAV date '%s' for scheme %s: %v", lastEntry.Date, amfiCode, parseErr)
+							logger.LogError("CreateMTMBulk: unable to parse NAV date '%s' for scheme %s: %v", lastEntry.Date, amfiCode, parseErr)
 							navFetchError = "Invalid NAV date format"
 						} else {
 							actualEndDate = parsed.Format(constants.DateFormat)
@@ -518,17 +518,17 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							actualEndDate = endDate
 							navFetchError = "" // Clear error, fallback succeeded
 						} else if err != nil {
-							log.Printf("CreateMTMBulk: amfi_nav_staging lookup failed for amfiCode=%d scheme=%s: %v", amfiInt, h.SchemeID, err)
+							logger.LogError("CreateMTMBulk: amfi_nav_staging lookup failed for amfiCode=%d scheme=%s: %v", amfiInt, h.SchemeID, err)
 						}
 					} else {
-						log.Printf("CreateMTMBulk: amfiCode '%s' for scheme %s is not numeric, cannot query amfi_nav_staging", amfiCode, h.SchemeID)
+						logger.LogInfo("CreateMTMBulk: amfiCode '%s' for scheme %s is not numeric, cannot query amfi_nav_staging", amfiCode, h.SchemeID)
 					}
 				}
 			}
 
 			// If still no end NAV, record error and skip
 			if endNAV == 0 {
-				log.Printf("CreateMTMBulk: unable to fetch end NAV for scheme %s (%s): %s", h.SchemeID, h.SchemeName, navFetchError)
+				logger.LogInfo("CreateMTMBulk: unable to fetch end NAV for scheme %s (%s): %s", h.SchemeID, h.SchemeName, navFetchError)
 				results = append(results, map[string]interface{}{
 					"success":     false,
 					"scheme_id":   h.SchemeID,
@@ -592,9 +592,9 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								}
 							}
 						} else if respRange != nil {
-							log.Printf("CreateMTMBulk: MFapi range returned status %d for amfiCode=%s", respRange.StatusCode, amfiCode)
+							logger.LogInfo("CreateMTMBulk: MFapi range returned status %d for amfiCode=%s", respRange.StatusCode, amfiCode)
 						} else if err != nil {
-							log.Printf("CreateMTMBulk: MFapi range request failed for amfiCode=%s: %v", amfiCode, err)
+							logger.LogError("CreateMTMBulk: MFapi range request failed for amfiCode=%s: %v", amfiCode, err)
 						}
 					}
 
@@ -609,12 +609,12 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							`, amfiInt, actualEndDate).Scan(&stagedPrev); err == nil && stagedPrev > 0 {
 								prevNAV = stagedPrev
 							} else if err != nil {
-								log.Printf("CreateMTMBulk: amfi_nav_staging lookup failed for amfiCode=%d scheme=%s up to date=%s: %v", amfiInt, h.SchemeID, actualEndDate, err)
+								logger.LogError("CreateMTMBulk: amfi_nav_staging lookup failed for amfiCode=%d scheme=%s up to date=%s: %v", amfiInt, h.SchemeID, actualEndDate, err)
 							}
 						}
 					}
 				} else {
-					log.Printf("CreateMTMBulk: cannot parse actualEndDate '%s' for scheme %s: %v", actualEndDate, h.SchemeID, perr)
+					logger.LogError("CreateMTMBulk: cannot parse actualEndDate '%s' for scheme %s: %v", actualEndDate, h.SchemeID, perr)
 				}
 			}
 
@@ -629,7 +629,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						"error":       "Invalid avg_nav (prev_nav fallback <= 0)",
 					})
 					hadError = true
-					log.Printf("CreateMTMBulk: no valid prev_nav found for scheme %s; avg_nav also invalid", h.SchemeID)
+					logger.LogError("CreateMTMBulk: no valid prev_nav found for scheme %s; avg_nav also invalid", h.SchemeID)
 					continue
 				}
 			}
@@ -650,7 +650,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number = $1 AND COALESCE(is_deleted,false) = false LIMIT 1`, h.FolioNumber).Scan(&fid); err == nil {
 					folioID = &fid
 				} else {
-					log.Printf("CreateMTMBulk: no active folio_id found for folio_number=%s: %v", h.FolioNumber, err)
+					logger.LogError("CreateMTMBulk: no active folio_id found for folio_number=%s: %v", h.FolioNumber, err)
 				}
 			}
 			if h.DematAccNumber != "" {
@@ -658,7 +658,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if err := tx.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number = $1 AND COALESCE(is_deleted,false) = false LIMIT 1`, h.DematAccNumber).Scan(&did); err == nil {
 					dematID = &did
 				} else {
-					log.Printf("CreateMTMBulk: no active demat_id found for demat_account_number=%s: %v", h.DematAccNumber, err)
+					logger.LogError("CreateMTMBulk: no active demat_id found for demat_account_number=%s: %v", h.DematAccNumber, err)
 				}
 			}
 
@@ -676,7 +676,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// before attempting any further audit/commit operations so we don't try to execute
 				// commands on an aborted transaction.
 				hadError = true
-				log.Printf("CreateMTMBulk: failed to insert MTM row for scheme %s: %v", h.SchemeID, err)
+				logger.LogError("CreateMTMBulk: failed to insert MTM row for scheme %s: %v", h.SchemeID, err)
 				results = append(results, map[string]interface{}{
 					"success":     false,
 					"scheme_id":   h.SchemeID,
@@ -710,10 +710,10 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Log detailed row errors for debugging
 			for _, r := range results {
 				if success, ok := r["success"].(bool); ok && !success {
-					log.Printf("CreateMTMBulk: row error detail: scheme=%v error=%v", r["scheme_id"], r["error"])
+					logger.LogError("CreateMTMBulk: row error detail: scheme=%v error=%v", r["scheme_id"], r["error"])
 				}
 			}
-			log.Printf("CreateMTMBulk: encountered row-level errors, rolling back transaction. activity_id=%s", activityID)
+			logger.LogError("CreateMTMBulk: encountered row-level errors, rolling back transaction. activity_id=%s", activityID)
 			_ = tx.Rollback(ctx)
 			api.RespondWithPayload(w, api.IsBulkSuccess(results), "Partial results due to row-level errors", map[string]any{
 				"activity_id":       activityID,
@@ -729,13 +729,13 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 		`, activityID, userEmail); err != nil {
-			log.Printf("CreateMTMBulk: failed to insert audit row for activity_id=%s: %v", activityID, err)
+			logger.LogError("CreateMTMBulk: failed to insert audit row for activity_id=%s: %v", activityID, err)
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			log.Printf("CreateMTMBulk: failed to commit transaction for activity_id=%s: %v", activityID, err)
+			logger.LogError("CreateMTMBulk: failed to commit transaction for activity_id=%s: %v", activityID, err)
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
@@ -1451,7 +1451,7 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					preview.Transactions = txs
 				} else {
-					log.Printf("PreviewMTMBulk: transactions query failed for scheme=%s folio=%s demat=%s: %v", h.SchemeID, h.FolioNumber, h.DematAccNumber, err)
+					logger.LogError("PreviewMTMBulk: transactions query failed for scheme=%s folio=%s demat=%s: %v", h.SchemeID, h.FolioNumber, h.DematAccNumber, err)
 				}
 			}
 			preview.Success = true

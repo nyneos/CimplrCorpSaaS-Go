@@ -6,12 +6,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 type bankBalanceAuditRequest struct {
 	UserID    string `json:"user_id"`
@@ -176,7 +176,7 @@ func insertBankBalanceDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, 
 		VALUES ($1, $2, now(), $3, $4)
 	`, balanceID, requestedBy, extractAuditFileName(uploadS3Key), nullIfEmpty(uploadS3Key))
 	if err != nil {
-		log.Printf("failed to insert bank balance download audit for %s: %v", balanceID, err)
+		logger.LogError("failed to insert bank balance download audit for %s: %v", balanceID, err)
 	}
 }
 

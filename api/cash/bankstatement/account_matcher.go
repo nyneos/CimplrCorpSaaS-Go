@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"regexp"
 	"strings"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // accountMatchScore represents a scored match between a file and an account
 type accountMatchScore struct {
@@ -33,7 +33,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 	// Strategy 1: Direct override with exact match (highest priority - immediate return)
 	if strings.TrimSpace(accountOverride) != "" {
 		override := strings.TrimSpace(accountOverride)
-		log.Printf("[ACCOUNT-MATCHER] direct override provided: %s", override)
+		logger.LogError("[ACCOUNT-MATCHER] direct override provided: %s", override)
 
 		// Check if it's a direct match (not masked)
 		if !strings.Contains(override, "X") {
@@ -41,7 +41,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 			if len(availableAccounts) > 0 {
 				for _, acc := range availableAccounts {
 					if strings.EqualFold(acc, override) {
-						log.Printf("[ACCOUNT-MATCHER] ✓ Direct override %s found in available accounts (1000 points)", override)
+						logger.LogError("[ACCOUNT-MATCHER] ✓ Direct override %s found in available accounts (1000 points)", override)
 						return override
 					}
 				}
@@ -56,10 +56,10 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 				)
 			`, override).Scan(&exists)
 			if err == nil && exists {
-				log.Printf("[ACCOUNT-MATCHER] ✓ Direct override %s verified in DB (1000 points)", override)
+				logger.LogError("[ACCOUNT-MATCHER] ✓ Direct override %s verified in DB (1000 points)", override)
 				return override
 			}
-			log.Printf("[ACCOUNT-MATCHER] override %s not found in DB, will try scoring system", override)
+			logger.LogError("[ACCOUNT-MATCHER] override %s not found in DB, will try scoring system", override)
 		}
 	}
 
@@ -85,7 +85,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 	// Strategy 2: Check for masked patterns in file content (first 20 rows)
 	if len(fileContent) > 0 {
 		maskedInFile := extractMaskedAccountsFromContent(fileContent)
-		log.Printf("[ACCOUNT-MATCHER] found %d masked patterns in file content: %v", len(maskedInFile), maskedInFile)
+		logger.LogInfo("[ACCOUNT-MATCHER] found %d masked patterns in file content: %v", len(maskedInFile), maskedInFile)
 
 		for _, masked := range maskedInFile {
 			// Try to resolve masked account
@@ -94,7 +94,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 				for _, acc := range availableAccounts {
 					if matchesMaskedPattern(acc, masked) {
 						addScore(acc, 500, fmt.Sprintf("masked pattern '%s' in file content matches account", masked))
-						log.Printf("[ACCOUNT-MATCHER]  Masked pattern '%s' in file content matched to %s (+500 points)", masked, acc)
+						logger.LogInfo("[ACCOUNT-MATCHER]  Masked pattern '%s' in file content matched to %s (+500 points)", masked, acc)
 					}
 				}
 			} else {
@@ -102,7 +102,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 				matched := matchMaskedAccount(ctx, db, masked, availableAccounts)
 				if matched != "" {
 					addScore(matched, 400, fmt.Sprintf("masked pattern '%s' in file content resolved via DB", masked))
-					log.Printf("[ACCOUNT-MATCHER]  Masked pattern '%s' in file content resolved to %s via DB (+400 points)", masked, matched)
+					logger.LogInfo("[ACCOUNT-MATCHER]  Masked pattern '%s' in file content resolved to %s via DB (+400 points)", masked, matched)
 				}
 			}
 		}
@@ -110,7 +110,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 
 	// Strategy 3: Extract from filename patterns
 	if filename != "" {
-		log.Printf("[ACCOUNT-MATCHER] analyzing filename: %s", filename)
+		logger.LogInfo("[ACCOUNT-MATCHER] analyzing filename: %s", filename)
 
 		// Check for masked patterns in filename
 		maskedInFilename := extractMaskedAccountsFromString(filename)
@@ -119,14 +119,14 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 				for _, acc := range availableAccounts {
 					if matchesMaskedPattern(acc, masked) {
 						addScore(acc, 300, fmt.Sprintf("masked pattern '%s' in filename", masked))
-						log.Printf("[ACCOUNT-MATCHER]  Masked pattern '%s' in filename matched to %s (+300 points)", masked, acc)
+						logger.LogInfo("[ACCOUNT-MATCHER]  Masked pattern '%s' in filename matched to %s (+300 points)", masked, acc)
 					}
 				}
 			} else {
 				matched := matchMaskedAccount(ctx, db, masked, availableAccounts)
 				if matched != "" {
 					addScore(matched, 250, fmt.Sprintf("masked pattern '%s' in filename resolved via DB", masked))
-					log.Printf("[ACCOUNT-MATCHER]  Masked pattern '%s' in filename resolved to %s via DB (+250 points)", masked, matched)
+					logger.LogInfo("[ACCOUNT-MATCHER]  Masked pattern '%s' in filename resolved to %s via DB (+250 points)", masked, matched)
 				}
 			}
 		}
@@ -140,10 +140,10 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 				for _, acc := range availableAccounts {
 					if strings.EqualFold(acc, candidate) {
 						addScore(acc, 400, fmt.Sprintf("full account number '%s' in filename", candidate))
-						log.Printf("[ACCOUNT-MATCHER]  Filename contains full account %s (+400 points)", acc)
+						logger.LogInfo("[ACCOUNT-MATCHER]  Filename contains full account %s (+400 points)", acc)
 					} else if strings.HasSuffix(acc, candidate) {
 						addScore(acc, 200, fmt.Sprintf("partial account number '%s' suffix in filename", candidate))
-						log.Printf("[ACCOUNT-MATCHER]  Filename contains suffix %s for account %s (+200 points)", candidate, acc)
+						logger.LogInfo("[ACCOUNT-MATCHER]  Filename contains suffix %s for account %s (+200 points)", candidate, acc)
 					}
 				}
 			}
@@ -158,7 +158,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 			`, candidate).Scan(&matchedAccount)
 			if err == nil && matchedAccount != "" {
 				addScore(matchedAccount, 350, fmt.Sprintf("full account '%s' in filename verified in DB", candidate))
-				log.Printf("[ACCOUNT-MATCHER]  Filename candidate %s matched DB account %s (+350 points)", candidate, matchedAccount)
+				logger.LogInfo("[ACCOUNT-MATCHER]  Filename candidate %s matched DB account %s (+350 points)", candidate, matchedAccount)
 			} else {
 				// Try suffix match
 				err = db.QueryRowContext(ctx, `
@@ -169,7 +169,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 				`, candidate).Scan(&matchedAccount)
 				if err == nil && matchedAccount != "" {
 					addScore(matchedAccount, 150, fmt.Sprintf("partial account '%s' suffix in filename, DB matched", candidate))
-					log.Printf("[ACCOUNT-MATCHER]  Filename suffix %s matched DB account %s (+150 points)", candidate, matchedAccount)
+					logger.LogInfo("[ACCOUNT-MATCHER]  Filename suffix %s matched DB account %s (+150 points)", candidate, matchedAccount)
 				}
 			}
 		}
@@ -181,14 +181,14 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 			for _, acc := range availableAccounts {
 				if matchesMaskedPattern(acc, accountOverride) {
 					addScore(acc, 450, fmt.Sprintf("override masked pattern '%s' matches", accountOverride))
-					log.Printf("[ACCOUNT-MATCHER]  Override masked pattern %s matched to %s (+450 points)", accountOverride, acc)
+					logger.LogError("[ACCOUNT-MATCHER]  Override masked pattern %s matched to %s (+450 points)", accountOverride, acc)
 				}
 			}
 		} else {
 			matched := matchMaskedAccount(ctx, db, accountOverride, availableAccounts)
 			if matched != "" {
 				addScore(matched, 400, fmt.Sprintf("override masked pattern '%s' resolved via DB", accountOverride))
-				log.Printf("[ACCOUNT-MATCHER]  Override masked pattern %s resolved to %s via DB (+400 points)", accountOverride, matched)
+				logger.LogError("[ACCOUNT-MATCHER]  Override masked pattern %s resolved to %s via DB (+400 points)", accountOverride, matched)
 			}
 		}
 	}
@@ -202,12 +202,12 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 	}
 
 	if bestMatch != nil && bestMatch.score > 0 {
-		log.Printf("[ACCOUNT-MATCHER] ✓ BEST MATCH: %s with %d points", bestMatch.accountNumber, bestMatch.score)
-		log.Printf("[ACCOUNT-MATCHER] ✓ Reasons: %v", bestMatch.reasons)
+		logger.LogInfo("[ACCOUNT-MATCHER] ✓ BEST MATCH: %s with %d points", bestMatch.accountNumber, bestMatch.score)
+		logger.LogInfo("[ACCOUNT-MATCHER] ✓ Reasons: %v", bestMatch.reasons)
 		return bestMatch.accountNumber
 	}
 
-	log.Printf("[ACCOUNT-MATCHER] ✗ No match found via scoring system, will use file content extraction fallback")
+	logger.LogInfo("[ACCOUNT-MATCHER] ✗ No match found via scoring system, will use file content extraction fallback")
 	return ""
 }
 
@@ -261,7 +261,7 @@ func extractAccountCandidatesFromFilename(filename string) []string {
 		}
 	}
 
-	log.Printf("[ACCOUNT-MATCHER] extracted %d candidates from filename: %v", len(candidates), candidates)
+	logger.LogInfo("[ACCOUNT-MATCHER] extracted %d candidates from filename: %v", len(candidates), candidates)
 	return candidates
 }
 
@@ -274,26 +274,26 @@ func matchMaskedAccount(ctx context.Context, db *sql.DB, maskedAccount string, a
 		return ""
 	}
 
-	log.Printf("[ACCOUNT-MATCHER] attempting masked account match: %s", masked)
+	logger.LogInfo("[ACCOUNT-MATCHER] attempting masked account match: %s", masked)
 
 	// Extract the visible suffix (non-X characters at the end)
 	suffix := strings.TrimLeft(masked, "X")
 	if suffix == "" || suffix == masked {
-		log.Printf("[ACCOUNT-MATCHER] no visible suffix found in masked account")
+		logger.LogInfo("[ACCOUNT-MATCHER] no visible suffix found in masked account")
 		return ""
 	}
 
 	// Count the total expected length
 	expectedLen := len(masked)
 
-	log.Printf("[ACCOUNT-MATCHER] masked account suffix: %s, expected length: %d", suffix, expectedLen)
+	logger.LogInfo("[ACCOUNT-MATCHER] masked account suffix: %s, expected length: %d", suffix, expectedLen)
 
 	// Try available accounts first
 	if len(availableAccounts) > 0 {
 		for _, acc := range availableAccounts {
 			acc = strings.TrimSpace(acc)
 			if len(acc) == expectedLen && strings.HasSuffix(acc, suffix) {
-				log.Printf("[ACCOUNT-MATCHER] masked %s matched available account %s", masked, acc)
+				logger.LogInfo("[ACCOUNT-MATCHER] masked %s matched available account %s", masked, acc)
 				return acc
 			}
 		}
@@ -310,7 +310,7 @@ func matchMaskedAccount(ctx context.Context, db *sql.DB, maskedAccount string, a
 	`
 	err := db.QueryRowContext(ctx, query, suffix, expectedLen).Scan(&matchedAccount)
 	if err == nil && matchedAccount != "" {
-		log.Printf("[ACCOUNT-MATCHER] masked %s matched DB account %s", masked, matchedAccount)
+		logger.LogInfo("[ACCOUNT-MATCHER] masked %s matched DB account %s", masked, matchedAccount)
 		return matchedAccount
 	}
 
@@ -322,11 +322,11 @@ func matchMaskedAccount(ctx context.Context, db *sql.DB, maskedAccount string, a
 		LIMIT 1
 	`, suffix).Scan(&matchedAccount)
 	if err == nil && matchedAccount != "" {
-		log.Printf("[ACCOUNT-MATCHER] masked %s matched DB account %s (no length constraint)", masked, matchedAccount)
+		logger.LogInfo("[ACCOUNT-MATCHER] masked %s matched DB account %s (no length constraint)", masked, matchedAccount)
 		return matchedAccount
 	}
 
-	log.Printf("[ACCOUNT-MATCHER] no match found for masked account %s", masked)
+	logger.LogInfo("[ACCOUNT-MATCHER] no match found for masked account %s", masked)
 	return ""
 }
 
@@ -477,6 +477,6 @@ func parseAccountNumbers(formValues map[string][]string) []string {
 		}
 	}
 
-	log.Printf("[ACCOUNT-MATCHER] parsed %d account numbers from form: %v", len(result), result)
+	logger.LogInfo("[ACCOUNT-MATCHER] parsed %d account numbers from form: %v", len(result), result)
 	return result
 }

@@ -8,14 +8,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/lib/pq"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // Request structure for FX Ops Dashboard
 type FXOpsDashboardRequest struct {
@@ -87,11 +87,11 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 		entities := req.Entities
 
 		// Log for debugging
-		log.Printf("Entities from request: %v", entities)
+		logger.LogInfo("Entities from request: %v", entities)
 		if len(entities) == 0 {
-			log.Printf("No entities filter provided - fetching all data")
+			logger.LogInfo("No entities filter provided - fetching all data")
 		} else {
-			log.Printf("Using entity filter: %v", entities)
+			logger.LogInfo("Using entity filter: %v", entities)
 		}
 
 		// Parse time period (0 or not provided means fetch all data, no time filtering)
@@ -220,7 +220,7 @@ func getMaturingExposuresAlert(ctx context.Context, db *sql.DB, entities []strin
 	var count int
 	err := db.QueryRowContext(ctx, query, args...).Scan(&count)
 	if err != nil {
-		log.Printf("Error in getMaturingExposuresAlert: %v", err)
+		logger.LogError("Error in getMaturingExposuresAlert: %v", err)
 		count = 0
 	}
 
@@ -268,7 +268,7 @@ func getSettlementFailedAlert(ctx context.Context, db *sql.DB, entities []string
 	var count int
 	err := db.QueryRowContext(ctx, query, args...).Scan(&count)
 	if err != nil {
-		log.Printf("Error in getSettlementFailedAlert: %v", err)
+		logger.LogError("Error in getSettlementFailedAlert: %v", err)
 		count = 0
 	}
 
@@ -340,7 +340,7 @@ func getUnhedgedExposures(ctx context.Context, db *sql.DB, entities []string, cu
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		log.Printf("Error in getUnhedgedExposures: %v", err)
+		logger.LogError("Error in getUnhedgedExposures: %v", err)
 		return 0, 0
 	}
 	defer rows.Close()
@@ -354,7 +354,7 @@ func getUnhedgedExposures(ctx context.Context, db *sql.DB, entities []string, cu
 		var currency string
 
 		if err := rows.Scan(&count, &totalAmount, &currency); err != nil {
-			log.Printf("Error scanning unhedged exposures: %v", err)
+			logger.LogError("Error scanning unhedged exposures: %v", err)
 			continue
 		}
 
@@ -399,7 +399,7 @@ func getTradesMaturingToday(ctx context.Context, db *sql.DB, entities []string, 
 	var count int
 	err := db.QueryRowContext(ctx, query, args...).Scan(&count)
 	if err != nil {
-		log.Printf("Error in getTradesMaturingToday: %v", err)
+		logger.LogError("Error in getTradesMaturingToday: %v", err)
 		return 0
 	}
 
@@ -430,7 +430,7 @@ func getPendingSettlementToday(ctx context.Context, db *sql.DB, entities []strin
 	var count int
 	err := db.QueryRowContext(ctx, query, args...).Scan(&count)
 	if err != nil {
-		log.Printf("Error in getPendingSettlementToday: %v", err)
+		logger.LogError("Error in getPendingSettlementToday: %v", err)
 		return 0
 	}
 
@@ -472,7 +472,7 @@ func getExposureMaturities(ctx context.Context, db *sql.DB, entities []string, c
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		log.Printf("Error in getExposureMaturities: %v", err)
+		logger.LogError("Error in getExposureMaturities: %v", err)
 		return []ExposureBlock{}
 	}
 	defer rows.Close()
@@ -485,7 +485,7 @@ func getExposureMaturities(ctx context.Context, db *sql.DB, entities []string, c
 	hedgeQuery := `SELECT DISTINCT exposure_header_id FROM exposure_hedge_links WHERE is_active = true`
 	hedgeRows, err := db.QueryContext(ctx, hedgeQuery)
 	if err != nil {
-		log.Printf("[WARN] failed to fetch exposure hedges: %v", err)
+		logger.LogError("[WARN] failed to fetch exposure hedges: %v", err)
 	} else {
 		defer hedgeRows.Close()
 		for hedgeRows.Next() {
@@ -577,7 +577,7 @@ func getSettlementPerformance(ctx context.Context, db *sql.DB, entities []string
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		log.Printf("Error in getSettlementPerformance: %v", err)
+		logger.LogError("Error in getSettlementPerformance: %v", err)
 		return summary
 	}
 	defer rows.Close()
@@ -587,7 +587,7 @@ func getSettlementPerformance(ctx context.Context, db *sql.DB, entities []string
 		var count int
 
 		if err := rows.Scan(&status, &count); err != nil {
-			log.Printf("Error scanning settlement performance: %v", err)
+			logger.LogError("Error scanning settlement performance: %v", err)
 			continue
 		}
 
@@ -655,7 +655,7 @@ func getTopCurrencyPositions(ctx context.Context, db *sql.DB, entities []string,
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		log.Printf("Error in getTopCurrencyPositions: %v", err)
+		logger.LogError("Error in getTopCurrencyPositions: %v", err)
 		return []NetPosition{}
 	}
 	defer rows.Close()
@@ -666,7 +666,7 @@ func getTopCurrencyPositions(ctx context.Context, db *sql.DB, entities []string,
 		var netPosition float64
 
 		if err := rows.Scan(&currency, &netPosition); err != nil {
-			log.Printf("Error scanning net positions: %v", err)
+			logger.LogError("Error scanning net positions: %v", err)
 			continue
 		}
 

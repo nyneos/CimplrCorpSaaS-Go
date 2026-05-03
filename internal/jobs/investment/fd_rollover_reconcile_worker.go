@@ -37,17 +37,17 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"log"
 	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // StartRolloverReconcileWorker fires once immediately, then every day at 18:00.
 func StartRolloverReconcileWorker(db *pgxpool.Pool) {
-	log.Println("[RolloverReconcile] Worker started — fires daily at 18:00")
+	logger.LogError("[RolloverReconcile] Worker started — fires daily at 18:00")
 
 	fireAt6pm(func() { runRolloverReconcile(db) })
 }
@@ -99,7 +99,7 @@ func runRolloverReconcile(db *pgxpool.Pool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	log.Printf("[RolloverReconcile] Starting run at %s", time.Now().Format(time.RFC3339))
+	logger.LogError("[RolloverReconcile] Starting run at %s", time.Now().Format(time.RFC3339))
 
 	// Find all rollover closures where:
 	//   - a new booking was created (new_booking_id IS NOT NULL)
@@ -149,7 +149,7 @@ func runRolloverReconcile(db *pgxpool.Pool) {
 		  )
 	`)
 	if err != nil {
-		log.Printf("[RolloverReconcile] Query error: %v", err)
+		logger.LogError("[RolloverReconcile] Query error: %v", err)
 		return
 	}
 	defer rows.Close()
@@ -166,7 +166,7 @@ func runRolloverReconcile(db *pgxpool.Pool) {
 			&r.StartDate, &r.MaturityDate, &r.TenureDays,
 			&r.BankFDRefNo, &r.ConfirmationID,
 		); err != nil {
-			log.Printf("[RolloverReconcile] Scan error: %v", err)
+			logger.LogError("[RolloverReconcile] Scan error: %v", err)
 			continue
 		}
 		pending = append(pending, r)
@@ -176,7 +176,7 @@ func runRolloverReconcile(db *pgxpool.Pool) {
 	activated, failed := 0, 0
 	for _, r := range pending {
 		if err := activateRolloverFD(ctx, db, r); err != nil {
-			log.Printf("[RolloverReconcile] Failed for booking %s (closure %s): %v",
+			logger.LogError("[RolloverReconcile] Failed for booking %s (closure %s): %v",
 				r.NewBookingID, r.ClosureRequestID, err)
 			_, _ = db.Exec(ctx, `
 				INSERT INTO investment.fd_auto_renewal_log (
@@ -190,7 +190,7 @@ func runRolloverReconcile(db *pgxpool.Pool) {
 		activated++
 	}
 
-	log.Printf("[RolloverReconcile] Run complete — activated=%d failed=%d total=%d at %s",
+	logger.LogError("[RolloverReconcile] Run complete — activated=%d failed=%d total=%d at %s",
 		activated, failed, len(pending), time.Now().Format(time.RFC3339))
 }
 
@@ -213,7 +213,7 @@ func activateRolloverFD(ctx context.Context, db *pgxpool.Pool, r rolloverReconci
 	).Scan(&existingFDID)
 	if existingFDID != "" {
 		// Already activated by someone else between the outer query and now.
-		log.Printf("[RolloverReconcile] booking %s already has fd_master %s — skipping", r.NewBookingID, existingFDID)
+		logger.LogError("[RolloverReconcile] booking %s already has fd_master %s — skipping", r.NewBookingID, existingFDID)
 		return nil
 	}
 
@@ -277,7 +277,7 @@ func activateRolloverFD(ctx context.Context, db *pgxpool.Pool, r rolloverReconci
 	// Generate and save cashflow schedule.
 	if cfErr := generateAndSaveCashflows(ctx, tx, newFDID, r); cfErr != nil {
 		// Non-fatal — fd_master is created; cashflows can be regenerated manually.
-		log.Printf("[RolloverReconcile] cashflow generation failed for fd %s: %v", newFDID, cfErr)
+		logger.LogError("[RolloverReconcile] cashflow generation failed for fd %s: %v", newFDID, cfErr)
 	} else {
 		// Mark cashflow_generated so the accrual engine picks it up.
 		_, _ = tx.Exec(ctx,
@@ -309,7 +309,7 @@ func activateRolloverFD(ctx context.Context, db *pgxpool.Pool, r rolloverReconci
 		) VALUES ($1,$2,CURRENT_DATE,'RECONCILE_ACTIVATED',$3,$4,NOW())`,
 		newFDID, r.ClosureRequestID, r.TenureDays, r.PrincipalAmount)
 
-	log.Printf("[RolloverReconcile] Activated fd_master %s for booking %s (closure %s)",
+	logger.LogError("[RolloverReconcile] Activated fd_master %s for booking %s (closure %s)",
 		newFDID, r.NewBookingID, r.ClosureRequestID)
 	return nil
 }

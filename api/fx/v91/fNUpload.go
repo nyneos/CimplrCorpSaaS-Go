@@ -1,32 +1,5 @@
 package exposures
 
-// import (
-// 	"crypto/sha256"
-// 	"encoding/csv"
-// 	"encoding/hex"
-// 	"encoding/json"
-// 	"errors"
-// 	"fmt"
-// 	"io"
-// 	"log"
-// 	"mime/multipart"
-// 	"net/http"
-// 	"os"
-// 	"path/filepath"
-// 	"runtime"
-// 	"strconv"
-// 	"strings"
-// 	"sync"
-// 	"time"
-
-// 	"math"
-
-// 	"github.com/xuri/excelize/v2"
-// 	"github.com/google/uuid"
-// 	"github.com/jackc/pgx/v5"
-// 	"github.com/jackc/pgx/v5/pgxpool"
-// 	"github.com/shopspring/decimal"
-// )
 
 // type CanonicalRow struct {
 // 	Source           string                   `json:"Source"`
@@ -162,7 +135,7 @@ package exposures
 // 		currencyAliases := map[string]string{}
 // 		if strings.TrimSpace(currencyAliasesJSON) != "" {
 // 			if err := json.Unmarshal([]byte(currencyAliasesJSON), &currencyAliases); err != nil {
-// 				log.Printf("[WARN] invalid currency_aliases JSON: %v", err)
+// 				logger.LogError("[WARN] invalid currency_aliases JSON: %v", err)
 // 			} else {
 // 				// normalize keys and values to uppercase to make lookups case-insensitive
 // 				norm := make(map[string]string, len(currencyAliases))
@@ -486,17 +459,17 @@ package exposures
 // 				return
 // 			}
 
-// 			log.Printf("[DEBUG] After CSV parsing: canonicals=%d, batch=%s file=%s", len(canonicals), batchID.String(), fh.Filename)
+// 			logger.LogInfo("[DEBUG] After CSV parsing: canonicals=%d, batch=%s file=%s", len(canonicals), batchID.String(), fh.Filename)
 // 			if len(canonicals) > 0 {
 // 				sample := canonicals[0]
-// 				log.Printf("[DEBUG] Sample canonical[0]: CompanyCode='%s', Party='%s', Currency='%s', Amount=%s, AmountFloat=%f, NetDueDate='%s'",
+// 				logger.LogInfo("[DEBUG] Sample canonical[0]: CompanyCode='%s', Party='%s', Currency='%s', Amount=%s, AmountFloat=%f, NetDueDate='%s'",
 // 					sample.CompanyCode, sample.Party, sample.DocumentCurrency, sample.AmountDoc.String(), sample.AmountFloat, sample.NetDueDate)
 // 			}
 
 // 			// exposuresFloat, knocksFloat := allocateFIFOFloat(canonicals)
 // 			exposuresFloat, knocksFloat := allocateFIFOFloat(canonicals, receivableLogic, payableLogic)
 
-// 			log.Printf("[DEBUG] After allocation: exposuresFloat=%d, knocksFloat=%d, batch=%s", len(exposuresFloat), len(knocksFloat), batchID.String())
+// 			logger.LogInfo("[DEBUG] After allocation: exposuresFloat=%d, knocksFloat=%d, batch=%s", len(exposuresFloat), len(knocksFloat), batchID.String())
 // 			// print a small sample of knock events for debugging (base, knock, amount)
 // 			if len(knocksFloat) > 0 {
 // 				limit := 10
@@ -505,7 +478,7 @@ package exposures
 // 				}
 // 				for i := 0; i < limit; i++ {
 // 					kf := knocksFloat[i]
-// 					log.Printf("[DEBUG] knock[%d]: base=%s knock=%s amt=%f", i, kf.BaseDoc, kf.KnockDoc, kf.AmtFloat)
+// 					logger.LogInfo("[DEBUG] knock[%d]: base=%s knock=%s amt=%f", i, kf.BaseDoc, kf.KnockDoc, kf.AmtFloat)
 // 				}
 // 				// also log number of unique base docs in knocks
 // 				uniqBases := map[string]struct{}{}
@@ -514,7 +487,7 @@ package exposures
 // 						uniqBases[k.BaseDoc] = struct{}{}
 // 					}
 // 				}
-// 				log.Printf("[DEBUG] knocksFloat unique base docs=%d", len(uniqBases))
+// 				logger.LogInfo("[DEBUG] knocksFloat unique base docs=%d", len(uniqBases))
 // 			}
 
 // 			// --- Apply Non-Qualified rules based on net exposure per (Source,CompanyCode,Party) ---
@@ -560,7 +533,7 @@ package exposures
 // 				}
 // 			}
 
-// 			log.Printf("[DEBUG] After net-exposure pass: flagged=%d out of %d exposuresFloat, batch=%s", flaggedCount, len(exposuresFloat), batchID.String())
+// 			logger.LogInfo("[DEBUG] After net-exposure pass: flagged=%d out of %d exposuresFloat, batch=%s", flaggedCount, len(exposuresFloat), batchID.String())
 
 // 			exposures := make([]CanonicalRow, 0, len(exposuresFloat))
 // 			for _, e := range exposuresFloat {
@@ -577,7 +550,7 @@ package exposures
 // 				exposures = append(exposures, e)
 // 			}
 
-// 			log.Printf("[DEBUG] After building exposures: exposures=%d, batch=%s", len(exposures), batchID.String())
+// 			logger.LogInfo("[DEBUG] After building exposures: exposures=%d, batch=%s", len(exposures), batchID.String())
 
 // 			// Mark exposures non-qualified when entity or currency not found in maps
 // 			entityMiss := 0
@@ -625,7 +598,7 @@ package exposures
 // 				if entityMiss > 0 || currencyMiss > 0 {
 // 					msg2 := fmt.Sprintf("Marked %d rows non-qualified due to missing entity and %d due to missing currency (company_code/currency).", entityMiss, currencyMiss)
 // 					fileErrors = append(fileErrors, msg2)
-// 					log.Printf("[INFO] %s", msg2)
+// 					logger.LogInfo("%s", msg2)
 // 				}
 // 			}
 
@@ -643,10 +616,10 @@ package exposures
 
 // 			qualified, nonQualified := validateExposures(exposures)
 
-// 			log.Printf("[DEBUG] After validation: qualified=%d, nonQualified=%d, batch=%s", len(qualified), len(nonQualified), batchID.String())
+// 			logger.LogInfo("[DEBUG] After validation: qualified=%d, nonQualified=%d, batch=%s", len(qualified), len(nonQualified), batchID.String())
 // 			if len(nonQualified) > 0 && len(nonQualified) <= 5 {
 // 				for i, nq := range nonQualified {
-// 					log.Printf("[DEBUG] nonQualified[%d]: doc=%s, issues=%v", i, nq.Row.DocumentNumber, nq.Issues)
+// 					logger.LogInfo("[DEBUG] nonQualified[%d]: doc=%s, issues=%v", i, nq.Row.DocumentNumber, nq.Issues)
 // 				}
 // 			}
 
@@ -654,11 +627,11 @@ package exposures
 // 				if len(knocksFloat) > 0 {
 // 					msg := fmt.Sprintf("No exposures were written: allocation fully matched all rows (knock events=%d). This commonly occurs when incoming debit/credit rows for the same Source|CompanyCode|Party fully net to zero, or because of receivable/payable logic settings (receivable_logic=%s, payable_logic=%s). If you expected inserts, check mapping, amount signs, and NetDueDate values; or run a small unbalanced test file to verify behavior.", len(knocksFloat), receivableLogic, payableLogic)
 // 					fileErrors = append(fileErrors, msg)
-// 					log.Printf("[INFO] %s", msg)
+// 					logger.LogInfo("%s", msg)
 // 				} else {
 // 					msg := fmt.Sprintf("No exposures were written: allocation produced no base or knock items. Likely causes: amounts all share the same sign (no debits or no credits), amounts parsed as zero, or mapping produced empty AmountDoc values. Check mapping, amount signs (+/-), and NetDueDate; try 'receivable_logic'/'payable_logic' = reverse to flip allocation direction or upload a small unbalanced test file.")
 // 					fileErrors = append(fileErrors, msg)
-// 					log.Printf("[INFO] %s", msg)
+// 					logger.LogInfo("%s", msg)
 // 				}
 // 			}
 
@@ -748,7 +721,7 @@ package exposures
 // 					if v, ok := q._raw["Category"]; ok {
 // 						rawCat = fmt.Sprintf("%v", v)
 // 					}
-// 					log.Printf("[FBUP] header-row[%d] doc=%s rawCategory='%s' source='%s' exposureType='%s' exposureCategory='%s' company='%s' amount=%s",
+// 					logger.LogInfo("[FBUP] header-row[%d] doc=%s rawCategory='%s' source='%s' exposureType='%s' exposureCategory='%s' company='%s' amount=%s",
 // 						i, q.DocumentNumber, rawCat, q.Source, exposureType, exposureCategory, q.CompanyCode, q.AmountDoc.String())
 // 				}
 
@@ -792,12 +765,12 @@ package exposures
 // 				}, nil
 // 			})
 
-// 			log.Printf("[FBUP] about to COPY %d exposure_headers for batch %s file=%s", len(qualified), batchID.String(), fh.Filename)
+// 			logger.LogInfo("[FBUP] about to COPY %d exposure_headers for batch %s file=%s", len(qualified), batchID.String(), fh.Filename)
 // 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"public", "exposure_headers"}, headerCols, headerSrc); err != nil {
 // 				httpError(w, 500, "copy headers: "+err.Error())
 // 				return
 // 			}
-// 			log.Printf("[FBUP] finished COPY exposure_headers for batch %s file=%s", batchID.String(), fh.Filename)
+// 			logger.LogInfo("[FBUP] finished COPY exposure_headers for batch %s file=%s", batchID.String(), fh.Filename)
 
 // 			lineItemCols := []string{
 // 				"line_item_id", "exposure_header_id", "line_number", "product_id", "product_description",
@@ -863,7 +836,7 @@ package exposures
 // 				})
 // 				if _, err := tx.CopyFrom(ctx, pgx.Identifier{"public", "exposure_line_items"}, lineItemCols, liSrc); err != nil {
 // 					// log but don't fail entire batch — choose behavior per your appetite
-// 					log.Printf("[FBUP] error copying line items: %v", err)
+// 					logger.LogError("[FBUP] error copying line items: %v", err)
 // 					fileWarnings = append(fileWarnings, fmt.Sprintf("line items copy failed: %v", err))
 // 				} else {
 // 					lineItemsInserted = len(liRows)
@@ -939,7 +912,7 @@ package exposures
 // 			}
 
 // 			// update batch processed/failed counts & commit
-// 			log.Printf("[FBUP] updating staging batch counts processed=%d failed=%d batch=%s file=%s", len(qualified), len(nonQualified), batchID.String(), fh.Filename)
+// 			logger.LogError("[FBUP] updating staging batch counts processed=%d failed=%d batch=%s file=%s", len(qualified), len(nonQualified), batchID.String(), fh.Filename)
 // 			if _, err := tx.Exec(ctx, `UPDATE public.staging_batches_exposures SET processed_records=$1, failed_records=$2, status='completed' WHERE batch_id=$3`, len(qualified), len(nonQualified), batchID); err != nil {
 // 				httpError(w, 500, "update batch: "+err.Error())
 // 				return
@@ -950,7 +923,7 @@ package exposures
 // 				return
 // 			}
 // 			committed = true
-// 			log.Printf("[FBUP] committed batch %s file=%s processed=%d failed=%d warnings=%d line_items=%d", batchID.String(), fh.Filename, len(qualified), len(nonQualified), len(fileWarnings), lineItemsInserted)
+// 			logger.LogError("[FBUP] committed batch %s file=%s processed=%d failed=%d warnings=%d line_items=%d", batchID.String(), fh.Filename, len(qualified), len(nonQualified), len(fileWarnings), lineItemsInserted)
 
 // 			// prepare response: map knockMap into response structure
 // 			respKnock := knockMap

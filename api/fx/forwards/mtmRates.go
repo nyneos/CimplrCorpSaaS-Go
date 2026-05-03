@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -23,7 +22,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
@@ -398,7 +398,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 				_ = tx.Rollback()
 				if s3Uploaded {
 					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
-						log.Printf("[mtm-upload] failed to cleanup S3 object after insert failure for %s: %v", fileHeader.Filename, cleanupErr)
+						logger.LogError("[mtm-upload] failed to cleanup S3 object after insert failure for %s: %v", fileHeader.Filename, cleanupErr)
 					}
 				}
 				results = append(results, map[string]interface{}{
@@ -412,7 +412,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 		if err != nil {
 			if s3Uploaded {
 				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
-					log.Printf("[mtm-upload] failed to cleanup S3 object after commit failure for %s: %v", fileHeader.Filename, cleanupErr)
+					logger.LogError("[mtm-upload] failed to cleanup S3 object after commit failure for %s: %v", fileHeader.Filename, cleanupErr)
 				}
 			}
 			results = append(results, map[string]interface{}{

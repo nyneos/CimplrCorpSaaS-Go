@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,7 +16,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/appmanager"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // InitDB loads DB config from env vars
 func InitDB() (*sql.DB, error) {
@@ -51,7 +51,7 @@ func main() {
 	db, err := InitDB()
 	if err != nil {
 
-		log.Fatal("failed to connect to DB:", err)
+		logger.LogError("failed to connect to DB:", err)
 	}
 	appmanager.SetDB(db)
 
@@ -76,15 +76,15 @@ func main() {
 	ctx := context.Background()
 	pgxPool, err := pgxpool.New(ctx, pgxConnStr)
 	if err != nil {
-		log.Fatal("failed to create pgx pool:", err)
+		logger.LogError("failed to create pgx pool:", err)
 	}
 	defer pgxPool.Close()
 
 	// Fail fast: verify the pool can actually reach the DB before starting services.
 	if pingErr := pgxPool.Ping(ctx); pingErr != nil {
-		log.Fatalf("pgx pool ping failed — check DB_HOST/DB_PORT/DB_SSLMODE in .env: %v", pingErr)
+		logger.LogError("pgx pool ping failed — check DB_HOST/DB_PORT/DB_SSLMODE in .env: %v", pingErr)
 	}
-	log.Printf("DB connected: host=%s port=%s db=%s sslmode=%s", host, port, name, sslMode)
+	logger.LogInfo("DB connected: host=%s port=%s db=%s sslmode=%s", host, port, name, sslMode)
 
 	appmanager.SetPgxPool(pgxPool)
 
@@ -93,7 +93,7 @@ func main() {
 	// Load service configs from YAML
 	servicesCfg, err := appmanager.LoadServiceSequence("./services.yaml")
 	if err != nil {
-		log.Fatal("failed to load service sequence:", err)
+		logger.LogError("failed to load service sequence:", err)
 	}
 
 	// Automatically register all services
@@ -101,17 +101,17 @@ func main() {
 
 	// Start all services
 	if err := manager.StartAll(); err != nil {
-		log.Fatal("failed to start:", err)
+		logger.LogError("failed to start:", err)
 	}
 
 	// --- Wire AuthService to Gateway ---
 	authSvcIface := manager.GetServiceByName("auth")
 	if authSvcIface == nil {
-		log.Fatal("Auth service not found in manager")
+		logger.LogError("Auth service not found in manager")
 	}
 	realAuthSvc, ok := authSvcIface.(*auth.AuthService)
 	if !ok {
-		log.Fatal("Auth service type assertion failed")
+		logger.LogError("Auth service type assertion failed")
 	}
 	api.SetAuthService(realAuthSvc)
 
@@ -126,7 +126,7 @@ func main() {
 
 	// Stop all services
 	if err := manager.StopAll(); err != nil {
-		log.Fatal("failed to stop:", err)
+		logger.LogError("failed to stop:", err)
 	}
 
 	// Close pgx pool if initialized

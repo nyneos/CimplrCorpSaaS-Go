@@ -2,7 +2,6 @@ package investment
 
 import (
 	"database/sql"
-	"log"
 	"net/http"
 
 	"CimplrCorpSaas/api"
@@ -21,7 +20,8 @@ import (
 	redemption "CimplrCorpSaas/api/investment/redemption"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux := http.NewServeMux()
@@ -294,9 +294,9 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	// mux.HandleFunc("/investment/portfolio", portfolioHandler)
 	// mux.HandleFunc("/investment/schemes", schemesHandler)
 
-	log.Printf("Investment Service started on :%s", port)
+	logger.LogInfo("Investment Service started on :%s", port)
 	err := http.ListenAndServe(":"+port, mux)
 	if err != nil {
-		log.Fatalf("Investment service failed: %v", err)
+		logger.LogError("Investment service failed: %v", err)
 	}
 }

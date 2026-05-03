@@ -2,14 +2,14 @@ package api
 
 import (
     "context"
-    "log"
     "os"
     "strings"
     "sync"
 
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/joho/godotenv"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 var (
     adminUserIDs []string
@@ -136,7 +136,7 @@ func IsUserInAdminRole(ctx context.Context, db *pgxpool.Pool, userID string) (bo
         }
     }
     if len(matched) > 0 {
-        log.Printf("[AUDIT] IsUserInAdminRole: user=%s matched_roles=%v", userID, matched)
+        logger.LogAudit("IsUserInAdminRole: user=%s matched_roles=%v", userID, matched)
     }
     return len(matched) > 0, matched, nil
 }

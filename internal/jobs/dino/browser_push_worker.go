@@ -36,7 +36,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"strconv"
@@ -45,7 +44,8 @@ import (
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Payload types (serialised and sent to sw.js)
@@ -83,7 +83,7 @@ type vapidConfig struct {
 // Wire in scheduler.go: go dinojobs.StartBrowserPushWorker(ctx, pool)
 func StartBrowserPushWorker(ctx context.Context, pool *pgxpool.Pool) {
 	if !bpwGetenvBool("BROWSER_PUSH_ENABLED", true) {
-		log.Println("[browser-push] disabled via BROWSER_PUSH_ENABLED=false")
+		logger.LogInfo("[browser-push] disabled via BROWSER_PUSH_ENABLED=false")
 		return
 	}
 
@@ -91,7 +91,7 @@ func StartBrowserPushWorker(ctx context.Context, pool *pgxpool.Pool) {
 	vapidPrivate := strings.TrimSpace(os.Getenv("VAPID_PRIVATE_KEY"))
 	vapidSubject := strings.TrimSpace(os.Getenv("VAPID_SUBJECT"))
 	if vapidPublic == "" || vapidPrivate == "" || vapidSubject == "" {
-		log.Println("[browser-push] VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT not set — skipping")
+		logger.LogInfo("[browser-push] VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT not set — skipping")
 		return
 	}
 
@@ -101,7 +101,7 @@ func StartBrowserPushWorker(ctx context.Context, pool *pgxpool.Pool) {
 	digestInterval := time.Duration(bpwGetenvInt("BROWSER_PUSH_DIGEST_MINS", 30)) * time.Minute
 	batchSize := bpwGetenvInt("BROWSER_PUSH_BATCH_SIZE", 50)
 
-	log.Printf("[browser-push] started (event_poll=%s digest_interval=%s batch=%d)",
+	logger.LogInfo("[browser-push] started (event_poll=%s digest_interval=%s batch=%d)",
 		pollInterval, digestInterval, batchSize)
 
 	eventTicker := time.NewTicker(pollInterval)
@@ -112,7 +112,7 @@ func StartBrowserPushWorker(ctx context.Context, pool *pgxpool.Pool) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[browser-push] stopped")
+			logger.LogInfo("[browser-push] stopped")
 			return
 		case <-eventTicker.C:
 			bpwProcessOutbox(ctx, pool, cfg, batchSize)
@@ -149,7 +149,7 @@ func bpwProcessOutbox(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig,
 	// Fetch PENDING PUSH rows using FOR UPDATE SKIP LOCKED to prevent double-delivery
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		log.Printf("[browser-push] begin tx: %v", err)
+		logger.LogError("[browser-push] begin tx: %v", err)
 		return
 	}
 	defer tx.Rollback(ctx)
@@ -168,7 +168,7 @@ func bpwProcessOutbox(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig,
 		FOR UPDATE SKIP LOCKED
 	`, batchSize)
 	if err != nil {
-		log.Printf("[browser-push] fetch outbox: %v", err)
+		logger.LogError("[browser-push] fetch outbox: %v", err)
 		return
 	}
 
@@ -181,21 +181,21 @@ func bpwProcessOutbox(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig,
 			&r.EventID, &r.AuditID, &r.CorrelationID,
 			&r.RetryCount, &r.PriorityLevel,
 		); err != nil {
-			log.Printf("[browser-push] scan: %v", err)
+			logger.LogError("[browser-push] scan: %v", err)
 			continue
 		}
 		batch = append(batch, r)
 	}
 	rows.Close()
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("[browser-push] commit: %v", err)
+		logger.LogError("[browser-push] commit: %v", err)
 		return
 	}
 
 	if len(batch) == 0 {
 		return
 	}
-	log.Printf("[browser-push] processing %d PUSH outbox rows", len(batch))
+	logger.LogInfo("[browser-push] processing %d PUSH outbox rows", len(batch))
 
 	for _, row := range batch {
 		// Claim as PROCESSING (optimistic lock — skip if already taken)
@@ -216,14 +216,14 @@ func bpwProcessOutbox(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig,
 
 		subs, err := bpwFetchSubscriptions(ctx, pool, row.RecipientUserID)
 		if err != nil {
-			log.Printf("[browser-push] fetch subs userID=%s: %v", row.RecipientUserID, err)
+			logger.LogError("[browser-push] fetch subs userID=%s: %v", row.RecipientUserID, err)
 			bpwMarkFailed(ctx, pool, row, "db error fetching subscriptions")
 			continue
 		}
 		if len(subs) == 0 {
 			// User has no registered browser push subscription — mark SENT (not an error)
 			bpwMarkSent(ctx, pool, row)
-			log.Printf("[browser-push] no subscriptions for userID=%s — SENT (skipped)", row.RecipientUserID)
+			logger.LogInfo("[browser-push] no subscriptions for userID=%s — SENT (skipped)", row.RecipientUserID)
 			continue
 		}
 
@@ -240,14 +240,14 @@ func bpwProcessOutbox(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig,
 		deliveredToAtLeastOne := false
 		for _, sub := range subs {
 			if err := bpwSendVAPID(cfg, sub, payloadBytes); err != nil {
-				log.Printf("[browser-push] VAPID error outbox=%s sub=%s: %v", row.OutboxID, sub.ID, err)
+				logger.LogError("[browser-push] VAPID error outbox=%s sub=%s: %v", row.OutboxID, sub.ID, err)
 				if bpwIsExpiredSub(err) {
 					bpwDeactivateSubscription(ctx, pool, sub.ID)
 				}
 				continue
 			}
 			deliveredToAtLeastOne = true
-			log.Printf("[browser-push] delivered outbox=%s sub=%s userID=%s",
+			logger.LogInfo("[browser-push] delivered outbox=%s sub=%s userID=%s",
 				row.OutboxID, sub.ID, row.RecipientUserID)
 		}
 
@@ -287,7 +287,7 @@ func bpwSendDigest(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig) {
 		  )
 	`, throttleMinutes)
 	if err != nil {
-		log.Printf("[browser-push-digest] candidate query: %v", err)
+		logger.LogError("[browser-push-digest] candidate query: %v", err)
 		return
 	}
 
@@ -303,7 +303,7 @@ func bpwSendDigest(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig) {
 	if len(userIDs) == 0 {
 		return
 	}
-	log.Printf("[browser-push-digest] sending digest to %d user(s)", len(userIDs))
+	logger.LogInfo("[browser-push-digest] sending digest to %d user(s)", len(userIDs))
 
 	for _, userID := range userIDs {
 		bpwSendDigestToUser(ctx, pool, cfg, userID, topN)
@@ -325,7 +325,7 @@ func bpwSendDigestToUser(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConf
 		LIMIT $2
 	`, userID, topN)
 	if err != nil {
-		log.Printf("[browser-push-digest] fetch items userID=%s: %v", userID, err)
+		logger.LogError("[browser-push-digest] fetch items userID=%s: %v", userID, err)
 		return
 	}
 
@@ -383,7 +383,7 @@ func bpwSendDigestToUser(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConf
 	}
 
 	if !deliveredToAtLeastOne {
-		log.Printf("[browser-push-digest] all subs failed for userID=%s", userID)
+		logger.LogError("[browser-push-digest] all subs failed for userID=%s", userID)
 		return
 	}
 
@@ -394,7 +394,7 @@ func bpwSendDigestToUser(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConf
 		ON CONFLICT (user_id) DO UPDATE SET last_digest_at = NOW()
 	`, userID)
 
-	log.Printf("[browser-push-digest] sent to userID=%s unread=%d top=%d",
+	logger.LogInfo("[browser-push-digest] sent to userID=%s unread=%d top=%d",
 		userID, totalUnread, len(items))
 }
 
@@ -477,7 +477,7 @@ func bpwMarkFailed(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow, er
 			       scheduled_at      = $3
 			 WHERE outbox_id = $1
 		`, row.OutboxID, errMsg, nextAt)
-		log.Printf("[browser-push] RETRY outbox=%s attempt=%d next=%s",
+		logger.LogInfo("[browser-push] RETRY outbox=%s attempt=%d next=%s",
 			row.OutboxID, row.RetryCount+1, nextAt.Format(time.RFC3339))
 	} else {
 		pool.Exec(ctx, `
@@ -487,7 +487,7 @@ func bpwMarkFailed(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow, er
 			       last_error        = $2
 			 WHERE outbox_id = $1
 		`, row.OutboxID, errMsg)
-		log.Printf("[browser-push] DEAD outbox=%s after %d attempts",
+		logger.LogInfo("[browser-push] DEAD outbox=%s after %d attempts",
 			row.OutboxID, row.RetryCount+1)
 	}
 }
@@ -508,7 +508,7 @@ func bpwDeactivateSubscription(ctx context.Context, pool *pgxpool.Pool, subID st
 		   SET is_active = FALSE, updated_at = NOW()
 		 WHERE id = $1
 	`, subID)
-	log.Printf("[browser-push] deactivated expired subscription id=%s", subID)
+	logger.LogInfo("[browser-push] deactivated expired subscription id=%s", subID)
 }
 
 func bpwExecRowsAffected(ctx context.Context, pool *pgxpool.Pool, sql string, args ...interface{}) (int64, error) {

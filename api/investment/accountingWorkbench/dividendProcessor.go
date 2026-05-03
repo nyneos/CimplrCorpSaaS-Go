@@ -4,14 +4,14 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
-	"log"
 	"time"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // ProcessDividendReinvestment creates buy transaction when dividend is reinvested
 // Called during approval for REINVEST type dividends
 func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID string) error {
-	log.Printf("[DEBUG DIVIDEND] ProcessDividendReinvestment called for activity: %s", activityID)
+	logger.LogInfo("[DEBUG DIVIDEND] ProcessDividendReinvestment called for activity: %s", activityID)
 
 	// First, check ALL dividends for this activity (debugging)
 	debugRows, err := tx.Query(ctx, `
@@ -20,13 +20,13 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 		WHERE activity_id = $1
 	`, activityID)
 	if err != nil {
-		log.Printf("[DEBUG DIVIDEND] debug query failed: %v", err)
+		logger.LogError("[DEBUG DIVIDEND] debug query failed: %v", err)
 	} else {
 		for debugRows.Next() {
 			var did, ttype string
 			var amt, nav, units float64
 			if err := debugRows.Scan(&did, &ttype, &amt, &nav, &units); err == nil {
-				log.Printf("[DEBUG DIVIDEND] Found dividend: %s | Type: %s | Amount: %.2f | Nav: %.4f | Units: %.6f",
+				logger.LogInfo("[DEBUG DIVIDEND] Found dividend: %s | Type: %s | Amount: %.2f | Nav: %.4f | Units: %.6f",
 					did, ttype, amt, nav, units)
 			}
 		}
@@ -79,16 +79,16 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 		return err
 	}
 
-	log.Printf("[DEBUG DIVIDEND] Found %d reinvest dividends with units > 0", len(reinvests))
+	logger.LogInfo("[DEBUG DIVIDEND] Found %d reinvest dividends with units > 0", len(reinvests))
 
 	if len(reinvests) == 0 {
-		log.Printf("[DEBUG DIVIDEND] No reinvestments to process (all dividends have reinvest_units = 0 or are PAYOUT type)")
+		logger.LogInfo("[DEBUG DIVIDEND] No reinvestments to process (all dividends have reinvest_units = 0 or are PAYOUT type)")
 		return nil
 	}
 
 	// For each reinvestment, create a BUY transaction in onboard_transaction
 	for _, dr := range reinvests {
-		log.Printf("[DEBUG DIVIDEND] Processing reinvest: %s | Scheme: %s | FolioID from dividend: %v | Units: %.6f | NAV: %.4f | Amount: %.2f",
+		logger.LogInfo("[DEBUG DIVIDEND] Processing reinvest: %s | Scheme: %s | FolioID from dividend: %v | Units: %.6f | NAV: %.4f | Amount: %.2f",
 			dr.DividendID, dr.SchemeID, dr.FolioID, dr.ReinvestUnits, dr.ReinvestNAV, dr.DividendAmount)
 
 		// Get folio details if folio_id is provided
@@ -97,7 +97,7 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 
 		if dr.FolioID != nil && *dr.FolioID != "" {
 			// Folio specified in dividend - use it
-			log.Printf("[DEBUG DIVIDEND] Fetching folio details for folio_id: %s", *dr.FolioID)
+			logger.LogInfo("[DEBUG DIVIDEND] Fetching folio details for folio_id: %s", *dr.FolioID)
 			err := tx.QueryRow(ctx, `
 				SELECT 
 					folio_id,
@@ -107,14 +107,14 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 				WHERE folio_id = $1
 			`, *dr.FolioID).Scan(&folioID, &folioNumber, &entityName)
 			if err != nil {
-				log.Printf("[ERROR DIVIDEND] Failed to fetch folio %s: %v", *dr.FolioID, err)
+				logger.LogError("[ERROR DIVIDEND] Failed to fetch folio %s: %v", *dr.FolioID, err)
 				return fmt.Errorf("failed to fetch folio %s: %w", *dr.FolioID, err)
 			}
 
-			log.Printf("[DEBUG DIVIDEND] Found folio: ID=%s, Number=%s, Entity=%s", folioID, folioNumber, entityName)
+			logger.LogInfo("[DEBUG DIVIDEND] Found folio: ID=%s, Number=%s, Entity=%s", folioID, folioNumber, entityName)
 		} else {
 			// No folio specified - find one linked to this scheme
-			log.Printf("[DEBUG DIVIDEND] No folio_id in dividend, searching for scheme %s", dr.SchemeID)
+			logger.LogInfo("[DEBUG DIVIDEND] No folio_id in dividend, searching for scheme %s", dr.SchemeID)
 			err := tx.QueryRow(ctx, `
 				SELECT 
 					f.folio_id,
@@ -129,11 +129,11 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 				LIMIT 1
 			`, dr.SchemeID).Scan(&folioID, &folioNumber, &entityName)
 			if err != nil {
-				log.Printf("[ERROR DIVIDEND] No active folio found for scheme %s: %v", dr.SchemeID, err)
+				logger.LogError("[ERROR DIVIDEND] No active folio found for scheme %s: %v", dr.SchemeID, err)
 				return fmt.Errorf("no active folio found for scheme %s: %w", dr.SchemeID, err)
 			}
 
-			log.Printf("[DEBUG DIVIDEND] Found folio via scheme mapping: ID=%s, Number=%s, Entity=%s", folioID, folioNumber, entityName)
+			logger.LogInfo("[DEBUG DIVIDEND] Found folio via scheme mapping: ID=%s, Number=%s, Entity=%s", folioID, folioNumber, entityName)
 		}
 
 		// Try to find linked demat account for this folio
@@ -151,9 +151,9 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 		if err == nil {
 			dematAccNumber = &tempDematAcc
 			dematID = &tempDematID
-			log.Printf("[DEBUG DIVIDEND] Found linked demat: AccNumber=%s, DematID=%s", *dematAccNumber, *dematID)
+			logger.LogInfo("[DEBUG DIVIDEND] Found linked demat: AccNumber=%s, DematID=%s", *dematAccNumber, *dematID)
 		} else {
-			log.Printf("[DEBUG DIVIDEND] No demat account found for entity %s (this is OK, will be NULL)", entityName)
+			logger.LogInfo("[DEBUG DIVIDEND] No demat account found for entity %s (this is OK, will be NULL)", entityName)
 		}
 
 		// Get scheme internal code
@@ -164,7 +164,7 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 			WHERE scheme_id = $1
 		`, dr.SchemeID).Scan(&schemeInternalCode)
 		if err != nil {
-			log.Printf("[WARN DIVIDEND] Could not fetch scheme internal code for %s: %v", dr.SchemeID, err)
+			logger.LogError("[WARN DIVIDEND] Could not fetch scheme internal code for %s: %v", dr.SchemeID, err)
 		}
 
 		// Parse payment date
@@ -177,11 +177,11 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 		var batchID string
 		err = tx.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&batchID)
 		if err != nil {
-			log.Printf("[ERROR DIVIDEND] Failed to generate batch_id for dividend %s: %v", dr.DividendID, err)
+			logger.LogError("[ERROR DIVIDEND] Failed to generate batch_id for dividend %s: %v", dr.DividendID, err)
 			return fmt.Errorf("failed to generate batch_id: %w", err)
 		}
 
-		log.Printf("[DEBUG DIVIDEND] Inserting transaction: Date=%s, Type=PURCHASE, SchemeCode=%v, FolioNum=%s, FolioID=%s, DematAcc=%v, DematID=%v, SchemeID=%s, Units=%.6f, NAV=%.4f, Amount=%.2f, Entity=%s, BatchID=%s",
+		logger.LogInfo("[DEBUG DIVIDEND] Inserting transaction: Date=%s, Type=PURCHASE, SchemeCode=%v, FolioNum=%s, FolioID=%s, DematAcc=%v, DematID=%v, SchemeID=%s, Units=%.6f, NAV=%.4f, Amount=%.2f, Entity=%s, BatchID=%s",
 			paymentDate, schemeInternalCode, folioNumber, folioID, dematAccNumber, dematID, dr.SchemeID, dr.ReinvestUnits, dr.ReinvestNAV, dr.DividendAmount, entityName, batchID)
 
 		// Insert BUY transaction for dividend reinvestment
@@ -222,14 +222,14 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 			dr.SchemeID, dr.ReinvestUnits, dr.ReinvestNAV, dr.DividendAmount, entityName, batchID)
 
 		if err != nil {
-			log.Printf("[ERROR DIVIDEND] Failed to create onboard_transaction for dividend %s: %v", dr.DividendID, err)
+			logger.LogError("[ERROR DIVIDEND] Failed to create onboard_transaction for dividend %s: %v", dr.DividendID, err)
 			return fmt.Errorf("failed to create reinvestment transaction for dividend %s: %w", dr.DividendID, err)
 		}
 
-		log.Printf("[DEBUG DIVIDEND] Successfully created onboard_transaction for dividend %s", dr.DividendID)
+		logger.LogInfo("[DEBUG DIVIDEND] Successfully created onboard_transaction for dividend %s", dr.DividendID)
 	}
 
-	log.Printf("[DEBUG DIVIDEND] ProcessDividendReinvestment completed successfully for activity %s", activityID)
+	logger.LogInfo("[DEBUG DIVIDEND] ProcessDividendReinvestment completed successfully for activity %s", activityID)
 	return nil
 }
 

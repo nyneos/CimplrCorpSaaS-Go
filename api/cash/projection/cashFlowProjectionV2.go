@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -16,7 +15,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // V2 API handlers for new schema with base_currency_code, maturity_date, bank info
 // PERFORMANCE OPTIMIZED for bulk operations (10K-100K records)
@@ -171,7 +171,7 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		elapsed := time.Since(start)
-		log.Printf("[DeleteCashFlowProposalV2] Processed %d proposals in %v", len(req.ProposalIDs), elapsed)
+		logger.LogInfo("[DeleteCashFlowProposalV2] Processed %d proposals in %v", len(req.ProposalIDs), elapsed)
 		api.RespondWithResult(w, true, fmt.Sprintf("Marked %d proposals for deletion in %v", len(req.ProposalIDs), elapsed))
 		// Notify: FULL proposal data for rich templates
 		capturedIDs := req.ProposalIDs
@@ -306,7 +306,7 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 		committed = true
 
 		elapsed := time.Since(start)
-		log.Printf("[BulkRejectCashFlowProposalActionsV2] Rejected %d proposals in %v", len(actionIDs), elapsed)
+		logger.LogInfo("[BulkRejectCashFlowProposalActionsV2] Rejected %d proposals in %v", len(actionIDs), elapsed)
 		api.RespondWithResult(w, true, fmt.Sprintf("Rejected %d proposals in %v", len(actionIDs), elapsed))
 		// Notify: FULL proposal data for rich templates
 		capturedIDs := req.ProposalIDs
@@ -474,7 +474,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 		committed = true
 
 		elapsed := time.Since(start)
-		log.Printf("[BulkApproveCashFlowProposalActionsV2] Approved %d proposals (%d deleted) in %v",
+		logger.LogInfo("[BulkApproveCashFlowProposalActionsV2] Approved %d proposals (%d deleted) in %v",
 			len(actionIDs), len(deleteProposalIDs), elapsed)
 		api.RespondWithResult(w, true, fmt.Sprintf("Approved %d proposals (%d deleted) in %v",
 			len(actionIDs), len(deleteProposalIDs), elapsed))
@@ -636,7 +636,7 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if year > 0 && month >= 1 && month <= 12 {
 					insProj := `INSERT INTO cimplrcorpsaas.cashflow_projection_monthly (item_id, year, month, projected_amount) VALUES ($1, $2, $3, $4)`
 					if _, err := tx.Exec(ctx, insProj, itemID, year, month, amount); err != nil {
-						log.Printf("Warning: Failed to insert projection for %s: %v", yearMonth, err)
+						logger.LogError("Warning: Failed to insert projection for %s: %v", yearMonth, err)
 					}
 				}
 			}
@@ -1312,7 +1312,7 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if year > 0 && month >= 1 && month <= 12 {
 					insProj := `INSERT INTO cimplrcorpsaas.cashflow_projection_monthly (item_id, year, month, projected_amount) VALUES ($1, $2, $3, $4)`
 					if _, err := tx.Exec(ctx, insProj, itemID, year, month, amount); err != nil {
-						log.Printf("Warning: Failed to insert projection for %s: %v", yearMonth, err)
+						logger.LogError("Warning: Failed to insert projection for %s: %v", yearMonth, err)
 					}
 				}
 			}
@@ -1333,7 +1333,7 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		elapsed := time.Since(start)
-		log.Printf("[UpdateCashFlowProposalV2] Updated proposal %s with %d items in %v", req.ProposalID, updated, elapsed)
+		logger.LogInfo("[UpdateCashFlowProposalV2] Updated proposal %s with %d items in %v", req.ProposalID, updated, elapsed)
 		// Notify: FULL proposal data for rich templates
 		capturedProposalID := req.ProposalID
 		capturedUser := req.UserID

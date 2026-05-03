@@ -7,13 +7,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 type projectionAuditRequest struct {
 	UserID     string `json:"user_id"`
@@ -223,7 +223,7 @@ func insertProjectionDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, p
 		VALUES ($1, $2, now(), $3, $4)
 	`, proposalID, requestedBy, projectionExtractAuditFileName(uploadS3Key), projectionNullIfEmpty(uploadS3Key))
 	if err != nil {
-		log.Printf("failed to insert projection download audit for %s: %v", proposalID, err)
+		logger.LogError("failed to insert projection download audit for %s: %v", proposalID, err)
 	}
 }
 

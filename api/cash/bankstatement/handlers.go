@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -25,7 +24,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func auditActorDisplayName(ctx context.Context, userID string) string {
 	if session := middlewares.GetSessionFromContext(ctx); session != nil {
@@ -370,7 +370,7 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 				r.RemoteAddr,
 				entityName,
 			); err != nil {
-				log.Printf("failed to insert bank statement download audit for %s: %v", body.BankStatementID, err)
+				logger.LogError("failed to insert bank statement download audit for %s: %v", body.BankStatementID, err)
 			}
 		}
 
@@ -449,7 +449,7 @@ func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 					r.RemoteAddr,
 					entityName,
 				); err != nil {
-					log.Printf("failed to insert bank statement bulk download audit for %s: %v", bankStatementID, err)
+					logger.LogError("failed to insert bank statement bulk download audit for %s: %v", bankStatementID, err)
 				}
 			}
 
@@ -624,7 +624,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 					SET category_id = $1
 					WHERE transaction_id = $2
 				`, catParam, transactionID); err != nil {
-					log.Printf("failed to update category_id for transaction_id %d: %v", transactionID, err)
+					logger.LogError("failed to update category_id for transaction_id %d: %v", transactionID, err)
 				}
 			}
 
@@ -1331,7 +1331,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		isPDF := r.URL.Query().Get("is_pdf") == "true"
 
 		if isPDF {
-			log.Println("[BANK_STATEMENT] PDF flag detected, processing from bank.json")
+			logger.LogInfo("[BANK_STATEMENT] PDF flag detected, processing from bank.json")
 			result, err := ProcessBankStatementFromJSON(r.Context(), db)
 			if err != nil {
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1355,7 +1355,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			log.Printf("[BANK-UPLOAD-ERROR] Failed to parse multipart form: %v", err)
+			logger.LogError("[BANK-UPLOAD-ERROR] Failed to parse multipart form: %v", err)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
 				"message": "Unable to read the uploaded file. Please try again.",
@@ -1381,14 +1381,14 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			if mappingsJSON != "" {
 				mappings = &ColumnMappings{}
 				if err := json.Unmarshal([]byte(mappingsJSON), mappings); err != nil {
-					log.Printf("[BANK-UPLOAD-ERROR] Invalid column_mappings JSON: %v", err)
+					logger.LogError("[BANK-UPLOAD-ERROR] Invalid column_mappings JSON: %v", err)
 					json.NewEncoder(w).Encode(map[string]interface{}{
 						"success": false,
 						"message": "Invalid column_mappings JSON: " + err.Error(),
 					})
 					return
 				}
-				log.Printf("[BANK-UPLOAD-DEBUG] Custom column mappings provided: %+v", mappings)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Custom column mappings provided: %+v", mappings)
 			} else {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"success": false,
@@ -1411,9 +1411,9 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			for fieldName := range r.MultipartForm.File {
 				fileFieldsAvailable = append(fileFieldsAvailable, fieldName)
 			}
-			log.Printf("[BANK-UPLOAD-DEBUG] Available file form fields: %v", fileFieldsAvailable)
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] Available file form fields: %v", fileFieldsAvailable)
 		} else {
-			log.Printf("[BANK-UPLOAD-ERROR] No file fields found in multipart form - request may not include a file attachment")
+			logger.LogError("[BANK-UPLOAD-ERROR] No file fields found in multipart form - request may not include a file attachment")
 		}
 
 		file, fileHeader, err := r.FormFile("file")
@@ -1422,7 +1422,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			uploadFileName = fileHeader.Filename
 		}
 		if err != nil {
-			log.Printf("[BANK-UPLOAD-ERROR] FormFile('file') error: %v", err)
+			logger.LogError("[BANK-UPLOAD-ERROR] FormFile('file') error: %v", err)
 			if file == nil {
 				file, fileHeader, err = r.FormFile("statement")
 				if fileHeader != nil {
@@ -1437,10 +1437,10 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			}
 			if err != nil && file == nil {
 				if r.MultipartForm != nil && len(r.MultipartForm.File) > 0 {
-					log.Printf("[BANK-UPLOAD-DEBUG] Trying first available file field from: %v", fileFieldsAvailable)
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] Trying first available file field from: %v", fileFieldsAvailable)
 					for fieldName, files := range r.MultipartForm.File {
 						if len(files) > 0 {
-							log.Printf("[BANK-UPLOAD-DEBUG] Using field: %s", fieldName)
+							logger.LogInfo("[BANK-UPLOAD-DEBUG] Using field: %s", fieldName)
 							file, err = files[0].Open()
 							uploadFileName = files[0].Filename
 							break
@@ -1475,7 +1475,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		// This keeps preview/upload behavior aligned with user expectation for mixed-account CSVs.
 		if !multiFlag {
 			if isLikelyMultiAccountStatement(uploadFileName, fileBytes) {
-				log.Printf("[BANK-UPLOAD-DEBUG] Auto-detected multi-account statement for %s; routing to multi handler", uploadFileName)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Auto-detected multi-account statement for %s; routing to multi handler", uploadFileName)
 				UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
 				return
 			}
@@ -1508,7 +1508,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 				return
 			case 1:
 				accountOverride = accountNumbers[0]
-				log.Printf("[BANK-UPLOAD-DEBUG] force_override=true — using account %s directly", accountOverride)
+				logger.LogError("[BANK-UPLOAD-DEBUG] force_override=true — using account %s directly", accountOverride)
 			default:
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"success": false,
@@ -1525,12 +1525,12 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			matched := matchAccountNumberToFile(r.Context(), db, uploadFileName, "", accountNumbers, fileContent)
 			if matched != "" {
 				accountOverride = matched
-				log.Printf("[BANK-UPLOAD-DEBUG] Matched file to account %s via weighted scoring", matched)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Matched file to account %s via weighted scoring", matched)
 			} else if len(accountNumbers) == 1 {
 				accountOverride = accountNumbers[0]
-				log.Printf("[BANK-UPLOAD-DEBUG] Single account fallback: %s", accountOverride)
+				logger.LogError("[BANK-UPLOAD-DEBUG] Single account fallback: %s", accountOverride)
 			} else {
-				log.Printf("[BANK-UPLOAD-DEBUG] Multiple accounts, no weighted match found for %s — relying on file content extraction", uploadFileName)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Multiple accounts, no weighted match found for %s — relying on file content extraction", uploadFileName)
 			}
 		}
 		result, err := UploadBankStatementV2WithCategorization(
@@ -1550,7 +1550,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		)
 		if err != nil {
 			// V2 failed — try multi as a last-resort fallback (e.g. multi-account sheet)
-			log.Printf("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
+			logger.LogError("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
 			multiRec := httptest.NewRecorder()
 			UploadMultiAccountBankStatementHandler(db).ServeHTTP(multiRec, r)
 			// Multi handler returns outer "success":true even when ALL individual accounts fail.
@@ -1572,7 +1572,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 				}
 			}
 			if multiActuallySucceeded {
-				log.Printf("[BANK-UPLOAD-DEBUG] Multi fallback succeeded for at least one account")
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Multi fallback succeeded for at least one account")
 				for k, v := range multiRec.Header() {
 					w.Header()[k] = v
 				}
@@ -1625,11 +1625,11 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 					// those messages — they are more actionable than V2's account-not-found error.
 					if allAlreadyStored && len(multiMsgs) > 0 {
 						surfaceMsg = strings.Join(multiMsgs, " | ")
-						log.Printf("[BANK-UPLOAD-DEBUG] Surfacing multi 'already stored' error instead of V2 error: %s", surfaceMsg)
+						logger.LogError("[BANK-UPLOAD-DEBUG] Surfacing multi 'already stored' error instead of V2 error: %s", surfaceMsg)
 					}
 				}
 			}
-			log.Printf("[BANK-UPLOAD-DEBUG] Multi fallback also failed; returning error: %s", surfaceMsg)
+			logger.LogError("[BANK-UPLOAD-DEBUG] Multi fallback also failed; returning error: %s", surfaceMsg)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
 				"message": surfaceMsg,
@@ -1770,7 +1770,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 		//   force=false + N accounts → match each file to one account via weighted scoring (filename+content); unmatched → error
 		//   force=false + 0 accounts → auto-detect account per file from filename/content against DB
 		forceOverride := r.FormValue("force_override") == "true"
-		log.Printf("[ZIP-UPLOAD] Received %d account number(s) from form-data, force_override=%v", len(accountNumbers), forceOverride)
+		logger.LogInfo("[ZIP-UPLOAD] Received %d account number(s) from form-data, force_override=%v", len(accountNumbers), forceOverride)
 
 		zipData, err := readBankStatementZipBytes(zipFile, zipHeader)
 		if err != nil {
@@ -1863,12 +1863,12 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 			case forceOverride && len(accountNumbers) > 1:
 				// 1:1 positional mapping — already validated counts above
 				accountOverride = accountNumbers[fileIdx]
-				log.Printf("[ZIP-UPLOAD] force+N: file[%d] %s → account %s", fileIdx, ze.name, accountOverride)
+				logger.LogError("[ZIP-UPLOAD] force+N: file[%d] %s → account %s", fileIdx, ze.name, accountOverride)
 
 			case forceOverride && len(accountNumbers) == 1:
 				// All files → single account
 				accountOverride = accountNumbers[0]
-				log.Printf("[ZIP-UPLOAD] force+1: assigning file %s → account %s", ze.name, accountOverride)
+				logger.LogError("[ZIP-UPLOAD] force+1: assigning file %s → account %s", ze.name, accountOverride)
 
 			case forceOverride && len(accountNumbers) == 0:
 				// Trust filename: extract account number segment from the filename.
@@ -1943,7 +1943,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 					failureCount++
 					continue
 				}
-				log.Printf("[ZIP-UPLOAD] force+filename: file %s → account %s (from filename)", ze.name, accountOverride)
+				logger.LogInfo("[ZIP-UPLOAD] force+filename: file %s → account %s (from filename)", ze.name, accountOverride)
 
 			case !forceOverride && len(accountNumbers) > 0:
 				// Match each file to one of the provided accounts via weighted scoring
@@ -1954,10 +1954,10 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 				matched := matchAccountNumberToFile(ctx, db, ze.name, "", accountNumbers, fileContent)
 				if matched != "" {
 					accountOverride = matched
-					log.Printf("[ZIP-UPLOAD] matched: file %s → account %s", ze.name, matched)
+					logger.LogInfo("[ZIP-UPLOAD] matched: file %s → account %s", ze.name, matched)
 				} else if len(accountNumbers) == 1 {
 					accountOverride = accountNumbers[0]
-					log.Printf("[ZIP-UPLOAD] single-account fallback: file %s → account %s", ze.name, accountOverride)
+					logger.LogError("[ZIP-UPLOAD] single-account fallback: file %s → account %s", ze.name, accountOverride)
 				} else {
 					results = append(results, FileResult{
 						FileName: ze.name, Success: false,
@@ -1969,7 +1969,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 
 			default: // !forceOverride && len(accountNumbers) == 0
 				// Auto-detect: UploadBankStatementV2 resolves account from filename+content against DB
-				log.Printf("[ZIP-UPLOAD] auto-detect: file %s — no account hint, resolving from filename/content", ze.name)
+				logger.LogInfo("[ZIP-UPLOAD] auto-detect: file %s — no account hint, resolving from filename/content", ze.name)
 			}
 
 			bytesReader := bytes.NewReader(ze.data)

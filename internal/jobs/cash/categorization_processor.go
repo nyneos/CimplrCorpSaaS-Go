@@ -3,7 +3,6 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"runtime"
 	"sync"
@@ -73,10 +72,11 @@ func RunCategorizationScheduler(cfg *CategorizationConfig, db *pgxpool.Pool) err
 
 	c := cron.New(cron.WithLocation(loc))
 	_, err = c.AddFunc(cfg.Schedule, func() {
-		auditLog(fmt.Sprintf("Starting smart-categorization job at %s", time.Now().In(loc).Format(time.RFC3339)))
-		if err := ProcessUncategorizedTransactions(db, cfg.BatchSize); err != nil {
-			auditLog(fmt.Sprintf("Smart-categorization job failed: %v", err))
-			log.Printf("ERROR: Smart-categorization job failed: %v", err)
+		logger.GlobalLogger.LogAudit(fmt.Sprintf("Starting auto-categorization job at %s", time.Now().In(loc).Format(time.RFC3339)))
+		err := ProcessUncategorizedTransactions(db, cfg.BatchSize)
+		if err != nil {
+			logger.GlobalLogger.LogAudit(fmt.Sprintf("Auto-categorization job failed: %v", err))
+			logger.LogError("ERROR: Auto-categorization job failed: %v", err)
 		} else {
 			auditLog("Smart-categorization job completed successfully")
 		}
@@ -86,8 +86,9 @@ func RunCategorizationScheduler(cfg *CategorizationConfig, db *pgxpool.Pool) err
 	}
 
 	c.Start()
-	auditLog(fmt.Sprintf("Auto-categorization scheduler started: %s (%s)", cfg.Schedule, cfg.TimeZone))
-	log.Printf("[AUDIT] Auto-categorization scheduler started: %s (%s)", cfg.Schedule, cfg.TimeZone)
+	logger.GlobalLogger.LogAudit(fmt.Sprintf("Auto-categorization scheduler started with schedule: %s (timezone: %s)", cfg.Schedule, cfg.TimeZone))
+	logger.LogAudit("Auto-categorization scheduler started: %s (%s)", cfg.Schedule, cfg.TimeZone)
+
 	return nil
 }
 
@@ -136,16 +137,11 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		auditLog("Smart-categorization: another instance is already running — skipping")
 		return nil
 	}
-	defer func() {
-		if _, err := db.Exec(ctx, `SELECT pg_advisory_unlock(hashtext('smart-cat-batch'))`); err != nil {
-			log.Printf("[SMART-CAT] advisory unlock error: %v", err)
-		}
-	}()
+	logger.LogAudit("Total transactions to consider for recategorization: %d", totalCount)
 
-	auditLog("Smart-categorization: loading rules and caches…")
-
-	// ── 1. Pre-load rules and caches ──────────────────────────────────────────
-	allRules, err := cat.LoadAllSmartRules(ctx, db)
+	// Load all rules once
+	logger.LogAudit("Loading all active categorization rules for recategorization...")
+	allRules, err := loadAllCategoryRules(ctx, sqlDB)
 	if err != nil {
 		return fmt.Errorf("load rules: %w", err)
 	}
@@ -282,9 +278,13 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		totalUpdated += len(persistItems)
 		totalProcessed += len(batch)
 
-		if time.Since(progressAt) > 30*time.Second {
-			log.Printf("[AUDIT] Smart-categorization progress: processed=%d/%d updated=%d", totalProcessed, totalCount, totalUpdated)
-			progressAt = time.Now()
+		totalProcessed += len(txns)
+		offset += len(txns)
+
+		// small progress log
+		if time.Since(startTime) > 30*time.Second {
+			logger.LogAudit("Recategorization progress: processed %d/%d, updated %d", totalProcessed, totalCount, totalUpdated)
+			startTime = time.Now()
 		}
 	}
 
