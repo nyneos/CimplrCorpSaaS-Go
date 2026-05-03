@@ -2,7 +2,6 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"compress/gzip"
@@ -317,14 +316,7 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		// Get created_by from session
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				createdBy = s.Name
-				break
-			}
-		}
+		createdBy := api.GetUserNameFromCtx(r.Context())
 		if createdBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -937,13 +929,7 @@ func GetCashEntityLogoURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		validSession := false
-		for _, session := range auth.GetActiveSessions() {
-			if session.UserID == req.UserID {
-				validSession = true
-				break
-			}
-		}
+		validSession := api.GetSessionFromCtx(r.Context()) != nil
 		if !validSession {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -1004,14 +990,7 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		// Get updated_by from session
-		updatedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				updatedBy = s.Name
-				break
-			}
-		}
+		updatedBy := api.GetUserNameFromCtx(r.Context())
 		if updatedBy == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidSessionCapitalized})
@@ -1614,13 +1593,7 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// ── 2. Validate session ─────────────────────────────
-		requestedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
+		requestedBy := api.GetUserNameFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -1757,14 +1730,7 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		// Get checker_by from session
-		checkerBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -1864,14 +1830,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		// Get checker_by from session
-		checkerBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -2041,14 +2000,7 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Validate user session
-		validUser := false
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				validUser = true
-				break
-			}
-		}
+		validUser := api.GetSessionFromCtx(r.Context()) != nil
 		if !validUser {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2348,13 +2300,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
+		userName := api.GetUserNameFromCtx(r.Context())
 		if userName == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -2756,13 +2702,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uploadEntityError(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
+		userName := api.GetUserNameFromCtx(r.Context())
 		if userName == "" {
 			uploadEntityError(w, http.StatusUnauthorized, "Invalid or expired session. Please log in again.")
 			return
@@ -3136,7 +3076,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Ensure index (non-fatal, outside tx to avoid temp-table conflicts)
 		{
-			cctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			cctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 			defer cancel()
 			_, _ = pgxPool.Exec(cctx,
 				`CREATE UNIQUE INDEX IF NOT EXISTS idx_masterentitycash_name ON masterentitycash (entity_name)`)

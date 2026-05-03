@@ -2,7 +2,6 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -145,17 +144,14 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Get pre-validated context values
 		// session := middlewares.GetSessionFromContext(r.Context())
 		// Get created_by from session
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				createdBy = s.Name
-				break
-			}
-		}
-		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		createdBy := session.Email
+		if createdBy == "" {
+			createdBy = session.Name
 		}
 
 		var results []map[string]interface{}
@@ -290,17 +286,14 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		// Get created_by from session
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				createdBy = s.Name
-				break
-			}
-		}
-		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		createdBy := session.Email
+		if createdBy == "" {
+			createdBy = session.Name
 		}
 
 		ctx := r.Context()
@@ -326,6 +319,7 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 		) a ON TRUE
+		WHERE COALESCE(m.is_deleted, false) = false
 		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC;
 	`
 
@@ -479,17 +473,14 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 	return
 		// }
 		// updatedBy := session.Name
-		updatedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				updatedBy = s.Name
-				break
-			}
-		}
-		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		updatedBy := session.Email
+		if updatedBy == "" {
+			updatedBy = session.Name
 		}
 		var results []map[string]interface{}
 		for _, cur := range req.Currency {
@@ -637,17 +628,14 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// }
 		// checkerBy := session.Name
 
-		checkerBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		checkerBy := session.Email
+		if checkerBy == "" {
+			checkerBy = session.Name
 		}
 		query := `UPDATE auditactioncurrency SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE currency_id = ANY($3) RETURNING action_id,currency_id`
 		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
@@ -697,28 +685,29 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 	return
 		// }
 		// checkerBy := session.Name
-		checkerBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		checkerBy := session.Email
+		if checkerBy == "" {
+			checkerBy = session.Name
 		}
 		ctx := r.Context()
 
-		// --- Step 3: Delete records pending approval ---
+		// --- Step 3: Handle delete-approvals (Soft Delete) ---
 		delQuery := `
-			DELETE FROM auditactioncurrency
-			WHERE currency_id = ANY($1)
+			UPDATE auditactioncurrency
+			SET processing_status = 'APPROVED',
+			    checker_by = $1,
+			    checker_at = now(),
+			    checker_comment = $2
+			WHERE currency_id = ANY($3)
 			  AND processing_status = 'PENDING_DELETE_APPROVAL'
 			RETURNING action_id, currency_id
 		`
-		delRows, delErr := pgxPool.Query(ctx, delQuery, pq.Array(req.CurrencyIDs))
+		delRows, delErr := pgxPool.Query(ctx, delQuery, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
 		var deleted []string
 		var currencyIDsToDelete []string
 		if delErr == nil {
@@ -732,9 +721,9 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// --- Step 4: Delete corresponding currencies from mastercurrency (HARD DELETE) ---
+		// --- Step 4: Soft delete corresponding currencies ---
 		if len(currencyIDsToDelete) > 0 {
-			delCurQuery := `DELETE FROM mastercurrency WHERE currency_id = ANY($1)`
+			delCurQuery := `UPDATE mastercurrency SET is_deleted = true, status = 'Inactive' WHERE currency_id = ANY($1)`
 			if _, err := pgxPool.Exec(ctx, delCurQuery, pq.Array(currencyIDsToDelete)); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDatabaseDeleteFailed)
 				return
@@ -802,17 +791,14 @@ func BulkDeleteCurrencyAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 	return
 		// }
 		// requestedBy := session.Name
-		requestedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
-		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		requestedBy := session.Email
+		if requestedBy == "" {
+			requestedBy = session.Name
 		}
 		ctx := r.Context()
 		var results []string

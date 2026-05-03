@@ -623,7 +623,7 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		// We'll compute holdings from transaction rows so totals are aggregated across batches.
 		// Fetch all BUY/PURCHASE transactions ordered by date based on method (FIFO/LIFO)

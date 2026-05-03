@@ -37,7 +37,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		var resp KPIResponse
 
 		// spot rates for conversion to USD (fallbacks)
@@ -164,7 +164,7 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		// Query: join proposals -> items and left join latest audit_action per proposal
 		rows, err := pgxPool.Query(ctx, `
@@ -282,7 +282,7 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		q := `
 			SELECT COALESCE(i.entity_name, '') AS entity_name,

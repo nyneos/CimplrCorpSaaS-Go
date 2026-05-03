@@ -2,7 +2,6 @@ package allMaster
 
 import (
 	api "CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	exposures "CimplrCorpSaas/api/fx/exposures"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"encoding/json"
@@ -103,14 +102,7 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Missing user_id in body")
 			return
 		}
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				createdBy = s.Name
-				break
-			}
-		}
+		createdBy := api.GetUserNameFromCtx(r.Context())
 		if createdBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "User session not found or Name missing")
 			return
@@ -279,14 +271,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrMissingUserID})
 			return
 		}
-		updatedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				updatedBy = s.Name
-				break
-			}
-		}
+		updatedBy := api.GetUserNameFromCtx(r.Context())
 		if updatedBy == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "User session not found"})
@@ -640,8 +625,9 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 					}
 
-					if _, delErr := tx.Exec(ctx, `DELETE FROM masterclearingcode WHERE account_id=$1`, updatedAccountID); delErr != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to delete old clearing codes: " + delErr.Error(), "account_id": updatedAccountID})
+					// mark existing clearing codes as deleted (soft-delete)
+					if _, delErr := tx.Exec(ctx, `UPDATE masterclearingcode SET is_deleted = true WHERE account_id=$1`, updatedAccountID); delErr != nil {
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to soft-delete old clearing codes: " + delErr.Error(), "account_id": updatedAccountID})
 						return
 					}
 
@@ -716,14 +702,7 @@ func BulkDeleteBankAccountAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		sessions := auth.GetActiveSessions()
-		requestedBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
+		requestedBy := api.GetUserNameFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -759,14 +738,7 @@ func BulkRejectBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide account_ids")
 			return
 		}
-		sessions := auth.GetActiveSessions()
-		checkerBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -806,25 +778,18 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide account_ids")
 			return
 		}
-		sessions := auth.GetActiveSessions()
-		checkerBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		// First, delete audit rows that requested DELETE (pending delete approval)
+		// First, handle audit rows that requested DELETE (Soft Delete)
 		var delRows pgx.Rows
 		var delErr error
 		var deleted []string
 		var accountIDsToDelete []string
-		delQuery := `DELETE FROM auditactionbankaccount WHERE account_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, account_id`
-		delRows, delErr = pgxPool.Query(r.Context(), delQuery, pq.Array(req.AccountIDs))
+		delQuery := `UPDATE auditactionbankaccount SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2 WHERE account_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, account_id`
+		delRows, delErr = pgxPool.Query(r.Context(), delQuery, checkerBy, req.Comment, pq.Array(req.AccountIDs))
 		if delErr == nil {
 			defer delRows.Close()
 			for delRows.Next() {
@@ -957,6 +922,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 					c.account_id,
 					STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
 				FROM public.masterclearingcode c
+				WHERE COALESCE(c.is_deleted, false) = false
 				GROUP BY c.account_id
 			)
 			SELECT
@@ -1249,13 +1215,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Step 2: Fetch user name from active sessions
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
+		userName := api.GetUserNameFromCtx(r.Context())
 		if userName == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -2012,7 +1972,8 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
                         'old_code_value', COALESCE(c.old_code_value, '')
                     ))
                     FROM masterclearingcode c
-                    WHERE c.account_id = a.account_id
+                    WHERE c.account_id = a.account_id AND COALESCE(c.is_deleted, false) = false
+                    ORDER BY c.clearing_id
                 ), '[]'::json
             ) AS clearing_codes,
             b.bank_id,

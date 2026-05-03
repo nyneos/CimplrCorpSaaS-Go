@@ -747,7 +747,7 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyDPError(err, constants.ErrTxBeginFailedCapitalized)
@@ -874,7 +874,7 @@ func BulkRejectDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyDPError(err, constants.ErrTxBeginFailedCapitalized)

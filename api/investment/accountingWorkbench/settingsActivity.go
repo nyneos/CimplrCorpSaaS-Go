@@ -68,7 +68,7 @@ func CreateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 		// Normalize setting_key to uppercase
 		req.SettingKey = strings.ToUpper(req.SettingKey)
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			log.Printf("Error starting transaction: %v", err)
@@ -148,7 +148,7 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			log.Printf("Error starting transaction: %v", err)
@@ -252,7 +252,7 @@ func GetSettings(pool *pgxpool.Pool) http.HandlerFunc {
 		settingType := r.URL.Query().Get("setting_type")
 		isActiveStr := r.URL.Query().Get("is_active")
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		// Build query
 		query := `
@@ -329,7 +329,7 @@ func GetSettingByKey(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		query := `
 			SELECT setting_id, setting_key, setting_value, setting_type, 
 			       COALESCE(description, '') as description, is_active, 
@@ -378,7 +378,7 @@ func DeleteSetting(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		query := `
 			UPDATE investment.accounting_setting 
 			SET is_active = FALSE, updated_at = NOW()

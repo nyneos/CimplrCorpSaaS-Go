@@ -2,8 +2,8 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -51,13 +51,8 @@ type penaltyStructureAuditReq struct {
 
 // ─── Session validator ────────────────────────────────────────────────────────
 
-func validateMasterAuditSession(userID string) bool {
-	for _, s := range auth.GetActiveSessions() {
-		if s.UserID == userID {
-			return true
-		}
-	}
-	return false
+func validateMasterAuditSession(ctx context.Context) bool {
+	return api.GetSessionFromCtx(ctx) != nil
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
@@ -107,7 +102,7 @@ func GetInterestTypeAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
-		if !validateMasterAuditSession(req.UserID) {
+		if !validateMasterAuditSession(r.Context()) {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
@@ -190,7 +185,7 @@ func GetBankConfigAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
-		if !validateMasterAuditSession(req.UserID) {
+		if !validateMasterAuditSession(r.Context()) {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
@@ -315,7 +310,7 @@ func GetCompoundingFrequencyAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc
 			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
-		if !validateMasterAuditSession(req.UserID) {
+		if !validateMasterAuditSession(r.Context()) {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
@@ -396,7 +391,7 @@ func GetDayCountConventionAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
-		if !validateMasterAuditSession(req.UserID) {
+		if !validateMasterAuditSession(r.Context()) {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
@@ -474,7 +469,7 @@ func GetBankRateCardAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
-		if !validateMasterAuditSession(req.UserID) {
+		if !validateMasterAuditSession(r.Context()) {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
@@ -577,7 +572,7 @@ func GetTdsPlanAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
-		if !validateMasterAuditSession(req.UserID) {
+		if !validateMasterAuditSession(r.Context()) {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
@@ -662,7 +657,7 @@ func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
-		if !validateMasterAuditSession(req.UserID) {
+		if !validateMasterAuditSession(r.Context()) {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}

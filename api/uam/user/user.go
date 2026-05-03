@@ -90,15 +90,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		// Get createdBy from session
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				createdBy = s.Email
-				break
-			}
-		}
+		createdBy := api.GetUserEmailFromCtx(r.Context())
 		if createdBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -194,9 +186,9 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			_, err = tx.Exec(`
-				INSERT INTO user_entity_mappings (user_id, entity_id, entity_name)
-				VALUES ($1, $2, $3)
-				ON CONFLICT (user_id, entity_id) DO UPDATE SET entity_name = EXCLUDED.entity_name`,
+				INSERT INTO user_entity_mappings (user_id, entity_id, entity_name, is_deleted)
+				VALUES ($1, $2, $3, false)
+				ON CONFLICT (user_id, entity_id) DO UPDATE SET entity_name = EXCLUDED.entity_name, is_deleted = false`,
 				userId, em.EntityID, em.EntityName,
 			)
 			if err != nil {
@@ -262,6 +254,7 @@ func GetUsers(db *sql.DB) http.HandlerFunc {
 		countArgs := []interface{}{pq.Array(entityIDs)}
 		paramIdx := 2
 		countQuery := `SELECT COUNT(*) FROM users u WHERE
+			COALESCE(u.is_deleted, false) = false AND
 			EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = u.id AND uem.entity_id = ANY($1::text[]))`
 		if status != "" {
 			countQuery += fmt.Sprintf(" AND u.status = $%d", paramIdx)
@@ -288,7 +281,7 @@ LEFT JOIN LATERAL (
 				 COALESCE(r.role_code, r.rolecode) AS role_code
 	FROM user_roles ur
 	JOIN roles r ON ur.role_id = r.id
-	WHERE ur.user_id = u.id
+	WHERE ur.user_id = u.id AND COALESCE(ur.is_deleted, false) = false
 	LIMIT 1
 ) rr ON true
 LEFT JOIN LATERAL (
@@ -296,9 +289,9 @@ LEFT JOIN LATERAL (
 			json_agg(json_build_object('entity_id', entity_id, 'entity_name', entity_name)),
 			'[]'::json
 		) AS entity_mappings
-	FROM user_entity_mappings WHERE user_id = u.id
+	FROM user_entity_mappings WHERE user_id = u.id AND COALESCE(is_deleted, false) = false
 ) em ON true
-WHERE EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = u.id AND uem.entity_id = ANY($1::text[]))`
+WHERE COALESCE(u.is_deleted, false) = false AND EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = u.id AND uem.entity_id = ANY($1::text[]))`
 		if status != "" {
 			query += fmt.Sprintf(" AND u.status = $%d", pIdx)
 			args = append(args, status)
@@ -365,7 +358,7 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 				) AS entity_mappings
 				FROM user_entity_mappings WHERE user_id = u.id
 			) em ON true
-			WHERE u.id = $1
+			WHERE u.id = $1 AND COALESCE(u.is_deleted, false) = false
 			  AND EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = u.id AND uem.entity_id = ANY($2::text[]))`,
 			req.UserID, pq.Array(entityIDs),
 		)
@@ -433,6 +426,7 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 					  AND UPPER(TRIM(ec.entity_name)) = UPPER(TRIM($2))
 				)
 				  AND LOWER(TRIM(u.status)) = 'approved'
+				  AND COALESCE(u.is_deleted, false) = false
 				ORDER BY u.id DESC
 			`, pq.Array(entityIDs), req.EntityName)
 		} else {
@@ -443,6 +437,7 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 					WHERE uem.user_id = u.id AND uem.entity_id = ANY($1::text[])
 				)
 				  AND LOWER(TRIM(u.status)) = 'approved'
+				  AND COALESCE(u.is_deleted, false) = false
 				ORDER BY u.id DESC
 			`, pq.Array(entityIDs))
 		}
@@ -520,15 +515,7 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 			}
 			delete(req, "entity_mappings")
 		}
-		// Get updated_by from session
-		updatedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				updatedBy = s.Email
-				break
-			}
-		}
+		updatedBy := api.GetUserEmailFromCtx(r.Context())
 		if updatedBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -623,12 +610,12 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 			}
 		// Replace entity mappings if the caller provided a new list.
 		if len(newEntityMappings) > 0 {
-			db.Exec("DELETE FROM user_entity_mappings WHERE user_id = $1", id)
+			db.Exec("UPDATE user_entity_mappings SET is_deleted = true WHERE user_id = $1", id)
 			for _, em := range newEntityMappings {
 				db.Exec(`
-					INSERT INTO user_entity_mappings (user_id, entity_id, entity_name)
-					VALUES ($1, $2, $3)
-					ON CONFLICT (user_id, entity_id) DO UPDATE SET entity_name = EXCLUDED.entity_name`,
+					INSERT INTO user_entity_mappings (user_id, entity_id, entity_name, is_deleted)
+					VALUES ($1, $2, $3, false)
+					ON CONFLICT (user_id, entity_id) DO UPDATE SET entity_name = EXCLUDED.entity_name, is_deleted = false`,
 					id, em.EntityID, em.EntityName,
 				)
 			}
@@ -668,15 +655,7 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		// Determine who requested the delete for auditing
-		deleter := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				deleter = s.Email
-				break
-			}
-		}
+		deleter := api.GetUserEmailFromCtx(r.Context())
 		if deleter == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -770,15 +749,17 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 		if len(toDelete) > 0 {
 			// Delete user_roles first for referential integrity
 			_, err := db.Exec(
-				"DELETE FROM user_roles WHERE user_id = ANY($1)",
+				"UPDATE user_roles SET is_deleted = true WHERE user_id = ANY($1)",
 				pq.Array(toDelete),
 			)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Failed to delete user_roles: "+err.Error())
 				return
 			}
+			// Soft delete users (set is_deleted = true)
 			delRows, err := db.Query(`
-				DELETE FROM users WHERE id = ANY($1)
+				UPDATE users SET is_deleted = true, status = 'Deleted', updated_at = NOW()
+				WHERE id = ANY($1)
 				  AND EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = users.id AND uem.entity_id = ANY($2::text[]))
 				RETURNING *`,
 				pq.Array(toDelete), pq.Array(entityIDs),
@@ -801,15 +782,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 				}
 			}
 		}
-		// Get approved_by from session
-		approvedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				approvedBy = s.Email
-				break
-			}
-		}
+		approvedBy := api.GetUserEmailFromCtx(r.Context())
 		if approvedBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -864,15 +837,7 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		// Get rejected_by from session
-		rejectedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				rejectedBy = s.Email
-				break
-			}
-		}
+		rejectedBy := api.GetUserEmailFromCtx(r.Context())
 		if rejectedBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return

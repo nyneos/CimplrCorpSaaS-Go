@@ -2,7 +2,6 @@ package investmentsuite
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"encoding/json"
@@ -163,7 +162,7 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail, ok := resolveUserEmail(req.UserID)
+		userEmail, ok := resolveUserEmail(ctx)
 		if !ok {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -241,7 +240,7 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail, ok := resolveUserEmail(req.UserID)
+		userEmail, ok := resolveUserEmail(ctx)
 		if !ok {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -325,7 +324,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			return
 		}
 
-		userEmail, ok := resolveUserEmail(req.UserID)
+		userEmail, ok := resolveUserEmail(ctx)
 		if !ok {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -552,7 +551,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail, ok := resolveUserEmail(req.UserID)
+		userEmail, ok := resolveUserEmail(ctx)
 		if !ok {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -1495,11 +1494,9 @@ func validateUpdateProposalRequest(req *UpdateProposalRequest) error {
 	return nil
 }
 
-func resolveUserEmail(userID string) (string, bool) {
-	for _, s := range auth.GetActiveSessions() {
-		if s.UserID == userID {
-			return s.Name, true
-		}
+func resolveUserEmail(ctx context.Context) (string, bool) {
+	if s := api.GetSessionFromCtx(ctx); s != nil {
+		return s.Name, true
 	}
 	return "", false
 }

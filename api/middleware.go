@@ -118,6 +118,27 @@ func GetUserIDFromCtx(ctx context.Context) string {
 	return ""
 }
 
+func GetUserEmailFromCtx(ctx context.Context) string {
+	if s := GetSessionFromCtx(ctx); s != nil {
+		return s.Email
+	}
+	return ""
+}
+
+func GetUserNameFromCtx(ctx context.Context) string {
+	if s := GetSessionFromCtx(ctx); s != nil {
+		return s.Name
+	}
+	return ""
+}
+
+func GetUserRoleFromCtx(ctx context.Context) string {
+	if s := GetSessionFromCtx(ctx); s != nil {
+		return s.Role
+	}
+	return ""
+}
+
 // Validation helpers
 func IsEntityAllowed(ctx context.Context, entityIdentifier string) bool {
 	entityNames := GetEntityNamesFromCtx(ctx)
@@ -368,16 +389,15 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Validate session
-			found := false
-			activeSessions := auth.GetActiveSessions()
-			for _, session := range activeSessions {
-				if session.UserID == userID {
-					found = true
+			// Validate session and capture it for context injection
+			var matchedSession *auth.UserSession
+			for _, s := range auth.GetActiveSessions() {
+				if s.UserID == userID {
+					matchedSession = s
 					break
 				}
 			}
-			if !found {
+			if matchedSession == nil {
 				log.Printf("[BUMiddleware] BLOCKED %s %s — invalid session for user_id=%s", r.Method, r.URL.Path, userID)
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				w.WriteHeader(http.StatusUnauthorized)
@@ -492,9 +512,11 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				})
 				return
 			}
-			// Attach to context and call next
+			// Attach entity scope, session, and user identity to context
 			ctx := context.WithValue(r.Context(), BusinessUnitsKey, buNames)
 			ctx = context.WithValue(ctx, EntityIDsKey, buEntityIDs)
+			ctx = context.WithValue(ctx, "session", matchedSession)
+			ctx = context.WithValue(ctx, "user_id", userID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
