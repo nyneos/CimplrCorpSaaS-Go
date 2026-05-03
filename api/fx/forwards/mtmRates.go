@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -432,6 +433,12 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 
 func GetMTMDownloadURL(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if err := db.Ping(); err != nil {
+			log.Printf("[ERROR] GetMTMDownloadURL: database connection issue: %v", err)
+			respondWithError(w, http.StatusInternalServerError, "database connection unavailable")
+			return
+		}
+
 		var req struct {
 			MTMID    string `json:"mtm_id"`
 			RecordID string `json:"record_id"`
@@ -450,6 +457,13 @@ func GetMTMDownloadURL(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Handle base64-encoded mtm_id (sent by frontend)
+		if decoded, err := base64.StdEncoding.DecodeString(mtmID); err == nil {
+			mtmID = string(decoded)
+		}
+
+		log.Printf("[DEBUG] GetMTMDownloadURL: attempting to fetch mtm_id=%s", mtmID)
+
 		var uploadS3Key sql.NullString
 		err := db.QueryRowContext(r.Context(), `
 			SELECT upload_s3_key
@@ -462,7 +476,8 @@ func GetMTMDownloadURL(db *sql.DB) http.HandlerFunc {
 				respondWithError(w, http.StatusNotFound, "mtm record not found")
 				return
 			}
-			respondWithError(w, http.StatusInternalServerError, "failed to fetch mtm record")
+			log.Printf("[ERROR] GetMTMDownloadURL: failed to fetch mtm record for mtm_id=%s, error=%v", mtmID, err)
+			respondWithError(w, http.StatusInternalServerError, "failed to fetch mtm record: "+err.Error())
 			return
 		}
 

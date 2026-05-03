@@ -31,7 +31,7 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-const bankStatementUploadFolder = "bankstatement"
+const bankStatementUploadModule = "bankstatement"
 
 // tryExtractNumbersAsXLSX attempts to extract the embedded XLSX from an Apple Numbers (.numbers) file.
 // Apple Numbers files are ZIP archives containing Sheets/Sheet.xlsx (or similar).
@@ -638,7 +638,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	}
 
 	storedFileName := s3storage.BuildUploadedFilename(uploadFileName, uploadedBy, time.Now().UTC())
-	s3Key := s3storage.BuildNamedS3Key(bankStatementUploadFolder, "", storedFileName)
+	folder := s3storage.GetStoragePrefix(bankStatementUploadModule)
+	s3Key := s3storage.BuildNamedS3Key(folder,"",storedFileName)
 	var uploadS3Key sql.NullString
 	var s3URL string
 	if s3storage.IsS3UploadEnabled() {
