@@ -587,90 +587,89 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var inserted, errList []map[string]interface{}
 
 		for i, row := range rows {
-			req := hubV2RequestFromRow(row, formType, userID)
+			func(i int, row map[string]string) {
+				req := hubV2RequestFromRow(row, formType, userID)
 
-			if err := validateHubCreateRequest(req); err != nil {
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": err.Error(),
-					"counterparty_code": req.CounterpartyCode,
+				if err := validateHubCreateRequest(req); err != nil {
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": err.Error(),
+						"counterparty_code": req.CounterpartyCode,
+					})
+					return
+				}
+
+				tx, err := pgxPool.Begin(ctx)
+				if err != nil {
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": constants.ErrTransactionFailed,
+					})
+					return
+				}
+				defer tx.Rollback(ctx)
+
+				var cpID string
+				err = tx.QueryRow(ctx, `
+					INSERT INTO apibox_svc.counterparty (
+						counterparty_code, counterparty_name, short_name, counterparty_type,
+						country, primary_currency, lei, effective_from, rm_email, notes,
+						status, created_by
+					) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'DRAFT',$11)
+					RETURNING counterparty_id`,
+					strings.ToUpper(req.CounterpartyCode), req.CounterpartyName, nilIfEmpty(req.ShortName),
+					req.CounterpartyType, strings.ToUpper(req.Country), strings.ToUpper(req.PrimaryCurrency),
+					nilIfEmpty(req.LEI), req.EffectiveFrom, nilIfEmpty(req.RMEmail), nilIfEmpty(req.Notes),
+					userEmail,
+				).Scan(&cpID)
+				if err != nil {
+					msg, _ := getUserFriendlyCounterpartyError(err, "counterparty insert failed")
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": msg,
+						"counterparty_code": req.CounterpartyCode,
+					})
+					return
+				}
+
+				typedID, err := insertTypedDetail(ctx, tx, cpID, req.CounterpartyType, reqToFieldsMap(req))
+				if err != nil {
+					msg, _ := getUserFriendlyCounterpartyError(err, "typed insert failed")
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": msg,
+						"counterparty_code": req.CounterpartyCode,
+					})
+					return
+				}
+
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO apibox_svc.audit_counterparty
+						(counterparty_id, action_type, processing_status, requested_by, requested_at)
+					VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, cpID, userEmail); err != nil {
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": constants.ErrAuditInsertFailed,
+					})
+					return
+				}
+
+				if err := insertTypedAudit(ctx, tx, req.CounterpartyType, typedID, cpID, userEmail); err != nil {
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": constants.ErrAuditInsertFailed,
+					})
+					return
+				}
+
+				if err := tx.Commit(ctx); err != nil {
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": constants.ErrCommitFailed + err.Error(),
+					})
+					return
+				}
+
+				inserted = append(inserted, map[string]interface{}{
+					"success": true, "row_index": i,
+					"counterparty_id":   cpID,
+					"counterparty_code": strings.ToUpper(req.CounterpartyCode),
+					"counterparty_type": req.CounterpartyType,
 				})
-				continue
-			}
-
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": constants.ErrTransactionFailed,
-				})
-				continue
-			}
-
-			var cpID string
-			err = tx.QueryRow(ctx, `
-				INSERT INTO apibox_svc.counterparty (
-					counterparty_code, counterparty_name, short_name, counterparty_type,
-					country, primary_currency, lei, effective_from, rm_email, notes,
-					status, created_by
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'DRAFT',$11)
-				RETURNING counterparty_id`,
-				strings.ToUpper(req.CounterpartyCode), req.CounterpartyName, nilIfEmpty(req.ShortName),
-				req.CounterpartyType, strings.ToUpper(req.Country), strings.ToUpper(req.PrimaryCurrency),
-				nilIfEmpty(req.LEI), req.EffectiveFrom, nilIfEmpty(req.RMEmail), nilIfEmpty(req.Notes),
-				userEmail,
-			).Scan(&cpID)
-			if err != nil {
-				_ = tx.Rollback(ctx)
-				msg, _ := getUserFriendlyCounterpartyError(err, "counterparty insert failed")
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": msg,
-					"counterparty_code": req.CounterpartyCode,
-				})
-				continue
-			}
-
-			typedID, err := insertTypedDetail(ctx, tx, cpID, req.CounterpartyType, reqToFieldsMap(req))
-			if err != nil {
-				_ = tx.Rollback(ctx)
-				msg, _ := getUserFriendlyCounterpartyError(err, "typed insert failed")
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": msg,
-					"counterparty_code": req.CounterpartyCode,
-				})
-				continue
-			}
-
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO apibox_svc.audit_counterparty
-					(counterparty_id, action_type, processing_status, requested_by, requested_at)
-				VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, cpID, userEmail); err != nil {
-				_ = tx.Rollback(ctx)
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": constants.ErrAuditInsertFailed,
-				})
-				continue
-			}
-
-			if err := insertTypedAudit(ctx, tx, req.CounterpartyType, typedID, cpID, userEmail); err != nil {
-				_ = tx.Rollback(ctx)
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": constants.ErrAuditInsertFailed,
-				})
-				continue
-			}
-
-			if err := tx.Commit(ctx); err != nil {
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": constants.ErrCommitFailed + err.Error(),
-				})
-				continue
-			}
-
-			inserted = append(inserted, map[string]interface{}{
-				"success": true, "row_index": i,
-				"counterparty_id":   cpID,
-				"counterparty_code": strings.ToUpper(req.CounterpartyCode),
-				"counterparty_type": req.CounterpartyType,
-			})
+			}(i, row)
 		}
 
 		api.RespondWithPayload(w, len(inserted) > 0, "", map[string]interface{}{

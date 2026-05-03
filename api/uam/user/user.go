@@ -114,7 +114,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// -------------------------------------------------------------------------
 
-		tx, err := db.Begin()
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -610,14 +610,33 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 			}
 		// Replace entity mappings if the caller provided a new list.
 		if len(newEntityMappings) > 0 {
-			db.Exec("UPDATE user_entity_mappings SET is_deleted = true WHERE user_id = $1", id)
+			tx, err := db.BeginTx(r.Context(), nil)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+				return
+			}
+			defer tx.Rollback()
+
+			if _, err := tx.Exec("UPDATE user_entity_mappings SET is_deleted = true WHERE user_id = $1", id); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to soft-delete old mappings: "+err.Error())
+				return
+			}
+
 			for _, em := range newEntityMappings {
-				db.Exec(`
+				if _, err := tx.Exec(`
 					INSERT INTO user_entity_mappings (user_id, entity_id, entity_name, is_deleted)
 					VALUES ($1, $2, $3, false)
 					ON CONFLICT (user_id, entity_id) DO UPDATE SET entity_name = EXCLUDED.entity_name, is_deleted = false`,
 					id, em.EntityID, em.EntityName,
-				)
+				); err != nil {
+					respondWithError(w, http.StatusInternalServerError, "Failed to insert entity mapping: "+err.Error())
+					return
+				}
+			}
+
+			if err := tx.Commit(); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to commit entity mappings: "+err.Error())
+				return
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

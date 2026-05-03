@@ -610,13 +610,13 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 			})
 			continue
 		}
+		defer tx.Rollback()
 
 		uploadS3Key := ""
 		s3Uploaded := false
 		if s3storage.IsS3UploadEnabled() {
 			contentType := s3storage.DetectContentType(fileBytes)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				_ = tx.Rollback()
 				results = append(results, map[string]interface{}{
 					"filename":      fileHeader.Filename,
 					"upload_s3_key": "",
@@ -650,7 +650,6 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 			}
 		}
 		if len(errorRows) > 0 {
-			_ = tx.Rollback()
 			if s3Uploaded {
 				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					fmt.Printf("[forward-upload] failed to cleanup S3 object for %s after insert failure: %v\n", fileHeader.Filename, cleanupErr)
@@ -882,13 +881,13 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 			})
 			continue
 		}
+		defer tx.Rollback()
 
 		uploadS3Key := ""
 		s3Uploaded := false
 		if s3storage.IsS3UploadEnabled() {
 			contentType := s3storage.DetectContentType(fileBytes)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				_ = tx.Rollback()
 				results = append(results, map[string]interface{}{
 					"filename":      fileHeader.Filename,
 					"upload_s3_key": "",
@@ -934,7 +933,6 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 			successCount++
 		}
 		if len(errorRows) > 0 {
-			_ = tx.Rollback()
 			if s3Uploaded {
 				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					fmt.Printf("[forward-confirmation-upload] failed to cleanup S3 object for %s after update failure: %v\n", fileHeader.Filename, cleanupErr)
