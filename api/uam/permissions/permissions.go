@@ -190,7 +190,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Step 3: Bulk insert or fetch permission IDs
-		tx, err := db.Begin()
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction)
 			return
@@ -504,7 +504,7 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		tx, err := db.Begin()
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction)
 			return
