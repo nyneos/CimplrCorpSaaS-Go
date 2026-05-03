@@ -317,7 +317,6 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}(receiptID, req.FdID, userEmail, req.GrossInterestReceived)
 
 		resp := map[string]interface{}{
-			"success":                 true,
 			"receipt_id":              receiptID,
 			"fd_id":                   req.FdID,
 			"fd_ref_no":               fdRefNo,
@@ -329,8 +328,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		if tdsID != "" {
 			resp["tds_id"] = tdsID
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, resp, "")
 	}
 }
 
@@ -524,12 +522,10 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}(req.ReceiptID, userEmail, newGross)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"receipt_id": req.ReceiptID,
 			"updated_by": userEmail,
-		})
+		}, "")
 	}
 }
 
@@ -634,11 +630,7 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"results": results,
-		})
+		api.Success(w, http.StatusOK, results, "")
 	}
 }
 
@@ -678,13 +670,10 @@ func SubmitReceiptForApproval(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// New schema: CREATE already inserts audit with PENDING_APPROVAL — no separate submit needed.
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":        true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"receipt_id":     req.ReceiptID,
 			"receipt_status": receiptStatus,
-			"message":        "Receipt is already in approval queue from creation. No separate submit step required.",
-		})
+		}, "Receipt is already in approval queue from creation. No separate submit step required.")
 	}
 }
 
@@ -871,12 +860,10 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":        true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"approved_count": len(req.ReceiptIDs),
 			"checker":        userEmail,
-		})
+		}, "")
 		for _, rID := range req.ReceiptIDs {
 			go func(id, uEmail string) {
 				notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/bulk-approve", id, map[string]interface{}{
@@ -999,12 +986,10 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":        true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"rejected_count": len(req.ReceiptIDs),
 			"checker":        userEmail,
-		})
+		}, "")
 		for _, rID := range req.ReceiptIDs {
 			go func(id, uEmail string) {
 				notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/bulk-reject", id, map[string]interface{}{
@@ -1188,12 +1173,10 @@ WHERE r.is_deleted = false`
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    out,
-			"count":   len(out),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  out,
+			"count": len(out),
+		}, "")
 	}
 }
 
@@ -1310,13 +1293,10 @@ WHERE r.is_deleted = false AND l.processing_status = 'APPROVED'`
 			out = []map[string]interface{}{}
 		}
 
-		// Return consistent list shape: { success, count, rows }
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"count":   len(out),
-			"rows":    out,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  out,
+			"count": len(out),
+		}, "")
 	}
 }
 
@@ -1430,12 +1410,10 @@ WHERE t.is_deleted = false AND l.processing_status = 'APPROVED'`
 			out = []map[string]interface{}{}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"count":   len(out),
-			"rows":    out,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  out,
+			"count": len(out),
+		}, "")
 	}
 }
 
@@ -1588,12 +1566,10 @@ WHERE t.is_deleted = false`
 			out = []map[string]interface{}{}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    out,
-			"count":   len(out),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  out,
+			"count": len(out),
+		}, "")
 	}
 }
 
@@ -1686,15 +1662,13 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		defer jeRows.Close()
 		jeData, _ := rowsToMapSlice(jeRows)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":           true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"receipt":           receipt,
 			"tds":               tdsData,
 			"reconcile_results": reconcileData,
 			"exceptions":        exceptionData,
 			"journal_entries":   jeData,
-		})
+		}, "")
 	}
 }
 
@@ -1739,12 +1713,10 @@ func GetReceiptAuditHistory(pool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 		out, _ := rowsToMapSlice(rows)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    out,
-			"count":   len(out),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  out,
+			"count": len(out),
+		}, "")
 	}
 }
 
@@ -1822,11 +1794,9 @@ func GetTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		var exceptionCount int
 		pool.QueryRow(ctx, summarySQL, args...).Scan(&totalRows, &totalExpected, &totalDeducted, &totalVariance, &exceptionCount) //nolint:errcheck
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    out,
-			"count":   len(out),
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  out,
+			"count": len(out),
 			"summary": map[string]interface{}{
 				"total_rows":      totalRows,
 				"total_expected":  totalExpected,
@@ -1834,7 +1804,7 @@ func GetTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				"total_variance":  totalVariance,
 				"exception_count": exceptionCount,
 			},
-		})
+		}, "")
 	}
 }
 
@@ -1926,12 +1896,9 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 		api.LogInfo("[FDReceipt] ReconcilePreview (no DB write) entity=%s i=%d tds=%d",
 			req.EntityID, preview.Interest.Processed, preview.TDS.Processed)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Dry-run preview. Call /reconcile/ingest with the same payload to commit.",
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"preview": preview,
-		})
+		}, "Dry-run preview. Call /reconcile/ingest with the same payload to commit.")
 	}
 }
 
@@ -2039,13 +2006,10 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 		api.LogInfo("[FDReceipt] IngestReconciliation started: run_id=%s entity=%s period=%s→%s i=%d tds=%d",
 			runID, req.EntityID, req.PeriodStart, req.PeriodEnd,
 			len(req.ReceiptIDs), len(req.TDSIDs))
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":          true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"reconcile_run_id": runID,
 			"run_status":       "RUNNING",
-			"message":          "Reconciliation ingestion started. Poll /reconcile/status for progress.",
-		})
+		}, "Reconciliation ingestion started. Poll /reconcile/status for progress.")
 	}
 }
 
@@ -2140,12 +2104,10 @@ func GetReconcileRunStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			out = []map[string]interface{}{}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"runs":    out,
-			"count":   len(out),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  out,
+			"count": len(out),
+		}, "")
 	}
 }
 
@@ -2403,12 +2365,10 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 			results = []ResultLine{}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    results,
-			"count":   len(results),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  results,
+			"count": len(results),
+		}, "")
 	}
 }
 
@@ -2740,13 +2700,11 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			results = []ResultRow{}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":      true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"run":          run,
 			"result_count": len(results),
-			"results":      results,
-		})
+			"data":         results,
+		}, "")
 	}
 }
 
@@ -2989,16 +2947,14 @@ WHERE t.is_deleted = false
 		}
 		tRows.Close()
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":             true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"interest_candidates": interestCandidates,
 			"interest_count":      len(interestCandidates),
 			"tds_candidates":      tdsCandidates,
 			"tds_count":           len(tdsCandidates),
 			"total_count":         len(interestCandidates) + len(tdsCandidates),
 			"note":                "Only APPROVED receipts/TDS with no prior reconcile result. Feed receipt_ids/tds_ids from here into /reconcile/run or /reconcile/ingest.",
-		})
+		}, "")
 	}
 }
 
@@ -3052,12 +3008,10 @@ func GetExceptions(pool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 		out, _ := rowsToMapSlice(rows)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    out,
-			"count":   len(out),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  out,
+			"count": len(out),
+		}, "")
 	}
 }
 
@@ -3124,12 +3078,10 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":          true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"exception_id":     req.ExceptionID,
 			"exception_status": "IN_REVIEW",
-		})
+		}, "")
 	}
 }
 
@@ -3205,12 +3157,10 @@ func ApproveException(pool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}(req.ExceptionID, userEmail)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":          true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"exception_id":     req.ExceptionID,
 			"exception_status": "APPROVED",
-		})
+		}, "")
 	}
 }
 
@@ -3271,12 +3221,10 @@ func CloseException(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":          true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"exception_id":     req.ExceptionID,
 			"exception_status": "CLOSED",
-		})
+		}, "")
 	}
 }
 
@@ -3375,13 +3323,11 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 			}(rID, userEmail)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"posted":  posted,
 			"skipped": skipped,
-			"results": results,
-		})
+			"data":    results,
+		}, "")
 	}
 }
 
@@ -3511,12 +3457,10 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"tds_id":     req.TdsID,
 			"updated_by": userEmail,
-		})
+		}, "")
 	}
 }
 
@@ -3573,12 +3517,10 @@ func GetTDSDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		defer auditRows.Close()
 		auditData, _ := rowsToMapSlice(auditRows)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":       true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"tds":           tds,
 			"audit_history": auditData,
-		})
+		}, "")
 	}
 }
 
@@ -3622,11 +3564,9 @@ func GetTDSAuditHistory(pool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 		out, _ := rowsToMapSlice(rows)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    out,
-			"count":   len(out),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  out,
+			"count": len(out),
+		}, "")
 	}
 }

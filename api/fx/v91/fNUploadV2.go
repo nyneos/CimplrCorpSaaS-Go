@@ -190,13 +190,12 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			httpError(w, status, err.Error())
 			return
 		}
-		writeJSON(w, map[string]interface{}{
-			constants.ValueSuccess: true,
-			"results":              results,
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"results": results,
 			"duration": map[string]interface{}{
 				"seconds": elapsed.Seconds(),
 			},
-		})
+		}, "")
 	}
 }
 
@@ -1813,8 +1812,7 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 }
 
 func httpError(w http.ResponseWriter, status int, msg string) {
-	w.WriteHeader(status)
-	writeJSON(w, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: msg})
+	api.Error(w, status, msg)
 }
 
 func GetExposureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
@@ -1868,12 +1866,9 @@ func GetExposureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		writeJSON(w, map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"download_url": downloadURL,
+		}, "")
 	}
 }
 
@@ -1896,24 +1891,13 @@ func normalizeBulkIDs(ids []string) []string {
 
 func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
 	if len(files) == 0 {
-		writeJSON(w, map[string]interface{}{
-			constants.ValueSuccess: false,
-			"message":              "no downloadable files found",
-			"data": map[string]interface{}{
-				"files":      []map[string]string{},
-				"failed_ids": failedIDs,
-			},
-		})
+		api.Error(w, http.StatusOK, "no downloadable files found")
 		return
 	}
-
-	writeJSON(w, map[string]interface{}{
-		constants.ValueSuccess: true,
-		"data": map[string]interface{}{
-			"files":      files,
-			"failed_ids": failedIDs,
-		},
-	})
+	api.Success(w, http.StatusOK, map[string]interface{}{
+		"files":      files,
+		"failed_ids": failedIDs,
+	}, "")
 }
 
 func GetExposureBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
@@ -2267,8 +2251,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			previewRes.Errors = append(previewRes.Errors, "no allocations supplied")
-			writeJSON(w, map[string]interface{}{constants.ValueSuccess: false, "results": []UploadResult{previewRes}})
-			w.WriteHeader(statusCode)
+			api.Error(w, statusCode, "no allocations supplied")
 			return
 		}
 
@@ -2280,7 +2263,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			previewRes.Errors = append(previewRes.Errors, errorsList...)
-			writeJSON(w, map[string]interface{}{constants.ValueSuccess: false, "results": []UploadResult{previewRes}})
+			api.Error(w, http.StatusBadRequest, strings.Join(errorsList, "; "))
 			return
 		}
 
@@ -2435,7 +2418,7 @@ GROUP BY
 				return
 			}
 			previewRes.Errors = append(previewRes.Errors, errorsList...)
-			writeJSON(w, map[string]interface{}{constants.ValueSuccess: false, "results": []UploadResult{previewRes}})
+			api.Error(w, http.StatusBadRequest, strings.Join(errorsList, "; "))
 			return
 		}
 
@@ -2558,7 +2541,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),now(),$11)
 		previewRes.Info = append(previewRes.Info,
 			fmt.Sprintf("Edit applied: %d allocations inserted (replaced previous allocations) for batch %s by user %s",
 				insertedCount, batchUUID.String(), userName))
-		writeJSON(w, map[string]interface{}{constants.ValueSuccess: true, "results": []UploadResult{previewRes}})
+		api.Success(w, http.StatusOK, map[string]interface{}{"results": []UploadResult{previewRes}}, "")
 	}
 }
 

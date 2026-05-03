@@ -146,7 +146,7 @@ type EntitySchemeHolding struct {
 func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -215,7 +215,7 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		resp := CreateProposalResponse{Success: true, ProposalID: proposalID, TotalAmount: req.TotalAmount, AllocationCount: len(allocIDs)}
-		api.RespondWithPayload(w, true, "", resp)
+		api.Success(w, http.StatusOK, resp, "")
 
 	}
 }
@@ -224,7 +224,7 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -291,7 +291,7 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 		}(req.ProposalID, req.UserID, userEmail)
 
 		resp := UpdateProposalResponse{Success: true, ProposalID: req.ProposalID, TotalAmount: req.TotalAmount, AllocationCount: len(req.Allocations)}
-		api.RespondWithPayload(w, true, "", resp)
+		api.Success(w, http.StatusOK, resp, "")
 	}
 }
 
@@ -308,7 +308,7 @@ func BulkRejectProposals(pool *pgxpool.Pool) http.HandlerFunc {
 func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -527,7 +527,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			}()
 		}
 
-		api.RespondWithPayload(w, true, "", response)
+		api.Success(w, http.StatusOK, response, "")
 	}
 }
 
@@ -535,7 +535,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -663,7 +663,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 			}()
 		}
 
-		api.RespondWithPayload(w, true, "", response)
+		api.Success(w, http.StatusOK, response, "")
 	}
 }
 
@@ -671,7 +671,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		ctx := r.Context()
@@ -680,7 +680,7 @@ func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch proposal meta: "+err.Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 
@@ -796,7 +796,7 @@ func fetchProposalRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([
 func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -902,7 +902,7 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 
@@ -910,7 +910,7 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1197,7 +1197,7 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			a["entity_demats"] = entityDemats
 			allocations[i] = a
 		}
-		api.RespondWithPayload(w, true, "", payload)
+		api.Success(w, http.StatusOK, payload, "")
 	}
 }
 
@@ -1205,7 +1205,7 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1311,7 +1311,7 @@ ORDER BY amc_name, scheme_name
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", holdings)
+		api.Success(w, http.StatusOK, holdings, "")
 	}
 }
 
@@ -1319,7 +1319,7 @@ ORDER BY amc_name, scheme_name
 func GetEntityAccounts(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1394,7 +1394,7 @@ func GetEntityAccounts(pool *pgxpool.Pool) http.HandlerFunc {
 			"entity_folios": entityFolios,
 			"entity_demats": entityDemats,
 		}
-		api.RespondWithPayload(w, true, "", payload)
+		api.Success(w, http.StatusOK, payload, "")
 	}
 }
 func normalizeProposalRequest(req *CreateProposalRequest) {

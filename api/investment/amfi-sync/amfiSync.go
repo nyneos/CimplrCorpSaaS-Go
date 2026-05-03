@@ -1,8 +1,8 @@
 package amfisync
 
 import (
+	"CimplrCorpSaas/api"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -40,11 +40,9 @@ type LogEntry struct {
 func SyncSchemesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 		// Initialize response
 		response := SyncResponse{
@@ -77,7 +75,7 @@ func SyncSchemesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				Level:   "ERROR",
 				Message: fmt.Sprintf("Failed to get initial AMC count: %v", err),
 			})
-			json.NewEncoder(w).Encode(response)
+			api.Success(w, http.StatusOK, response, "")
 			return
 		}
 
@@ -87,7 +85,7 @@ func SyncSchemesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				Level:   "ERROR",
 				Message: fmt.Sprintf("Failed to get initial scheme count: %v", err),
 			})
-			json.NewEncoder(w).Encode(response)
+			api.Success(w, http.StatusOK, response, "")
 			return
 		}
 
@@ -108,7 +106,7 @@ func SyncSchemesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				Level:   "ERROR",
 				Message: fmt.Sprintf("Synchronization failed: %v", err),
 			})
-			json.NewEncoder(w).Encode(response)
+			api.Success(w, http.StatusOK, response, "")
 			return
 		}
 
@@ -119,7 +117,7 @@ func SyncSchemesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				Level:   "ERROR",
 				Message: fmt.Sprintf("Failed to get final AMC count: %v", err),
 			})
-			json.NewEncoder(w).Encode(response)
+			api.Success(w, http.StatusOK, response, "")
 			return
 		}
 
@@ -129,7 +127,7 @@ func SyncSchemesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				Level:   "ERROR",
 				Message: fmt.Sprintf("Failed to get final scheme count: %v", err),
 			})
-			json.NewEncoder(w).Encode(response)
+			api.Success(w, http.StatusOK, response, "")
 			return
 		}
 
@@ -169,7 +167,7 @@ func SyncSchemesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		response.Data.NewSchemes = newSchemes
 		response.Data.TotalProcessed = finalSchemeCount
 
-		json.NewEncoder(w).Encode(response)
+		api.Success(w, http.StatusOK, response, "")
 	}
 }
 

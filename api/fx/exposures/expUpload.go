@@ -76,7 +76,7 @@ func UploadExposure(w http.ResponseWriter, r *http.Request) {
 		// ...other exposure fields...
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		api.Error(w, http.StatusBadRequest, "Invalid request")
 		return
 	}
 
@@ -90,29 +90,26 @@ func UploadExposure(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !found {
-		http.Error(w, "Unauthorized: invalid session", http.StatusUnauthorized)
+		api.Error(w, http.StatusUnauthorized, "Unauthorized: invalid session")
 		return
 	}
 
 	buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 	if !ok {
-		http.Error(w, "Business units not found in context", http.StatusInternalServerError)
+		api.Error(w, http.StatusInternalServerError, "Business units not found in context")
 		return
 	}
-	responseNames, _ := json.Marshal(buNames)
-	// Handle the exposure upload logic here
-	w.Write(responseNames)
+	respondWithSuccess(w, http.StatusOK, buNames, "")
 }
 
 // Helper: send JSON error response and log
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	log.Println("[ERROR]", errMsg)
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
+	api.Error(w, status, errMsg)
+}
+
+func respondWithSuccess(w http.ResponseWriter, status int, data interface{}, message string) {
+	api.Success(w, status, data, message)
 }
 
 // Helper: check if string in slice
@@ -442,11 +439,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			results = append(results, rowMap)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 results,
-		})
+		respondWithSuccess(w, http.StatusOK, results, "")
 	}
 }
 
@@ -795,8 +788,7 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 		if perms, ok := exposureUploadPerms[constants.ExposureUpload]; ok {
 			resp[constants.ExposureUpload] = perms
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		respondWithSuccess(w, http.StatusOK, resp, "")
 	}
 }
 
@@ -851,17 +843,10 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 		}
 		count, _ := res.RowsAffected()
 		if count == 0 {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				"message":              "No matching exposure_headers found",
-			})
+			respondWithError(w, http.StatusNotFound, "No matching exposure_headers found")
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"message":              fmt.Sprintf("%d exposure_header(s) marked for delete approval", count),
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{}, fmt.Sprintf("%d exposure_header(s) marked for delete approval", count))
 	}
 }
 
@@ -927,10 +912,7 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			}
 			rejected = append(rejected, rowMap)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"rejected":             rejected,
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{"rejected": rejected}, "")
 	}
 }
 
@@ -1211,13 +1193,12 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"deleted":              results["deleted"],
-			"approved":             results["approved"],
-			"rolled":               results["rolled"],
-			"skipped":              results["skipped"],
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{
+			"deleted":  results["deleted"],
+			"approved": results["approved"],
+			"rolled":   results["rolled"],
+			"skipped":  results["skipped"],
+		}, "")
 	}
 }
 
@@ -1284,19 +1265,10 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 			allErrors = append(allErrors, "No files found.")
 		}
 		if len(allErrors) > 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				constants.ValueError:   strings.Join(allErrors, "; "),
-			})
+			respondWithError(w, http.StatusBadRequest, strings.Join(allErrors, "; "))
 			return
 		}
-		// All successful
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 results,
-		})
+		respondWithSuccess(w, http.StatusOK, results, "")
 
 	}
 }
@@ -1334,13 +1306,9 @@ func GetExposureDownloadURL(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "failed to generate download url")
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{
+			"download_url": downloadURL,
+		}, "")
 	}
 }
 
@@ -1362,26 +1330,14 @@ func normalizeBulkIDs(ids []string) []string {
 }
 
 func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	if len(files) == 0 {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: false,
-			"message":              "no downloadable files found",
-			"data": map[string]interface{}{
-				"files":      []map[string]string{},
-				"failed_ids": failedIDs,
-			},
-		})
+		api.Error(w, http.StatusOK, "no downloadable files found")
 		return
 	}
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: true,
-		"data": map[string]interface{}{
-			"files":      files,
-			"failed_ids": failedIDs,
-		},
-	})
+	respondWithSuccess(w, http.StatusOK, map[string]interface{}{
+		"files":      files,
+		"failed_ids": failedIDs,
+	}, "")
 }
 
 func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {

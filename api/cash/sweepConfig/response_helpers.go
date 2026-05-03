@@ -27,7 +27,6 @@ func ensureData(payload interface{}) interface{} {
 	return payload
 }
 
-
 func respondWithResult(w http.ResponseWriter, success bool, result string) {
 	if success {
 		if strings.TrimSpace(result) == "" {

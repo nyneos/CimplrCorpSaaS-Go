@@ -154,7 +154,7 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&payload)
 
 		if strings.TrimSpace(payload.BatchID) == "" || strings.TrimSpace(payload.FileHash) == "" {
-			api.RespondWithPayload(w, false, "batch_id and file_hash are required", nil)
+			api.Error(w, http.StatusBadRequest, "batch_id and file_hash are required")
 			return
 		}
 
@@ -206,7 +206,7 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -379,7 +379,7 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&payload)
 
 		if strings.TrimSpace(payload.BatchID) == "" || strings.TrimSpace(payload.FileHash) == "" {
-			api.RespondWithPayload(w, false, "batch_id and file_hash are required", nil)
+			api.Error(w, http.StatusBadRequest, "batch_id and file_hash are required")
 			return
 		}
 
@@ -449,7 +449,7 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -655,7 +655,7 @@ func GetExposureUploadBatchesMinimal(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -691,6 +691,6 @@ func GetExposureUploadBatchesMinimal(pool *pgxpool.Pool) http.HandlerFunc {
 			list = append(list, rec)
 		}
 
-		api.RespondWithPayload(w, true, "OK", list)
+		api.Success(w, http.StatusOK, list, "OK")
 	}
 }

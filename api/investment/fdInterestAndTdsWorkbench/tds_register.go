@@ -159,25 +159,20 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			// Don't fail the request — audit is non-critical for workbench entries
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "TDS register entry created successfully",
-			"data": map[string]interface{}{
-				"tds_id":              tdsID,
-				"fd_id":               req.FDID,
-				"fd_ref_no":           fdRefNo,
-				"entity_id":           req.EntityID,
-				"entity_name":         entityName,
-				"bank_id":             bankID,
-				"bank_name":           bankName,
-				"ingestion_source":    "TDS_WORKBENCH",
-				"tds_expected":        req.TDSExpected,
-				"tds_deducted_actual": req.TDSDeductedActual,
-				"tds_variance":        tdsVariance,
-				"exception_raised":    exceptionRaised,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"tds_id":              tdsID,
+			"fd_id":               req.FDID,
+			"fd_ref_no":           fdRefNo,
+			"entity_id":           req.EntityID,
+			"entity_name":         entityName,
+			"bank_id":             bankID,
+			"bank_name":           bankName,
+			"ingestion_source":    "TDS_WORKBENCH",
+			"tds_expected":        req.TDSExpected,
+			"tds_deducted_actual": req.TDSDeductedActual,
+			"tds_variance":        tdsVariance,
+			"exception_raised":    exceptionRaised,
+		}, "TDS register entry created successfully")
 		go func(id, uEmail, fID, eID string) {
 			defer func() { recover() }() //nolint:errcheck
 			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/tds-register/create", id, map[string]interface{}{
@@ -334,12 +329,10 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 			summary["total_variance"] = summary["total_variance"].(float64) + toFloat64(entry["tds_variance"])
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"data":    entries,
 			"summary": summary,
-		})
+		}, "")
 	}
 }
 
@@ -441,15 +434,10 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "TDS reconciliation completed successfully",
-			"data": map[string]interface{}{
-				"updated_count": updatedCount,
-				"action":        req.ReconcileAction,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"updated_count": updatedCount,
+			"action":        req.ReconcileAction,
+		}, "TDS reconciliation completed successfully")
 		go func(uEmail, eID, action string) {
 			defer func() { recover() }() //nolint:errcheck
 			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/tds-register/reconcile", eID, map[string]interface{}{
@@ -554,10 +542,6 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 			payload = []map[string]interface{}{}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    payload,
-		})
+		api.Success(w, http.StatusOK, payload, "")
 	}
 }

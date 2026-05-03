@@ -233,15 +233,13 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 		dec := json.NewDecoder(r.Body)
 		dec.UseNumber()
 		if err := dec.Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		// We no longer enforce a strict magnitude limit here; DB has unlimited numeric precision.
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		// Check entity_level_0 access
@@ -253,8 +251,7 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if !found {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "You do not have access to this business unit"})
+			respondWithError(w, http.StatusForbidden, "You do not have access to this business unit")
 			return
 		}
 		query := `INSERT INTO forward_bookings (
@@ -314,17 +311,14 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 			valPtrs[i] = &vals[i]
 		}
 		if err := row.Scan(valPtrs...); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		result := make(map[string]interface{})
 		for i, col := range cols {
 			result[col] = vals[i]
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": result})
+		respondWithSuccess(w, http.StatusCreated, result, "")
 	}
 }
 
@@ -335,14 +329,12 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		rows, err := db.Query(`
@@ -352,8 +344,7 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 			  AND COALESCE(is_deleted, false) = false
 		`, pq.Array(buNames))
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		cols, _ := rows.Columns()
@@ -396,9 +387,7 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		rows.Close()
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
+		respondWithSuccess(w, http.StatusOK, data, "")
 	}
 }
 
@@ -410,33 +399,27 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
+			respondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 		files := r.MultipartForm.File["files"]
 		if len(files) == 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoFilesUploaded})
+			respondWithError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		// Delegate to service
 		ctx := r.Context()
 		results, err := processUploadForwardBookings(ctx, db, r, buNames)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
+		respondWithSuccess(w, http.StatusOK, results, "")
 	}
 }
 
@@ -706,33 +689,27 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
+			respondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 		files := r.MultipartForm.File["files"]
 		if len(files) == 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoFilesUploaded})
+			respondWithError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		// Delegate to service
 		ctx := r.Context()
 		results, err := processUploadForwardConfirmations(ctx, db, r, buNames)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
+		respondWithSuccess(w, http.StatusOK, results, "")
 	}
 }
 
@@ -979,27 +956,22 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
+			respondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 		// Validate user_id
 		if userID := r.FormValue(constants.KeyUserID); userID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrPleaseLogin})
+			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
 		// Delegate to service
 		ctx := r.Context()
 		results, batchID, err := processUploadBankForwardBookings(ctx, db, r)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_id": batchID, "results": results})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{"batch_id": batchID, "results": results}, "")
 	}
 }
 
@@ -1072,13 +1044,9 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{
+			"download_url": downloadURL,
+		}, "")
 	}
 }
 
@@ -1100,26 +1068,14 @@ func normalizeBulkIDs(ids []string) []string {
 }
 
 func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	if len(files) == 0 {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: false,
-			"message":              "no downloadable files found",
-			"data": map[string]interface{}{
-				"files":      []map[string]string{},
-				"failed_ids": failedIDs,
-			},
-		})
+		api.Error(w, http.StatusOK, "no downloadable files found")
 		return
 	}
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: true,
-		"data": map[string]interface{}{
-			"files":      files,
-			"failed_ids": failedIDs,
-		},
-	})
+	respondWithSuccess(w, http.StatusOK, map[string]interface{}{
+		"files":      files,
+		"failed_ids": failedIDs,
+	}, "")
 }
 
 func GetForwardBulkDownloadURL(db *sql.DB) http.HandlerFunc {

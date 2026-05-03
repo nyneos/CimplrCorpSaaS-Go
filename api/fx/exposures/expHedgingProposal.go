@@ -99,10 +99,6 @@ func GetHedgingProposalsAggregated(db *sql.DB) http.HandlerFunc {
 			}
 			proposals = append(proposals, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"proposals":            proposals,
-		})
+		respondWithSuccess(w, http.StatusOK, proposals, "")
 	}
 }

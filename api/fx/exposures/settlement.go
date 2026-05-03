@@ -81,8 +81,7 @@ func FilterForwardBookingsForSettlement(db *sql.DB) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
+		respondWithSuccess(w, http.StatusOK, data, "")
 	}
 }
 
@@ -152,7 +151,6 @@ func GetForwardBookingsByEntityAndCurrency(db *sql.DB) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
+		respondWithSuccess(w, http.StatusOK, data, "")
 	}
 }

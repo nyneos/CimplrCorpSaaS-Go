@@ -49,7 +49,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RenewalInstructions string  `json:"renewal_instructions"` // kept for compat, maps to auto_renewal
 			Notes               string  `json:"notes"`                // → booking_remarks
 			BookingRemarks      string  `json:"booking_remarks"`
-			OfferValidTill      string  `json:"offer_valid_till"`      // YYYY-MM-DD; bank offer validity date
+			OfferValidTill      string  `json:"offer_valid_till"` // YYYY-MM-DD; bank offer validity date
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -1703,8 +1703,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{constants.ValueSuccess: true, "rows": out}) //nolint:errcheck
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("[FDBooking] GetBookingsWithAudit: %d rows", len(out))
 	}
 }
@@ -2014,8 +2013,7 @@ func GetBookingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{constants.ValueSuccess: true, "audit_logs": out}) //nolint:errcheck
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("[FDBooking] GetBookingAuditHistory: %d records", len(out))
 	}
 }

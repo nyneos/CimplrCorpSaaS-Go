@@ -75,10 +75,7 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 data,
-		})
+		respondWithSuccess(w, http.StatusOK, data, "")
 	}
 }
 
@@ -256,12 +253,7 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 				"bank":                  bankName,
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		// json.NewEncoder(w).Encode(response)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 response,
-		})
+		respondWithSuccess(w, http.StatusOK, response, "")
 	}
 }
 
@@ -434,11 +426,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		// finished processing headers
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 response,
-		})
+		respondWithSuccess(w, http.StatusOK, response, "")
 	}
 }
 
@@ -495,8 +483,7 @@ func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 		// Log to forward_booking_ledger
 		ledgerQuery := `INSERT INTO forward_booking_ledger (booking_id, action_type, action_id, action_date, amount_changed, running_open_amount, user_id) VALUES ($1, 'UTILIZATION', $2, CURRENT_DATE, $3, $4, $5)`
 		_, _ = db.Exec(ledgerQuery, req.BookingID, req.ExposureHeaderID, req.HedgedAmount, newOpenAmount, req.UserID)
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "link": linkMap})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{"link": linkMap}, "")
 	}
 }
 

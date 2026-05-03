@@ -1831,8 +1831,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{constants.ValueSuccess: true, "rows": out}) //nolint:errcheck
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("[FDBooking] GetConfirmationsWithAudit: %d rows", len(out))
 	}
 }
@@ -1939,8 +1938,7 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{constants.ValueSuccess: true, "audit_logs": out}) //nolint:errcheck
+		api.Success(w, http.StatusOK, out, "")
 		api.LogInfo("[FDBooking] GetConfirmationAuditHistory: %d records", len(out))
 	}
 }

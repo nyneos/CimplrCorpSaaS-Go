@@ -3,12 +3,12 @@ package amfisync
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/internal/config"
 	investmentjobs "CimplrCorpSaas/internal/jobs/investment"
 	"CimplrCorpSaas/internal/logger"
@@ -39,11 +39,9 @@ type NAVSyncData struct {
 func UpdateNAVHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 		// Initialize response
 		response := NAVSyncResponse{
@@ -83,7 +81,7 @@ func UpdateNAVHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				Level:   "ERROR",
 				Message: fmt.Sprintf("NAV synchronization failed: %v", err),
 			})
-			json.NewEncoder(w).Encode(response)
+			api.Success(w, http.StatusOK, response, "")
 			return
 		}
 
@@ -100,7 +98,7 @@ func UpdateNAVHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		response.Data.RecordsInserted = recordsProcessed
 		response.Data.RecordsUpdated = 0
 
-		json.NewEncoder(w).Encode(response)
+		api.Success(w, http.StatusOK, response, "")
 	}
 }
 

@@ -26,12 +26,11 @@ import (
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
+	api.Error(w, status, errMsg)
+}
+
+func respondWithSuccess(w http.ResponseWriter, status int, data interface{}, message string) {
+	api.Success(w, status, data, message)
 }
 
 func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
@@ -78,18 +77,7 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		hasErrors := false
-		for _, r := range results {
-			if r[constants.ValueError] != nil {
-				hasErrors = true
-				break
-			}
-		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: !hasErrors,
-			"results":              results,
-		})
+		respondWithSuccess(w, http.StatusOK, results, "")
 	}
 }
 
@@ -478,13 +466,9 @@ func GetMTMDownloadURL(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{
+			"download_url": downloadURL,
+		}, "")
 	}
 }
 
@@ -636,10 +620,6 @@ func GetMTMData(db *sql.DB) http.HandlerFunc {
 			delete(rowMap, "upload_link")
 			data = append(data, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 data,
-		})
+		respondWithSuccess(w, http.StatusOK, data, "")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -44,22 +45,15 @@ type SchemeDataResponse struct {
 func GetSchemeDataHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 		// Parse request body (allow empty body)
 		var req SchemeDataRequest
 		if r.Body != nil && r.ContentLength > 0 {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				response := SchemeDataResponse{
-					Success: false,
-					Data:    []SchemeData{},
-					Message: fmt.Sprintf("Invalid request body: %v", err),
-				}
-				json.NewEncoder(w).Encode(response)
+				api.Error(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 				return
 			}
 		}
@@ -120,12 +114,7 @@ func GetSchemeDataHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		var total int
 		err := pool.QueryRow(ctx, countQuery, args...).Scan(&total)
 		if err != nil {
-			response := SchemeDataResponse{
-				Success: false,
-				Data:    []SchemeData{},
-				Message: fmt.Sprintf("Failed to get count: %v", err),
-			}
-			json.NewEncoder(w).Encode(response)
+			api.Error(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get count: %v", err))
 			return
 		}
 
@@ -136,12 +125,7 @@ func GetSchemeDataHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		// Execute query
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
-			response := SchemeDataResponse{
-				Success: false,
-				Data:    []SchemeData{},
-				Message: fmt.Sprintf("Database query failed: %v", err),
-			}
-			json.NewEncoder(w).Encode(response)
+			api.Error(w, http.StatusInternalServerError, fmt.Sprintf("Database query failed: %v", err))
 			return
 		}
 		defer rows.Close()
@@ -159,12 +143,9 @@ func GetSchemeDataHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Return response
-		response := SchemeDataResponse{
-			Success: true,
-			Data:    schemes,
-			Total:   total,
-			Message: "Success",
-		}
-		json.NewEncoder(w).Encode(response)
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  schemes,
+			"total": total,
+		}, "Success")
 	}
 }

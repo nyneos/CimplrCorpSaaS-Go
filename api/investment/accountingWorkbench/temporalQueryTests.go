@@ -1,9 +1,9 @@
 package accountingworkbench
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -20,7 +20,7 @@ func TestTemporalQueriesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		testDateStr := r.URL.Query().Get("test_date")
 
 		if schemeID == "" {
-			http.Error(w, "scheme_id is required", http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, "scheme_id is required")
 			return
 		}
 
@@ -29,7 +29,7 @@ func TestTemporalQueriesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		if testDateStr != "" {
 			testDate, err = time.Parse(constants.DateFormat, testDateStr)
 			if err != nil {
-				http.Error(w, fmt.Sprintf("invalid test_date format (use YYYY-MM-DD): %v", err), http.StatusBadRequest)
+				api.Error(w, http.StatusBadRequest, fmt.Sprintf("invalid test_date format (use YYYY-MM-DD): %v", err))
 				return
 			}
 		} else {
@@ -38,12 +38,11 @@ func TestTemporalQueriesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		result, err := runTemporalTests(ctx, pool, schemeID, testDate)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("test failed: %v", err), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, fmt.Sprintf("test failed: %v", err))
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(result)
+		api.Success(w, http.StatusOK, result, "")
 	}
 }
 
@@ -345,8 +344,7 @@ func VerifyAllQueriesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			"timestamp":         time.Now().Format(time.RFC3339),
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(response)
+		api.Success(w, http.StatusOK, response, "")
 	}
 }
 

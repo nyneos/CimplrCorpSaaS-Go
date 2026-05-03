@@ -1,6 +1,7 @@
 package accountingworkbench
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"database/sql"
@@ -42,13 +43,13 @@ func CreateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req SettingRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
 			return
 		}
 
 		// Validate required fields
 		if req.SettingKey == "" || req.SettingValue == "" || req.SettingType == "" {
-			http.Error(w, "setting_key, setting_value, and setting_type are required", http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, "setting_key, setting_value, and setting_type are required")
 			return
 		}
 
@@ -61,7 +62,7 @@ func CreateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 			"FORMULA":         true,
 		}
 		if !validTypes[req.SettingType] {
-			http.Error(w, "setting_type must be one of: ROUNDING, ACCOUNT_MAPPING, THRESHOLD, PRECISION, FORMULA", http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, "setting_type must be one of: ROUNDING, ACCOUNT_MAPPING, THRESHOLD, PRECISION, FORMULA")
 			return
 		}
 
@@ -72,7 +73,7 @@ func CreateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			log.Printf("Error starting transaction: %v", err)
-			http.Error(w, constants.ErrTxStartFailed, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -97,17 +98,17 @@ func CreateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil {
 			if strings.Contains(err.Error(), constants.ErrDuplicateKey) {
-				http.Error(w, "Setting with this key already exists", http.StatusConflict)
+				api.Error(w, http.StatusConflict, "Setting with this key already exists")
 				return
 			}
 			log.Printf("Error creating setting: %v", err)
-			http.Error(w, "Failed to create setting: "+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "Failed to create setting: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			log.Printf("Error committing transaction: %v", err)
-			http.Error(w, "Failed to commit transaction", http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "Failed to commit transaction")
 			return
 		}
 
@@ -123,13 +124,7 @@ func CreateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 			CreatedAt:    createdAt,
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Setting created successfully",
-			"data":    response,
-		})
+		api.Success(w, http.StatusCreated, response, "Setting created successfully")
 	}
 }
 
@@ -138,13 +133,13 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		settingKey := r.URL.Query().Get("setting_key")
 		if settingKey == "" {
-			http.Error(w, constants.ErrSettingKeyRequired, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrSettingKeyRequired)
 			return
 		}
 
 		var req SettingRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
 			return
 		}
 
@@ -152,7 +147,7 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			log.Printf("Error starting transaction: %v", err)
-			http.Error(w, constants.ErrTxStartFailed, http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -193,7 +188,7 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 		updateFields = append(updateFields, constants.FormatUpdatedAt)
 
 		if len(updateFields) == 1 { // Only updated_at
-			http.Error(w, "No fields to update", http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, "No fields to update")
 			return
 		}
 
@@ -222,27 +217,22 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 
 		if err == sql.ErrNoRows {
-			http.Error(w, constants.ErrSettingNotFound, http.StatusNotFound)
+			api.Error(w, http.StatusNotFound, constants.ErrSettingNotFound)
 			return
 		}
 		if err != nil {
 			log.Printf("Error updating setting: %v", err)
-			http.Error(w, "Failed to update setting: "+err.Error(), http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "Failed to update setting: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			log.Printf("Error committing transaction: %v", err)
-			http.Error(w, "Failed to commit transaction", http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "Failed to commit transaction")
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Setting updated successfully",
-			"data":    response,
-		})
+		api.Success(w, http.StatusOK, response, "Setting updated successfully")
 	}
 }
 
@@ -285,7 +275,7 @@ func GetSettings(pool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
 			log.Printf("Error fetching settings: %v", err)
-			http.Error(w, "Failed to fetch settings", http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch settings")
 			return
 		}
 		defer rows.Close()
@@ -311,12 +301,10 @@ func GetSettings(pool *pgxpool.Pool) http.HandlerFunc {
 			settings = append(settings, setting)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"count":   len(settings),
-			"data":    settings,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  settings,
+			"count": len(settings),
+		}, "")
 	}
 }
 
@@ -325,7 +313,7 @@ func GetSettingByKey(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		settingKey := r.URL.Query().Get("setting_key")
 		if settingKey == "" {
-			http.Error(w, constants.ErrSettingKeyRequired, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrSettingKeyRequired)
 			return
 		}
 
@@ -352,20 +340,16 @@ func GetSettingByKey(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 
 		if err == sql.ErrNoRows {
-			http.Error(w, constants.ErrSettingNotFound, http.StatusNotFound)
+			api.Error(w, http.StatusNotFound, constants.ErrSettingNotFound)
 			return
 		}
 		if err != nil {
 			log.Printf("Error fetching setting: %v", err)
-			http.Error(w, "Failed to fetch setting", http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch setting")
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    setting,
-		})
+		api.Success(w, http.StatusOK, setting, "")
 	}
 }
 
@@ -374,7 +358,7 @@ func DeleteSetting(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		settingKey := r.URL.Query().Get("setting_key")
 		if settingKey == "" {
-			http.Error(w, constants.ErrSettingKeyRequired, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrSettingKeyRequired)
 			return
 		}
 
@@ -390,19 +374,15 @@ func DeleteSetting(pool *pgxpool.Pool) http.HandlerFunc {
 		err := pool.QueryRow(ctx, query, strings.ToUpper(settingKey)).Scan(&settingID)
 
 		if err == sql.ErrNoRows {
-			http.Error(w, constants.ErrSettingNotFound, http.StatusNotFound)
+			api.Error(w, http.StatusNotFound, constants.ErrSettingNotFound)
 			return
 		}
 		if err != nil {
 			log.Printf("Error deleting setting: %v", err)
-			http.Error(w, "Failed to delete setting", http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "Failed to delete setting")
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Setting deactivated successfully",
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{}, "Setting deactivated successfully")
 	}
 }

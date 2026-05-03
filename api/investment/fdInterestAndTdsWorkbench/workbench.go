@@ -138,13 +138,11 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			 FROM investment.fd_interest_receipt WHERE is_deleted=false`,
 		).Scan(&totalCount, &totalGross, &totalTDS, &totalNet) //nolint:errcheck
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":          true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"summary":          map[string]interface{}{"total_count": totalCount, "total_gross": totalGross, "total_tds": totalTDS, "total_net": totalNet},
 			"status_breakdown": statusData,
 			"recent_receipts":  recentData,
-		})
+		}, "")
 	}
 }
 
@@ -227,13 +225,11 @@ func GetTDSWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 		defer exRows.Close()
 		exData, _ := rowsToMapSlice(exRows)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":           true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"summary":           map[string]interface{}{"total_count": totalCount, "total_expected": totalExpected, "total_actual": totalActual, "total_variance": totalVariance, "exception_count": exceptionCount},
 			"entity_breakdown":  entityData,
 			"recent_exceptions": exData,
-		})
+		}, "")
 	}
 }
 
@@ -299,12 +295,10 @@ func GetReconciliationDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		defer pipelineRows.Close()
 		pipelineData, _ := rowsToMapSlice(pipelineRows)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":            true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"recent_runs":        runData,
 			"exception_pipeline": pipelineData,
-		})
+		}, "")
 	}
 }
 
@@ -385,11 +379,9 @@ func GetInterestVsAccrualAnalysis(pool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 		out, _ := rowsToMapSlice(rows)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    out,
-			"count":   len(out),
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"data":  out,
+			"count": len(out),
+		}, "")
 	}
 }

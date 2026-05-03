@@ -28,8 +28,7 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 			CancellationReason string             `json:"cancellation_reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BookingAmounts) == 0 || req.CancellationDate == "" || req.CancellationRate == 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "user_id, booking_amounts (map), cancellation_date, and cancellation_rate are required"})
+			respondWithError(w, http.StatusBadRequest, "user_id, booking_amounts (map), cancellation_date, and cancellation_rate are required")
 			return
 		}
 		for bid, amtCancelled := range req.BookingAmounts {
@@ -37,8 +36,7 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 			var currentStatus string
 			err := db.QueryRow(`SELECT status FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&currentStatus)
 			if err != nil || currentStatus != "Pending Cancellation" {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Booking not in pending cancellation state"})
+				respondWithError(w, http.StatusBadRequest, "Booking not in pending cancellation state")
 				return
 			}
 			// Perform the actual cancellation logic (ledger, cancellation record, etc.)
@@ -79,11 +77,7 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 				_, _ = db.Exec(`UPDATE forward_bookings SET status = 'Partiallu Cancelled' WHERE system_transaction_id = $1`, bid)
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"message":              "Forward Cancellation Request Processed Successfully",
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{}, "Forward Cancellation Request Processed Successfully")
 	}
 }
 
@@ -94,14 +88,12 @@ func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIIsRequired})
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve business units"})
+			respondWithError(w, http.StatusInternalServerError, "failed to retrieve business units")
 			return
 		}
 		// Join forward_cancellations with forward_bookings to get entity_level_0 (bu)
@@ -113,8 +105,7 @@ func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
 		`
 		rows, err := db.Query(getQuery, pq.Array(buNames))
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve pending cancellations"})
+			respondWithError(w, http.StatusInternalServerError, "failed to retrieve pending cancellations")
 			return
 		}
 		defer rows.Close()
@@ -169,11 +160,7 @@ func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
 			}
 			bookings = append(bookings, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"bookings":             bookings,
-		})
+		respondWithSuccess(w, http.StatusOK, bookings, "")
 	}
 }
 
@@ -241,11 +228,7 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 				return
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"message":              "Forward rollover request submitted for approval",
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{}, "Forward rollover request submitted for approval")
 	}
 }
 
@@ -395,8 +378,7 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
+		respondWithSuccess(w, http.StatusOK, data, "")
 	}
 }
 
@@ -487,8 +469,7 @@ func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
+		respondWithSuccess(w, http.StatusOK, data, "")
 	}
 }
 
@@ -531,11 +512,7 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 				return
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"message":              "Forward cancellation request submitted for approval",
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{}, "Forward cancellation request submitted for approval")
 	}
 }
 
@@ -636,11 +613,7 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"message":              "Forward Rollover Request Processed Successfully",
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{}, "Forward Rollover Request Processed Successfully")
 	}
 }
 
@@ -650,14 +623,12 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIIsRequired})
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve business units"})
+			respondWithError(w, http.StatusInternalServerError, "failed to retrieve business units")
 			return
 		}
 		// Join forward_rollovers with forward_bookings to get entity_level_0 (bu)
@@ -669,8 +640,7 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 	       `
 		rows, err := db.Query(getQuery, pq.Array(buNames))
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve pending rollovers"})
+			respondWithError(w, http.StatusInternalServerError, "failed to retrieve pending rollovers")
 			return
 		}
 		defer rows.Close()
@@ -725,10 +695,6 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 			}
 			bookings = append(bookings, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"bookings":             bookings,
-		})
+		respondWithSuccess(w, http.StatusOK, bookings, "")
 	}
 }

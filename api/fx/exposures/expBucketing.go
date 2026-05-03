@@ -240,11 +240,7 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "No records updated")
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"updated":              updated,
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{"updated": updated}, "")
 	}
 }
 
@@ -370,8 +366,7 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		if perms, ok := exposureBucketingPerms[constants.ExposureBucketing]; ok {
 			resp[constants.ExposureBucketing] = perms
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		respondWithSuccess(w, http.StatusOK, resp, "")
 	}
 }
 
@@ -428,11 +423,7 @@ func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
 			}
 			approved = append(approved, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"Approved":             approved,
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{"approved": approved}, "")
 	}
 }
 
@@ -489,10 +480,6 @@ func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
 			}
 			rejected = append(rejected, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"Rejected":             rejected,
-		})
+		respondWithSuccess(w, http.StatusOK, map[string]interface{}{"rejected": rejected}, "")
 	}
 }
