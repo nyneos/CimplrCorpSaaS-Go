@@ -102,40 +102,36 @@ func GetProjectionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ProposalID string `json:"proposal_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if strings.TrimSpace(req.ProposalID) == "" {
-			api.RespondWithResult(w, false, "proposal_id required")
+			respondWithResult(w, false, "proposal_id required")
 			return
 		}
 
 		ctx := r.Context()
 		var uploadS3Key interface{}
 		if err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM cimplrcorpsaas.cashflow_proposal WHERE proposal_id = $1 AND COALESCE(is_deleted, false) = false`, req.ProposalID).Scan(&uploadS3Key); err != nil {
-			api.RespondWithResult(w, false, "Proposal not found or query error: "+err.Error())
+			respondWithResult(w, false, "Proposal not found or query error: "+err.Error())
 			return
 		}
 
 		key := strings.TrimSpace(ifaceToString(uploadS3Key))
 		if key == "" {
-			api.RespondWithResult(w, false, "no file available")
+			respondWithResult(w, false, "no file available")
 			return
 		}
 
 		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			respondWithResult(w, false, "Failed to generate download url: "+err.Error())
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"download_url": downloadURL,
+		}, "")
 	}
 }
 
@@ -146,12 +142,12 @@ func GetProjectionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ProposalIDs []string `json:"proposal_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if len(req.ProposalIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrProposalIDsRequired)
+			respondWithResult(w, false, constants.ErrProposalIDsRequired)
 			return
 		}
 
@@ -190,26 +186,14 @@ func GetProjectionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(files) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				"message":              "no downloadable files found",
-				"data": map[string]interface{}{
-					"files":      []map[string]string{},
-					"failed_ids": failedIDs,
-				},
-			})
+			api.Error(w, http.StatusOK, "no downloadable files found")
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"files":      files,
-				"failed_ids": failedIDs,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
+		}, "")
 	}
 }
 
@@ -221,7 +205,7 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason      string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONShort)
+			respondWithResult(w, false, constants.ErrInvalidJSONShort)
 			return
 		}
 		requestedBy := ""
@@ -232,22 +216,22 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		if len(req.ProposalIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrProposalIDsRequired)
+			respondWithResult(w, false, constants.ErrProposalIDsRequired)
 			return
 		}
 		if strings.TrimSpace(req.Reason) == "" {
-			api.RespondWithResult(w, false, "comment required")
+			respondWithResult(w, false, "comment required")
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
+			respondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -272,21 +256,21 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			`, pid).Scan(&latestActionType, &latestStatus)
 			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
-				api.RespondWithResult(w, false, "delete request already pending for proposal: "+pid)
+				respondWithResult(w, false, "delete request already pending for proposal: "+pid)
 				return
 			}
 			if _, err := tx.Exec(ctx, q, pid, req.Reason, requestedBy); err != nil {
-				api.RespondWithResult(w, false, "Failed to insert audit for proposal "+pid+": "+err.Error())
+				respondWithResult(w, false, "Failed to insert audit for proposal "+pid+": "+err.Error())
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, constants.ErrCommitFailedCapitalized+err.Error())
+			respondWithResult(w, false, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
-		api.RespondWithResult(w, true, "")
+		respondWithResult(w, true, "")
 	}
 }
 
@@ -299,7 +283,7 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONShort)
+			respondWithResult(w, false, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -310,14 +294,14 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
+			respondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -331,7 +315,7 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `SELECT DISTINCT ON (proposal_id) action_id, proposal_id, processing_status FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = ANY($1) ORDER BY proposal_id, requested_at DESC, action_id DESC`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to fetch audit rows: "+err.Error())
+			respondWithResult(w, false, "Failed to fetch audit rows: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -370,23 +354,23 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				msg += "Cannot reject already approved proposals: " + strings.Join(cannotReject, ", ")
 			}
-			api.RespondWithResult(w, false, msg)
+			respondWithResult(w, false, msg)
 			return
 		}
 
 		// Update to REJECTED
 		upd := `UPDATE cimplrcorpsaas.audit_action_cashflow_proposal SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
 		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, actionIDs); err != nil {
-			api.RespondWithResult(w, false, "Failed to update audit rows: "+err.Error())
+			respondWithResult(w, false, "Failed to update audit rows: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, constants.ErrCommitFailedCapitalized+err.Error())
+			respondWithResult(w, false, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
-		api.RespondWithResult(w, true, "")
+		respondWithResult(w, true, "")
 	}
 }
 
@@ -399,7 +383,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONShort)
+			respondWithResult(w, false, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -410,22 +394,22 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		if len(req.ProposalIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrProposalIDsRequired)
+			respondWithResult(w, false, constants.ErrProposalIDsRequired)
 			return
 		}
 		if strings.TrimSpace(req.Comment) == "" {
-			api.RespondWithResult(w, false, "comment required")
+			respondWithResult(w, false, "comment required")
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
+			respondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -439,7 +423,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		sel := `SELECT DISTINCT ON (proposal_id) action_id, proposal_id, action_type, processing_status FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = ANY($1) ORDER BY proposal_id, requested_at DESC, action_id DESC`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to fetch audit rows: "+err.Error())
+			respondWithResult(w, false, "Failed to fetch audit rows: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -480,7 +464,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				}
 				msg += "Cannot approve already approved proposals: " + strings.Join(cannotApprove, ", ")
 			}
-			api.RespondWithResult(w, false, msg)
+			respondWithResult(w, false, msg)
 			return
 		}
 
@@ -494,7 +478,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
     WHERE action_id = ANY($3)
 	`
 		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, actionIDs); err != nil {
-			api.RespondWithResult(w, false, "Failed to update audit rows: "+err.Error())
+			respondWithResult(w, false, "Failed to update audit rows: "+err.Error())
 			return
 		}
 
@@ -528,17 +512,17 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				}
 			}
 			if err != nil {
-				api.RespondWithResult(w, false, "Failed to delete proposals after retries: "+err.Error())
+				respondWithResult(w, false, "Failed to delete proposals after retries: "+err.Error())
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, constants.ErrCommitFailedCapitalized+err.Error())
+			respondWithResult(w, false, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
-		api.RespondWithResult(w, true, "")
+		respondWithResult(w, true, "")
 	}
 }
 
@@ -569,7 +553,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
@@ -581,11 +565,11 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		if len(req.Projections) == 0 {
-			api.RespondWithResult(w, false, "No projections provided")
+			respondWithResult(w, false, "No projections provided")
 			return
 		}
 
@@ -594,7 +578,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
+			respondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -622,7 +606,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		insProp := `INSERT INTO cimplrcorpsaas.cashflow_proposal (proposal_id, proposal_name, currency_code, effective_date, recurrence_type, status) VALUES ($1,$2,$3,$4,$5,$6)`
 		if _, err := tx.Exec(ctx, insProp, proposalID, propName, currency, effDate, recurrenceType, "Active"); err != nil {
-			api.RespondWithResult(w, false, "Failed to create proposal: "+err.Error())
+			respondWithResult(w, false, "Failed to create proposal: "+err.Error())
 			return
 		}
 
@@ -632,19 +616,19 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			entry := p.Entry
 			// normalize and validate
 			if strings.TrimSpace(entry.Type) == "" || strings.TrimSpace(entry.CategoryName) == "" || strings.TrimSpace(entry.Entity) == "" || strings.TrimSpace(entry.Department) == "" {
-				api.RespondWithResult(w, false, fmt.Sprintf("Missing required fields in projection index %d", idx))
+				respondWithResult(w, false, fmt.Sprintf("Missing required fields in projection index %d", idx))
 				return
 			}
 			tUpper := Capitalize(strings.ToLower(strings.TrimSpace(entry.Type)))
 			if tUpper != "Inflow" && tUpper != "Outflow" {
-				api.RespondWithResult(w, false, "Invalid cashflow type: "+entry.Type)
+				respondWithResult(w, false, "Invalid cashflow type: "+entry.Type)
 				return
 			}
 
 			// verify category exists
 			var tmp string
 			if err := tx.QueryRow(ctx, `SELECT category_name FROM mastercashflowcategory WHERE category_name=$1`, entry.CategoryName).Scan(&tmp); err != nil {
-				api.RespondWithResult(w, false, "Master category not found: "+entry.CategoryName)
+				respondWithResult(w, false, "Master category not found: "+entry.CategoryName)
 				return
 			}
 
@@ -655,7 +639,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				entityParam = s
 				// verify entity exists if provided
 				if err := tx.QueryRow(ctx, `SELECT entity_name FROM masterentitycash WHERE entity_name=$1`, s).Scan(&tmp); err != nil {
-					api.RespondWithResult(w, false, "Master entity not found: "+s)
+					respondWithResult(w, false, "Master entity not found: "+s)
 					return
 				}
 			} else {
@@ -664,7 +648,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if d := strings.TrimSpace(entry.Department); d != "" {
 				deptParam = d
 				if err := tx.QueryRow(ctx, `SELECT centre_code FROM mastercostprofitcenter WHERE centre_code=$1`, d).Scan(&tmp); err != nil {
-					api.RespondWithResult(w, false, "Master department not found: "+d)
+					respondWithResult(w, false, "Master department not found: "+d)
 					return
 				}
 			} else {
@@ -683,7 +667,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cp = "Generic"
 			}
 			if _, err := tx.Exec(ctx, insItem, itemID, proposalID, description, tUpper, entry.CategoryName, entry.ExpectedAmount, entry.Recurring, entry.Frequency, effDate, nil, entityParam, deptParam, cp, nil, entry.Frequency); err != nil {
-				api.RespondWithResult(w, false, "Failed to create item: "+err.Error())
+				respondWithResult(w, false, "Failed to create item: "+err.Error())
 				return
 			}
 
@@ -758,7 +742,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				projID := fmt.Sprintf("PROJ-%06d", time.Now().UnixNano()%1000000)
 				insMonthly := `INSERT INTO cimplrcorpsaas.cashflow_projection_monthly (projection_id, item_id, year, month, projected_amount) VALUES ($1,$2,$3,$4,$5)`
 				if _, err := tx.Exec(ctx, insMonthly, projID, itemID, year, mInt, amt); err != nil {
-					api.RespondWithResult(w, false, "Failed to create monthly projection: "+err.Error())
+					respondWithResult(w, false, "Failed to create monthly projection: "+err.Error())
 					return
 				}
 			}
@@ -769,17 +753,17 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// audit - one per proposal
 		auditQ := `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
 		if _, err := tx.Exec(ctx, auditQ, proposalID, "Imported", createdBy); err != nil {
-			api.RespondWithResult(w, false, "Failed to create audit: "+err.Error())
+			respondWithResult(w, false, "Failed to create audit: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
+			respondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 		committed = true
 
-		api.RespondWithResult(w, true, fmt.Sprintf("Successfully imported %d projections", created))
+		respondWithResult(w, true, fmt.Sprintf("Successfully imported %d projections", created))
 	}
 }
 
@@ -795,7 +779,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
@@ -808,7 +792,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -871,7 +855,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, baseQuery, params...)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to query proposals: "+err.Error())
+			respondWithResult(w, false, "Failed to query proposals: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -927,7 +911,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&pi.OldCounterpartyName,
 			)
 			if err != nil {
-				api.RespondWithResult(w, false, "Failed to scan proposal: "+err.Error())
+				respondWithResult(w, false, "Failed to scan proposal: "+err.Error())
 				return
 			}
 			proposals = append(proposals, pi)
@@ -935,12 +919,12 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := rows.Err(); err != nil {
-			api.RespondWithResult(w, false, "Error reading proposals: "+err.Error())
+			respondWithResult(w, false, "Error reading proposals: "+err.Error())
 			return
 		}
 
 		if len(proposals) == 0 {
-			api.RespondWithResult(w, false, "No projections found")
+			respondWithResult(w, false, "No projections found")
 			return
 		}
 
@@ -963,7 +947,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		monthlyRows, err := pgxPool.Query(ctx, monthlyQuery, itemIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to query monthly projections: "+err.Error())
+			respondWithResult(w, false, "Failed to query monthly projections: "+err.Error())
 			return
 		}
 		defer monthlyRows.Close()
@@ -981,7 +965,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			err := monthlyRows.Scan(&itemID, &year, &month, &amount)
 			if err != nil {
-				api.RespondWithResult(w, false, "Failed to scan monthly projection: "+err.Error())
+				respondWithResult(w, false, "Failed to scan monthly projection: "+err.Error())
 				return
 			}
 
@@ -999,7 +983,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := monthlyRows.Err(); err != nil {
-			api.RespondWithResult(w, false, "Error reading monthly projections: "+err.Error())
+			respondWithResult(w, false, "Error reading monthly projections: "+err.Error())
 			return
 		}
 
@@ -1055,10 +1039,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Return JSON response
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(response)
+		api.Success(w, http.StatusOK, response, "")
 	}
 }
 
@@ -1069,7 +1050,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ProposalID string `json:"proposal_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		valid := false
@@ -1080,11 +1061,11 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		if strings.TrimSpace(req.ProposalID) == "" {
-			api.RespondWithResult(w, false, "proposal_id required")
+			respondWithResult(w, false, "proposal_id required")
 			return
 		}
 
@@ -1143,7 +1124,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&h_deletedAt,
 			&h_deletedBy,
 		); err != nil {
-			api.RespondWithResult(w, false, "Proposal not found or query error: "+err.Error())
+			respondWithResult(w, false, "Proposal not found or query error: "+err.Error())
 			return
 		}
 
@@ -1213,7 +1194,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := pgxPool.Query(ctx, itemQ, req.ProposalID)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to query proposal items: "+err.Error())
+			respondWithResult(w, false, "Failed to query proposal items: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1272,19 +1253,16 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := rows.Err(); err != nil {
-			api.RespondWithResult(w, false, "Error reading items: "+err.Error())
+			respondWithResult(w, false, "Error reading items: "+err.Error())
 			return
 		}
 
 		if len(items) == 0 {
-			resp := map[string]interface{}{
-				constants.ValueSuccess: true,
-				"header":               header,
-				"projections":          []interface{}{},
-				"actions":              actions,
-			}
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(resp)
+			api.Success(w, http.StatusOK, map[string]interface{}{
+				"header":      header,
+				"projections": []interface{}{},
+				"actions":     actions,
+			}, "")
 			return
 		}
 
@@ -1395,7 +1373,7 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
@@ -1407,7 +1385,7 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -1435,7 +1413,7 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to query proposals: "+err.Error())
+			respondWithResult(w, false, "Failed to query proposals: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1456,7 +1434,7 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&uploadS3Key,
 				&processingStatus,
 			); err != nil {
-				api.RespondWithResult(w, false, "Error reading proposals: "+err.Error())
+				respondWithResult(w, false, "Error reading proposals: "+err.Error())
 				return
 			}
 
@@ -1474,17 +1452,13 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := rows.Err(); err != nil {
-			api.RespondWithResult(w, false, "Error reading rows: "+err.Error())
+			respondWithResult(w, false, "Error reading rows: "+err.Error())
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"proposals": out,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"proposals": out,
+		}, "")
 	}
 }
 
@@ -1498,14 +1472,14 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID      string                   `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
+			respondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1516,7 +1490,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var curEffDate time.Time
 		err = tx.QueryRow(ctx, `SELECT proposal_name, currency_code, effective_date, recurrence_type FROM cimplrcorpsaas.cashflow_proposal WHERE proposal_id=$1`, proposalID).Scan(&curName, &curCurrency, &curEffDate, &curType)
 		if err != nil {
-			api.RespondWithResult(w, false, "Proposal not found: "+err.Error())
+			respondWithResult(w, false, "Proposal not found: "+err.Error())
 			return
 		}
 
@@ -1545,7 +1519,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			proposalID,
 		)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to update proposal: "+err.Error())
+			respondWithResult(w, false, "Failed to update proposal: "+err.Error())
 			return
 		}
 
@@ -1564,7 +1538,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			err = tx.QueryRow(ctx, `SELECT category_id, department_id, entity_name, expected_amount, cashflow_type, recurrence_pattern, recurrence_frequency, description, is_recurring, start_date, end_date, counterparty_name FROM cimplrcorpsaas.cashflow_proposal_item WHERE item_id=$1`, itemID).Scan(
 				&curCat, &curDept, &curEnt, &curAmt, &curType, &curRecPat, &curRecFreq, &curDesc, &curRec, &curStart, &curEnd, &curCP)
 			if err != nil {
-				api.RespondWithResult(w, false, "Item not found: "+err.Error())
+				respondWithResult(w, false, "Item not found: "+err.Error())
 				return
 			}
 			startStr := ifaceToString(entry["start_date"])
@@ -1628,13 +1602,13 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				itemID,
 			)
 			if err != nil {
-				api.RespondWithResult(w, false, "Failed to update item: "+err.Error())
+				respondWithResult(w, false, "Failed to update item: "+err.Error())
 				return
 			}
 			if ifaceToFloat(entry["expectedAmount"]) != ifaceToFloat(curAmt) {
 				_, err = tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.cashflow_projection_monthly WHERE item_id=$1`, itemID)
 				if err != nil {
-					api.RespondWithResult(w, false, "Failed to delete monthly projections: "+err.Error())
+					respondWithResult(w, false, "Failed to delete monthly projections: "+err.Error())
 					return
 				}
 				projMap, ok := proj["projection"].(map[string]interface{})
@@ -1655,7 +1629,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.cashflow_projection_monthly (projection_id, item_id, year, month, projected_amount) VALUES ($1,$2,$3,$4,$5)`,
 							projectionID, itemID, yearNum, monthNum, amt)
 						if err != nil {
-							api.RespondWithResult(w, false, "Failed to insert monthly projection: "+err.Error())
+							respondWithResult(w, false, "Failed to insert monthly projection: "+err.Error())
 							return
 						}
 					}
@@ -1664,16 +1638,16 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now())`, proposalID, req.UserID)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to insert audit action: "+err.Error())
+			respondWithResult(w, false, "Failed to insert audit action: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
+			respondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 
-		api.RespondWithResult(w, true, "Proposal updated and submitted for approval")
+		respondWithResult(w, true, "Proposal updated and submitted for approval")
 	}
 }
 

@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	notif "CimplrCorpSaas/api/notification/catalog"
 	"archive/zip"
@@ -141,9 +142,7 @@ func respondWithError(w http.ResponseWriter, err error, userMsg string, code int
 	if userMsg == "" {
 		userMsg = "Internal server error"
 	}
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": userMsg})
+	apictx.Error(w, code, userMsg)
 }
 
 // insertUploadRow inserts a metadata row and returns the generated id
@@ -540,18 +539,15 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 		message = fmt.Sprintf("Processed zip: %d succeeded, %d failed, %d skipped", successCount, failedCount, skippedCount)
 	}
 
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":   failedCount == 0 && successCount > 0,
-		"status":    overallStatus,
-		"message":   message,
-		"processed": successCount + failedCount,
-		"succeeded": successCount,
-		"failed":    failedCount,
-		"skipped":   skippedCount,
-		"files":     results,
-	})
+	apictx.Success(w, http.StatusOK, map[string]interface{}{
+		"overall_success": failedCount == 0 && successCount > 0,
+		"status":          overallStatus,
+		"processed":       successCount + failedCount,
+		"succeeded":       successCount,
+		"failed":          failedCount,
+		"skipped":         skippedCount,
+		"files":           results,
+	}, message)
 }
 
 // UploadBankStatementV3Handler returns http.Handler that accepts file upload and streams preview
@@ -645,8 +641,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			}
 			tx = nil
 			resp := map[string]interface{}{"status": "exists", "id": existingID.String}
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(resp)
+			apictx.Success(w, http.StatusOK, resp, "")
 			return
 		} else if err != nil && err != sql.ErrNoRows {
 			respondWithError(w, err, "Failed to check existing uploads", http.StatusInternalServerError)
@@ -769,12 +764,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			tx = nil
 		}
 
-		// Send the single combined JSON response
-		w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(combinedResponse); err != nil {
-			log.Printf("failed to write response: %v", err)
-		}
+		apictx.Success(w, http.StatusOK, combinedResponse, "")
 
 		// Fire notification asynchronously — does not block the HTTP response.
 		// For PDF/DOCX: this is the "preview uploaded" event. The "committed" event
@@ -943,7 +933,7 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 				Issues: issues,
 			},
 		}
-		json.NewEncoder(w).Encode(output)
+		apictx.Success(w, http.StatusOK, output, "")
 	})
 }
 
@@ -1479,15 +1469,7 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			"transactions_under_review":       reviewTransactions,
 		}
 
-		// Wrap in standardized response format
-		result := map[string]interface{}{
-			"data":    data,
-			"message": "Bank statement uploaded successfully",
-			"success": true,
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(result)
+		apictx.Success(w, http.StatusOK, data, "Bank statement uploaded successfully")
 
 		// Fire rich notification for the commit event (PDF path).
 		// For CSV/XLS the V2 handler fires its own notification via UploadBankStatementV2Handler.
@@ -1559,8 +1541,7 @@ func GetPDFMetadataHandler(db *sql.DB) http.Handler {
 			respondWithError(w, err, "Failed to fetch metadata", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(row)
+		apictx.Success(w, http.StatusOK, row, "")
 	})
 }
 

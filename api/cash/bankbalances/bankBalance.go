@@ -219,7 +219,7 @@ func GetBankBalanceDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			BalanceID string `json:"balance_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.BalanceID) == "" {
-			api.RespondWithResult(w, false, "balance_id required")
+			respondWithResult(w, false, "balance_id required")
 			return
 		}
 
@@ -231,31 +231,27 @@ func GetBankBalanceDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE b.balance_id = $1
 		`, req.BalanceID).Scan(&uploadS3Key)
 		if err != nil {
-			api.RespondWithResult(w, false, "balance_id not found")
+			respondWithResult(w, false, "balance_id not found")
 			return
 		}
 
 		key := strings.TrimSpace(uploadS3Key.ValueOrZero().(string))
 		if key == "" {
-			api.RespondWithResult(w, false, "no file available")
+			respondWithResult(w, false, "no file available")
 			return
 		}
 
 		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to generate download url")
+			respondWithResult(w, false, "failed to generate download url")
 			return
 		}
 
 		insertBankBalanceDownloadAudit(ctx, pgxPool, req.BalanceID, requestedByFromCtx(ctx, req.UserID), key)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"download_url": downloadURL,
+		}, "")
 	}
 }
 
@@ -266,7 +262,7 @@ func GetBankBalanceBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			BalanceIDs []string `json:"balance_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.BalanceIDs) == 0 {
-			api.RespondWithResult(w, false, "balance_ids required")
+			respondWithResult(w, false, "balance_ids required")
 			return
 		}
 
@@ -312,26 +308,14 @@ func GetBankBalanceBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(files) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				"message":              "no downloadable files found",
-				"data": map[string]interface{}{
-					"files":      []map[string]string{},
-					"failed_ids": failedIDs,
-				},
-			})
+			api.Error(w, http.StatusOK, "no downloadable files found")
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"files":      files,
-				"failed_ids": failedIDs,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
+		}, "")
 	}
 }
 
@@ -392,12 +376,12 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason         string   `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
+			respondWithResult(w, false, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -422,29 +406,29 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			missing = append(missing, "balance_amount")
 		}
 		if len(missing) > 0 {
-			api.RespondWithResult(w, false, "missing required fields: "+fmt.Sprintf("%v", missing))
+			respondWithResult(w, false, "missing required fields: "+fmt.Sprintf("%v", missing))
 			return
 		}
 
 		if !ctxHasApprovedBankName(ctx, req.BankName) {
-			api.RespondWithResult(w, false, constants.ErrBankInvalidOrInactive)
+			respondWithResult(w, false, constants.ErrBankInvalidOrInactive)
 			return
 		}
 		if !ctxHasApprovedBankAccount(ctx, req.AccountNo) {
-			api.RespondWithResult(w, false, constants.ErrInvalidAccount)
+			respondWithResult(w, false, constants.ErrInvalidAccount)
 			return
 		}
 
 		// currency validation (middleware may provide approved currencies)
 		if !ctxHasApprovedCurrency(ctx, req.CurrencyCode) {
-			api.RespondWithResult(w, false, "Invalid or inactive currency")
+			respondWithResult(w, false, "Invalid or inactive currency")
 			return
 		}
 
 		// resolve user name/email from prevalidated session (fallback: active sessions)
 		requestedBy := requestedByFromCtx(ctx, req.UserID)
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -457,7 +441,7 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// parse optional as_of_date and time into proper types in SQL; pass as strings
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to begin tx: "+pgUserFriendlyMessage(err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -489,7 +473,7 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nullifyFloat(req.ClosingBalance),
 		)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to insert bank balance: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to insert bank balance: "+pgUserFriendlyMessage(err))
 			return
 		}
 
@@ -497,16 +481,16 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		auditQ := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
 		_, err = tx.Exec(ctx, auditQ, balanceID, nullifyEmpty(req.Reason), requestedBy)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to create audit action: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to create audit action: "+pgUserFriendlyMessage(err))
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			respondWithResult(w, false, "failed to commit: "+err.Error())
 			return
 		}
 
-		api.RespondWithResult(w, true, balanceID)
+		respondWithResult(w, true, balanceID)
 	}
 }
 
@@ -520,16 +504,16 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment    string   `json:"comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BalanceIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
+			respondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 		checkerBy := requestedByFromCtx(ctx, req.UserID)
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 		if code, msg := ensureBalanceIDsAccessible(ctx, pgxPool, req.BalanceIDs); code != 0 {
-			api.RespondWithError(w, code, msg)
+			api.Error(w, code, msg)
 			return
 		}
 
@@ -537,7 +521,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `SELECT DISTINCT ON (balance_id) action_id, balance_id, actiontype, processing_status FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, requested_at DESC, action_id DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.BalanceIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to fetch latest audits: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to fetch latest audits: "+pgUserFriendlyMessage(err))
 			return
 		}
 		defer rows.Close()
@@ -548,12 +532,12 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var actionID, balanceID, actionType, procStatus string
 			if err := rows.Scan(&actionID, &balanceID, &actionType, &procStatus); err != nil {
-				api.RespondWithResult(w, false, "failed to read latest audits: "+pgUserFriendlyMessage(err))
+				respondWithResult(w, false, "failed to read latest audits: "+pgUserFriendlyMessage(err))
 				return
 			}
 			found[balanceID] = true
 			if procStatus != "PENDING_APPROVAL" && procStatus != "PENDING_EDIT_APPROVAL" && procStatus != "PENDING_DELETE_APPROVAL" {
-				api.RespondWithResult(w, false, "cannot approve non-pending balance: "+balanceID)
+				respondWithResult(w, false, "cannot approve non-pending balance: "+balanceID)
 				return
 			}
 			actionIDs = append(actionIDs, actionID)
@@ -569,13 +553,13 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(missing) > 0 {
-			api.RespondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
+			respondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to begin tx: "+pgUserFriendlyMessage(err))
 			return
 		}
 		committed := false
@@ -589,7 +573,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		upd := `UPDATE auditactionbankbalances SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
 		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to approve actions: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to approve actions: "+pgUserFriendlyMessage(err))
 			return
 		}
 
@@ -618,32 +602,33 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`
 			drows, derr := tx.Query(ctx, delQ, deleteActionIDs)
 			if derr != nil {
-				api.RespondWithResult(w, false, "failed to soft delete balances: "+pgUserFriendlyMessage(derr))
+				respondWithResult(w, false, "failed to soft delete balances: "+pgUserFriendlyMessage(derr))
 				return
 			}
 			defer drows.Close()
 			for drows.Next() {
 				var id string
 				if err := drows.Scan(&id); err != nil {
-					api.RespondWithResult(w, false, "failed to read deleted balances: "+pgUserFriendlyMessage(err))
+					respondWithResult(w, false, "failed to read deleted balances: "+pgUserFriendlyMessage(err))
 					return
 				}
 				deleted = append(deleted, id)
 			}
 			if drows.Err() != nil {
-				api.RespondWithResult(w, false, "failed to read deleted balances: "+pgUserFriendlyMessage(drows.Err()))
+				respondWithResult(w, false, "failed to read deleted balances: "+pgUserFriendlyMessage(drows.Err()))
 				return
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit approve: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to commit approve: "+pgUserFriendlyMessage(err))
 			return
 		}
 		committed = true
 
-		// return structured JSON
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(actionIDs), "deleted": deleted})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"approved_count": len(actionIDs),
+			"deleted":        deleted,
+		}, "")
 	}
 }
 
@@ -657,23 +642,23 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment    string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BalanceIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
+			respondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 		checkerBy := requestedByFromCtx(ctx, req.UserID)
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 		if code, msg := ensureBalanceIDsAccessible(ctx, pgxPool, req.BalanceIDs); code != 0 {
-			api.RespondWithError(w, code, msg)
+			api.Error(w, code, msg)
 			return
 		}
 
 		sel := `SELECT DISTINCT ON (balance_id) action_id, balance_id, processing_status FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, requested_at DESC, action_id DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.BalanceIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to fetch latest audits: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to fetch latest audits: "+pgUserFriendlyMessage(err))
 			return
 		}
 		defer rows.Close()
@@ -685,12 +670,12 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var balanceID string
 			var procStatus string
 			if err := rows.Scan(&actionID, &balanceID, &procStatus); err != nil {
-				api.RespondWithResult(w, false, "failed to read latest audits: "+pgUserFriendlyMessage(err))
+				respondWithResult(w, false, "failed to read latest audits: "+pgUserFriendlyMessage(err))
 				return
 			}
 			found[balanceID] = true
 			if procStatus != "PENDING_APPROVAL" && procStatus != "PENDING_EDIT_APPROVAL" && procStatus != "PENDING_DELETE_APPROVAL" {
-				api.RespondWithResult(w, false, "cannot reject non-pending balance: "+balanceID)
+				respondWithResult(w, false, "cannot reject non-pending balance: "+balanceID)
 				return
 			}
 			actionIDs = append(actionIDs, actionID)
@@ -702,13 +687,13 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(missing) > 0 {
-			api.RespondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
+			respondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to begin tx: "+pgUserFriendlyMessage(err))
 			return
 		}
 		committed := false
@@ -721,7 +706,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		upd := `UPDATE auditactionbankbalances SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
 		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to reject actions: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to reject actions: "+pgUserFriendlyMessage(err))
 			return
 		}
 
@@ -734,13 +719,14 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// `
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit reject: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to commit reject: "+pgUserFriendlyMessage(err))
 			return
 		}
 		committed = true
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rejected_count": len(actionIDs)})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"rejected_count": len(actionIDs),
+		}, "")
 	}
 }
 
@@ -754,22 +740,22 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason     string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BalanceIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
+			respondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 		requestedBy := requestedByFromCtx(ctx, req.UserID)
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 		if code, msg := ensureBalanceIDsAccessible(ctx, pgxPool, req.BalanceIDs); code != 0 {
-			api.RespondWithError(w, code, msg)
+			api.Error(w, code, msg)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			respondWithResult(w, false, "failed to begin tx: "+err.Error())
 			return
 		}
 		committed := false
@@ -791,21 +777,21 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
 			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
-				api.RespondWithResult(w, false, fmt.Sprintf("delete request already pending for balance_id: %s", id))
+				respondWithResult(w, false, fmt.Sprintf("delete request already pending for balance_id: %s", id))
 				return
 			}
 			if _, err := tx.Exec(ctx, ins, id, nullifyEmpty(req.Reason), requestedBy); err != nil {
-				api.RespondWithResult(w, false, "failed to create delete audit: "+pgUserFriendlyMessage(err))
+				respondWithResult(w, false, "failed to create delete audit: "+pgUserFriendlyMessage(err))
 				return
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			respondWithResult(w, false, "failed to commit: "+err.Error())
 			return
 		}
 		committed = true
 
-		api.RespondWithResult(w, true, fmt.Sprintf("created %d delete requests", len(req.BalanceIDs)))
+		respondWithResult(w, true, fmt.Sprintf("created %d delete requests", len(req.BalanceIDs)))
 	}
 }
 
@@ -825,16 +811,16 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "Missing user_id in body")
+			respondWithResult(w, false, "Missing user_id in body")
 			return
 		}
 
 		if middlewares.GetSessionFromContext(ctx) == nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -946,7 +932,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			query := baseSelect + whereStr + " ORDER BY b.as_of_date DESC, b.balance_id"
 			rows, err = pgxPool.Query(ctx, query, args...)
 			if err != nil {
-				api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+				respondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 				return
 			}
 			defer rows.Close()
@@ -1036,7 +1022,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if rows.Err() != nil {
-				api.RespondWithResult(w, false, "DB rows error: "+rows.Err().Error())
+				respondWithResult(w, false, "DB rows error: "+rows.Err().Error())
 				return
 			}
 
@@ -1053,7 +1039,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						var rbyPtr *string
 						var ratPtr *time.Time
 						if err := auditRows.Scan(&bid, &atype, &rbyPtr, &ratPtr); err != nil {
-							api.RespondWithResult(w, false, "failed to read audit details: "+pgUserFriendlyMessage(err))
+							respondWithResult(w, false, "failed to read audit details: "+pgUserFriendlyMessage(err))
 							return
 						}
 						if auditMap[bid] == nil {
@@ -1086,7 +1072,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						var ps, rb, at, aid, cb, cc, r *string
 						var rat, cat *time.Time
 						if err := auditLatestRows.Scan(&bid, &ps, &rb, &rat, &at, &aid, &cb, &cat, &cc, &r); err != nil {
-							api.RespondWithResult(w, false, "failed to read latest audit details: "+pgUserFriendlyMessage(err))
+							respondWithResult(w, false, "failed to read latest audit details: "+pgUserFriendlyMessage(err))
 							return
 						}
 						auditLatestMap[bid] = map[string]*string{
@@ -1148,13 +1134,9 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: true,
-				"data": map[string]interface{}{
-					"bank_balances": partialRows,
-				},
-			})
+			api.Success(w, http.StatusOK, map[string]interface{}{
+				"bank_balances": partialRows,
+			}, "")
 		}
 	}
 }
@@ -1311,27 +1293,27 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason    string                 `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if req.UserID == "" || req.BalanceID == "" {
-			api.RespondWithResult(w, false, "user_id and balance_id required")
+			respondWithResult(w, false, "user_id and balance_id required")
 			return
 		}
 
 		ctx := r.Context()
 		requestedBy := requestedByFromCtx(ctx, req.UserID)
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 		if code, msg := ensureBalanceIDsAccessible(ctx, pgxPool, []string{req.BalanceID}); code != 0 {
-			api.RespondWithError(w, code, msg)
+			api.Error(w, code, msg)
 			return
 		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			respondWithResult(w, false, "failed to begin tx: "+err.Error())
 			return
 		}
 		defer func() {
@@ -1353,15 +1335,15 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&curAsOfDate, &curAsOfTime, &curBalanceType, &curBalanceAmount, &curStatementType, &curSourceChannel,
 			&curOpening, &curCredits, &curDebits, &curClosing,
 		); err != nil {
-			api.RespondWithResult(w, false, "failed to fetch existing balance: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to fetch existing balance: "+pgUserFriendlyMessage(err))
 			return
 		}
 		if curBankName.Valid && !ctxHasApprovedBankName(ctx, curBankName.S) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrBankInvalidOrInactive)
+			api.Error(w, http.StatusForbidden, constants.ErrBankInvalidOrInactive)
 			return
 		}
 		if curAccountNo.Valid && !ctxHasApprovedBankAccount(ctx, curAccountNo.S) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrInvalidAccount)
+			api.Error(w, http.StatusForbidden, constants.ErrInvalidAccount)
 			return
 		}
 
@@ -1398,13 +1380,13 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			switch k {
 			case "bank_name":
 				if !ctxHasApprovedBankName(ctx, fmt.Sprint(v)) {
-					api.RespondWithError(w, http.StatusForbidden, constants.ErrBankInvalidOrInactive)
+					api.Error(w, http.StatusForbidden, constants.ErrBankInvalidOrInactive)
 					return
 				}
 				addStrField("bank_name", "old_bank_name", v, curBankName)
 			case "account_no":
 				if !ctxHasApprovedBankAccount(ctx, fmt.Sprint(v)) {
-					api.RespondWithError(w, http.StatusForbidden, constants.ErrInvalidAccount)
+					api.Error(w, http.StatusForbidden, constants.ErrInvalidAccount)
 					return
 				}
 				addStrField("account_no", "old_account_no", v, curAccountNo)
@@ -1412,7 +1394,7 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				addStrField("iban", "old_iban", v, curIban)
 			case "currency_code":
 				if !ctxHasApprovedCurrency(ctx, fmt.Sprint(v)) {
-					api.RespondWithError(w, http.StatusForbidden, "Invalid or inactive currency")
+					api.Error(w, http.StatusForbidden, "Invalid or inactive currency")
 					return
 				}
 				addStrField("currency_code", "old_currency_code", v, curCurrency)
@@ -1450,7 +1432,7 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(sets) == 0 {
-			api.RespondWithResult(w, false, "no valid fields to update")
+			respondWithResult(w, false, "no valid fields to update")
 			return
 		}
 
@@ -1459,24 +1441,24 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, req.BalanceID)
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithResult(w, false, "failed to update balance: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to update balance: "+pgUserFriendlyMessage(err))
 			return
 		}
 
 		// insert audit action
 		auditQ := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())`
 		if _, err := tx.Exec(ctx, auditQ, req.BalanceID, nullifyEmpty(req.Reason), requestedBy); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit action: "+pgUserFriendlyMessage(err))
+			respondWithResult(w, false, "failed to create audit action: "+pgUserFriendlyMessage(err))
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			respondWithResult(w, false, "failed to commit: "+err.Error())
 			return
 		}
 		// clear tx rollback defer
 		tx = nil
 
-		api.RespondWithResult(w, true, req.BalanceID)
+		respondWithResult(w, true, req.BalanceID)
 	}
 }

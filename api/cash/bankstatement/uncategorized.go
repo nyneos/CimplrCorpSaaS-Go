@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
@@ -12,7 +13,7 @@ import (
 func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			apictx.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -23,12 +24,12 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, constants.ErrInvalidJSONPrefix+err.Error(), http.StatusBadRequest)
+			apictx.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			http.Error(w, constants.ErrUserIIsRequired, http.StatusBadRequest)
+			apictx.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -78,7 +79,7 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 
 		rows, err := db.Query(query, args...)
 		if err != nil {
-			http.Error(w, "Database query failed: "+err.Error(), http.StatusInternalServerError)
+			apictx.Error(w, http.StatusInternalServerError, "Database query failed: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -199,7 +200,6 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		db.QueryRow(countQuery).Scan(&totalCount)
 
 		response := map[string]interface{}{
-			"success":      true,
 			"transactions": transactions,
 			"count":        len(transactions),
 			"total_count":  totalCount,
@@ -210,7 +210,7 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			response["offset"] = offset
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(response)
+		apictx.Success(w, http.StatusOK, response, "")
 	})
 }
+

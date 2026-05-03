@@ -21,13 +21,13 @@ type bankBalanceAuditRequest struct {
 func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		var req bankBalanceAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.BalanceID) == "" {
-			http.Error(w, "Missing balance_id", http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, "Missing balance_id")
 			return
 		}
 
@@ -133,11 +133,7 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Standardize: always return 'rows' as the array field
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
-			"audit_logs": payload,
-		})
+		api.Success(w, http.StatusOK, payload, "")
 	}
 }
 

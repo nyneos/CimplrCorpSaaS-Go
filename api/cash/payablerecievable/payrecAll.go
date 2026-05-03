@@ -33,7 +33,7 @@ func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.TransactionID) == "" {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_id is required"})
+			api.Error(w, http.StatusOK, "transaction_id is required")
 			return
 		}
 
@@ -42,7 +42,7 @@ func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		requestedBy := transactionRequestedBy(req.UserID)
 		if txType == "" {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type is required"})
+			api.Error(w, http.StatusOK, "transaction_type is required")
 			return
 		}
 
@@ -52,46 +52,38 @@ func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM tr_payables WHERE payable_id = $1 AND is_deleted != TRUE`, req.TransactionID).Scan(&uploadS3Key)
 			if err != nil {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "payable not found"})
+				api.Error(w, http.StatusOK, "payable not found")
 				return
 			}
 		case "RECEIVABLE":
 			err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM tr_receivables WHERE receivable_id = $1 AND is_deleted != TRUE`, req.TransactionID).Scan(&uploadS3Key)
 			if err != nil {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "receivable not found"})
+				api.Error(w, http.StatusOK, "receivable not found")
 				return
 			}
 		default:
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type must be PAYABLE or RECEIVABLE"})
+			api.Error(w, http.StatusOK, "transaction_type must be PAYABLE or RECEIVABLE")
 			return
 		}
 
 		if uploadS3Key == nil || strings.TrimSpace(*uploadS3Key) == "" {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "no file available"})
+			api.Error(w, http.StatusNotFound, "no file available")
 			return
 		}
 
 		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, strings.TrimSpace(*uploadS3Key), 15*time.Minute)
 		if err != nil {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to generate download url"})
+			api.Error(w, http.StatusInternalServerError, "failed to generate download url")
 			return
 		}
 
 		insertTransactionDownloadAudit(ctx, pgxPool, txType, req.TransactionID, requestedBy, strings.TrimSpace(*uploadS3Key))
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"download_url": downloadURL,
+		}, "")
 	}
 }
 
@@ -104,7 +96,7 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.TransactionIDs) == 0 {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_ids are required"})
+			api.Error(w, http.StatusOK, "transaction_ids are required")
 			return
 		}
 
@@ -113,7 +105,7 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		requestedBy := transactionRequestedBy(req.UserID)
 		if txType == "" {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type is required"})
+			api.Error(w, http.StatusOK, "transaction_type is required")
 			return
 		}
 
@@ -142,7 +134,7 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			default:
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type must be PAYABLE or RECEIVABLE"})
+				api.Error(w, http.StatusOK, "transaction_type must be PAYABLE or RECEIVABLE")
 				return
 			}
 
@@ -165,26 +157,14 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(files) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				"message":              "no downloadable files found",
-				"data": map[string]interface{}{
-					"files":      []map[string]string{},
-					"failed_ids": failedIDs,
-				},
-			})
+			api.Error(w, http.StatusOK, "no downloadable files found")
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"files":      files,
-				"failed_ids": failedIDs,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
+		}, "")
 	}
 }
 
@@ -459,14 +439,14 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				UserID string `json:"user_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-				http.Error(w, "user_id required in body", http.StatusBadRequest)
+				api.Error(w, http.StatusBadRequest, "user_id required in body")
 				return
 			}
 			userID = req.UserID
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
-				http.Error(w, constants.ErrUserIDRequired, http.StatusBadRequest)
+				api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 				return
 			}
 		}
@@ -481,23 +461,23 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			http.Error(w, constants.ErrInvalidSession, http.StatusUnauthorized)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			http.Error(w, constants.ErrFailedToParseMultipartForm, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
 		if len(r.MultipartForm.File) == 0 {
-			http.Error(w, constants.ErrNoFilesUploaded, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 
 		// Read mapping
 		mapRows, err := pgxPool.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_input_transactions`)
 		if err != nil {
-			http.Error(w, "Mapping error", http.StatusInternalServerError)
+			api.Error(w, http.StatusInternalServerError, "Mapping error")
 			return
 		}
 		mapping := make(map[string]string)
@@ -515,14 +495,14 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, fileHeader := range files {
 				file, err := fileHeader.Open()
 				if err != nil {
-					http.Error(w, "Failed to open file: "+fileHeader.Filename, http.StatusBadRequest)
+					api.Error(w, http.StatusBadRequest, "Failed to open file: "+fileHeader.Filename)
 					return
 				}
 				ext := getFileExt(fileHeader.Filename)
 				records, err := parseUploadFile(file, ext)
 				file.Close()
 				if err != nil || len(records) < 2 {
-					http.Error(w, "Invalid or empty file: "+fileHeader.Filename, http.StatusBadRequest)
+					api.Error(w, http.StatusBadRequest, "Invalid or empty file: "+fileHeader.Filename)
 					return
 				}
 				headerRow := records[0]
@@ -556,7 +536,7 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					pgx.CopyFromRows(copyRows),
 				)
 				if err != nil {
-					http.Error(w, "Failed to stage data: "+err.Error(), http.StatusInternalServerError)
+					api.Error(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
 					return
 				}
 
@@ -570,7 +550,7 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						RETURNING payable_id
 					`, batchID)
 					if err != nil {
-						http.Error(w, "Final insert error (payables): "+err.Error(), http.StatusInternalServerError)
+						api.Error(w, http.StatusInternalServerError, "Final insert error (payables): "+err.Error())
 						return
 					}
 					var payableIDs []string
@@ -590,7 +570,7 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						auditSQL := "INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
 						_, auditErr := pgxPool.Exec(ctx, auditSQL)
 						if auditErr != nil {
-							http.Error(w, "Audit log error (payables): "+auditErr.Error(), http.StatusInternalServerError)
+							api.Error(w, http.StatusInternalServerError, "Audit log error (payables): "+auditErr.Error())
 							return
 						}
 					}
@@ -603,7 +583,7 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						RETURNING receivable_id
 					`, batchID)
 					if err != nil {
-						http.Error(w, "Final insert error (receivables): "+err.Error(), http.StatusInternalServerError)
+						api.Error(w, http.StatusInternalServerError, "Final insert error (receivables): "+err.Error())
 						return
 					}
 					var receivableIDs []string
@@ -623,21 +603,17 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						auditSQL := "INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
 						_, auditErr := pgxPool.Exec(ctx, auditSQL)
 						if auditErr != nil {
-							http.Error(w, "Audit log error (receivables): "+auditErr.Error(), http.StatusInternalServerError)
+							api.Error(w, http.StatusInternalServerError, "Audit log error (receivables): "+auditErr.Error())
 							return
 						}
 					}
 				} else {
-					http.Error(w, "Unknown transaction_type: "+txTypeUpper, http.StatusBadRequest)
+					api.Error(w, http.StatusBadRequest, "Unknown transaction_type: "+txTypeUpper)
 					return
 				}
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"message":              "All transactions uploaded and processed",
-		})
+		api.Success(w, http.StatusOK, map[string]any{}, "All transactions uploaded and processed")
 	}
 }
 
@@ -701,7 +677,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		payableRows, err := pgxPool.Query(ctx, `SELECT payable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code, upload_s3_key, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_amount, old_currency_code FROM tr_payables WHERE is_deleted != TRUE`)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
+			api.Error(w, http.StatusOK, err.Error())
 			return
 		}
 		defer payableRows.Close()
@@ -717,7 +693,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var oldCurrencyPtr *string
 			if err := payableRows.Scan(&p.PayableID, &p.EntityName, &p.CounterpartyName, &p.InvoiceNo, &invoiceDate, &dueDate, &p.Amount, &p.CurrencyCode, &uploadS3Key, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
+				api.Error(w, http.StatusOK, err.Error())
 				return
 			}
 			if uploadS3Key != nil {
@@ -777,7 +753,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		receivableRows, err := pgxPool.Query(ctx, `SELECT receivable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code, upload_s3_key, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_invoice_amount, old_currency_code FROM tr_receivables WHERE is_deleted != TRUE`)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
+			api.Error(w, http.StatusOK, err.Error())
 			return
 		}
 		defer receivableRows.Close()
@@ -793,7 +769,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var oldCurrencyPtr *string
 			if err := receivableRows.Scan(&rcv.ReceivableID, &rcv.EntityName, &rcv.CounterpartyName, &rcv.InvoiceNo, &invoiceDate, &dueDate, &rcv.Amount, &rcv.CurrencyCode, &uploadS3Key, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
+				api.Error(w, http.StatusOK, err.Error())
 				return
 			}
 			if uploadS3Key != nil {
@@ -958,16 +934,10 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		// Merge payables and receivables into a single array if you want a flat list, or return two arrays as separate fields
-		// Here, we return both as separate top-level arrays for clarity
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"payables":    payables,
-				"receivables": receivables,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"payables":    payables,
+			"receivables": receivables,
+		}, "")
 	}
 }
 
@@ -980,7 +950,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason         string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.TransactionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidJSON})
+			api.Error(w, http.StatusOK, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -992,7 +962,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidSession})
+			api.Error(w, http.StatusOK, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1009,7 +979,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
+			api.Error(w, http.StatusOK, "failed to begin tx")
 			return
 		}
 		committed := false
@@ -1034,7 +1004,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
 			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "delete request already pending for transaction: " + id})
+				api.Error(w, http.StatusOK, "delete request already pending for transaction: " + id)
 				return
 			}
 			var actionID string
@@ -1054,7 +1024,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
 			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "delete request already pending for transaction: " + id})
+				api.Error(w, http.StatusOK, "delete request already pending for transaction: " + id)
 				return
 			}
 			var actionID string
@@ -1064,12 +1034,12 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrTxCommitFailed})
+			api.Error(w, http.StatusOK, constants.ErrTxCommitFailed)
 			return
 		}
 		committed = true
 
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "message": "delete requests created"})
+		api.Success(w, http.StatusOK, map[string]any{}, "delete requests created")
 	}
 }
 
@@ -1082,7 +1052,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment        string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.TransactionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidJSON})
+			api.Error(w, http.StatusOK, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -1094,7 +1064,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidSession})
+			api.Error(w, http.StatusOK, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1117,7 +1087,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
+			api.Error(w, http.StatusOK, "failed to begin tx")
 			return
 		}
 		committed := false
@@ -1132,15 +1102,15 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, pid := range payIDs {
 				var aid, atype, status string
 				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`, pid).Scan(&aid, &atype, &status); err != nil {
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + pid})
+					api.Error(w, http.StatusOK, "missing latest audit for transaction: " + pid)
 					return
 				}
 				if aid == "" {
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + pid})
+					api.Error(w, http.StatusOK, "missing latest audit for transaction: " + pid)
 					return
 				}
 				if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot reject non-pending transaction: " + pid})
+					api.Error(w, http.StatusOK, "cannot reject non-pending transaction: " + pid)
 					return
 				}
 				payActionIDs = append(payActionIDs, aid)
@@ -1155,15 +1125,15 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, rid := range recIDs {
 				var aid, atype, status string
 				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`, rid).Scan(&aid, &atype, &status); err != nil {
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + rid})
+					api.Error(w, http.StatusOK, "missing latest audit for transaction: " + rid)
 					return
 				}
 				if aid == "" {
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + rid})
+					api.Error(w, http.StatusOK, "missing latest audit for transaction: " + rid)
 					return
 				}
 				if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot reject non-pending transaction: " + rid})
+					api.Error(w, http.StatusOK, "cannot reject non-pending transaction: " + rid)
 					return
 				}
 				recActionIDs = append(recActionIDs, aid)
@@ -1174,7 +1144,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(payActionIDs) == 0 && len(recActionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "no valid actions found for provided ids"})
+			api.Error(w, http.StatusOK, "no valid actions found for provided ids")
 			return
 		}
 		commentArg := interface{}(nil)
@@ -1195,7 +1165,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM tr_payables p
 				WHERE aa.action_id = ANY($1) AND aa.payable_id = p.payable_id
 			`, payEditActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to capture old payable values on rejection"})
+				api.Error(w, http.StatusOK, "failed to capture old payable values on rejection")
 				return
 			}
 		}
@@ -1213,29 +1183,29 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM tr_receivables r
 				WHERE aa.action_id = ANY($1) AND aa.receivable_id = r.receivable_id
 			`, recEditActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to capture old receivable values on rejection"})
+				api.Error(w, http.StatusOK, "failed to capture old receivable values on rejection")
 				return
 			}
 		}
 		if len(payActionIDs) > 0 {
 			if _, err := tx.Exec(ctx, `UPDATE auditactionpayable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, payActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to reject payable actions"})
+				api.Error(w, http.StatusOK, "failed to reject payable actions")
 				return
 			}
 		}
 		if len(recActionIDs) > 0 {
 			if _, err := tx.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, recActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to reject receivable actions"})
+				api.Error(w, http.StatusOK, "failed to reject receivable actions")
 				return
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrTxCommitFailed})
+			api.Error(w, http.StatusOK, constants.ErrTxCommitFailed)
 			return
 		}
 		committed = true
 
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rejected_count": len(payActionIDs) + len(recActionIDs)})
+		api.Success(w, http.StatusOK, map[string]interface{}{"rejected_count": len(payActionIDs) + len(recActionIDs)}, "")
 	}
 }
 
@@ -1248,7 +1218,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment        string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.TransactionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidJSON})
+			api.Error(w, http.StatusOK, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -1260,7 +1230,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidSession})
+			api.Error(w, http.StatusOK, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1291,15 +1261,15 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, pid).Scan(&aid, &atype, &status); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + pid})
+				api.Error(w, http.StatusOK, "missing latest audit for transaction: " + pid)
 				return
 			}
 			if aid == "" {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + pid})
+				api.Error(w, http.StatusOK, "missing latest audit for transaction: " + pid)
 				return
 			}
 			if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot approve non-pending transaction: " + pid})
+				api.Error(w, http.StatusOK, "cannot approve non-pending transaction: " + pid)
 				return
 			}
 			payActionIDs = append(payActionIDs, aid)
@@ -1318,15 +1288,15 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, rid).Scan(&aid, &atype, &status); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + rid})
+				api.Error(w, http.StatusOK, "missing latest audit for transaction: " + rid)
 				return
 			}
 			if aid == "" {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + rid})
+				api.Error(w, http.StatusOK, "missing latest audit for transaction: " + rid)
 				return
 			}
 			if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot approve non-pending transaction: " + rid})
+				api.Error(w, http.StatusOK, "cannot approve non-pending transaction: " + rid)
 				return
 			}
 			recActionIDs = append(recActionIDs, aid)
@@ -1338,12 +1308,12 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(payActionIDs) == 0 && len(recActionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "no valid actions found for provided ids"})
+			api.Error(w, http.StatusOK, "no valid actions found for provided ids")
 			return
 		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
+			api.Error(w, http.StatusOK, "failed to begin tx")
 			return
 		}
 		committed := false
@@ -1360,13 +1330,13 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(payActionIDs) > 0 {
 			if _, err := tx.Exec(ctx, `UPDATE auditactionpayable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, payActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to approve payable audits"})
+				api.Error(w, http.StatusOK, "failed to approve payable audits")
 				return
 			}
 		}
 		if len(recActionIDs) > 0 {
 			if _, err := tx.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, recActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to approve receivable audits"})
+				api.Error(w, http.StatusOK, "failed to approve receivable audits")
 				return
 			}
 		}
@@ -1385,7 +1355,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM tr_payables p
 				WHERE aa.action_id = ANY($1) AND aa.payable_id = p.payable_id
 			`, payEditActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to capture old payable values: " + err.Error()})
+				api.Error(w, http.StatusOK, "failed to capture old payable values: " + err.Error())
 				return
 			}
 			if _, err := tx.Exec(ctx, `
@@ -1401,7 +1371,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM auditactionpayable aa
 				WHERE aa.action_id = ANY($1) AND aa.payable_id = p.payable_id
 			`, payEditActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to apply new payable values: " + err.Error()})
+				api.Error(w, http.StatusOK, "failed to apply new payable values: " + err.Error())
 				return
 			}
 		}
@@ -1420,7 +1390,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM tr_receivables r
 				WHERE aa.action_id = ANY($1) AND aa.receivable_id = r.receivable_id
 			`, recEditActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to capture old receivable values: " + err.Error()})
+				api.Error(w, http.StatusOK, "failed to capture old receivable values: " + err.Error())
 				return
 			}
 			if _, err := tx.Exec(ctx, `
@@ -1436,7 +1406,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM auditactionreceivable aa
 				WHERE aa.action_id = ANY($1) AND aa.receivable_id = r.receivable_id
 			`, recEditActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to apply new receivable values: " + err.Error()})
+				api.Error(w, http.StatusOK, "failed to apply new receivable values: " + err.Error())
 				return
 			}
 		}
@@ -1451,7 +1421,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE aa.action_id = ANY($1)
 				  AND aa.payable_id = p.payable_id
 			`, payDeleteActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to soft delete payables"})
+				api.Error(w, http.StatusOK, "failed to soft delete payables")
 				return
 			}
 		}
@@ -1465,17 +1435,17 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE aa.action_id = ANY($1)
 				  AND aa.receivable_id = r.receivable_id
 			`, recDeleteActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to soft delete receivables"})
+				api.Error(w, http.StatusOK, "failed to soft delete receivables")
 				return
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrTxCommitFailed})
+			api.Error(w, http.StatusOK, constants.ErrTxCommitFailed)
 			return
 		}
 		committed = true
 
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(payActionIDs) + len(recActionIDs)})
+		api.Success(w, http.StatusOK, map[string]interface{}{"approved_count": len(payActionIDs) + len(recActionIDs)}, "")
 	}
 }
 
@@ -1487,11 +1457,11 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Items  []map[string]interface{} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidJSONShort})
+			api.Error(w, http.StatusOK, constants.ErrInvalidJSONShort)
 			return
 		}
 		if req.UserID == "" || len(req.Items) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "user_id and items are required"})
+			api.Error(w, http.StatusOK, "user_id and items are required")
 			return
 		}
 
@@ -1503,13 +1473,13 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidSession})
+			api.Error(w, http.StatusOK, constants.ErrInvalidSession)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
+			api.Error(w, http.StatusOK, "failed to begin tx")
 			return
 		}
 		committed := false
@@ -1528,7 +1498,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tRaw, ok := itm["transaction_type"]
 			if !ok {
 				tx.Rollback(ctx)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("item %d missing transaction_type", idx)})
+				api.Error(w, http.StatusOK, fmt.Sprintf("item %d missing transaction_type", idx))
 				return
 			}
 			txType := strings.ToUpper(fmt.Sprint(tRaw))
@@ -1557,7 +1527,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if entityName == "" || counterparty == "" || invoiceNumber == "" || currency == "" {
 				tx.Rollback(ctx)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("item %d missing required fields", idx)})
+				api.Error(w, http.StatusOK, fmt.Sprintf("item %d missing required fields", idx))
 				return
 			}
 
@@ -1580,7 +1550,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				q := `INSERT INTO tr_payables (entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING payable_id`
 				if err := tx.QueryRow(ctx, q, entityName, counterparty, invoiceNumber, invDateVal, dueDateVal, amountF, currency).Scan(&pid); err != nil {
 					tx.Rollback(ctx)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("failed to insert payable item %d: %v", idx, err)})
+					api.Error(w, http.StatusOK, fmt.Sprintf("failed to insert payable item %d: %v", idx, err))
 					return
 				}
 				createdPayables = append(createdPayables, pid)
@@ -1588,7 +1558,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditQ := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now()) RETURNING action_id`
 				if err := tx.QueryRow(ctx, auditQ, pid, userName).Scan(&actionID); err != nil {
 					tx.Rollback(ctx)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("failed to create audit for payable %s: %v", pid, err)})
+					api.Error(w, http.StatusOK, fmt.Sprintf("failed to create audit for payable %s: %v", pid, err))
 					return
 				}
 				payableActionIDs = append(payableActionIDs, actionID)
@@ -1598,7 +1568,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				q := `INSERT INTO tr_receivables (entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING receivable_id`
 				if err := tx.QueryRow(ctx, q, entityName, counterparty, invoiceNumber, invDateVal, dueDateVal, amountF, currency).Scan(&rid); err != nil {
 					tx.Rollback(ctx)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("failed to insert receivable item %d: %v", idx, err)})
+					api.Error(w, http.StatusOK, fmt.Sprintf("failed to insert receivable item %d: %v", idx, err))
 					return
 				}
 				createdReceivables = append(createdReceivables, rid)
@@ -1606,25 +1576,25 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditQ := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now()) RETURNING action_id`
 				if err := tx.QueryRow(ctx, auditQ, rid, userName).Scan(&actionID); err != nil {
 					tx.Rollback(ctx)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("failed to create audit for receivable %s: %v", rid, err)})
+					api.Error(w, http.StatusOK, fmt.Sprintf("failed to create audit for receivable %s: %v", rid, err))
 					return
 				}
 				receivableActionIDs = append(receivableActionIDs, actionID)
 
 			} else {
 				tx.Rollback(ctx)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("item %d unknown transaction_type: %s", idx, txType)})
+				api.Error(w, http.StatusOK, fmt.Sprintf("item %d unknown transaction_type: %s", idx, txType))
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrTxCommitFailed})
+			api.Error(w, http.StatusOK, constants.ErrTxCommitFailed)
 			return
 		}
 		committed = true
 
-		resp := map[string]interface{}{constants.ValueSuccess: true}
+		resp := map[string]interface{}{}
 		if len(createdPayables) > 0 {
 			resp["created_payables"] = createdPayables
 			resp["payable_action_ids"] = payableActionIDs
@@ -1634,7 +1604,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			resp["receivable_action_ids"] = receivableActionIDs
 		}
 
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, resp, "")
 	}
 }
 
@@ -1648,11 +1618,11 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason string                 `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if req.UserID == "" || req.ID == "" || len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id, id and fields are required")
+			api.Error(w, http.StatusBadRequest, "user_id, id and fields are required")
 			return
 		}
 
@@ -1664,14 +1634,14 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 
 		id := strings.TrimSpace(req.ID)
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		committed := false
@@ -1734,7 +1704,7 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if newEntity == nil && newCounter == nil && newInvoice == nil && newCurrency == nil &&
 				newInvDate == nil && newDueDate == nil && newAmount == nil {
-				api.RespondWithResult(w, false, "no valid fields to update")
+				respondWithResult(w, false, "no valid fields to update")
 				tx.Rollback(ctx)
 				return
 			}
@@ -1769,7 +1739,7 @@ reasonArg := interface{}(nil)
 				oldEntity, oldCounter, oldInvoice, oldInvDate, oldDueDate, oldAmount, oldCurrency,
 				newEntity, newCounter, newInvoice, newInvDate, newDueDate, newAmount, newCurrency).Scan(&actionID); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to create audit for payable: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "failed to create audit for payable: "+err.Error())
 				return
 			}
 
@@ -1824,7 +1794,7 @@ reasonArg := interface{}(nil)
 
 			if newEntity == nil && newCounter == nil && newInvoice == nil && newCurrency == nil &&
 				newInvDate == nil && newDueDate == nil && newAmount == nil {
-				api.RespondWithResult(w, false, "no valid fields to update")
+				respondWithResult(w, false, "no valid fields to update")
 				tx.Rollback(ctx)
 				return
 			}
@@ -1859,22 +1829,26 @@ reasonArg := interface{}(nil)
 				oldEntity, oldCounter, oldInvoice, oldInvDate, oldDueDate, oldAmount, oldCurrency,
 				newEntity, newCounter, newInvoice, newInvDate, newDueDate, newAmount, newCurrency).Scan(&actionID); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to create audit for receivable: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "failed to create audit for receivable: "+err.Error())
 				return
 			}
 
 		} else {
-			api.RespondWithError(w, http.StatusBadRequest, "unknown id prefix")
+			api.Error(w, http.StatusBadRequest, "unknown id prefix")
 			tx.Rollback(ctx)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		committed = true
 
-		api.RespondWithPayload(w, true, "", map[string]string{"id": id, "action_id": actionID})
+		respondWithPayload(w, true, "", map[string]string{"id": id, "action_id": actionID})
 	}
 }
+
+
+
+

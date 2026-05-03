@@ -162,13 +162,13 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req SimulationRequest
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
 		// Validate session
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrUserIIsRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -180,7 +180,7 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrUnauthorized)
+			api.Error(w, http.StatusUnauthorized, constants.ErrUnauthorized)
 			return
 		}
 
@@ -210,12 +210,12 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fetch approved sweeps
 		sweeps, err := fetchApprovedSweepsForSimulation(ctx, pgxPool, req, entityNames, bankNames)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to fetch sweeps: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch sweeps: "+err.Error())
 			return
 		}
 
 		if len(sweeps) == 0 {
-			api.RespondWithResult(w, false, "No sweeps found for simulation (check is_deleted status or filters)")
+			api.Error(w, http.StatusNotFound, "No sweeps found for simulation (check is_deleted status or filters)")
 			return
 		}
 
@@ -224,7 +224,7 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fetch current balances (including ALL accounts mentioned in sweeps)
 		balances, err := fetchCurrentBalancesWithSweepAccounts(ctx, pgxPool, sweeps, entityNames, bankNames)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to fetch balances: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch balances: "+err.Error())
 			return
 		}
 
@@ -244,11 +244,7 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		simulation.SimulationID = fmt.Sprintf("SIM-%s-%d", time.Now().Format("20060102"), time.Now().Unix())
 		simulation.GeneratedAt = time.Now().Format(time.RFC3339)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    simulation,
-		})
+		api.Success(w, http.StatusOK, simulation, "")
 	}
 }
 
@@ -265,12 +261,12 @@ func GetBalanceSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrUserIIsRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -283,7 +279,7 @@ func GetBalanceSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrUnauthorized)
+			api.Error(w, http.StatusUnauthorized, constants.ErrUnauthorized)
 			return
 		}
 
@@ -292,16 +288,14 @@ func GetBalanceSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		balances, err := fetchCurrentBalances(ctx, pgxPool, entityNames, bankNames)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to fetch balances: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch balances: "+err.Error())
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":  true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"balances": balances,
 			"count":    len(balances),
-		})
+		}, "")
 	}
 }
 
@@ -319,12 +313,12 @@ func ValidateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrUserIIsRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -337,7 +331,7 @@ func ValidateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrUnauthorized)
+			api.Error(w, http.StatusUnauthorized, constants.ErrUnauthorized)
 			return
 		}
 
@@ -378,7 +372,7 @@ func ValidateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, sweepArgs...)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to fetch sweeps: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch sweeps: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -434,13 +428,11 @@ func ValidateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":        true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"sweeps_checked": sweepCount,
 			"violations":     violations,
 			"is_valid":       len(violations) == 0,
-		})
+		}, "")
 	}
 }
 
@@ -459,12 +451,12 @@ func GetSweepAnalytics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrUserIIsRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -477,7 +469,7 @@ func GetSweepAnalytics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrUnauthorized)
+			api.Error(w, http.StatusUnauthorized, constants.ErrUnauthorized)
 			return
 		}
 
@@ -526,7 +518,7 @@ func GetSweepAnalytics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		err := pgxPool.QueryRow(ctx, query, entityArgs...).Scan(&totalExec, &successful, &failed, &totalSwept, &avgSwept)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to fetch analytics: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch analytics: "+err.Error())
 			return
 		}
 
@@ -553,11 +545,7 @@ func GetSweepAnalytics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			},
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    analytics,
-		})
+		api.Success(w, http.StatusOK, analytics, "")
 	}
 }
 
@@ -574,12 +562,12 @@ func GetSweepSuggestions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrUserIIsRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -592,7 +580,7 @@ func GetSweepSuggestions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrUnauthorized)
+			api.Error(w, http.StatusUnauthorized, constants.ErrUnauthorized)
 			return
 		}
 
@@ -631,12 +619,10 @@ func GetSweepSuggestions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			EstimatedBenefit: "Unlock up to 15% more working capital",
 		})
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":     true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"suggestions": suggestions,
 			"count":       len(suggestions),
-		})
+		}, "")
 	}
 }
 
@@ -653,12 +639,12 @@ func GetSweepExecutionGraph(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrUserIIsRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -671,7 +657,7 @@ func GetSweepExecutionGraph(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrUnauthorized)
+			api.Error(w, http.StatusUnauthorized, constants.ErrUnauthorized)
 			return
 		}
 
@@ -714,7 +700,7 @@ func GetSweepExecutionGraph(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, entityArgs...)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to fetch graph data: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch graph data: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -771,14 +757,12 @@ func GetSweepExecutionGraph(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nodeArray = append(nodeArray, node)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"graph": map[string]interface{}{
 				"nodes": nodeArray,
 				"edges": edges,
 			},
-		})
+		}, "")
 	}
 }
 

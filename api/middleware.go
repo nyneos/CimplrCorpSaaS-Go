@@ -359,12 +359,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 
 			if userID == "" {
 				log.Printf("[BUMiddleware] BLOCKED %s %s — missing user_id (ct=%q)", r.Method, r.URL.Path, ct)
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				w.WriteHeader(http.StatusUnauthorized)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrMissingUserID,
-				})
+				Error(w, http.StatusUnauthorized, constants.ErrMissingUserID)
 				return
 			}
 
@@ -379,12 +374,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			}
 			if !found {
 				log.Printf("[BUMiddleware] BLOCKED %s %s — invalid session for user_id=%s", r.Method, r.URL.Path, userID)
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				w.WriteHeader(http.StatusUnauthorized)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrInvalidSession,
-				})
+				Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 				return
 			}
 
@@ -410,12 +400,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 
 			if len(rootEntityIds) == 0 {
 				log.Printf("[BUMiddleware] BLOCKED %s %s — no entity mapping for user_id=%s", r.Method, r.URL.Path, userID)
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				w.WriteHeader(http.StatusForbidden)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrNoAccessibleBusinessUnit,
-				})
+				Error(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 				return
 			}
 
@@ -485,11 +470,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 
 			if len(buNames) == 0 {
 				log.Printf("[ERROR] No accessible business units found for user_id: %s", userID)
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   "No accessible business units found",
-				})
+				Error(w, http.StatusOK, "No accessible business units found")
 				return
 			}
 			// Attach to context and call next

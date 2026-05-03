@@ -4,7 +4,6 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
-	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -20,13 +19,13 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer func() {
 			if rec := recover(); rec != nil {
 				log.Printf("[UploadCashflowProposalSimple] Panic recovered: %v", rec)
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
+				api.Error(w, http.StatusInternalServerError, constants.ErrInternalServer)
 			}
 			log.Printf("[UploadCashflowProposalSimple] Finished in %s", time.Since(start))
 		}()
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 
@@ -37,7 +36,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		currency := strings.TrimSpace(r.FormValue("currency"))
 
 		if userID == "" || proposalName == "" || currency == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id, proposal_name and currency are required")
+			api.Error(w, http.StatusBadRequest, "user_id, proposal_name and currency are required")
 			return
 		}
 		if effectiveDate == "" {
@@ -59,7 +58,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No file uploaded")
+			api.Error(w, http.StatusBadRequest, "No file uploaded")
 			return
 		}
 
@@ -76,16 +75,14 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			},
 		)
 		if err != nil {
-			api.RespondWithError(w, statusCode, err.Error())
+			api.Error(w, statusCode, err.Error())
 			return
 		}
 
-		resp := map[string]interface{}{
-			constants.ValueSuccess: true,
-			"proposal_id":          proposalID,
-			"imported_rows":        importedRows,
-			"message":              "Proposal, items, projections & audit committed successfully",
-		}
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"proposal_id":   proposalID,
+			"imported_rows": importedRows,
+		}, "Proposal, items, projections & audit committed successfully")
 	}
 }
+

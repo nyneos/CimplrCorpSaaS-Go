@@ -38,35 +38,35 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason        string   `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
+			respondWithResult(w, false, constants.ErrUserIDRequired)
 			return
 		}
 		// user_id must match middleware-authenticated user
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
 		// validate entity / bank / account against middleware-provided context
 		if strings.TrimSpace(req.EntityName) != "" {
 			if !api.IsEntityAllowed(ctx, req.EntityName) {
-				api.RespondWithResult(w, false, "unauthorized entity")
+				respondWithResult(w, false, "unauthorized entity")
 				return
 			}
 		}
 		if strings.TrimSpace(req.BankName) != "" {
 			if !api.IsBankAllowed(ctx, req.BankName) {
-				api.RespondWithResult(w, false, "unauthorized bank")
+				respondWithResult(w, false, "unauthorized bank")
 				return
 			}
 		}
 		if strings.TrimSpace(req.BankAccount) != "" {
 			if !ctxHasApprovedBankAccountFor(ctx, req.BankAccount, req.BankName, req.EntityName) {
-				api.RespondWithResult(w, false, "unauthorized bank account")
+				respondWithResult(w, false, "unauthorized bank account")
 				return
 			}
 		}
@@ -80,7 +80,7 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -91,7 +91,7 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			respondWithResult(w, false, "failed to begin tx: "+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -111,22 +111,22 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nullifyEmpty(req.ActiveStatus),
 		)
 		if err != nil {
-			api.RespondWithResult(w, false, parseSweepConstraintError(err))
+			respondWithResult(w, false, parseSweepConstraintError(err))
 			return
 		}
 
 		auditQ := `INSERT INTO auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
 		if _, err := tx.Exec(ctx, auditQ, sweepID, nullifyEmpty(req.Reason), requestedBy); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit action: "+err.Error())
+			respondWithResult(w, false, "failed to create audit action: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			respondWithResult(w, false, "failed to commit: "+err.Error())
 			return
 		}
 
-		api.RespondWithResult(w, true, sweepID)
+		respondWithResult(w, true, sweepID)
 	}
 }
 
@@ -140,17 +140,17 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason  string                 `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if req.UserID == "" || req.SweepID == "" {
-			api.RespondWithResult(w, false, "user_id and sweep_id required")
+			respondWithResult(w, false, "user_id and sweep_id required")
 			return
 		}
 		// user_id must match middleware-authenticated user
 		ctx := r.Context()
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -162,13 +162,13 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			respondWithResult(w, false, "failed to begin tx: "+err.Error())
 			return
 		}
 		committed := false
@@ -183,7 +183,7 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var curBuffer sqlNullFloat
 		var curAuto, curActive sqlNullString
 		if err := tx.QueryRow(ctx, sel, req.SweepID).Scan(&curEntity, &curBank, &curAccount, &curType, &curParent, &curBuffer, &curFrequency, &curCutoff, &curAuto, &curActive); err != nil {
-			api.RespondWithResult(w, false, "failed to fetch existing sweep config: "+err.Error())
+			respondWithResult(w, false, "failed to fetch existing sweep config: "+err.Error())
 			return
 		}
 
@@ -219,7 +219,7 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// validate requested entity is allowed in context
 				if s := fmt.Sprint(v); strings.TrimSpace(s) != "" {
 					if !api.IsEntityAllowed(ctx, s) {
-						api.RespondWithResult(w, false, "unauthorized entity")
+						respondWithResult(w, false, "unauthorized entity")
 						return
 					}
 				}
@@ -228,7 +228,7 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			case "bank_name":
 				if s := fmt.Sprint(v); strings.TrimSpace(s) != "" {
 					if !api.IsBankAllowed(ctx, s) {
-						api.RespondWithResult(w, false, "unauthorized bank")
+						respondWithResult(w, false, "unauthorized bank")
 						return
 					}
 				}
@@ -259,13 +259,13 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// validate the final account (if present) matches bank/entity and allowed entities
 		if strings.TrimSpace(finalAccount) != "" {
 			if !ctxHasApprovedBankAccountFor(ctx, finalAccount, finalBank, finalEntity) {
-				api.RespondWithResult(w, false, "unauthorized bank account")
+				respondWithResult(w, false, "unauthorized bank account")
 				return
 			}
 		}
 
 		if len(sets) == 0 {
-			api.RespondWithResult(w, false, "no valid fields to update")
+			respondWithResult(w, false, "no valid fields to update")
 			return
 		}
 
@@ -273,23 +273,23 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, req.SweepID)
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithResult(w, false, "failed to update sweep config: "+err.Error())
+			respondWithResult(w, false, "failed to update sweep config: "+err.Error())
 			return
 		}
 
 		auditQ := `INSERT INTO auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())`
 		if _, err := tx.Exec(ctx, auditQ, req.SweepID, nullifyEmpty(req.Reason), requestedBy); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit action: "+err.Error())
+			respondWithResult(w, false, "failed to create audit action: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			respondWithResult(w, false, "failed to commit: "+err.Error())
 			return
 		}
 		committed = true
 
-		api.RespondWithResult(w, true, req.SweepID)
+		respondWithResult(w, true, req.SweepID)
 	}
 }
 
@@ -301,16 +301,16 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "Missing user_id in body")
+			respondWithResult(w, false, "Missing user_id in body")
 			return
 		}
 		// user_id must match middleware-authenticated user
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -323,7 +323,7 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -341,7 +341,7 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if len(norm) == 0 {
 				// nothing allowed
-				api.RespondWithPayload(w, true, "", []map[string]interface{}{})
+				respondWithPayload(w, true, "", []map[string]interface{}{})
 				return
 			}
 			q := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE AND lower(trim(entity_name)) = ANY($1) ORDER BY GREATEST(COALESCE(created_at, '1970-01-01'::timestamp), COALESCE(updated_at, '1970-01-01'::timestamp)) DESC, sweep_id`
@@ -351,7 +351,7 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err = pgxPool.Query(ctx, q)
 		}
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -476,11 +476,11 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, m)
 		}
 		if rows.Err() != nil {
-			api.RespondWithResult(w, false, "DB rows error: "+rows.Err().Error())
+			respondWithResult(w, false, "DB rows error: "+rows.Err().Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		respondWithPayload(w, true, "", out)
 	}
 }
 
@@ -494,7 +494,7 @@ func BulkApproveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.SweepIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
+			respondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 		checkerBy := ""
@@ -505,14 +505,14 @@ func BulkApproveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
 		sel := `SELECT DISTINCT ON (sweep_id) action_id, sweep_id, actiontype FROM auditactionsweepconfiguration WHERE sweep_id = ANY($1) ORDER BY sweep_id, requested_at DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.SweepIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to fetch latest audits: "+err.Error())
+			respondWithResult(w, false, "failed to fetch latest audits: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -539,20 +539,20 @@ func BulkApproveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(missing) > 0 {
-			api.RespondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
+			respondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			respondWithResult(w, false, "failed to begin tx: "+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
 
 		upd := `UPDATE auditactionsweepconfiguration SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
 		if _, err := tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
-			api.RespondWithResult(w, false, "failed to approve actions: "+err.Error())
+			respondWithResult(w, false, "failed to approve actions: "+err.Error())
 			return
 		}
 
@@ -572,11 +572,11 @@ func BulkApproveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			respondWithResult(w, false, "failed to commit: "+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"approved_count": len(actionIDs), "deleted": deleted})
+		respondWithPayload(w, true, "", map[string]interface{}{"approved_count": len(actionIDs), "deleted": deleted})
 	}
 }
 
@@ -590,7 +590,7 @@ func BulkRejectSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.SweepIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
+			respondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 		checkerBy := ""
@@ -601,14 +601,14 @@ func BulkRejectSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
 		sel := `SELECT DISTINCT ON (sweep_id) action_id, sweep_id FROM auditactionsweepconfiguration WHERE sweep_id = ANY($1) ORDER BY sweep_id, requested_at DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.SweepIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to fetch latest audits: "+err.Error())
+			respondWithResult(w, false, "failed to fetch latest audits: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -630,17 +630,17 @@ func BulkRejectSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(missing) > 0 {
-			api.RespondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
+			respondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
 			return
 		}
 
 		upd := `UPDATE auditactionsweepconfiguration SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
 		if _, err := pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
-			api.RespondWithResult(w, false, "failed to reject actions: "+err.Error())
+			respondWithResult(w, false, "failed to reject actions: "+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"rejected_count": len(actionIDs)})
+		respondWithPayload(w, true, "", map[string]interface{}{"rejected_count": len(actionIDs)})
 	}
 }
 
@@ -654,7 +654,7 @@ func BulkRequestDeleteSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFun
 			Reason   string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.SweepIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
+			respondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 		requestedBy := ""
@@ -665,13 +665,13 @@ func BulkRequestDeleteSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFun
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			respondWithResult(w, false, "failed to begin tx: "+err.Error())
 			return
 		}
 		committed := false
@@ -684,17 +684,17 @@ func BulkRequestDeleteSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFun
 		ins := `INSERT INTO auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
 		for _, id := range req.SweepIDs {
 			if _, err := tx.Exec(ctx, ins, id, nullifyEmpty(req.Reason), requestedBy); err != nil {
-				api.RespondWithResult(w, false, "failed to create delete audit: "+err.Error())
+				respondWithResult(w, false, "failed to create delete audit: "+err.Error())
 				return
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			respondWithResult(w, false, "failed to commit: "+err.Error())
 			return
 		}
 		committed = true
 
-		api.RespondWithResult(w, true, fmt.Sprintf("created %d delete requests", len(req.SweepIDs)))
+		respondWithResult(w, true, fmt.Sprintf("created %d delete requests", len(req.SweepIDs)))
 	}
 }
 
@@ -894,3 +894,4 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 	log.Printf("[CTX-ACC-CHECK] account=%s not found in ApprovedBankAccounts", accountNumber)
 	return false
 }
+

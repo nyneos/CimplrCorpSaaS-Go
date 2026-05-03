@@ -90,19 +90,19 @@ func normalizeTime(timeStr string) string {
 // 			}
 // 		}
 // 		if userID == "" {
-// 			http.Error(w, constants.ErrUserIDRequired, http.StatusBadRequest)
+// 			api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 // 			return
 // 		}
 
 // 		// verify session and resolve requested_by
 // 		userName := requestedByFromCtx(ctx, userID)
 // 		if userName == "" {
-// 			http.Error(w, constants.ErrInvalidSession, http.StatusUnauthorized)
+// 			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 // 			return
 // 		}
 
 // 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-// 			http.Error(w, constants.ErrFailedToParseMultipartForm, http.StatusBadRequest)
+// 			api.Error(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 // 			return
 // 		}
 
@@ -208,13 +208,13 @@ func normalizeTime(timeStr string) string {
 // 				}
 // 				tx, err := pgxPool.Begin(ctx)
 // 				if err != nil {
-// 					api.RespondWithError(w, http.StatusInternalServerError, "failed to start db transaction: "+err.Error())
+// 					api.Error(w, http.StatusInternalServerError, "failed to start db transaction: "+err.Error())
 // 					return
 // 				}
 // 				mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_bank_balance`)
 // 				if err != nil {
 // 					tx.Rollback(ctx)
-// 					api.RespondWithError(w, http.StatusInternalServerError, "mapping read error: "+err.Error())
+// 					api.Error(w, http.StatusInternalServerError, "mapping read error: "+err.Error())
 // 					return
 // 				}
 // 				mapping := make(map[string]string)
@@ -240,19 +240,19 @@ func normalizeTime(timeStr string) string {
 
 // 				if len(tgtCols) == 0 || len(selectExprs) == 0 {
 // 					tx.Rollback(ctx)
-// 					api.RespondWithError(w, http.StatusBadRequest, "no mapped columns found for upload file")
+// 					api.Error(w, http.StatusBadRequest, "no mapped columns found for upload file")
 // 					return
 // 				}
 
 // 				var stagedCount int
 // 				if err := tx.QueryRow(ctx, `SELECT count(*) FROM input_bank_balance_table WHERE upload_batch_id = $1`, batchID).Scan(&stagedCount); err != nil {
 // 					tx.Rollback(ctx)
-// 					api.RespondWithError(w, http.StatusInternalServerError, "failed to count staged rows: "+err.Error())
+// 					api.Error(w, http.StatusInternalServerError, "failed to count staged rows: "+err.Error())
 // 					return
 // 				}
 // 				if stagedCount == 0 {
 // 					tx.Rollback(ctx)
-// 					api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("no staged rows found for batch %s", batchID))
+// 					api.Error(w, http.StatusInternalServerError, fmt.Sprintf("no staged rows found for batch %s", batchID))
 // 					return
 // 				}
 
@@ -294,7 +294,7 @@ func normalizeTime(timeStr string) string {
 // 					vrows, verr := tx.Query(ctx, valSQL, batchID)
 // 					if verr != nil {
 // 						tx.Rollback(ctx)
-// 						api.RespondWithError(w, http.StatusInternalServerError, pgUserFriendlyMessage(verr))
+// 						api.Error(w, http.StatusInternalServerError, pgUserFriendlyMessage(verr))
 // 						return
 // 					}
 // 					for vrows.Next() {
@@ -319,14 +319,14 @@ func normalizeTime(timeStr string) string {
 // 						if bankName != nil && strings.TrimSpace(*bankName) != "" && !ctxHasApprovedBankName(ctx, *bankName) {
 // 							vrows.Close()
 // 							tx.Rollback(ctx)
-// 							api.RespondWithError(w, http.StatusForbidden, constants.ErrBankInvalidOrInactive)
+// 							api.Error(w, http.StatusForbidden, constants.ErrBankInvalidOrInactive)
 // 							return
 // 						}
 // 						if accountNo != nil && strings.TrimSpace(*accountNo) != "" {
 // 							if !ctxHasApprovedBankAccount(ctx, *accountNo) {
 // 								vrows.Close()
 // 								tx.Rollback(ctx)
-// 								api.RespondWithError(w, http.StatusForbidden, constants.ErrInvalidAccount)
+// 								api.Error(w, http.StatusForbidden, constants.ErrInvalidAccount)
 // 								return
 // 							}
 // 							// If middleware provided entity scope, ensure the account's entity is allowed
@@ -371,7 +371,7 @@ func normalizeTime(timeStr string) string {
 // 										if !allowed[*mbaEntityID] {
 // 											vrows.Close()
 // 											tx.Rollback(ctx)
-// 											api.RespondWithError(w, http.StatusForbidden, "Account's entity not allowed")
+// 											api.Error(w, http.StatusForbidden, "Account's entity not allowed")
 // 											return
 // 										}
 // 									} else {
@@ -386,7 +386,7 @@ func normalizeTime(timeStr string) string {
 // 										if !allowed {
 // 											vrows.Close()
 // 											tx.Rollback(ctx)
-// 											api.RespondWithError(w, http.StatusForbidden, "Account's entity not allowed")
+// 											api.Error(w, http.StatusForbidden, "Account's entity not allowed")
 // 											return
 // 										}
 // 									}
@@ -394,7 +394,7 @@ func normalizeTime(timeStr string) string {
 // 									// no masterbankaccount found for account -> forbid
 // 									vrows.Close()
 // 									tx.Rollback(ctx)
-// 									api.RespondWithError(w, http.StatusForbidden, constants.ErrInvalidAccount)
+// 									api.Error(w, http.StatusForbidden, constants.ErrInvalidAccount)
 // 									return
 // 								}
 // 							}
@@ -402,7 +402,7 @@ func normalizeTime(timeStr string) string {
 // 						if currency != nil && strings.TrimSpace(*currency) != "" && !ctxHasApprovedCurrency(ctx, *currency) {
 // 							vrows.Close()
 // 							tx.Rollback(ctx)
-// 							api.RespondWithError(w, http.StatusForbidden, "Invalid or inactive currency")
+// 							api.Error(w, http.StatusForbidden, "Invalid or inactive currency")
 // 							return
 // 						}
 // 					}
@@ -412,7 +412,7 @@ func normalizeTime(timeStr string) string {
 // 				rows, err := tx.Query(ctx, insertSQL, batchID)
 // 				if err != nil {
 // 					tx.Rollback(ctx)
-// 					api.RespondWithError(w, http.StatusInternalServerError, "final insert error: "+pgUserFriendlyMessage(err))
+// 					api.Error(w, http.StatusInternalServerError, "final insert error: "+pgUserFriendlyMessage(err))
 // 					return
 // 				}
 // 				var insertedIDs []string
@@ -426,20 +426,20 @@ func normalizeTime(timeStr string) string {
 // 				if len(insertedIDs) == 0 {
 // 					tx.Rollback(ctx)
 // 					msg := fmt.Sprintf("staged rows present for batch %s but no rows inserted into final table (staged=%d)", batchID, stagedCount)
-// 					api.RespondWithError(w, http.StatusInternalServerError, msg)
+// 					api.Error(w, http.StatusInternalServerError, msg)
 // 					return
 // 				}
 // 				for _, bid := range insertedIDs {
 // 					if _, err := tx.Exec(ctx, `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, bid, userName); err != nil {
 // 						tx.Rollback(ctx)
-// 						api.RespondWithError(w, http.StatusInternalServerError, "failed to create audit action: "+pgUserFriendlyMessage(err))
+// 						api.Error(w, http.StatusInternalServerError, "failed to create audit action: "+pgUserFriendlyMessage(err))
 // 						return
 // 					}
 // 				}
 
 // 				if err := tx.Commit(ctx); err != nil {
 // 					tx.Rollback(ctx)
-// 					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+// 					api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 // 					return
 // 				}
 // 			}
@@ -469,18 +469,18 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userID == "" {
-			http.Error(w, constants.ErrUserIDRequired, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
 		userName := requestedByFromCtx(ctx, userID)
 		if userName == "" {
-			http.Error(w, constants.ErrInvalidSession, http.StatusUnauthorized)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			http.Error(w, constants.ErrFailedToParseMultipartForm, http.StatusBadRequest)
+			api.Error(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
 
@@ -496,17 +496,15 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						statusCode = http.StatusBadRequest
 						message = duplicateBankBalanceUploadMessage
 					}
-					api.RespondWithError(w, statusCode, message)
+					api.Error(w, statusCode, message)
 					return
 				}
 				batchIDs = append(batchIDs, batchID)
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"batch_ids":            batchIDs,
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"batch_ids": batchIDs,
+		}, "")
 	}
 }

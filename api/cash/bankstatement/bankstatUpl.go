@@ -1,7 +1,7 @@
 package bankstatement
 
 import (
-	"CimplrCorpSaas/api"
+	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/notification/catalog"
 	"context"
@@ -164,14 +164,14 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				UserID string `json:"user_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-				api.RespondWithPayload(w, false, "user_id required in body", nil)
+				respondWithPayload(w, false, "user_id required in body", nil)
 				return
 			}
 			userID = req.UserID
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
-				api.RespondWithPayload(w, false, constants.ErrUserIDRequired, nil)
+				respondWithPayload(w, false, constants.ErrUserIDRequired, nil)
 				return
 			}
 		}
@@ -185,31 +185,31 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSession, nil)
+			respondWithPayload(w, false, constants.ErrInvalidSession, nil)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrFailedToParseMultipartForm, nil)
+			respondWithPayload(w, false, constants.ErrFailedToParseMultipartForm, nil)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrNoFilesUploaded, nil)
+			respondWithPayload(w, false, constants.ErrNoFilesUploaded, nil)
 			return
 		}
 		batchIDs := make([]string, 0, len(files))
 		for _, fileHeader := range files {
 			file, err := fileHeader.Open()
 			if err != nil {
-				api.RespondWithPayload(w, false, "Failed to open file: "+fileHeader.Filename, nil)
+				respondWithPayload(w, false, "Failed to open file: "+fileHeader.Filename, nil)
 				return
 			}
 			ext := getFileExt(fileHeader.Filename)
 			records, err := parseBankStatementFile(file, ext)
 			file.Close()
 			if err != nil || len(records) < 2 {
-				api.RespondWithPayload(w, false, "Invalid or empty file: "+fileHeader.Filename, nil)
+				respondWithPayload(w, false, "Invalid or empty file: "+fileHeader.Filename, nil)
 				return
 			}
 			headerRow := records[0]
@@ -250,12 +250,12 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				pgx.CopyFromRows(copyRows),
 			)
 			if err != nil {
-				api.RespondWithPayload(w, false, "Failed to stage data: "+err.Error(), nil)
+				respondWithPayload(w, false, "Failed to stage data: "+err.Error(), nil)
 				return
 			}
 			mapRows, err := pgxPool.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_bank_statement`)
 			if err != nil {
-				api.RespondWithPayload(w, false, "Mapping error", nil)
+				respondWithPayload(w, false, "Mapping error", nil)
 				return
 			}
 			mapping := make(map[string]string)
@@ -284,7 +284,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		       RETURNING bankstatementid
 		   `, tgtColsStr, srcColsStr), userName, batchID)
 			if err != nil {
-				api.RespondWithPayload(w, false, "Final insert error: "+err.Error(), nil)
+				respondWithPayload(w, false, "Final insert error: "+err.Error(), nil)
 				return
 			}
 			var newIDs []string
@@ -369,7 +369,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			// --- End: Insert transactions and update balances ---
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"batch_ids": batchIDs, "message": "All bank statements uploaded and processed"})
+		respondWithPayload(w, true, "", map[string]interface{}{"batch_ids": batchIDs, "message": "All bank statements uploaded and processed"})
 	}
 }
 
@@ -424,7 +424,7 @@ func GetBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondWithPayload(w, false, err.Error(), nil)
 			return
 		}
 		defer rows.Close()
@@ -533,7 +533,7 @@ func GetBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&it.BankName,
 				&reasonRaw,
 			); err != nil {
-				api.RespondWithPayload(w, false, err.Error(), nil)
+				respondWithPayload(w, false, err.Error(), nil)
 				return
 			}
 			if desc != nil {
@@ -713,11 +713,11 @@ func GetBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if rows.Err() != nil {
-			api.RespondWithPayload(w, false, rows.Err().Error(), nil)
+			respondWithPayload(w, false, rows.Err().Error(), nil)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", tempItems)
+		respondWithPayload(w, true, "", tempItems)
 	}
 }
 
@@ -729,7 +729,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment          string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
+			respondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
 			return
 		}
 		checkerBy := ""
@@ -741,13 +741,13 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
 			return
 		}
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
+			respondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
 			return
 		}
 		committed := false
@@ -759,7 +759,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, actiontype, processing_status FROM auditactionbankstatement WHERE bankstatementid = ANY($1) ORDER BY bankstatementid, requested_at DESC, action_id DESC`
 		rows, err := tx.Query(ctx, sel, req.BankStatementIDs)
 		if err != nil {
-			api.RespondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
+			respondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
 			return
 		}
 		defer rows.Close()
@@ -770,7 +770,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var aid, bid, atype, pstatus string
 			if err := rows.Scan(&aid, &bid, &atype, &pstatus); err != nil {
-				api.RespondWithPayload(w, false, "failed to scan audit rows: "+err.Error(), nil)
+				respondWithPayload(w, false, "failed to scan audit rows: "+err.Error(), nil)
 				return
 			}
 			found[bid] = true
@@ -794,13 +794,13 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if len(cannotApprove) > 0 {
 				msg += fmt.Sprintf("cannot approve already approved bankstatement_ids: %v", cannotApprove)
 			}
-			api.RespondWithPayload(w, false, msg, nil)
+			respondWithPayload(w, false, msg, nil)
 			return
 		}
 		upd := `UPDATE auditactionbankstatement SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id, bankstatementid, actiontype`
 		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, actionIDs)
 		if err != nil {
-			api.RespondWithPayload(w, false, "failed to update audit rows: "+err.Error(), nil)
+			respondWithPayload(w, false, "failed to update audit rows: "+err.Error(), nil)
 			return
 		}
 		defer urows.Close()
@@ -816,7 +816,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(updated) != len(actionIDs) {
-			api.RespondWithPayload(w, false, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)), nil)
+			respondWithPayload(w, false, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)), nil)
 			return
 		}
 		if len(deleteActionIDs) > 0 {
@@ -831,12 +831,12 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND aa.bankstatementid = bs.bankstatementid
 			`
 			if _, err := tx.Exec(ctx, sd, deleteActionIDs); err != nil {
-				api.RespondWithPayload(w, false, "failed to soft-delete bank_statement rows: "+err.Error(), nil)
+				respondWithPayload(w, false, "failed to soft-delete bank_statement rows: "+err.Error(), nil)
 				return
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
+			respondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
 			return
 		}
 		committed = true
@@ -870,7 +870,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
+		respondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
 	}
 }
 func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -881,7 +881,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
+			respondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
 			return
 		}
 		checkerBy := ""
@@ -893,13 +893,13 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
 			return
 		}
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
+			respondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
 			return
 		}
 		committed := false
@@ -911,7 +911,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, processing_status FROM auditactionbankstatement WHERE bankstatementid = ANY($1) ORDER BY bankstatementid, requested_at DESC, action_id DESC`
 		rows, err := tx.Query(ctx, sel, req.IDs)
 		if err != nil {
-			api.RespondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
+			respondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
 			return
 		}
 		defer rows.Close()
@@ -921,7 +921,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var aid, bid, pstatus string
 			if err := rows.Scan(&aid, &bid, &pstatus); err != nil {
-				api.RespondWithPayload(w, false, "failed to scan audit rows: "+err.Error(), nil)
+				respondWithPayload(w, false, "failed to scan audit rows: "+err.Error(), nil)
 				return
 			}
 			found[bid] = true
@@ -944,13 +944,13 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if len(cannotReject) > 0 {
 				msg += fmt.Sprintf("cannot reject already approved bankstatement_ids: %v", cannotReject)
 			}
-			api.RespondWithPayload(w, false, msg, nil)
+			respondWithPayload(w, false, msg, nil)
 			return
 		}
 		upd := `UPDATE auditactionbankstatement SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id, bankstatementid`
 		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, actionIDs)
 		if err != nil {
-			api.RespondWithPayload(w, false, "failed to update audit rows: "+err.Error(), nil)
+			respondWithPayload(w, false, "failed to update audit rows: "+err.Error(), nil)
 			return
 		}
 		defer urows.Close()
@@ -962,11 +962,11 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(updated) != len(actionIDs) {
-			api.RespondWithPayload(w, false, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)), nil)
+			respondWithPayload(w, false, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)), nil)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
+			respondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
 			return
 		}
 		committed = true
@@ -989,7 +989,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				fmt.Sprintf("BSREJECT/%s/%d", uID, time.Now().UnixMilli()), payload)
 		}()
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
+		respondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
 	}
 }
 
@@ -1002,7 +1002,7 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
+			respondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
 			return
 		}
 		requestedBy := ""
@@ -1014,17 +1014,17 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
 			return
 		}
 		if len(req.IDs) == 0 {
-			api.RespondWithPayload(w, false, "bankstatement_ids required", nil)
+			respondWithPayload(w, false, "bankstatement_ids required", nil)
 			return
 		}
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
+			respondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
 			return
 		}
 		committed := false
@@ -1037,7 +1037,7 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.IDs {
 			if strings.TrimSpace(id) == "" {
 				tx.Rollback(ctx)
-				api.RespondWithPayload(w, false, "empty bankstatement id provided", nil)
+				respondWithPayload(w, false, "empty bankstatement id provided", nil)
 				return
 			}
 			var latestActionType, latestStatus string
@@ -1051,7 +1051,7 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, id).Scan(&latestActionType, &latestStatus)
 			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
 				tx.Rollback(ctx)
-				api.RespondWithPayload(w, false, "delete request already pending for bankstatement_id: "+id, nil)
+				respondWithPayload(w, false, "delete request already pending for bankstatement_id: "+id, nil)
 				return
 			}
 			deleteReason := req.Reason
@@ -1060,16 +1060,16 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if _, err := tx.Exec(ctx, q, id, deleteReason, requestedBy); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithPayload(w, false, err.Error(), nil)
+				respondWithPayload(w, false, err.Error(), nil)
 				return
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
+			respondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
 			return
 		}
 		committed = true
-		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true})
+		respondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true})
 	}
 }
 
@@ -1140,7 +1140,7 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondWithPayload(w, false, err.Error(), nil)
 			return
 		}
 		defer rows.Close()
@@ -1270,7 +1270,7 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&rrow.CheckerAt,
 				&reasonRaw,
 			); err != nil {
-				api.RespondWithPayload(w, false, err.Error(), nil)
+				respondWithPayload(w, false, err.Error(), nil)
 				return
 			}
 			// normalize nullable strings to empty
@@ -1468,17 +1468,13 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, rrow)
 		}
 		if rows.Err() != nil {
-			api.RespondWithPayload(w, false, rows.Err().Error(), nil)
+			respondWithPayload(w, false, rows.Err().Error(), nil)
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"bank_statements": out,
-			},
-		})
+		apictx.Success(w, http.StatusOK, map[string]interface{}{
+			"bank_statements": out,
+		}, "")
 	}
 }
 
@@ -1511,7 +1507,7 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.Rows) == 0 {
-			api.RespondWithPayload(w, false, "Invalid JSON or missing user_id/rows", nil)
+			respondWithPayload(w, false, "Invalid JSON or missing user_id/rows", nil)
 			return
 		}
 
@@ -1525,13 +1521,13 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			respondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, "Failed to begin transaction: "+err.Error(), nil)
+			respondWithPayload(w, false, "Failed to begin transaction: "+err.Error(), nil)
 			return
 		}
 		committed := false
@@ -1567,7 +1563,7 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				missing = append(missing, "transactiondate")
 			}
 			if len(missing) > 0 {
-				api.RespondWithPayload(w, false, "Missing required fields: "+strings.Join(missing, ","), nil)
+				respondWithPayload(w, false, "Missing required fields: "+strings.Join(missing, ","), nil)
 				return
 			}
 
@@ -1624,7 +1620,7 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				row.DepositAmount,
 				mode,
 			).Scan(&id); err != nil {
-				api.RespondWithPayload(w, false, "Insert error: "+err.Error(), nil)
+				respondWithPayload(w, false, "Insert error: "+err.Error(), nil)
 				return
 			}
 
@@ -1635,7 +1631,7 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				reasonJSON = ""
 			}
 			if _, err := tx.Exec(ctx, auditQ, id, reasonJSON, createdBy); err != nil {
-				api.RespondWithPayload(w, false, "Audit insert error: "+err.Error(), nil)
+				respondWithPayload(w, false, "Audit insert error: "+err.Error(), nil)
 				return
 			}
 
@@ -1643,13 +1639,13 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, "Commit error: "+err.Error(), nil)
+			respondWithPayload(w, false, "Commit error: "+err.Error(), nil)
 			return
 		}
 		committed = true
 
 		// respond with created ids and overall success
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"created": created})
+		respondWithPayload(w, true, "", map[string]interface{}{"created": created})
 	}
 }
 
@@ -1662,7 +1658,7 @@ func CreateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Row    map[string]interface{} `json:"row"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			api.RespondWithPayload(w, false, "Invalid JSON or missing user_id/row", nil)
+			respondWithPayload(w, false, "Invalid JSON or missing user_id/row", nil)
 			return
 		}
 		// If single-row included a 'reason', lift it to top-level; otherwise omit
@@ -1693,11 +1689,11 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason          string                 `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
+			respondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
 			return
 		}
 		if strings.TrimSpace(req.UserID) == "" || strings.TrimSpace(req.BankStatementID) == "" {
-			api.RespondWithPayload(w, false, "user_id and bankstatementid required", nil)
+			respondWithPayload(w, false, "user_id and bankstatementid required", nil)
 			return
 		}
 
@@ -1711,13 +1707,13 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithPayload(w, false, constants.ErrInvalidSession, nil)
+			respondWithPayload(w, false, constants.ErrInvalidSession, nil)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, "failed to begin tx: "+err.Error(), nil)
+			respondWithPayload(w, false, "failed to begin tx: "+err.Error(), nil)
 			return
 		}
 		committed := false
@@ -1754,7 +1750,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&curDeposit,
 			&curMode,
 		); err != nil {
-			api.RespondWithPayload(w, false, "failed to fetch existing bank_statement: "+err.Error(), nil)
+			respondWithPayload(w, false, "failed to fetch existing bank_statement: "+err.Error(), nil)
 			return
 		}
 
@@ -1854,7 +1850,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(sets) == 0 {
-			api.RespondWithPayload(w, false, "no valid fields to update", nil)
+			respondWithPayload(w, false, "no valid fields to update", nil)
 			return
 		}
 
@@ -1862,7 +1858,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, req.BankStatementID)
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithPayload(w, false, "failed to update bank_statement: "+err.Error(), nil)
+			respondWithPayload(w, false, "failed to update bank_statement: "+err.Error(), nil)
 			return
 		}
 
@@ -1878,16 +1874,16 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if _, err := tx.Exec(ctx, auditQ, req.BankStatementID, reasonJSON, requestedBy); err != nil {
-			api.RespondWithPayload(w, false, "failed to create audit action: "+err.Error(), nil)
+			respondWithPayload(w, false, "failed to create audit action: "+err.Error(), nil)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, "failed to commit: "+err.Error(), nil)
+			respondWithPayload(w, false, "failed to commit: "+err.Error(), nil)
 			return
 		}
 		committed = true
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"bankstatementid": req.BankStatementID})
+		respondWithPayload(w, true, "", map[string]interface{}{"bankstatementid": req.BankStatementID})
 	}
 }

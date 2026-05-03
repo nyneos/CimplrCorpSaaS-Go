@@ -28,17 +28,17 @@ func GetSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+			respondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 		// user_id must match middleware-authenticated user
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -51,7 +51,7 @@ func GetSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -107,7 +107,7 @@ func GetSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -157,11 +157,11 @@ func GetSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithResult(w, false, "DB rows error: "+rows.Err().Error())
+			respondWithResult(w, false, "DB rows error: "+rows.Err().Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		respondWithPayload(w, true, "", map[string]interface{}{
 			"logs":  logs,
 			"total": len(logs),
 		})
@@ -182,18 +182,18 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+			respondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 
 		// user_id must match middleware-authenticated user
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -206,7 +206,7 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -270,7 +270,7 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -346,11 +346,11 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithResult(w, false, "DB rows error: "+rows.Err().Error())
+			respondWithResult(w, false, "DB rows error: "+rows.Err().Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", logs)
+		respondWithPayload(w, true, "", logs)
 	}
 }
 
@@ -382,17 +382,17 @@ func GetSweepStatisticsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+			respondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 		// user_id must match middleware-authenticated user
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -405,7 +405,7 @@ func GetSweepStatisticsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -469,7 +469,7 @@ func GetSweepStatisticsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		)
 
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
 
@@ -493,7 +493,7 @@ func GetSweepStatisticsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			stats["last_execution"] = nil
 		}
 
-		api.RespondWithPayload(w, true, "", stats)
+		respondWithPayload(w, true, "", stats)
 	}
 }
 
@@ -509,18 +509,18 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" || req.SweepID == "" {
-			api.RespondWithResult(w, false, "Missing user_id or sweep_id")
+			respondWithResult(w, false, "Missing user_id or sweep_id")
 			return
 		}
 
 		// user_id must match middleware-authenticated user
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -533,7 +533,7 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -563,45 +563,45 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&sweepType, &bufferAmount, &sweepAmount, &requiresInitiation, &frequency, &effectiveDate, &requestedAt)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "Sweep configuration not found: "+err.Error())
+			respondWithResult(w, false, "Sweep configuration not found: "+err.Error())
 			return
 		}
 
 		// CHECK: This endpoint is ONLY for requires_initiation = FALSE
 		// For manual trigger, we create an initiation and auto-approve it for audit trail
 		if requiresInitiation {
-			api.RespondWithResult(w, false, "This sweep requires initiation. Use /manual-trigger endpoint instead.")
+			respondWithResult(w, false, "This sweep requires initiation. Use /manual-trigger endpoint instead.")
 			return
 		}
 
 		// Validate sweep scope against prevalidation context
 		if strings.TrimSpace(entityName) != "" {
 			if !api.IsEntityAllowed(ctx, entityName) {
-				api.RespondWithResult(w, false, "unauthorized entity")
+				respondWithResult(w, false, "unauthorized entity")
 				return
 			}
 		}
 		if strings.TrimSpace(sourceBank) != "" {
 			if !api.IsBankAllowed(ctx, sourceBank) {
-				api.RespondWithResult(w, false, "unauthorized source bank")
+				respondWithResult(w, false, "unauthorized source bank")
 				return
 			}
 		}
 		if strings.TrimSpace(targetBank) != "" {
 			if !api.IsBankAllowed(ctx, targetBank) {
-				api.RespondWithResult(w, false, "unauthorized target bank")
+				respondWithResult(w, false, "unauthorized target bank")
 				return
 			}
 		}
 		if strings.TrimSpace(sourceAccount) != "" {
 			if !ctxHasApprovedBankAccountFor(ctx, sourceAccount, sourceBank, entityName) {
-				api.RespondWithResult(w, false, "unauthorized source bank account")
+				respondWithResult(w, false, "unauthorized source bank account")
 				return
 			}
 		}
 		if strings.TrimSpace(targetAccount) != "" {
 			if !ctxHasApprovedBankAccountFor(ctx, targetAccount, targetBank, entityName) {
-				api.RespondWithResult(w, false, "unauthorized target bank account")
+				respondWithResult(w, false, "unauthorized target bank account")
 				return
 			}
 		}
@@ -617,7 +617,7 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, req.SweepID).Scan(&processingStatus)
 
 		if err != nil || processingStatus != "APPROVED" {
-			api.RespondWithResult(w, false, "Sweep must be approved before manual execution")
+			respondWithResult(w, false, "Sweep must be approved before manual execution")
 			return
 		}
 
@@ -629,7 +629,7 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		err = pgxPool.QueryRow(ctx, insInitiation, req.SweepID, requestedBy).Scan(&initiationID)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to create initiation: "+err.Error())
+			respondWithResult(w, false, "Failed to create initiation: "+err.Error())
 			return
 		}
 
@@ -641,7 +641,7 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		_, err = pgxPool.Exec(ctx, insAudit, initiationID, req.SweepID, requestedBy, requestedBy)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to auto-approve initiation: "+err.Error())
+			respondWithResult(w, false, "Failed to auto-approve initiation: "+err.Error())
 			return
 		}
 
@@ -656,7 +656,7 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, sourceAccount).Scan(&sourceBalance)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to fetch source account balance: "+err.Error())
+			respondWithResult(w, false, "Failed to fetch source account balance: "+err.Error())
 			return
 		}
 
@@ -669,7 +669,7 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, targetAccount).Scan(&targetBalance)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to fetch target account balance: "+err.Error())
+			respondWithResult(w, false, "Failed to fetch target account balance: "+err.Error())
 			return
 		}
 
@@ -705,11 +705,11 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Execute direct sweep (same logic as ExecuteSweepV2Direct from sweep_processorV2.go)
 		result, err := executeDirectSweepV2(ctx, pgxPool, sweepData, requestedBy)
 		if err != nil {
-			api.RespondWithResult(w, false, "Sweep execution failed: "+err.Error())
+			respondWithResult(w, false, "Sweep execution failed: "+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "Sweep executed successfully (direct, no initiation)", result)
+		respondWithPayload(w, true, "Sweep executed successfully (direct, no initiation)", result)
 	}
 }
 
@@ -929,17 +929,17 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" || req.SweepID == "" {
-			api.RespondWithResult(w, false, "Missing user_id or sweep_id")
+			respondWithResult(w, false, "Missing user_id or sweep_id")
 			return
 		}
 		// user_id must match middleware-authenticated user
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -952,7 +952,7 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -969,38 +969,38 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&sweepType, &bufferAmount, &sweepAmount)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "Sweep configuration not found: "+err.Error())
+			respondWithResult(w, false, "Sweep configuration not found: "+err.Error())
 			return
 		}
 
 		// NOTE: ALL sweeps now use initiation workflow (requires_initiation flag removed)		// Validate sweep scope against prevalidation context
 		if strings.TrimSpace(entityName) != "" {
 			if !api.IsEntityAllowed(ctx, entityName) {
-				api.RespondWithResult(w, false, "unauthorized entity")
+				respondWithResult(w, false, "unauthorized entity")
 				return
 			}
 		}
 		// if strings.TrimSpace(sourceBank) != "" {
 		// 	if !api.IsBankAllowed(ctx, sourceBank) {
-		// 		api.RespondWithResult(w, false, "unauthorized source bank")
+		// 		respondWithResult(w, false, "unauthorized source bank")
 		// 		return
 		// 	}
 		// }
 		// if strings.TrimSpace(targetBank) != "" {
 		// 	if !api.IsBankAllowed(ctx, targetBank) {
-		// 		api.RespondWithResult(w, false, "unauthorized target bank")
+		// 		respondWithResult(w, false, "unauthorized target bank")
 		// 		return
 		// 	}
 		// }
 		// if strings.TrimSpace(sourceAccount) != "" {
 		// 	if !ctxHasApprovedBankAccountFor(ctx, sourceAccount, sourceBank, entityName) {
-		// 		api.RespondWithResult(w, false, "unauthorized source bank account")
+		// 		respondWithResult(w, false, "unauthorized source bank account")
 		// 		return
 		// 	}
 		// }
 		// if strings.TrimSpace(targetAccount) != "" {
 		// 	if !ctxHasApprovedBankAccountFor(ctx, targetAccount, targetBank, entityName) {
-		// 		api.RespondWithResult(w, false, "unauthorized target bank account")
+		// 		respondWithResult(w, false, "unauthorized target bank account")
 		// 		return
 		// 	}
 		// }
@@ -1016,7 +1016,7 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, req.SweepID).Scan(&processingStatus)
 
 		if err != nil || processingStatus != "APPROVED" {
-			api.RespondWithResult(w, false, "Sweep must be approved before manual execution")
+			respondWithResult(w, false, "Sweep must be approved before manual execution")
 			return
 		}
 
@@ -1035,7 +1035,7 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&initiationID)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to create manual initiation: "+err.Error())
+			respondWithResult(w, false, "failed to create manual initiation: "+err.Error())
 			return
 		}
 
@@ -1047,7 +1047,7 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		_, err = pgxPool.Exec(ctx, insAudit, initiationID, req.SweepID, requestedBy, requestedBy)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to auto-approve manual initiation: "+err.Error())
+			respondWithResult(w, false, "Failed to auto-approve manual initiation: "+err.Error())
 			return
 		}
 
@@ -1067,11 +1067,11 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil {
 			// Execution failure is already logged in sweep_execution_log by executeSweepV2WithInitiation
-			api.RespondWithResult(w, false, "Sweep execution failed: "+err.Error())
+			respondWithResult(w, false, "Sweep execution failed: "+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "Sweep executed successfully", result)
+		respondWithPayload(w, true, "Sweep executed successfully", result)
 		// Notify: pass FULL execution context for rich templates
 		capturedSweepID := req.SweepID
 		capturedUser := req.UserID
@@ -1399,23 +1399,23 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
+			respondWithResult(w, false, constants.ErrUserIDRequired)
 			return
 		}
 
 		if len(req.Sweeps) == 0 {
-			api.RespondWithResult(w, false, "sweeps array cannot be empty")
+			respondWithResult(w, false, "sweeps array cannot be empty")
 			return
 		}
 
 		// Validate session
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1427,14 +1427,14 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
 		// Start transaction
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
+			respondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		committed := false
@@ -1677,7 +1677,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 			}
 		}
 
-		api.RespondWithPayload(w, true,
+		respondWithPayload(w, true,
 			fmt.Sprintf("Processed %d sweeps: %d successful, %d failed", len(results), successCount, failureCount),
 			map[string]interface{}{
 				"results":    results,
@@ -1704,3 +1704,4 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 		)
 	}
 }
+

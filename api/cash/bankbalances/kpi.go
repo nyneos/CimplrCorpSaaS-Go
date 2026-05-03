@@ -73,12 +73,12 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+			respondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 
@@ -91,7 +91,7 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -142,7 +142,7 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		overall, err := getOverallKPI(ctx, pgxPool, entityFilter, bankFilter)
 		if err != nil {
 			// getOverallKPI failed: %v
-			api.RespondWithResult(w, false, "Failed to fetch overall KPI: "+err.Error())
+			respondWithResult(w, false, "Failed to fetch overall KPI: "+err.Error())
 			return
 		}
 		// Overall KPI computed
@@ -151,7 +151,7 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		entityWise, err := getEntityWiseKPI(ctx, pgxPool, overall.TotalBalance, entityFilter, bankFilter)
 		if err != nil {
 			// getEntityWiseKPI failed
-			api.RespondWithResult(w, false, "Failed to fetch entity-wise KPI: "+err.Error())
+			respondWithResult(w, false, "Failed to fetch entity-wise KPI: "+err.Error())
 			return
 		}
 		// Entity-wise KPI computed
@@ -160,7 +160,7 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		bankWise, err := getBankWiseKPI(ctx, pgxPool, overall.TotalBalance, entityFilter, bankFilter)
 		if err != nil {
 			// getBankWiseKPI failed
-			api.RespondWithResult(w, false, "Failed to fetch bank-wise KPI: "+err.Error())
+			respondWithResult(w, false, "Failed to fetch bank-wise KPI: "+err.Error())
 			return
 		}
 		// Bank-wise KPI computed
@@ -169,7 +169,7 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		mom, err := getMoMComparison(ctx, pgxPool, entityFilter, bankFilter)
 		if err != nil {
 			// getMoMComparison failed
-			api.RespondWithResult(w, false, "Failed to fetch MoM comparison: "+err.Error())
+			respondWithResult(w, false, "Failed to fetch MoM comparison: "+err.Error())
 			return
 		}
 		// MoM comparison computed
@@ -182,7 +182,7 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// response ready
-		api.RespondWithPayload(w, true, "", response)
+		respondWithPayload(w, true, "", response)
 	}
 }
 
@@ -442,3 +442,4 @@ func getMoMComparison(ctx context.Context, db *pgxpool.Pool, entityFilter, bankF
 		ChangePercent: changePercent,
 	}, nil
 }
+

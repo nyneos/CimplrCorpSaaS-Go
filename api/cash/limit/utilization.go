@@ -38,12 +38,12 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" || req.LimitID == "" {
-			api.RespondWithResult(w, false, "user_id and limit_id required")
+			respondWithResult(w, false, "user_id and limit_id required")
 			return
 		}
 
@@ -55,13 +55,13 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
 		// Validate utilization would not exceed limit
 		if err := validateUtilizationLimit(ctx, pgxPool, req.LimitID, req.UtilizedAmount); err != nil {
-			api.RespondWithResult(w, false, err.Error())
+			respondWithResult(w, false, err.Error())
 			return
 		}
 
@@ -72,7 +72,7 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin transaction: "+err.Error())
+			respondWithResult(w, false, "failed to begin transaction: "+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -90,7 +90,7 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&utilizationID)
 
 		if err != nil {
-			api.RespondWithResult(w, false, parseLimitConstraintError(err))
+			respondWithResult(w, false, parseLimitConstraintError(err))
 			return
 		}
 
@@ -99,16 +99,16 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		) VALUES ($1,$2,'CREATE','PENDING_APPROVAL',$3,$4,now())`
 
 		if _, err := tx.Exec(ctx, auditQ, utilizationID, req.LimitID, nullifyEmpty(req.Reason), requestedBy); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			respondWithResult(w, false, "failed to create audit: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			respondWithResult(w, false, "failed to commit: "+err.Error())
 			return
 		}
 
-		api.RespondWithResult(w, true, utilizationID)
+		respondWithResult(w, true, utilizationID)
 	}
 }
 
@@ -133,12 +133,12 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" || len(req.Utilizations) == 0 {
-			api.RespondWithResult(w, false, "user_id and utilizations array required")
+			respondWithResult(w, false, "user_id and utilizations array required")
 			return
 		}
 
@@ -150,7 +150,7 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -178,7 +178,7 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Bulk validate all utilizations in a single query
 		validationResults, err := validateBulkUtilizationLimits(ctx, pgxPool, utilizationData)
 		if err != nil {
-			api.RespondWithResult(w, false, "bulk validation failed: "+err.Error())
+			respondWithResult(w, false, "bulk validation failed: "+err.Error())
 			return
 		}
 
@@ -252,7 +252,7 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, result)
 		}
 
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		respondWithPayload(w, api.IsBulkSuccess(results), "", results)
 		// Notify: bulk utilizations created with FULL record data
 		capturedUser := req.UserID
 		// Collect successful utilization_ids from results
@@ -288,17 +288,17 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" || req.UtilizationID == "" {
-			api.RespondWithResult(w, false, "user_id and utilization_id required")
+			respondWithResult(w, false, "user_id and utilization_id required")
 			return
 		}
 
 		if len(req.Fields) == 0 {
-			api.RespondWithResult(w, false, "no fields provided to update")
+			respondWithResult(w, false, "no fields provided to update")
 			return
 		}
 
@@ -310,13 +310,13 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin transaction: "+err.Error())
+			respondWithResult(w, false, "failed to begin transaction: "+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -330,7 +330,7 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var curReferenceDoc *string
 
 		if err := tx.QueryRow(ctx, sel, req.UtilizationID).Scan(&curLimitID, &curUtilDate, &curCurrency, &curUtilizedAmount, &curRemarks, &curReferenceDoc); err != nil {
-			api.RespondWithResult(w, false, "failed to fetch current utilization: "+err.Error())
+			respondWithResult(w, false, "failed to fetch current utilization: "+err.Error())
 			return
 		}
 
@@ -387,7 +387,7 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(newSets) == 0 {
-			api.RespondWithResult(w, false, "no valid fields provided to update")
+			respondWithResult(w, false, "no valid fields provided to update")
 			return
 		}
 
@@ -401,7 +401,7 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, req.UtilizationID)
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithResult(w, false, "failed to update: "+err.Error())
+			respondWithResult(w, false, "failed to update: "+err.Error())
 			return
 		}
 
@@ -421,16 +421,16 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if _, err := tx.Exec(ctx, auditQ, req.UtilizationID, limitForAudit, nullifyEmpty(req.Reason), requestedBy); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			respondWithResult(w, false, "failed to create audit: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			respondWithResult(w, false, "failed to commit: "+err.Error())
 			return
 		}
 
-		api.RespondWithResult(w, true, req.UtilizationID)
+		respondWithResult(w, true, req.UtilizationID)
 		// Notify: utilization updated with FULL record data
 		capturedUID := req.UtilizationID
 		capturedUser := req.UserID
@@ -455,12 +455,12 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" || len(req.UtilizationIDs) == 0 {
-			api.RespondWithResult(w, false, "user_id and utilization_ids required")
+			respondWithResult(w, false, "user_id and utilization_ids required")
 			return
 		}
 
@@ -472,7 +472,7 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -523,7 +523,7 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, result)
 		}
 
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		respondWithPayload(w, api.IsBulkSuccess(results), "", results)
 		// Notify: utilizations submitted for deletion with FULL record data
 		capturedUser := req.UserID
 		capturedIDs := req.UtilizationIDs
@@ -579,7 +579,7 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
+			respondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -727,7 +727,7 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, item)
 		}
 
-		api.RespondWithPayload(w, true, "", results)
+		respondWithPayload(w, true, "", results)
 	}
 }
 
@@ -766,7 +766,7 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
+			respondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -852,7 +852,7 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, item)
 		}
 
-		api.RespondWithPayload(w, true, "", results)
+		respondWithPayload(w, true, "", results)
 	}
 }
 
@@ -883,7 +883,7 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
+			respondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1016,7 +1016,7 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"groups": grouped,
 		}
 
-		api.RespondWithPayload(w, true, "", payload)
+		respondWithPayload(w, true, "", payload)
 	}
 }
 
@@ -1031,7 +1031,7 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.UtilizationIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
+			respondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -1043,7 +1043,7 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1054,7 +1054,7 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, sel, req.UtilizationIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to fetch audits: "+err.Error())
+			respondWithResult(w, false, "failed to fetch audits: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1082,7 +1082,7 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(missing) > 0 {
-			api.RespondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
+			respondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
 			return
 		}
 
@@ -1091,7 +1091,7 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE action_id = ANY($3)`
 
 		if _, err := pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
-			api.RespondWithResult(w, false, "failed to approve: "+err.Error())
+			respondWithResult(w, false, "failed to approve: "+err.Error())
 			return
 		}
 
@@ -1110,7 +1110,7 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		respondWithPayload(w, true, "", map[string]interface{}{
 			"approved_count": len(actionIDs),
 			"deleted":        deleted,
 		})
@@ -1141,7 +1141,7 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.UtilizationIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
+			respondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -1153,7 +1153,7 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1164,7 +1164,7 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, sel, req.UtilizationIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to fetch audits: "+err.Error())
+			respondWithResult(w, false, "failed to fetch audits: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1188,7 +1188,7 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(missing) > 0 {
-			api.RespondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
+			respondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
 			return
 		}
 
@@ -1197,11 +1197,11 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE action_id = ANY($3)`
 
 		if _, err := pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
-			api.RespondWithResult(w, false, "failed to reject: "+err.Error())
+			respondWithResult(w, false, "failed to reject: "+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		respondWithPayload(w, true, "", map[string]interface{}{
 			"rejected_count": len(actionIDs),
 		})
 		// Notify: utilizations rejected with FULL record data
@@ -1223,13 +1223,13 @@ func UploadUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "failed to parse form: "+err.Error())
+			api.Error(w, http.StatusBadRequest, "failed to parse form: "+err.Error())
 			return
 		}
 
 		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -1241,20 +1241,20 @@ func UploadUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "no file uploaded")
+			api.Error(w, http.StatusBadRequest, "no file uploaded")
 			return
 		}
 
 		file := files[0]
 		f, err := file.Open()
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "failed to open file: "+err.Error())
+			api.Error(w, http.StatusBadRequest, "failed to open file: "+err.Error())
 			return
 		}
 		defer f.Close()
@@ -1267,24 +1267,24 @@ func UploadUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else if ext == ".xlsx" || ext == ".xls" {
 			rows, err = parseXLSXUtilization(file, f)
 		} else {
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported file type. Use CSV or XLSX")
+			api.Error(w, http.StatusBadRequest, "unsupported file type. Use CSV or XLSX")
 			return
 		}
 
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "failed to parse file: "+err.Error())
+			api.Error(w, http.StatusBadRequest, "failed to parse file: "+err.Error())
 			return
 		}
 
 		if len(rows) < 2 {
-			api.RespondWithError(w, http.StatusBadRequest, "file must contain header and at least one data row")
+			api.Error(w, http.StatusBadRequest, "file must contain header and at least one data row")
 			return
 		}
 
 		// Process rows and create utilizations
 		results := processUtilizationRows(ctx, pgxPool, rows, requestedBy)
 
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		respondWithPayload(w, api.IsBulkSuccess(results), "", results)
 		// Notify: utilization file uploaded with FULL record data
 		capturedUser := userID
 		capturedFile := file.Filename
@@ -1529,3 +1529,5 @@ func getCellValue(row []string, colMap map[string]int, colName string) string {
 	}
 	return strings.TrimSpace(row[idx])
 }
+
+

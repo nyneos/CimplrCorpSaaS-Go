@@ -100,7 +100,7 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason      string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
@@ -115,18 +115,18 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			requestedBy = req.UserID
 		}
 		if len(req.ProposalIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "proposal_ids cannot be empty")
+			api.Error(w, http.StatusBadRequest, "proposal_ids cannot be empty")
 			return
 		}
 		if strings.TrimSpace(req.Reason) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "reason cannot be empty")
+			api.Error(w, http.StatusBadRequest, "reason cannot be empty")
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		committed := false
@@ -155,24 +155,24 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			`, proposalID).Scan(&latestActionType, &latestStatus)
 			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
-				api.RespondWithError(w, http.StatusBadRequest, "delete request already pending for proposal: "+proposalID)
+				api.Error(w, http.StatusBadRequest, "delete request already pending for proposal: "+proposalID)
 				return
 			}
 		}
 		if _, err := tx.Exec(ctx, q, req.ProposalIDs, req.Reason, requestedBy); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
 
 		elapsed := time.Since(start)
 		log.Printf("[DeleteCashFlowProposalV2] Processed %d proposals in %v", len(req.ProposalIDs), elapsed)
-		api.RespondWithResult(w, true, fmt.Sprintf("Marked %d proposals for deletion in %v", len(req.ProposalIDs), elapsed))
+		respondWithResult(w, true, fmt.Sprintf("Marked %d proposals for deletion in %v", len(req.ProposalIDs), elapsed))
 		// Notify: FULL proposal data for rich templates
 		capturedIDs := req.ProposalIDs
 		capturedUser := req.UserID
@@ -202,7 +202,7 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
@@ -220,7 +220,7 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		committed := false
@@ -240,7 +240,7 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 		`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -252,7 +252,7 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 		for rows.Next() {
 			var actionID, proposalID, status string
 			if err := rows.Scan(&actionID, &proposalID, &status); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read latest proposal audits: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Failed to read latest proposal audits: "+err.Error())
 				return
 			}
 			foundProposals[proposalID] = true
@@ -281,7 +281,7 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 				}
 				msg += "Cannot reject (not pending): " + strings.Join(cannotReject, ",")
 			}
-			api.RespondWithError(w, http.StatusBadRequest, msg)
+			api.Error(w, http.StatusBadRequest, msg)
 			return
 		}
 
@@ -295,19 +295,19 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 			WHERE action_id = ANY($3)
 		`
 		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, actionIDs); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
 
 		elapsed := time.Since(start)
 		log.Printf("[BulkRejectCashFlowProposalActionsV2] Rejected %d proposals in %v", len(actionIDs), elapsed)
-		api.RespondWithResult(w, true, fmt.Sprintf("Rejected %d proposals in %v", len(actionIDs), elapsed))
+		respondWithResult(w, true, fmt.Sprintf("Rejected %d proposals in %v", len(actionIDs), elapsed))
 		// Notify: FULL proposal data for rich templates
 		capturedIDs := req.ProposalIDs
 		capturedUser := req.UserID
@@ -338,7 +338,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
@@ -353,18 +353,18 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 			checkerBy = req.UserID
 		}
 		if len(req.ProposalIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "proposal_ids cannot be empty")
+			api.Error(w, http.StatusBadRequest, "proposal_ids cannot be empty")
 			return
 		}
 		if strings.TrimSpace(req.Comment) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "comment cannot be empty")
+			api.Error(w, http.StatusBadRequest, "comment cannot be empty")
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		committed := false
@@ -384,7 +384,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 		`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -398,7 +398,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 		for rows.Next() {
 			var actionID, proposalID, actionType, status string
 			if err := rows.Scan(&actionID, &proposalID, &actionType, &status); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read latest proposal audits: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Failed to read latest proposal audits: "+err.Error())
 				return
 			}
 			foundProposals[proposalID] = true
@@ -431,7 +431,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 				}
 				msg += "Cannot approve (not pending): " + strings.Join(cannotApprove, ",")
 			}
-			api.RespondWithError(w, http.StatusBadRequest, msg)
+			api.Error(w, http.StatusBadRequest, msg)
 			return
 		}
 
@@ -445,7 +445,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 			WHERE action_id = ANY($3)
 		`
 		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, actionIDs); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 
@@ -462,13 +462,13 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 				  AND aa.proposal_id = p.proposal_id
 			`
 			if _, err := tx.Exec(ctx, delQ, deleteActionIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to soft delete proposals: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Failed to soft delete proposals: "+err.Error())
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
@@ -476,7 +476,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 		elapsed := time.Since(start)
 		log.Printf("[BulkApproveCashFlowProposalActionsV2] Approved %d proposals (%d deleted) in %v",
 			len(actionIDs), len(deleteProposalIDs), elapsed)
-		api.RespondWithResult(w, true, fmt.Sprintf("Approved %d proposals (%d deleted) in %v",
+		respondWithResult(w, true, fmt.Sprintf("Approved %d proposals (%d deleted) in %v",
 			len(actionIDs), len(deleteProposalIDs), elapsed))
 		// Notify: FULL proposal data for rich templates including deleted proposals
 		capturedIDs := req.ProposalIDs
@@ -527,7 +527,7 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
@@ -543,14 +543,14 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(req.Items) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "items cannot be empty")
+			api.Error(w, http.StatusBadRequest, "items cannot be empty")
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		committed := false
@@ -566,7 +566,7 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		err = tx.QueryRow(ctx, insProp, req.Proposal.ProposalName, req.Proposal.BaseCurrencyCode, req.Proposal.EffectiveDate).Scan(&proposalID)
 		if err != nil {
 			errorMsg := parseConstraintError(err)
-			api.RespondWithError(w, http.StatusBadRequest, errorMsg)
+			api.Error(w, http.StatusBadRequest, errorMsg)
 			return
 		}
 
@@ -574,7 +574,7 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, item := range req.Items {
 			// Validate cashflow_type
 			if item.CashflowType != "Inflow" && item.CashflowType != "Outflow" {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Invalid cashflow_type: %s (must be Inflow/Outflow)", item.CashflowType))
+				api.Error(w, http.StatusBadRequest, fmt.Sprintf("Invalid cashflow_type: %s (must be Inflow/Outflow)", item.CashflowType))
 				return
 			}
 
@@ -582,7 +582,7 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var categoryExists bool
 			catQ := `SELECT EXISTS(SELECT 1 FROM public.mastercashflowcategory WHERE category_id = $1)`
 			if err := tx.QueryRow(ctx, catQ, item.CategoryID).Scan(&categoryExists); err != nil || !categoryExists {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Invalid category_id: %s", item.CategoryID))
+				api.Error(w, http.StatusBadRequest, fmt.Sprintf("Invalid category_id: %s", item.CategoryID))
 				return
 			}
 
@@ -607,7 +607,7 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			).Scan(&itemID)
 			if err != nil {
 				errorMsg := parseConstraintError(err)
-				api.RespondWithError(w, http.StatusBadRequest, errorMsg)
+				api.Error(w, http.StatusBadRequest, errorMsg)
 				return
 			}
 
@@ -646,12 +646,12 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Insert audit record
 		auditQ := `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
 		if _, err := tx.Exec(ctx, auditQ, proposalID, "Created via API", createdBy); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to insert audit: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
@@ -668,7 +668,7 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			payload.ToMap(),
 		)
 
-		api.RespondWithResult(w, true, fmt.Sprintf("Successfully created proposal %s with %d items", proposalID, created))
+		respondWithResult(w, true, fmt.Sprintf("Successfully created proposal %s with %d items", proposalID, created))
 	}
 }
 func nullString(s string) interface{} {
@@ -686,7 +686,7 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ProposalID string `json:"proposal_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
@@ -698,11 +698,11 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrUnauthorized)
+			api.Error(w, http.StatusForbidden, constants.ErrUnauthorized)
 			return
 		}
 		if strings.TrimSpace(req.ProposalID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "proposal_id cannot be empty")
+			api.Error(w, http.StatusBadRequest, "proposal_id cannot be empty")
 			return
 		}
 
@@ -751,7 +751,7 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&oldProposalName, &oldBaseCurrency, &oldEffectiveDate, &processingStatus, &isDeleted, &deletedAt, &deletedBy,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Proposal not found: "+err.Error())
+			api.Error(w, http.StatusNotFound, "Proposal not found: "+err.Error())
 			return
 		}
 
@@ -793,7 +793,7 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, itemQ, req.ProposalID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -916,13 +916,11 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+		api.Success(w, http.StatusOK, map[string]interface{}{
 			"header":  header,
 			"items":   items,
 			"actions": actions,
-		})
+		}, "")
 	}
 }
 
@@ -933,7 +931,7 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
@@ -945,7 +943,7 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrUnauthorized)
+			api.Error(w, http.StatusForbidden, constants.ErrUnauthorized)
 			return
 		}
 
@@ -977,7 +975,7 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -989,7 +987,7 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var effectiveDate time.Time
 			var itemCount int
 			if err := rows.Scan(&proposalID, &proposalName, &baseCurrency, &effectiveDate, &uploadS3Key, &status, &itemCount); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read proposals: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Failed to read proposals: "+err.Error())
 				return
 			}
 			proposals = append(proposals, map[string]interface{}{
@@ -1003,13 +1001,9 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data": map[string]interface{}{
-				"proposals": proposals,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"proposals": proposals,
+		}, "")
 	}
 }
 
@@ -1021,12 +1015,12 @@ func GetProjectionDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ProposalID string `json:"proposal_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if strings.TrimSpace(req.ProposalID) == "" {
-			api.RespondWithResult(w, false, "proposal_id required")
+			respondWithResult(w, false, "proposal_id required")
 			return
 		}
 
@@ -1038,31 +1032,27 @@ func GetProjectionDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE proposal_id = $1
 			  AND COALESCE(is_deleted, false) = false
 		`, req.ProposalID).Scan(&uploadS3Key); err != nil {
-			api.RespondWithResult(w, false, "Proposal not found or query error: "+err.Error())
+			respondWithResult(w, false, "Proposal not found or query error: "+err.Error())
 			return
 		}
 
 		key := strings.TrimSpace(ifaceToString(uploadS3Key))
 		if key == "" {
-			api.RespondWithResult(w, false, "no file available")
+			respondWithResult(w, false, "no file available")
 			return
 		}
 
 		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			respondWithResult(w, false, "Failed to generate download url: "+err.Error())
 			return
 		}
 
 		insertProjectionDownloadAudit(ctx, pgxPool, req.ProposalID, projectionRequestedBy(req.UserID), key)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"download_url": downloadURL,
+		}, "")
 	}
 }
 
@@ -1075,12 +1065,12 @@ func GetProjectionBulkDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if len(req.ProposalIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrProposalIDsRequired)
+			respondWithResult(w, false, constants.ErrProposalIDsRequired)
 			return
 		}
 
@@ -1126,26 +1116,14 @@ func GetProjectionBulkDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(files) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				"message":              "no downloadable files found",
-				"data": map[string]interface{}{
-					"files":      []map[string]string{},
-					"failed_ids": failedIDs,
-				},
-			})
+			api.Error(w, http.StatusOK, "no downloadable files found")
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"files":      files,
-				"failed_ids": failedIDs,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
+		}, "")
 	}
 }
 
@@ -1181,7 +1159,7 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
 
@@ -1196,18 +1174,18 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			requestedBy = req.UserID
 		}
 		if strings.TrimSpace(req.ProposalID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "proposal_id cannot be empty")
+			api.Error(w, http.StatusBadRequest, "proposal_id cannot be empty")
 			return
 		}
 		if strings.TrimSpace(req.Reason) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "reason cannot be empty for updates")
+			api.Error(w, http.StatusBadRequest, "reason cannot be empty for updates")
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		committed := false
@@ -1222,7 +1200,7 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var oldDate time.Time
 		q := `SELECT proposal_name, base_currency_code, effective_date FROM cimplrcorpsaas.cashflow_proposal WHERE proposal_id=$1`
 		if err := tx.QueryRow(ctx, q, req.ProposalID).Scan(&oldName, &oldCurrency, &oldDate); err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Proposal not found: "+err.Error())
+			api.Error(w, http.StatusNotFound, "Proposal not found: "+err.Error())
 			return
 		}
 
@@ -1240,13 +1218,13 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err := tx.Exec(ctx, updProp,
 			req.Proposal.ProposalName, req.Proposal.BaseCurrencyCode, req.Proposal.EffectiveDate,
 			oldName, oldCurrency, oldDate, req.ProposalID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to update proposal: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to update proposal: "+err.Error())
 			return
 		}
 
 		// Delete old items and projections (will recreate from request)
 		if _, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id=$1`, req.ProposalID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to delete old items: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to delete old items: "+err.Error())
 			return
 		}
 
@@ -1254,14 +1232,14 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		updated := 0
 		for _, item := range req.Items {
 			if item.CashflowType != "Inflow" && item.CashflowType != "Outflow" {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Invalid cashflow_type: %s", item.CashflowType))
+				api.Error(w, http.StatusBadRequest, fmt.Sprintf("Invalid cashflow_type: %s", item.CashflowType))
 				return
 			}
 
 			var categoryExists bool
 			catQ := `SELECT EXISTS(SELECT 1 FROM public.mastercashflowcategory WHERE category_id = $1)`
 			if err := tx.QueryRow(ctx, catQ, item.CategoryID).Scan(&categoryExists); err != nil || !categoryExists {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Invalid category_id: %s", item.CategoryID))
+				api.Error(w, http.StatusBadRequest, fmt.Sprintf("Invalid category_id: %s", item.CategoryID))
 				return
 			}
 
@@ -1284,7 +1262,7 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				maturityDate, nullString(item.BankName), nullString(item.BankAccountNumber), nullString(item.EntityName),
 			).Scan(&itemID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert item: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Failed to insert item: "+err.Error())
 				return
 			}
 
@@ -1322,12 +1300,12 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Insert audit record
 		auditQ := `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
 		if _, err := tx.Exec(ctx, auditQ, req.ProposalID, req.Reason, requestedBy); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to insert audit: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
@@ -1361,6 +1339,6 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fmt.Sprintf("PROJ_UPDATE/%s/%d", capturedProposalID, time.Now().UnixMilli()),
 			payloadMap,
 		)
-		api.RespondWithResult(w, true, fmt.Sprintf("Updated proposal with %d items in %v", updated, elapsed))
+		respondWithResult(w, true, fmt.Sprintf("Updated proposal with %d items in %v", updated, elapsed))
 	}
 }

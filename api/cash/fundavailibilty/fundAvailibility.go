@@ -27,12 +27,12 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+			api.Error(w, http.StatusBadRequest, constants.ErrMissingUserID)
 			return
 		}
 
@@ -45,7 +45,7 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -54,7 +54,7 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.AsOfDate != "" {
 			parsed, err := time.Parse(constants.DateFormat, req.AsOfDate)
 			if err != nil {
-				api.RespondWithResult(w, false, "Invalid as_of_date format. Use YYYY-MM-DD")
+				api.Error(w, http.StatusBadRequest, "Invalid as_of_date format. Use YYYY-MM-DD")
 				return
 			}
 			asOfDate = parsed
@@ -66,7 +66,7 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			viewType = "monthly"
 		}
 		if viewType != "daily" && viewType != "weekly" && viewType != "monthly" && viewType != "quarterly" && viewType != "yearly" {
-			api.RespondWithResult(w, false, "Invalid view_type. Must be: daily, weekly, monthly, quarterly, or yearly")
+			api.Error(w, http.StatusBadRequest, "Invalid view_type. Must be: daily, weekly, monthly, quarterly, or yearly")
 			return
 		}
 
@@ -98,14 +98,14 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fetch actuals from bank statements
 		actuals, actualsErr := fetchActuals(ctx, pgxPool, asOfDate, endDate, viewType, entityIDs, bankNames)
 		if actualsErr != nil {
-			api.RespondWithResult(w, false, "Failed to fetch actuals: "+actualsErr.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch actuals: "+actualsErr.Error())
 			return
 		}
 
 		// Fetch projections from cashflow proposals
 		projections, projectionsErr := fetchProjections(ctx, pgxPool, asOfDate, endDate, viewType, entityIDs, bankNames)
 		if projectionsErr != nil {
-			api.RespondWithResult(w, false, "Failed to fetch projections: "+projectionsErr.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to fetch projections: "+projectionsErr.Error())
 			return
 		}
 
@@ -135,13 +135,9 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			},
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"fund_availability": response,
-			},
-		})
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"fund_availability": response,
+		}, "")
 	}
 }
 

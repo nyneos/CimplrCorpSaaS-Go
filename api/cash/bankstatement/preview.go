@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"archive/zip"
 	"bytes"
@@ -29,7 +30,7 @@ import (
 func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			apictx.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -38,13 +39,13 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 		// Parse multipart form
 		err := r.ParseMultipartForm(100 << 20) // 100MB max
 		if err != nil {
-			http.Error(w, "Failed to parse multipart form: "+err.Error(), http.StatusBadRequest)
+			apictx.Error(w, http.StatusBadRequest, "Failed to parse multipart form: "+err.Error())
 			return
 		}
 
 		file, header, err := r.FormFile("file")
 		if err != nil {
-			http.Error(w, "Missing 'file' field: "+err.Error(), http.StatusBadRequest)
+			apictx.Error(w, http.StatusBadRequest, "Missing 'file' field: "+err.Error())
 			return
 		}
 		defer file.Close()
@@ -57,7 +58,7 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 			if mappingsJSON != "" {
 				mappings = &ColumnMappings{}
 				if err := json.Unmarshal([]byte(mappingsJSON), mappings); err != nil {
-					http.Error(w, "Invalid mappings JSON: "+err.Error(), http.StatusBadRequest)
+					apictx.Error(w, http.StatusBadRequest, "Invalid mappings JSON: "+err.Error())
 					return
 				}
 			}
@@ -69,7 +70,7 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 		// Read file into memory
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
+			apictx.Error(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
 			return
 		}
 
@@ -82,41 +83,37 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 			// ZIP with multiple files
 			allTransactions, err = processZipPreviewFlat(ctx, db, fileBytes, useMapping, mappings)
 			if err != nil {
-				http.Error(w, "ZIP processing failed: "+err.Error(), http.StatusInternalServerError)
+				apictx.Error(w, http.StatusInternalServerError, "ZIP processing failed: "+err.Error())
 				return
 			}
 		} else if ext == ".pdf" || ext == ".docx" {
 			// PDF/DOCX - call external AI parser (NO DB writes)
 			allTransactions, err = processPDFPreviewFlat(ctx, db, fileBytes, header.Filename)
 			if err != nil {
-				http.Error(w, "PDF/DOCX processing failed: "+err.Error(), http.StatusInternalServerError)
+				apictx.Error(w, http.StatusInternalServerError, "PDF/DOCX processing failed: "+err.Error())
 				return
 			}
 		} else if ext == ".csv" && isMultiAccount {
 			// Multi-account CSV
 			allTransactions, err = processMultiAccountCSVPreviewFlat(ctx, db, fileBytes)
 			if err != nil {
-				http.Error(w, "Multi-account CSV processing failed: "+err.Error(), http.StatusInternalServerError)
+				apictx.Error(w, http.StatusInternalServerError, "Multi-account CSV processing failed: "+err.Error())
 				return
 			}
 		} else {
 			// Single file processing (XLSX, XLS, CSV)
 			transactions, err := processSingleFilePreviewFlat(ctx, db, fileBytes, header.Filename, useMapping, mappings)
 			if err != nil {
-				http.Error(w, "File processing failed: "+err.Error(), http.StatusInternalServerError)
+				apictx.Error(w, http.StatusInternalServerError, "File processing failed: "+err.Error())
 				return
 			}
 			allTransactions = transactions
 		}
 
-		response := map[string]interface{}{
-			"success": true,
-			"data":    allTransactions,
-			"count":   len(allTransactions),
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(response)
+		apictx.Success(w, http.StatusOK, map[string]interface{}{
+			"transactions": allTransactions,
+			"count":        len(allTransactions),
+		}, "")
 	})
 }
 
@@ -1357,3 +1354,4 @@ func getMapKeys(m map[string]interface{}) []string {
 
 // Note: Helper functions z4(), q8(), and attachStreamKey() are defined in stream_handlers.go
 // They are already available in this package, so we don't redefine them here
+

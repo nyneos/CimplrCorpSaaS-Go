@@ -2695,17 +2695,14 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB, pool *pgxpool.Pool) http
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if r.Method != http.MethodPost {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "Only POST method is allowed for this endpoint.",
-			})
+			apictx.Error(w, http.StatusOK, "Only POST method is allowed for this endpoint.")
 			return
 		}
 
 		// Ensure multipart form is parsed
 		if r.MultipartForm == nil {
 			if err := r.ParseMultipartForm(32 << 20); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Unable to read the uploaded file. Please try again."})
+				apictx.Error(w, http.StatusOK, "Unable to read the uploaded file. Please try again.")
 				return
 			}
 		}
@@ -2737,7 +2734,7 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB, pool *pgxpool.Pool) http
 			}
 		}
 		if err != nil || file == nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "File not found in request. Please attach a CSV, XLSX, or XLS file using the 'file' field in form-data."})
+			apictx.Error(w, http.StatusOK, "File not found in request. Please attach a CSV, XLSX, or XLS file using the 'file' field in form-data.")
 			return
 		}
 		defer file.Close()
@@ -2747,18 +2744,18 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB, pool *pgxpool.Pool) http
 		// Read file bytes
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Failed to read the uploaded file. Please try again."})
+			apictx.Error(w, http.StatusOK, "Failed to read the uploaded file. Please try again.")
 			return
 		}
 
 		// Parse CSV / XLSX / XLS → uniform [][]string
 		rows, parseErr := parseFileToRows(fileBytes)
 		if parseErr != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Unable to parse file. Please upload a valid CSV, XLSX, or XLS file."})
+			apictx.Error(w, http.StatusOK, "Unable to parse file. Please upload a valid CSV, XLSX, or XLS file.")
 			return
 		}
 		if len(rows) < 1 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "File contains no rows."})
+			apictx.Error(w, http.StatusOK, "File contains no rows.")
 			return
 		}
 
@@ -3196,11 +3193,7 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB, pool *pgxpool.Pool) http
 			}
 		}
 
-		// Return aggregated results
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    results,
-		})
+		apictx.Success(w, http.StatusOK, results, "")
 	})
 }
 

@@ -39,39 +39,39 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
+			respondWithResult(w, false, constants.ErrUserIDRequired)
 			return
 		}
 
 		// Validate entity access
 		if !api.IsEntityAllowed(ctx, req.EntityName) {
-			api.RespondWithResult(w, false, "unauthorized entity")
+			respondWithResult(w, false, "unauthorized entity")
 			return
 		}
 
 		// Validate core_limit_type
 		coreLimitType := strings.ToUpper(strings.TrimSpace(req.CoreLimitType))
 		if coreLimitType != constants.FundBased && coreLimitType != constants.NonFundBased && coreLimitType != constants.TermLoans {
-			api.RespondWithResult(w, false, "invalid core_limit_type. Allowed: Fund Based, Non Fund Based, Term Loans")
+			respondWithResult(w, false, "invalid core_limit_type. Allowed: Fund Based, Non Fund Based, Term Loans")
 			return
 		}
 
 		// Validate fungibility_type
 		fungibilityType := strings.ToUpper(strings.TrimSpace(req.FungibilityType))
 		if fungibilityType != constants.InterCore && fungibilityType != constants.IntraCore && fungibilityType != constants.None {
-			api.RespondWithResult(w, false, "invalid fungibility_type. Allowed: Inter-Core, Intra-Core, None")
+			respondWithResult(w, false, "invalid fungibility_type. Allowed: Inter-Core, Intra-Core, None")
 			return
 		}
 
 		// Validate security_type
 		securityType := strings.ToUpper(strings.TrimSpace(req.SecurityType))
 		if securityType != "SECURED" && securityType != "UNSECURED" {
-			api.RespondWithResult(w, false, "invalid security_type. Allowed: Secured, Unsecured")
+			respondWithResult(w, false, "invalid security_type. Allowed: Secured, Unsecured")
 			return
 		}
 
@@ -83,7 +83,7 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -98,13 +98,13 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ExcludeLimitID: "",
 		}
 		if err := checkLimitUniqueness(ctx, pgxPool, key); err != nil {
-			api.RespondWithResult(w, false, err.Error())
+			respondWithResult(w, false, err.Error())
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin transaction: "+err.Error())
+			respondWithResult(w, false, "failed to begin transaction: "+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -126,7 +126,7 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&limitID)
 
 		if err != nil {
-			api.RespondWithResult(w, false, parseLimitConstraintError(err))
+			respondWithResult(w, false, parseLimitConstraintError(err))
 			return
 		}
 
@@ -135,16 +135,16 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
 
 		if _, err := tx.Exec(ctx, auditQ, limitID, nullifyEmpty(req.Reason), requestedBy); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			respondWithResult(w, false, "failed to create audit: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			respondWithResult(w, false, "failed to commit: "+err.Error())
 			return
 		}
 
-		api.RespondWithResult(w, true, limitID)
+		respondWithResult(w, true, limitID)
 	}
 }
 
@@ -176,12 +176,12 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" || len(req.Limits) == 0 {
-			api.RespondWithResult(w, false, "user_id and limits array required")
+			respondWithResult(w, false, "user_id and limits array required")
 			return
 		}
 
@@ -193,7 +193,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -304,7 +304,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			uniquenessResults, err := validateBulkLimitUniqueness(ctx, pgxPool, uniquenessData)
 			if err != nil {
-				api.RespondWithResult(w, false, "bulk uniqueness validation failed: "+err.Error())
+				respondWithResult(w, false, "bulk uniqueness validation failed: "+err.Error())
 				return
 			}
 
@@ -394,7 +394,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		respondWithPayload(w, api.IsBulkSuccess(results), "", results)
 		// Notify: bulk limit creation submitted with FULL record data
 		// Collect successful limit_ids from results
 		createdLimitIDs := []string{}
@@ -431,17 +431,17 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" || req.LimitID == "" {
-			api.RespondWithResult(w, false, "user_id and limit_id required")
+			respondWithResult(w, false, "user_id and limit_id required")
 			return
 		}
 
 		if len(req.Fields) == 0 {
-			api.RespondWithResult(w, false, "no fields provided to update")
+			respondWithResult(w, false, "no fields provided to update")
 			return
 		}
 
@@ -453,13 +453,13 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin transaction: "+err.Error())
+			respondWithResult(w, false, "failed to begin transaction: "+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -477,7 +477,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var curInitialUtilization *float64
 
 		if err := tx.QueryRow(ctx, sel, req.LimitID).Scan(&curEntity, &curBank, &curCoreLimit, &curLimitType, &curLimitSub, &curSanctionDate, &curEffectiveDate, &curCurrency, &curSanctionedAmount, &curFungibilityType, &curFungibilityPct, &curSecurity, &curRemarks, &curInitialUtilization); err != nil {
-			api.RespondWithResult(w, false, "failed to fetch current limit: "+err.Error())
+			respondWithResult(w, false, "failed to fetch current limit: "+err.Error())
 			return
 		}
 
@@ -515,7 +515,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if s, ok := v.(string); ok {
 					val := strings.ToUpper(strings.TrimSpace(s))
 					if val != constants.FundBased && val != constants.NonFundBased && val != constants.TermLoans {
-						api.RespondWithResult(w, false, "invalid core_limit_type")
+						respondWithResult(w, false, "invalid core_limit_type")
 						return
 					}
 					addStr("core_limit_type", val)
@@ -551,7 +551,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if s, ok := v.(string); ok {
 					val := strings.ToUpper(strings.TrimSpace(s))
 					if val != constants.InterCore && val != constants.IntraCore && val != constants.None {
-						api.RespondWithResult(w, false, "invalid fungibility_type")
+						respondWithResult(w, false, "invalid fungibility_type")
 						return
 					}
 					addStr("fungibility_type", val)
@@ -567,7 +567,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if s, ok := v.(string); ok {
 					val := strings.ToUpper(strings.TrimSpace(s))
 					if val != "SECURED" && val != "UNSECURED" {
-						api.RespondWithResult(w, false, "invalid security_type")
+						respondWithResult(w, false, "invalid security_type")
 						return
 					}
 					addStr("security_type", val)
@@ -589,7 +589,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(newSets) == 0 {
-			api.RespondWithResult(w, false, "no valid fields provided to update")
+			respondWithResult(w, false, "no valid fields provided to update")
 			return
 		}
 
@@ -603,7 +603,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, req.LimitID)
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithResult(w, false, "failed to update limit: "+err.Error())
+			respondWithResult(w, false, "failed to update limit: "+err.Error())
 			return
 		}
 
@@ -612,16 +612,16 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())`
 
 		if _, err := tx.Exec(ctx, auditQ, req.LimitID, nullifyEmpty(req.Reason), requestedBy); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			respondWithResult(w, false, "failed to create audit: "+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			respondWithResult(w, false, "failed to commit: "+err.Error())
 			return
 		}
 
-		api.RespondWithResult(w, true, req.LimitID)
+		respondWithResult(w, true, req.LimitID)
 		// Notify: limit updated with FULL record data
 		capturedLimitID := req.LimitID
 		capturedUser := req.UserID
@@ -647,12 +647,12 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" || len(req.LimitIDs) == 0 {
-			api.RespondWithResult(w, false, "user_id and limit_ids required")
+			respondWithResult(w, false, "user_id and limit_ids required")
 			return
 		}
 
@@ -664,7 +664,7 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -704,7 +704,7 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, result)
 		}
 
-		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		respondWithPayload(w, api.IsBulkSuccess(results), "", results)
 		// Notify: limits submitted for deletion with FULL record data
 		// capturedUser = req.UserID (not display name) so dispatcher resolves entity correctly
 		capturedUser := req.UserID
@@ -748,7 +748,7 @@ func GetAllBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC`
 		rows, err := pgxPool.Query(ctx, query, entityNames)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
+			respondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -828,7 +828,7 @@ func GetAllBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, item)
 		}
 
-		api.RespondWithPayload(w, true, "", results)
+		respondWithPayload(w, true, "", results)
 	}
 }
 
@@ -881,7 +881,7 @@ func GetApprovedBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC`
 		rows, err := pgxPool.Query(ctx, query, entityNames)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
+			respondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -929,7 +929,7 @@ func GetApprovedBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, item)
 		}
 
-		api.RespondWithPayload(w, true, "", results)
+		respondWithPayload(w, true, "", results)
 	}
 }
 
@@ -944,7 +944,7 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.LimitIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
+			respondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -956,7 +956,7 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -968,7 +968,7 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, sel, req.LimitIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to fetch audits: "+err.Error())
+			respondWithResult(w, false, "failed to fetch audits: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -996,7 +996,7 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(missing) > 0 {
-			api.RespondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
+			respondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
 			return
 		}
 
@@ -1006,7 +1006,7 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE action_id = ANY($3)`
 
 		if _, err := pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
-			api.RespondWithResult(w, false, "failed to approve: "+err.Error())
+			respondWithResult(w, false, "failed to approve: "+err.Error())
 			return
 		}
 
@@ -1025,7 +1025,7 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		respondWithPayload(w, true, "", map[string]interface{}{
 			"approved_count": len(actionIDs),
 			"deleted":        deleted,
 		})
@@ -1057,7 +1057,7 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.LimitIDs) == 0 {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
+			respondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -1069,7 +1069,7 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1080,7 +1080,7 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, sel, req.LimitIDs)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to fetch audits: "+err.Error())
+			respondWithResult(w, false, "failed to fetch audits: "+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1104,7 +1104,7 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(missing) > 0 {
-			api.RespondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
+			respondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
 			return
 		}
 
@@ -1113,11 +1113,11 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE action_id = ANY($3)`
 
 		if _, err := pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
-			api.RespondWithResult(w, false, "failed to reject: "+err.Error())
+			respondWithResult(w, false, "failed to reject: "+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		respondWithPayload(w, true, "", map[string]interface{}{
 			"rejected_count": len(actionIDs),
 		})
 		// Notify: limits rejected with FULL record data
@@ -1155,3 +1155,4 @@ func timeOrEmpty(t *time.Time) string {
 	}
 	return t.Format(constants.DateTimeFormat)
 }
+

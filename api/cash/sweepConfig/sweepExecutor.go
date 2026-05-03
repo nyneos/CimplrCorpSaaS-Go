@@ -26,17 +26,17 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+			respondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 		// user_id must match middleware-authenticated user
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -49,7 +49,7 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -119,7 +119,7 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -162,7 +162,7 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithResult(w, false, "DB rows error: "+rows.Err().Error())
+			respondWithResult(w, false, "DB rows error: "+rows.Err().Error())
 			return
 		}
 
@@ -198,7 +198,7 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			totalCount = 0
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		respondWithPayload(w, true, "", map[string]interface{}{
 			"logs":   logs,
 			"total":  totalCount,
 			"limit":  req.Limit,
@@ -219,17 +219,17 @@ func GetSweepStatistics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, constants.ErrMissingUserID)
+			respondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 		// user_id must match middleware-authenticated user
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -242,7 +242,7 @@ func GetSweepStatistics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			respondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -318,7 +318,7 @@ func GetSweepStatistics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		)
 
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
 
@@ -342,7 +342,7 @@ func GetSweepStatistics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			stats["last_execution"] = nil
 		}
 
-		api.RespondWithPayload(w, true, "", stats)
+		respondWithPayload(w, true, "", stats)
 	}
 }
 
@@ -365,17 +365,17 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			respondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" || req.SweepID == "" {
-			api.RespondWithResult(w, false, "Missing user_id or sweep_id")
+			respondWithResult(w, false, "Missing user_id or sweep_id")
 			return
 		}
 		// user_id must match middleware-authenticated user
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -388,7 +388,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			respondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -404,33 +404,33 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, req.SweepID).Scan(&entityName, &bankName, &bankAccount, &sweepType, &parentAccount, &bufferAmount, &activeStatus)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "Sweep configuration not found: "+err.Error())
+			respondWithResult(w, false, "Sweep configuration not found: "+err.Error())
 			return
 		}
 
 		// Validate sweep scope against prevalidation context
 		if strings.TrimSpace(entityName) != "" {
 			if !api.IsEntityAllowed(ctx, entityName) {
-				api.RespondWithResult(w, false, "unauthorized entity")
+				respondWithResult(w, false, "unauthorized entity")
 				return
 			}
 		}
 		if strings.TrimSpace(bankName) != "" {
 			if !api.IsBankAllowed(ctx, bankName) {
-				api.RespondWithResult(w, false, "unauthorized bank")
+				respondWithResult(w, false, "unauthorized bank")
 				return
 			}
 		}
 		if strings.TrimSpace(bankAccount) != "" {
 			if !ctxHasApprovedBankAccountFor(ctx, bankAccount, bankName, entityName) {
-				api.RespondWithResult(w, false, "unauthorized bank account")
+				respondWithResult(w, false, "unauthorized bank account")
 				return
 			}
 		}
 		if strings.TrimSpace(parentAccount) != "" {
 			// parent must be an approved account and belong to the same entity (when entity is known)
 			if !ctxHasApprovedBankAccountFor(ctx, parentAccount, "", entityName) {
-				api.RespondWithResult(w, false, "unauthorized parent account")
+				respondWithResult(w, false, "unauthorized parent account")
 				return
 			}
 		}
@@ -446,7 +446,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, req.SweepID).Scan(&processingStatus)
 
 		if err != nil || processingStatus != "APPROVED" {
-			api.RespondWithResult(w, false, "Sweep must be approved before manual execution")
+			respondWithResult(w, false, "Sweep must be approved before manual execution")
 			return
 		}
 
@@ -465,7 +465,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, bankAccount).Scan(&balanceID, &currentBalance)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to fetch current balance: "+err.Error())
+			respondWithResult(w, false, "Failed to fetch current balance: "+err.Error())
 			return
 		}
 
@@ -484,7 +484,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if currentBalance > buffer {
 				sweepAmount = currentBalance - buffer
 			} else {
-				api.RespondWithResult(w, false, fmt.Sprintf("Current balance (%.2f) is below buffer (%.2f). No sweep needed.", currentBalance, buffer))
+				respondWithResult(w, false, fmt.Sprintf("Current balance (%.2f) is below buffer (%.2f). No sweep needed.", currentBalance, buffer))
 				return
 			}
 
@@ -492,7 +492,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if currentBalance >= buffer {
 				sweepAmount = currentBalance
 			} else {
-				api.RespondWithResult(w, false, fmt.Sprintf("Current balance (%.2f) has not reached buffer (%.2f). No sweep needed.", currentBalance, buffer))
+				respondWithResult(w, false, fmt.Sprintf("Current balance (%.2f) has not reached buffer (%.2f). No sweep needed.", currentBalance, buffer))
 				return
 			}
 
@@ -500,7 +500,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if currentBalance > buffer {
 				sweepAmount = currentBalance - buffer
 			} else {
-				api.RespondWithResult(w, false, fmt.Sprintf("Current balance (%.2f) is at or below target (%.2f). No sweep needed.", currentBalance, buffer))
+				respondWithResult(w, false, fmt.Sprintf("Current balance (%.2f) is at or below target (%.2f). No sweep needed.", currentBalance, buffer))
 				return
 			}
 
@@ -508,24 +508,24 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if currentBalance > buffer {
 				sweepAmount = currentBalance - buffer
 			} else {
-				api.RespondWithResult(w, false, "No amount to sweep - balance at or below buffer")
+				respondWithResult(w, false, "No amount to sweep - balance at or below buffer")
 				return
 			}
 
 		default:
-			api.RespondWithResult(w, false, "Unknown sweep type: "+sweepType)
+			respondWithResult(w, false, "Unknown sweep type: "+sweepType)
 			return
 		}
 
 		if sweepAmount <= 0 {
-			api.RespondWithResult(w, false, "No amount to sweep")
+			respondWithResult(w, false, "No amount to sweep")
 			return
 		}
 
 		// Begin transaction
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to begin transaction: "+err.Error())
+			respondWithResult(w, false, "Failed to begin transaction: "+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -547,7 +547,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, newBalance, sweepAmount, balanceID)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to update source account: "+err.Error())
+			respondWithResult(w, false, "Failed to update source account: "+err.Error())
 			return
 		}
 
@@ -559,7 +559,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, balanceID, fmt.Sprintf("Manual sweep execution: %s", req.SweepID), requestedBy)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to create audit for source: "+err.Error())
+			respondWithResult(w, false, "Failed to create audit for source: "+err.Error())
 			return
 		}
 
@@ -576,7 +576,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, parentAccount).Scan(&parentBalanceID, &parentBalance)
 
 		if err != nil {
-			api.RespondWithResult(w, false, fmt.Sprintf("Parent account '%s' not found in bank_balances_manual. Please ensure the parent account exists before executing sweep.", parentAccount))
+			respondWithResult(w, false, fmt.Sprintf("Parent account '%s' not found in bank_balances_manual. Please ensure the parent account exists before executing sweep.", parentAccount))
 			return
 		}
 
@@ -597,7 +597,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, parentNewBalance, sweepAmount, parentBalanceID)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to update parent account: "+err.Error())
+			respondWithResult(w, false, "Failed to update parent account: "+err.Error())
 			return
 		}
 
@@ -609,7 +609,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, parentBalanceID, fmt.Sprintf("Manual sweep receipt: %s", req.SweepID), requestedBy)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to create audit for parent: "+err.Error())
+			respondWithResult(w, false, "Failed to create audit for parent: "+err.Error())
 			return
 		}
 
@@ -622,17 +622,17 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, req.SweepID, sweepAmount, bankAccount, parentAccount, currentBalance, newBalance)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to log execution: "+err.Error())
+			respondWithResult(w, false, "Failed to log execution: "+err.Error())
 			return
 		}
 
 		// Commit
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "Failed to commit: "+err.Error())
+			respondWithResult(w, false, "Failed to commit: "+err.Error())
 			return
 		}
 
-		api.RespondWithPayload(w, true, "Sweep executed successfully", map[string]interface{}{
+		respondWithPayload(w, true, "Sweep executed successfully", map[string]interface{}{
 			"sweep_id":       req.SweepID,
 			"amount_swept":   sweepAmount,
 			"from_account":   bankAccount,
@@ -642,3 +642,4 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
+

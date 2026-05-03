@@ -1,6 +1,7 @@
 package payablerecievable
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"context"
 	"crypto/sha256"
@@ -96,16 +97,7 @@ const (
 // Helper function for consistent error responses
 func respondWithErrorTransactionV2(w http.ResponseWriter, status int, errMsg string) {
 	log.Printf("[ERROR] %s", errMsg)
-	w.Header().Set(ContentTypeJSON, ApplicationJSON)
-	w.WriteHeader(status)
-	response := map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	}
-	if status == http.StatusBadRequest {
-		response["message"] = errMsg
-	}
-	json.NewEncoder(w).Encode(response)
+	api.Error(w, status, errMsg)
 }
 
 // Batch processor for transactions
@@ -394,19 +386,15 @@ func BatchUploadTransactionsV2(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(ContentTypeJSON, ApplicationJSON)
-		response := map[string]interface{}{
-			constants.ValueSuccess: true,
-			"batch_id":             result.BatchID,
-			"total_records":        result.TotalRecords,
-			"processed_records":    result.ProcessedRecords,
-			"processed_files":      result.ProcessedFiles,
-			"processing_time":      result.ProcessingTime.String(),
-			"file_storage_key":     result.FileStorageKey,
-			"file_storage_url":     result.FileStorageURL,
-			"message":              fmt.Sprintf("Successfully uploaded %d transaction records, %d processed to canonical tables", result.TotalRecords, result.ProcessedRecords),
-		}
-		json.NewEncoder(w).Encode(response)
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"batch_id":          result.BatchID,
+			"total_records":     result.TotalRecords,
+			"processed_records": result.ProcessedRecords,
+			"processed_files":   result.ProcessedFiles,
+			"processing_time":   result.ProcessingTime.String(),
+			"file_storage_key":  result.FileStorageKey,
+			"file_storage_url":  result.FileStorageURL,
+		}, fmt.Sprintf("Successfully uploaded %d transaction records, %d processed to canonical tables", result.TotalRecords, result.ProcessedRecords))
 	}
 }
 

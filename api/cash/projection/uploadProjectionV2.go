@@ -8,7 +8,6 @@ import (
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/csv"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -60,7 +59,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer func() {
 			if rec := recover(); rec != nil {
 				log.Printf("[UploadCashflowProposalV2] Panic recovered: %v", rec)
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
+				api.Error(w, http.StatusInternalServerError, constants.ErrInternalServer)
 			}
 			log.Printf("[UploadCashflowProposalV2] Finished in %s", time.Since(start))
 		}()
@@ -69,7 +68,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
+			api.Error(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 
@@ -84,7 +83,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		effectiveDate := strings.TrimSpace(r.FormValue("effective_date"))
 
 		if userID == "" || proposalName == "" || baseCurrencyCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id, proposal_name and currency/base_currency_code are required")
+			api.Error(w, http.StatusBadRequest, "user_id, proposal_name and currency/base_currency_code are required")
 			return
 		}
 		if effectiveDate == "" {
@@ -108,7 +107,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Get uploaded file
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No file uploaded")
+			api.Error(w, http.StatusBadRequest, "No file uploaded")
 			return
 		}
 
@@ -116,7 +115,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		fileExt := strings.ToLower(filepath.Ext(fh.Filename))
 		fileForHash, err := fh.Open()
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to open uploaded file: "+err.Error())
+			api.Error(w, http.StatusBadRequest, "Failed to open uploaded file: "+err.Error())
 			return
 		}
 		fileBytes, err := io.ReadAll(fileForHash)
@@ -124,30 +123,30 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			log.Printf("[UploadCashflowProposalV2] failed to close upload stream: %v", closeErr)
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
+			api.Error(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
 			return
 		}
 		if s3storage.IsS3UploadEnabled() {
 			if err := ensureUniqueProjectionUpload(ctx, pgxPool, fileBytes); err != nil {
 				if errors.Is(err, ErrProjectionFileAlreadyUploaded) {
-					api.RespondWithError(w, http.StatusBadRequest, duplicateProjectionUploadMessage)
+					api.Error(w, http.StatusBadRequest, duplicateProjectionUploadMessage)
 					return
 				}
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.Error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 		}
 
 		file, err := fh.Open()
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to reopen uploaded file: "+err.Error())
+			api.Error(w, http.StatusBadRequest, "Failed to reopen uploaded file: "+err.Error())
 			return
 		}
 		defer file.Close()
 
 		records, err := parseUploadFileV2(file, fileExt)
 		if err != nil || len(records) < 2 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
+			api.Error(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
 			return
 		}
 
@@ -159,14 +158,14 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		required := []string{"description", "type", "categoryname", "entity", "expectedamount"}
 		for _, req := range required {
 			if !containsCol(headers, req) {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("CSV missing required column: %s", req))
+				api.Error(w, http.StatusBadRequest, fmt.Sprintf("CSV missing required column: %s", req))
 				return
 			}
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		committed := false
@@ -191,7 +190,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RETURNING proposal_id;
 		`, proposalName, baseCurrencyCode, effectiveDate).Scan(&proposalID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusUnprocessableEntity, parseConstraintError(err))
+			api.Error(w, http.StatusUnprocessableEntity, parseConstraintError(err))
 			return
 		}
 		log.Printf("Created V2 proposal %s", proposalID)
@@ -202,7 +201,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			contentType := s3storage.DetectContentType(fileBytes)
 			if uploadErr := s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); uploadErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to upload file to S3: "+uploadErr.Error())
+				api.Error(w, http.StatusInternalServerError, "Failed to upload file to S3: "+uploadErr.Error())
 				return
 			}
 			s3Uploaded = true
@@ -212,7 +211,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SET upload_s3_key = $1
 				WHERE proposal_id = $2
 			`, s3Key, proposalID); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to update proposal upload key: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Failed to update proposal upload key: "+err.Error())
 				return
 			}
 		}
@@ -287,14 +286,14 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"cimplrcorpsaas", "cashflow_proposal_item"}, itemCols, pgx.CopyFromRows(copyRows)); err != nil {
-			api.RespondWithError(w, http.StatusUnprocessableEntity, parseConstraintError(err))
+			api.Error(w, http.StatusUnprocessableEntity, parseConstraintError(err))
 			return
 		}
 
 		// Fetch item IDs (same order)
 		rows, err := tx.Query(ctx, `SELECT item_id FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id=$1 ORDER BY created_at`, proposalID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to read item IDs: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to read item IDs: "+err.Error())
 			return
 		}
 		i := 0
@@ -338,7 +337,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					batch = append(batch, []interface{}{it.ID, year, m, monthly})
 					if len(batch) >= cap(batch) {
 						if err := flushBatch(); err != nil {
-							api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToInsertMonthlyProjections+err.Error())
+							api.Error(w, http.StatusInternalServerError, constants.ErrFailedToInsertMonthlyProjections+err.Error())
 							return
 						}
 					}
@@ -358,7 +357,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					batch = append(batch, []interface{}{it.ID, year, m, amount})
 					if len(batch) >= cap(batch) {
 						if err := flushBatch(); err != nil {
-							api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToInsertMonthlyProjections+err.Error())
+							api.Error(w, http.StatusInternalServerError, constants.ErrFailedToInsertMonthlyProjections+err.Error())
 							return
 						}
 					}
@@ -377,7 +376,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					batch = append(batch, []interface{}{it.ID, year, m, amount})
 					if len(batch) >= cap(batch) {
 						if err := flushBatch(); err != nil {
-							api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToInsertMonthlyProjections+err.Error())
+							api.Error(w, http.StatusInternalServerError, constants.ErrFailedToInsertMonthlyProjections+err.Error())
 							return
 						}
 					}
@@ -385,7 +384,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if err := flushBatch(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to finalize monthly projections: "+err.Error())
+			api.Error(w, http.StatusInternalServerError, "Failed to finalize monthly projections: "+err.Error())
 			return
 		}
 
@@ -395,23 +394,20 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			(proposal_id, action_type, processing_status, reason, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL','Imported via V2 uploader',$2,now())
 		`, proposalID, requestedBy); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, parseConstraintError(err))
+			api.Error(w, http.StatusInternalServerError, parseConstraintError(err))
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			api.Error(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
 
-		resp := map[string]interface{}{
-			constants.ValueSuccess: true,
-			"proposal_id":          proposalID,
-			"imported_rows":        len(copyRows),
-			"message":              "V2 Proposal, items, projections & audit committed successfully",
-		}
-		json.NewEncoder(w).Encode(resp)
+		api.Success(w, http.StatusOK, map[string]interface{}{
+			"proposal_id":   proposalID,
+			"imported_rows": len(copyRows),
+		}, "V2 Proposal, items, projections & audit committed successfully")
 		log.Printf("Committed V2 proposal %s (%d items, %d monthly rows)", proposalID, len(itemInfos), len(itemInfos)*12)
 		// Notify: FULL proposal data for rich templates
 		capturedProposalID := proposalID
@@ -496,3 +492,4 @@ func lookupCategoryFromContext(ctx context.Context, categoryName string) string 
 	// If not found, return original (might be an ID not in approved list)
 	return categoryName
 }
+

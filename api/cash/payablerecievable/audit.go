@@ -1,6 +1,7 @@
 package payablerecievable
 
 import (
+	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"context"
@@ -23,13 +24,13 @@ type transactionAuditRequest struct {
 func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		var req transactionAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.TransactionID) == "" || strings.TrimSpace(req.TransactionType) == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type and transaction_id are required"})
+			api.Error(w, http.StatusOK, "transaction_type and transaction_id are required")
 			return
 		}
 
@@ -44,7 +45,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tableName = "auditactionreceivable"
 			idColumn = "receivable_id"
 		default:
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type must be PAYABLE or RECEIVABLE"})
+			api.Error(w, http.StatusOK, "transaction_type must be PAYABLE or RECEIVABLE")
 			return
 		}
 
@@ -66,7 +67,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY requested_at ASC, action_id ASC
 		`, req.TransactionID)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
+			api.Error(w, http.StatusOK, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -78,7 +79,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var checkerBy, checkerComment, reason *string
 			var checkerAt *time.Time
 			if err := rows.Scan(&actionID, &entityID, &action, &status, &performedBy, &performedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction audit history"})
+				api.Error(w, http.StatusOK, "failed to read transaction audit history")
 				return
 			}
 
@@ -97,7 +98,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if err := rows.Err(); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction audit history"})
+			api.Error(w, http.StatusOK, "failed to read transaction audit history")
 			return
 		}
 
@@ -108,7 +109,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY requested_at ASC, download_audit_id ASC
 		`, txType, req.TransactionID)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction download audit history"})
+			api.Error(w, http.StatusOK, "failed to read transaction download audit history")
 			return
 		}
 		defer downloadRows.Close()
@@ -118,7 +119,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var requestedAt sql.NullTime
 			var fileName, uploadKey sql.NullString
 			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &fileName, &uploadKey); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction download audit history"})
+				api.Error(w, http.StatusOK, "failed to read transaction download audit history")
 				return
 			}
 
@@ -138,15 +139,11 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if err := downloadRows.Err(); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction download audit history"})
+			api.Error(w, http.StatusOK, "failed to read transaction download audit history")
 			return
 		}
 
-		// Standardize: always return 'rows' as the array field
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
-			"audit_logs": payload,
-		})
+		api.Success(w, http.StatusOK, payload, "")
 	}
 }
 

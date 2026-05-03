@@ -7,7 +7,6 @@ import (
 	"CimplrCorpSaas/internal/validation"
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -25,7 +24,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to read request body")
+				api.Error(w, http.StatusBadRequest, "Failed to read request body")
 				return
 			}
 			r.Body.Close()
@@ -33,7 +32,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 
 			userID, err := validation.ExtractUserID(r)
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+				api.Error(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 				return
 			}
 
@@ -41,7 +40,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 
 			session := validation.ValidateSession(userID)
 			if session == nil {
-				api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+				api.Error(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 				return
 			}
 
@@ -49,27 +48,20 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			if err != nil {
 				le := strings.ToLower(err.Error())
 				if err == http.ErrMissingFile || strings.Contains(le, "no business") || strings.Contains(le, "no entity") || strings.Contains(le, "no accessible") {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{
-						constants.ValueSuccess: false,
-						"error":                "No accessible business units found for this user",
-						"code":                 "NO_ACCESS_ENTITIES",
-						"help":                 "Contact your administrator to grant access to business units or set up entities for your account.",
-					})
+					api.Error(w, http.StatusOK, "No accessible business units found for this user")
 					return
 				}
-				api.RespondWithError(w, http.StatusUnauthorized, "Validation failed: "+err.Error())
+				api.Error(w, http.StatusUnauthorized, "Validation failed: "+err.Error())
 				return
 			}
 
 			entityIDs, entityNames, err := resolveEntityHierarchyMulti(ctx, db, validationResult.RootEntityIDs)
 			if err != nil {
 				if err == http.ErrMissingFile {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": "No accessible business units found"})
+					api.Error(w, http.StatusOK, "No accessible business units found")
 					return
 				}
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve entity hierarchy: "+err.Error())
+				api.Error(w, http.StatusInternalServerError, "Failed to resolve entity hierarchy: "+err.Error())
 				return
 			}
 
@@ -829,3 +821,4 @@ func loadApprovedDemats(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 
 	return demats, nil
 }
+

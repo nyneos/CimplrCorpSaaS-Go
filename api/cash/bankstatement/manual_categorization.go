@@ -1,7 +1,7 @@
 package bankstatement
 
 import (
-	"CimplrCorpSaas/api"
+	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	"encoding/json"
@@ -14,7 +14,7 @@ import (
 func ManualCategorizationTriggerHandler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			apictx.Error(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -24,19 +24,19 @@ func ManualCategorizationTriggerHandler(pgxPool *pgxpool.Pool) http.Handler {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, constants.ErrInvalidJSONPrefix+err.Error(), http.StatusBadRequest)
+			apictx.Error(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if body.UserID == "" {
-			http.Error(w, constants.ErrMissingUserID, http.StatusBadRequest)
+			apictx.Error(w, http.StatusBadRequest, constants.ErrMissingUserID)
 			return
 		}
 
 		// Validate user session (basic check)
 		ctx := r.Context()
-		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != body.UserID {
-			http.Error(w, constants.ErrInvalidSessionCapitalized, http.StatusForbidden)
+		if ctxUID := apictx.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != body.UserID {
+			apictx.Error(w, http.StatusForbidden, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -52,18 +52,11 @@ func ManualCategorizationTriggerHandler(pgxPool *pgxpool.Pool) http.Handler {
 		// Trigger the categorization job
 		err := cashjobs.ProcessUncategorizedTransactions(pgxPool, batchSize)
 		if err != nil {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "Categorization job failed: " + err.Error(),
-			})
+			apictx.Error(w, http.StatusOK, "Categorization job failed: "+err.Error())
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Categorization job completed successfully",
-		})
+		apictx.Success(w, http.StatusOK, map[string]any{}, "Categorization job completed successfully")
 	})
 }
+
