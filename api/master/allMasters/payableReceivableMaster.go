@@ -5,7 +5,6 @@ import (
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/utils"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"

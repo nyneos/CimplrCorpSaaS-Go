@@ -112,8 +112,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
 			return
 		}
-		// -------------------------------------------------------------------------
-
+		ctx := r.Context()
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
