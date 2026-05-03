@@ -1,8 +1,7 @@
-﻿package allMaster
+package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"

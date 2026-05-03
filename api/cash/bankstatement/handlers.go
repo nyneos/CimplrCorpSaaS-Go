@@ -335,8 +335,7 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 			if err := insertDownloadAudit(
 				ctx,
 				db,
-				auditFileID,
-				sql.NullString{String: body.BankStatementID, Valid: true},
+				auditFileID.String,
 				requestedBy,
 				r.RemoteAddr,
 				entityName,
@@ -415,8 +414,7 @@ func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 				if err := insertDownloadAudit(
 					ctx,
 					db,
-					auditFileID,
-					sql.NullString{String: bankStatementID, Valid: true},
+					auditFileID.String,
 					requestedBy,
 					r.RemoteAddr,
 					entityName,

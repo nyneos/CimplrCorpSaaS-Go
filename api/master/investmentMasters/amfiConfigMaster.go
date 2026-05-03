@@ -3,7 +3,6 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
-	"context"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"

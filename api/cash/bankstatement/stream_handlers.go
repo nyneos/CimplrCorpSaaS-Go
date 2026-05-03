@@ -1853,7 +1853,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 		ip := r.RemoteAddr
 		go func() {
 			// best-effort; log on error
-			if err := insertDownloadAudit(r.Context(), db, sql.NullString{String: strings.TrimSpace(id), Valid: strings.TrimSpace(id) != ""}, bankStatementID, userID, ip, entityName); err != nil {
+			if err := insertDownloadAudit(r.Context(), db, id, userID, ip, entityName); err != nil {
 				log.Printf("failed to insert download audit: %v", err)
 			}
 		}()
