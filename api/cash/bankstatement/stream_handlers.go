@@ -805,15 +805,13 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		var existingID sql.NullString
 		err = tx.QueryRowContext(ctx, `SELECT id FROM cimplrcorpsaas.bank_pdf_uploads WHERE checksum_sha256 = $1 LIMIT 1`, checksum).Scan(&existingID)
 		if err == nil && existingID.Valid {
-			// already exists — rollback and return
+			// already exists — rollback the open transaction but continue parsing
+			// so the caller receives the full preview data instead of a bare {exists} stub
 			if rerr := tx.Rollback(); rerr != nil {
 				log.Printf("failed to rollback tx after existing-check: %v", rerr)
 			}
 			tx = nil
-			resp := map[string]interface{}{"status": "exists", "id": existingID.String}
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(resp)
-			return
+			// fall through: parse and return full preview using the existing record ID
 		} else if err != nil && err != sql.ErrNoRows {
 			respondWithError(w, err, "Failed to check existing uploads", http.StatusInternalServerError)
 			return
@@ -941,7 +939,8 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// insert the metadata row inside the transaction. If any of these
 		// steps fail we rollback and attempt cleanup so we don't leave
 		// dangling state.
-		if uploadEnabled {
+		// Skip storage upload and DB insert when the same checksum already exists.
+		if uploadEnabled && !existingID.Valid {
 			if upErr := uploadToSupabase(ctx, fileBytes, objectPath); upErr != nil {
 				// rollback transaction
 				if tx != nil {
@@ -957,23 +956,34 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		}
 
 		// Insert metadata row now that parsing (and optional storage upload)
-		// have succeeded.
-		id, err := insertUploadRowTx(ctx, tx, header.Filename, objectPath, checksum)
-		if err != nil {
-			// attempt to delete uploaded object if we uploaded earlier
-			if uploadEnabled {
-				if derr := deleteFromSupabase(ctx, objectPath); derr != nil {
-					log.Printf("failed to delete uploaded object after insert failure: %v", derr)
+		// have succeeded. If the same checksum already existed, reuse that ID.
+		var id string
+		if existingID.Valid {
+			id = existingID.String
+		} else {
+			id, err = insertUploadRowTx(ctx, tx, header.Filename, objectPath, checksum)
+			if err != nil {
+				// attempt to delete uploaded object if we uploaded earlier
+				if uploadEnabled {
+					if derr := deleteFromSupabase(ctx, objectPath); derr != nil {
+						log.Printf("failed to delete uploaded object after insert failure: %v", derr)
+					}
 				}
+				respondWithError(w, err, "Failed to persist upload metadata", http.StatusInternalServerError)
+				return
 			}
-			respondWithError(w, err, "Failed to persist upload metadata", http.StatusInternalServerError)
-			return
+		}
+
+		// Determine response status: "exists" for re-uploads, "uploaded" for new ones.
+		uploadStatus := "uploaded"
+		if existingID.Valid {
+			uploadStatus = "exists"
 		}
 
 		// Merge upload metadata with AI response
 		combinedResponse := map[string]interface{}{
 			"id":     id,
-			"status": "uploaded",
+			"status": uploadStatus,
 		}
 
 		// Copy all fields from AI response
