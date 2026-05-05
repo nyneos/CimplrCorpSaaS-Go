@@ -213,6 +213,12 @@ func moduleDefaultPrefix(module string) string {
 		return "cash/transactions/payables/"
 	case "receivables":
 		return "cash/transactions/receivables/"
+	case "fx-exposure":
+		return "fx/exposures/"
+	case "fx-forward":
+		return "fx/forwards/"
+	case "fx-mtm":
+		return "fx/mtm/"
 	default:
 		return ""
 	}
