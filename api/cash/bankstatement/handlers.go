@@ -160,7 +160,13 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				t.deposit_amount,
 				t.balance,
 				c.category_name,
-				COALESCE(t.misclassified_flag, false) AS misclassified_flag
+				t.category_id,
+				COALESCE(t.misclassified_flag, false)           AS misclassified_flag,
+				COALESCE(t.narration_clean, t.description, '')  AS narration_clean,
+				COALESCE(t.narration_ref, '')                   AS narration_ref,
+				COALESCE(t.payment_channel, '')                 AS payment_channel,
+				t.confidence_score,
+				COALESCE(t.classification_step, '')             AS classification_step
 			FROM cimplrcorpsaas.bank_statement_transactions t
 			JOIN cimplrcorpsaas.bank_statements s
 				ON t.bank_statement_id = s.bank_statement_id
@@ -183,17 +189,23 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 
 		for rows.Next() {
 			var (
-				tid           int64
-				entityName    string
-				tranID        sql.NullString
-				desc          string
-				category      sql.NullString
-				vdate         time.Time
-				tdate         time.Time
-				withdrawal    sql.NullFloat64
-				deposit       sql.NullFloat64
-				balance       sql.NullFloat64
-				misclassified bool
+				tid                int64
+				entityName         string
+				tranID             sql.NullString
+				desc               string
+				category           sql.NullString
+				categoryID         sql.NullString
+				vdate              time.Time
+				tdate              time.Time
+				withdrawal         sql.NullFloat64
+				deposit            sql.NullFloat64
+				balance            sql.NullFloat64
+				misclassified      bool
+				narrationClean     string
+				narrationRef       string
+				paymentChannel     string
+				confidenceScore    sql.NullFloat64
+				classificationStep string
 			)
 
 			if err := rows.Scan(
@@ -207,7 +219,13 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				&deposit,
 				&balance,
 				&category,
+				&categoryID,
 				&misclassified,
+				&narrationClean,
+				&narrationRef,
+				&paymentChannel,
+				&confidenceScore,
+				&classificationStep,
 			); err != nil {
 				continue
 			}
@@ -215,6 +233,11 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 			categoryName := category.String
 			if !category.Valid || categoryName == "" {
 				categoryName = "Uncategorized"
+			}
+
+			var confScore *float64
+			if confidenceScore.Valid {
+				confScore = &confidenceScore.Float64
 			}
 
 			resp = append(resp, map[string]interface{}{
@@ -228,7 +251,14 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				"deposit_amount":     deposit.Float64,
 				"balance":            balance.Float64,
 				"category_name":      categoryName,
+				"category_id":        categoryID.String,
 				"misclassified_flag": misclassified,
+				// Smart categorization fields
+				"narration_clean":     narrationClean,
+				"narration_ref":       narrationRef,
+				"payment_channel":     paymentChannel,
+				"confidence_score":    confScore,
+				"classification_step": classificationStep,
 			})
 		}
 

@@ -73,6 +73,12 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/transactions/categorize-uncategorized", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CategorizeUncategorizedTransactionsHandler(db)))
 	mux.Handle("/cash/transactions/recompute-uncategorized", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RecomputeUncategorizedTransactionsHandler(db)))
 	mux.Handle("/cash/transactions/auto-categorize-trigger", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ManualCategorizationTriggerHandler(pgxPool)))
+	// Smart Categorization Engine
+	mux.Handle("/cash/smart-cat/status", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.SmartCatStatusHandler(pgxPool)))
+	mux.Handle("/cash/smart-cat/review-queue", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetReviewQueueHandler(pgxPool)))
+	mux.Handle("/cash/smart-cat/review-action", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ReviewActionHandler(pgxPool)))
+	mux.Handle("/cash/smart-cat/correction", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.SaveCorrectionHandler(pgxPool)))
+	mux.Handle("/cash/smart-cat/gl-mapping/create", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CreateGLMappingHandler(pgxPool)))
 	// V2 Bank Statement APIs
 	mux.Handle("/cash/bank-statements/v2/get", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetAllBankStatementsHandler(db)))
 	mux.Handle("/cash/bank-statements/v2/transactions", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementTransactionsHandler(db)))
