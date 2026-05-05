@@ -6,12 +6,13 @@ import "time"
 // Waterfall step labels — written to classification_audit_log
 // ─────────────────────────────────────────────────────────────
 const (
-	StepRule         = "RULE"
-	StepCounterparty = "COUNTERPARTY"
-	StepGL           = "GL"
-	StepCorrection   = "CORRECTION"
-	StepSimilarity   = "SIMILARITY"
-	StepUnallocated  = "UNALLOCATED"
+	StepRule            = "RULE"
+	StepCounterparty    = "COUNTERPARTY"
+	StepGL              = "GL"
+	StepCorrection      = "CORRECTION"
+	StepSimilarity      = "SIMILARITY"
+	StepAccountDefault  = "ACCOUNT_DEFAULT" // account-level inflow/outflow/charges/interest defaults
+	StepUnallocated     = "UNALLOCATED"
 
 	// MinConfidenceForActuals: below this → review queue, category NOT set.
 	MinConfidenceForActuals = 0.70
@@ -96,11 +97,24 @@ type glDefault struct {
 	CatName    string
 }
 
-// SmartCaches holds in-memory lookups for Steps 2 and 3.
+// accountDefault holds the per-account category defaults configured in masterbankaccount.
+// These map transaction direction / type → category, as set by the user in bank account master.
+type accountDefault struct {
+	// cat_inflow / cat_outflow: used when no more-specific step matched
+	CatInflow  string // category_id for deposits
+	CatOutflow string // category_id for withdrawals
+	CatCharges string // category_id when narration suggests bank charges
+	CatIntInc  string // category_id for interest income
+	CatIntExp  string // category_id for interest expense
+}
+
+// SmartCaches holds in-memory lookups for Steps 2, 3, and 6.
 // Load once per batch run with LoadSmartCaches.
 type SmartCaches struct {
 	// key: lowercase counterparty name
 	CounterpartyByName map[string]cpDefault
 	// key: gl_account_id
 	GLMapping map[string]glDefault
+	// key: account_number — per-account category defaults (Step 6)
+	AccountDefaults map[string]accountDefault
 }

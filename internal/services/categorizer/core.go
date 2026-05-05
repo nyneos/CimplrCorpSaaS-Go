@@ -99,6 +99,7 @@ func LoadSmartCaches(ctx context.Context, pool *pgxpool.Pool) (*SmartCaches, err
 	caches := &SmartCaches{
 		CounterpartyByName: make(map[string]cpDefault),
 		GLMapping:          make(map[string]glDefault),
+		AccountDefaults:    make(map[string]accountDefault),
 	}
 
 	// Step 2 — counterparties with default_category_id
@@ -146,8 +147,45 @@ func LoadSmartCaches(ctx context.Context, pool *pgxpool.Pool) (*SmartCaches, err
 		return nil, err
 	}
 
-	log.Printf("[SMART-CAT] Caches: %d counterparties, %d GL mappings",
-		len(caches.CounterpartyByName), len(caches.GLMapping))
+	// Step 6 — account-level category defaults from masterbankaccount
+	// cat_inflow, cat_outflow, cat_charges, cat_int_inc, cat_int_exp
+	accRows, err := pool.Query(ctx, `
+		SELECT
+			account_number,
+			COALESCE(cat_inflow, ''),
+			COALESCE(cat_outflow, ''),
+			COALESCE(cat_charges, ''),
+			COALESCE(cat_int_inc, ''),
+			COALESCE(cat_int_exp, '')
+		FROM public.masterbankaccount
+		WHERE is_deleted = false
+		  AND (cat_inflow IS NOT NULL OR cat_outflow IS NOT NULL
+		       OR cat_charges IS NOT NULL OR cat_int_inc IS NOT NULL
+		       OR cat_int_exp IS NOT NULL)
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("load account defaults: %w", err)
+	}
+	defer accRows.Close()
+	for accRows.Next() {
+		var acctNum, catIn, catOut, catChg, catII, catIE string
+		if err := accRows.Scan(&acctNum, &catIn, &catOut, &catChg, &catII, &catIE); err != nil {
+			return nil, err
+		}
+		caches.AccountDefaults[acctNum] = accountDefault{
+			CatInflow:  catIn,
+			CatOutflow: catOut,
+			CatCharges: catChg,
+			CatIntInc:  catII,
+			CatIntExp:  catIE,
+		}
+	}
+	if err := accRows.Err(); err != nil {
+		return nil, err
+	}
+
+	log.Printf("[SMART-CAT] Caches: %d counterparties, %d GL mappings, %d account defaults",
+		len(caches.CounterpartyByName), len(caches.GLMapping), len(caches.AccountDefaults))
 	return caches, nil
 }
 
@@ -200,7 +238,13 @@ func SmartCategorize(
 		}
 	}
 
-	// Step 6: Unallocated
+	// Step 6: Account-level default category (masterbankaccount.cat_inflow / cat_outflow etc.)
+	// Confidence 0.75 — above threshold so the category IS set, but lower than specific matches.
+	if r, ok := lookupAccountDefault(narration, txn, caches); ok {
+		return r
+	}
+
+	// Step 7: Unallocated
 	return ClassificationResult{
 		Step:       StepUnallocated,
 		Confidence: 0,
@@ -535,6 +579,77 @@ func lookupGLMemory(glAccountID string, caches *SmartCaches) (ClassificationResu
 			SourceRef:    fmt.Sprintf("gl_account=%s", glAccountID),
 		}, true
 	}
+	return ClassificationResult{}, false
+}
+
+// ── Step 6: Account-level default category ────────────────────
+// Uses masterbankaccount cat_inflow / cat_outflow / cat_charges / cat_int_inc / cat_int_exp.
+// Priority order within the account defaults:
+//  1. cat_charges — if narration suggests bank charges/commission/fee
+//  2. cat_int_inc — if deposit and narration suggests interest
+//  3. cat_int_exp — if withdrawal and narration suggests interest
+//  4. cat_inflow  — any deposit with no more-specific match
+//  5. cat_outflow — any withdrawal with no more-specific match
+
+func lookupAccountDefault(narration NarrationResult, txn TxnInput, caches *SmartCaches) (ClassificationResult, bool) {
+	if caches == nil || len(caches.AccountDefaults) == 0 {
+		return ClassificationResult{}, false
+	}
+	ad, ok := caches.AccountDefaults[txn.AccountNumber]
+	if !ok {
+		return ClassificationResult{}, false
+	}
+
+	desc := strings.ToLower(narration.Clean)
+	isDebit := txn.Withdrawal != nil && *txn.Withdrawal > 0
+	isCredit := txn.Deposit != nil && *txn.Deposit > 0
+
+	isCharge := strings.ContainsAny(desc, "") || // initialise
+		strings.Contains(desc, "charge") ||
+		strings.Contains(desc, "commission") ||
+		strings.Contains(desc, "fee") ||
+		strings.Contains(desc, "chg") ||
+		strings.Contains(desc, "levy")
+
+	isInterest := strings.Contains(desc, "interest") ||
+		strings.Contains(desc, "int cr") ||
+		strings.Contains(desc, "int dr") ||
+		strings.Contains(desc, "int inc") ||
+		strings.Contains(desc, "int exp")
+
+	pick := func(catID, label string) (ClassificationResult, bool) {
+		if catID == "" {
+			return ClassificationResult{}, false
+		}
+		return ClassificationResult{
+			CategoryID: catID,
+			Confidence: 0.75,
+			Step:       StepAccountDefault,
+			SourceRef:  fmt.Sprintf("account_default=%s acct=%s", label, txn.AccountNumber),
+		}, true
+	}
+
+	// 1. Bank charges/fees
+	if isCharge && isDebit && ad.CatCharges != "" {
+		return pick(ad.CatCharges, "cat_charges")
+	}
+	// 2. Interest income (credit)
+	if isInterest && isCredit && ad.CatIntInc != "" {
+		return pick(ad.CatIntInc, "cat_int_inc")
+	}
+	// 3. Interest expense (debit)
+	if isInterest && isDebit && ad.CatIntExp != "" {
+		return pick(ad.CatIntExp, "cat_int_exp")
+	}
+	// 4. General inflow
+	if isCredit && ad.CatInflow != "" {
+		return pick(ad.CatInflow, "cat_inflow")
+	}
+	// 5. General outflow
+	if isDebit && ad.CatOutflow != "" {
+		return pick(ad.CatOutflow, "cat_outflow")
+	}
+
 	return ClassificationResult{}, false
 }
 
