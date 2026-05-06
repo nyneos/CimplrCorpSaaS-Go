@@ -53,7 +53,7 @@ func listProjectionAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, pare
 	return additionalfiles.QueryFiles(ctx, pool, projectionFileQuery(`
 		WHERE f.proposal_id = $1
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
-		  AND LOWER(TRIM(i.entity_name)) = ANY($2)
+		  AND `+projectionParentEntityAllowed("p.proposal_id", "$2")+`
 		ORDER BY f.uploaded_at DESC
 	`), parentID, names)
 }
@@ -66,9 +66,8 @@ func createProjectionAdditionalFile(ctx context.Context, tx pgx.Tx, input additi
 	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "cimplrcorpsaas.cashflow_proposal_files", "proposal_id", input, `
 		SELECT DISTINCT p.proposal_id AS parent_id
 		FROM cimplrcorpsaas.cashflow_proposal p
-		JOIN cimplrcorpsaas.cashflow_proposal_item i ON i.proposal_id = p.proposal_id
 		WHERE p.proposal_id = $8
-		  AND LOWER(TRIM(i.entity_name)) = ANY($9)
+		  AND `+projectionParentEntityAllowed("p.proposal_id", "$9")+`
 	`, input.ParentID, names)
 }
 
@@ -81,7 +80,7 @@ func getProjectionAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parent
 		WHERE f.proposal_id = $1
 		  AND f.file_id = $2
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
-		  AND LOWER(TRIM(i.entity_name)) = ANY($3)
+		  AND `+projectionParentEntityAllowed("p.proposal_id", "$3")+`
 	`), parentID, fileID, names)
 }
 
@@ -95,7 +94,7 @@ func getProjectionAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, paren
 		WHERE f.proposal_id = $1
 		  AND f.file_id = ANY($2)
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
-		  AND LOWER(TRIM(i.entity_name)) = ANY($3)
+		  AND `+projectionParentEntityAllowed("p.proposal_id", "$3")+`
 		ORDER BY f.uploaded_at DESC
 	`), parentID, trimmedIDs, names)
 	if queryErr != nil {
@@ -114,12 +113,12 @@ func deleteProjectionAdditionalFile(ctx context.Context, pool *pgxpool.Pool, par
 		SET is_deleted = TRUE,
 		    deleted_by = $3,
 		    deleted_at = $4
-		FROM cimplrcorpsaas.cashflow_proposal_item i
+		FROM cimplrcorpsaas.cashflow_proposal p
 		WHERE f.proposal_id = $1
 		  AND f.file_id = $2
-		  AND i.proposal_id = f.proposal_id
+		  AND p.proposal_id = f.proposal_id
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
-		  AND LOWER(TRIM(i.entity_name)) = ANY($5)
+		  AND `+projectionParentEntityAllowed("p.proposal_id", "$5")+`
 	`, parentID, fileID, deletedBy, deletedAt, names)
 	if execErr != nil {
 		return false, execErr
@@ -132,8 +131,27 @@ func projectionFileQuery(whereClause string) string {
 		SELECT DISTINCT f.file_id, f.stored_file_name, f.content_type, f.file_size, f.upload_s3_key, f.uploaded_by, f.uploaded_at
 		FROM cimplrcorpsaas.cashflow_proposal_files f
 		JOIN cimplrcorpsaas.cashflow_proposal p ON p.proposal_id = f.proposal_id
-		JOIN cimplrcorpsaas.cashflow_proposal_item i ON i.proposal_id = p.proposal_id
 	` + whereClause
+}
+
+func projectionParentEntityAllowed(proposalExpr, namesExpr string) string {
+	return `
+		(
+			NOT EXISTS (
+				SELECT 1
+				FROM cimplrcorpsaas.cashflow_proposal_item scope_i
+				WHERE scope_i.proposal_id = ` + proposalExpr + `
+			)
+			OR EXISTS (
+				SELECT 1
+				FROM cimplrcorpsaas.cashflow_proposal_item scope_i
+				WHERE scope_i.proposal_id = ` + proposalExpr + `
+				  AND (
+					NULLIF(TRIM(scope_i.entity_name), '') IS NULL
+					OR LOWER(TRIM(scope_i.entity_name)) = ANY(` + namesExpr + `)
+				  )
+			)
+		)`
 }
 
 func projectionEntityNames(ctx context.Context) ([]string, error) {
