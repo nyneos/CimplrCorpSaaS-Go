@@ -188,6 +188,11 @@ func StartFXService(db *sql.DB, port string) {
 		mux.Handle("/fx/exposures/get-bucketing", middlewares.PreValidationMiddleware(pgxPool)(exposures.GetExposureHeadersLineItemsBucketing(db)))
 		mux.Handle("/fx/exposures/approve-bucketing-status", middlewares.PreValidationMiddleware(pgxPool)(exposures.ApproveBucketingStatus(db)))
 		mux.Handle("/fx/exposures/reject-bucketing-status", middlewares.PreValidationMiddleware(pgxPool)(exposures.RejectBucketingStatus(db)))
+		mux.Handle("/fx/exposures/bucketing/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(exposures.ListExposureBucketingAdditionalFilesHandler(pgxPool)))
+		mux.Handle("/fx/exposures/bucketing/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(exposures.UploadExposureBucketingAdditionalFilesHandler(pgxPool)))
+		mux.Handle("/fx/exposures/bucketing/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(exposures.DownloadExposureBucketingAdditionalFileHandler(pgxPool)))
+		mux.Handle("/fx/exposures/bucketing/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(exposures.DownloadSelectedExposureBucketingAdditionalFilesHandler(pgxPool)))
+		mux.Handle("/fx/exposures/bucketing/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(exposures.DeleteExposureBucketingAdditionalFileHandler(pgxPool)))
 		/*hedging-proposals */
 		mux.Handle("/fx/exposures/get-hedging-proposals", middlewares.PreValidationMiddleware(pgxPool)(exposures.GetHedgingProposalsAggregated(db)))
 		/*linkage */

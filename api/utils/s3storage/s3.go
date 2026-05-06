@@ -215,6 +215,8 @@ func moduleDefaultPrefix(module string) string {
 		return "cash/transactions/receivables/"
 	case "fx-exposure":
 		return "fx/exposures/"
+	case "fx-exposure-bucketing":
+		return "fx/create exposure-bucket/"
 	case "fx-forward":
 		return "fx/forwards/"
 	case "fx-mtm":
