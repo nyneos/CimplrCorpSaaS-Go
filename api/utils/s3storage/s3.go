@@ -219,6 +219,12 @@ func moduleDefaultPrefix(module string) string {
 		return "fx/forwards/"
 	case "fx-mtm":
 		return "fx/mtm/"
+	case "fund-planning":
+		return "cash/fund-planning/"
+	case "sweep-planning":
+		return "cash/sweep-planning/"
+	case "sweep-initiation":
+		return "cash/sweep-initiation/"
 	default:
 		return ""
 	}

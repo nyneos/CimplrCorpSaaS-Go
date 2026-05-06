@@ -43,6 +43,7 @@ type CreateInput struct {
 type Config struct {
 	Module        string
 	ParentIDField string
+	FolderName    string
 	List          func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]FileRecord, error)
 	Create        func(ctx context.Context, tx pgx.Tx, input CreateInput) error
 	GetOne        func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*FileRecord, error)
@@ -344,12 +345,17 @@ func AdditionalFilesFolder() string {
 	return "additional files"
 }
 
-func BuildAdditionalFilesS3Key(module, storedFileName string) string {
+func BuildAdditionalFilesS3Key(module, storedFileName string, folderNames ...string) string {
+	additionalFolder := AdditionalFilesFolder()
+	if len(folderNames) > 0 && strings.TrimSpace(folderNames[0]) != "" {
+		additionalFolder = strings.TrimSpace(folderNames[0])
+	}
+
 	folder := strings.Trim(strings.TrimSpace(s3storage.GetStoragePrefix(module)), "/")
 	if folder == "" {
-		folder = AdditionalFilesFolder()
+		folder = additionalFolder
 	} else {
-		folder = folder + "/" + AdditionalFilesFolder()
+		folder = folder + "/" + additionalFolder
 	}
 	return s3storage.BuildNamedS3Key(folder, "", storedFileName)
 }
@@ -433,7 +439,7 @@ func uploadOneFile(ctx context.Context, pool *pgxpool.Pool, cfg Config, parentID
 	uploadedAt := time.Now().UTC()
 	contentType := s3storage.DetectContentType(body)
 	storedFileName := s3storage.BuildUploadedFilename(header.Filename, uploadedBy, uploadedAt)
-	s3Key := BuildAdditionalFilesS3Key(cfg.Module, storedFileName)
+	s3Key := BuildAdditionalFilesS3Key(cfg.Module, storedFileName, cfg.FolderName)
 	fileHash := s3storage.ContentHashHex(body)
 
 	tx, err := pool.Begin(ctx)
