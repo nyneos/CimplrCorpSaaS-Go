@@ -1,13 +1,16 @@
 package bankstatement
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/csv"
 	"errors"
 	"fmt"
-	"log"
+	"io"
 	"math"
+	"mime/multipart"
 	"regexp"
 	"strconv"
 	"strings"
@@ -17,6 +20,30 @@ import (
 
 	"github.com/lib/pq"
 )
+
+// MaxBankStatementZipBytes is the maximum allowed uncompressed upload size for a
+// bank-statement .zip file (multipart field "file").
+const MaxBankStatementZipBytes int64 = 5 << 20 // 5 MiB
+
+// readBankStatementZipBytes reads a zip upload and rejects bodies larger than MaxBankStatementZipBytes.
+func readBankStatementZipBytes(file multipart.File, header *multipart.FileHeader) ([]byte, error) {
+	const max = MaxBankStatementZipBytes
+	if header != nil && header.Size > 0 {
+		if header.Size > max {
+			return nil, fmt.Errorf("zip file exceeds the maximum size of 5 MB (%d bytes); uploaded file is %d bytes", max, header.Size)
+		}
+		return io.ReadAll(file)
+	}
+	limited := io.LimitReader(file, max+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("zip file exceeds the maximum size of 5 MB (%d bytes)", max)
+	}
+	return data, nil
+}
 
 func pqUserFriendlyMessage(err error) string {
 	if err == nil {
@@ -339,11 +366,282 @@ var (
 
 func headerContainsAny(lowerHeader string, tokens []string) bool {
 	for _, t := range tokens {
-		if strings.Contains(lowerHeader, t) {
+		kwLc := strings.ToLower(t)
+		if len(kwLc) <= 3 {
+			if lowerHeader == kwLc || strings.HasPrefix(lowerHeader, kwLc+" ") || strings.HasSuffix(lowerHeader, " "+kwLc) || strings.Contains(lowerHeader, " "+kwLc+" ") {
+				return true
+			}
+		} else if strings.Contains(lowerHeader, kwLc) {
 			return true
 		}
 	}
 	return false
+}
+
+func rowMatrixMaxCols(rows [][]string) int {
+	m := 0
+	for _, r := range rows {
+		if len(r) > m {
+			m = len(r)
+		}
+	}
+	return m
+}
+
+// parseDelimitedTextRows parses UTF-8 CSV or tab-separated (TSV) bank extracts into [][]string.
+//
+// Upload/preview use encoding/csv with the default comma. Citibank-style XLS exports and some
+// converter outputs are tab-separated; comma parsing then yields one column per row and breaks
+// header / debit / credit detection even though the same sheet opens correctly in parseXLSFile.
+//
+// Heuristic: if the file contains tabs and comma-parsed rows have fewer columns than tab-parsed
+// rows (and tab has at least 3 columns), use the tab parse.
+func parseDelimitedTextRows(fileBytes []byte) ([][]string, error) {
+	read := func(comma rune) ([][]string, error) {
+		r := csv.NewReader(bytes.NewReader(fileBytes))
+		r.Comma = comma
+		r.FieldsPerRecord = -1
+		r.LazyQuotes = true
+		r.TrimLeadingSpace = true
+		return r.ReadAll()
+	}
+
+	commaRows, cErr := read(',')
+	if cErr != nil {
+		tabRows, tErr := read('\t')
+		if tErr != nil {
+			return nil, cErr
+		}
+		return tabRows, nil
+	}
+	if len(commaRows) == 0 {
+		return nil, errors.New("file contains no rows")
+	}
+
+	if !bytes.Contains(fileBytes, []byte{'\t'}) {
+		return commaRows, nil
+	}
+	commaMax := rowMatrixMaxCols(commaRows)
+	// Already looks like a multi-column comma file
+	if commaMax >= 4 {
+		return commaRows, nil
+	}
+
+	tabRows, tErr := read('\t')
+	if tErr != nil {
+		return commaRows, nil
+	}
+	tabMax := rowMatrixMaxCols(tabRows)
+	if tabMax > commaMax && tabMax >= 3 {
+		return tabRows, nil
+	}
+	return commaRows, nil
+}
+
+// nonTxnKeywords lists substrings (lower-case) that mark a row as a footer,
+// summary, or informational row — never a real ledger transaction.
+// Checked against first cell + description column(s) of each row.
+var nonTxnKeywords = []string{
+	// General bank footer / informational lines
+	"call 1800", "write to us", "toll free", "customer care",
+	"please do not share", "computer generated", "does not require",
+	"power of attorney",
+
+	// Balance summary rows
+	"closing balance", "opening balance",
+	"new balance", "new val",
+	"avl balance", "available balance", "avl", "avil",
+
+	// Page / statement totals (skipped as they are summation rows, not transactions)
+	"page total", "statement total", "grand total",
+	"total debit", "total credit", "total withdrawals", "total deposits",
+	"cumulative total", "cumulative totals",
+
+	// Statement summary section (SBI / UBI / other banks)
+	"statement summary", "brought forward",
+
+	// SBI-specific
+	"page no.", "page no ", "powappsrv4",
+	"account summary", "statement of account",
+	"welcome:", "as on",
+
+	// UBI-specific
+	"unless constituent", "discrepancy found",
+	"fastest mode", "ifsc/micr",
+	"please visit your branch", "inconvenience to",
+	"legal heirs", "cancelled by you", "finacle.ubi.com",
+	"transaction details", "page :", "page: ",
+
+	// ICICI / generic legal & legend blocks (PDF→CSV often appends these after the txn table)
+	"legends for",
+	"authenticated intimation", "category of service",
+	"regd address", "registered address",
+	"team icici", "sincerely",
+	"customers are requested", "notify the bank of any discrepancy",
+	"miv/st/bank", "banking &financial services",
+}
+
+// IsNonTransactionRow checks whether any of the given candidate cell values
+// (lower-cased, trimmed) contain a non-transaction keyword. This covers footer,
+// summary, informational, and page-break rows across all bank formats.
+func IsNonTransactionRow(candidateCells ...string) bool {
+	for _, cell := range candidateCells {
+		lc := strings.ToLower(strings.TrimSpace(cell))
+		if lc == "" {
+			continue
+		}
+		for _, kw := range nonTxnKeywords {
+			if strings.Contains(lc, kw) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsSeparatorRow returns true when the first cell is a line of dashes or
+// equals signs (common in UBI / PDF-to-CSV output as visual separators).
+func IsSeparatorRow(row []string) bool {
+	if len(row) == 0 {
+		return false
+	}
+	first := strings.TrimSpace(row[0])
+	if len(first) < 4 {
+		return false
+	}
+	for _, r := range first {
+		if r != '-' && r != '=' && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+// IsPageBreakRow detects SBI-style page-break rows where the only meaningful
+// content is "Page no." or "Balance" repeated as a column header, and
+// mid-file repeated column headers (Date + Transaction/Particulars) from PDF→CSV.
+func IsPageBreakRow(row []string) bool {
+	if len(row) >= 2 {
+		c0 := strings.ToLower(strings.TrimSpace(row[0]))
+		c1 := strings.ToLower(strings.TrimSpace(row[1]))
+		if c0 == "date" && (strings.Contains(c1, "transaction") || strings.Contains(c1, "particulars") ||
+			strings.Contains(c1, "details") || strings.Contains(c1, "narration")) {
+			return true
+		}
+	}
+	for _, cell := range row {
+		lc := strings.ToLower(strings.TrimSpace(cell))
+		if lc == "" {
+			continue
+		}
+		if lc == "page no." || lc == "balance" || strings.HasPrefix(lc, "page ") || lc == "particulars" || lc == "withdrawals" || lc == "deposits" {
+			return true
+		}
+	}
+	return false
+}
+
+// MergeMultiLineDescriptions collapses continuation rows into their parent
+// transaction row. This handles SBI/UBI PDF-to-CSV formats where a single
+// transaction's description is split across 2–3 CSV rows.
+//
+// Detection heuristic:
+//   - A "transaction row" has a non-empty cell at dateColIdx that looks like a date.
+//   - A "continuation row" has no date and only text in descColIdx.
+//   - Continuation text is appended to the preceding transaction row's descColIdx with " ".
+//   - Rows that are separators, page breaks, or non-transaction are passed through as-is
+//     (the caller will skip them).
+//
+// The function returns a new slice — the original is not mutated.
+func MergeMultiLineDescriptions(rows [][]string, dateColIdx, descColIdx int) [][]string {
+	if len(rows) == 0 || dateColIdx < 0 || descColIdx < 0 {
+		return rows
+	}
+
+	result := make([][]string, 0, len(rows))
+	var lastTxnIdx int = -1 // index in result of the last transaction row
+
+	isDateLike := func(s string) bool {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return false
+		}
+		// Quick check: contains at least one digit and a separator (/, -, .)
+		hasDigit := false
+		hasSep := false
+		for _, r := range s {
+			if r >= '0' && r <= '9' {
+				hasDigit = true
+			}
+			if r == '/' || r == '-' || r == '.' || r == '\u2013' || r == '\u2014' || r == '\u2212' {
+				hasSep = true
+			}
+		}
+		return hasDigit && hasSep
+	}
+
+	for _, row := range rows {
+		// Determine if this row has a date (transaction row) or is a continuation
+		hasDate := dateColIdx < len(row) && isDateLike(row[dateColIdx])
+
+		if hasDate {
+			// This is a transaction row — copy and append
+			rowCopy := make([]string, len(row))
+			copy(rowCopy, row)
+			result = append(result, rowCopy)
+			lastTxnIdx = len(result) - 1
+		} else if lastTxnIdx >= 0 {
+			// Continuation row — check if there is any text in ANY column
+			hasText := false
+			isNonTxn := false
+			for _, cell := range row {
+				txt := strings.TrimSpace(cell)
+				if txt != "" && txt != "-" {
+					hasText = true
+					if IsNonTransactionRow(txt) {
+						isNonTxn = true
+						break
+					}
+				}
+			}
+			joined := strings.TrimSpace(strings.Join(row, " "))
+			if joined != "" && IsNonTransactionRow(joined) {
+				isNonTxn = true
+			}
+
+			if hasText && !IsSeparatorRow(row) && !isNonTxn && !IsPageBreakRow(row) {
+				// Merge each column into the corresponding parent column
+				for ci := 0; ci < len(row); ci++ {
+					if ci == dateColIdx {
+						continue // never merge into the date column
+					}
+					extra := strings.TrimSpace(row[ci])
+					if extra != "" && extra != "-" {
+						for len(result[lastTxnIdx]) <= ci {
+							result[lastTxnIdx] = append(result[lastTxnIdx], "")
+						}
+						existing := strings.TrimSpace(result[lastTxnIdx][ci])
+						if existing != "" {
+							result[lastTxnIdx][ci] = existing + " " + extra
+						} else {
+							result[lastTxnIdx][ci] = extra
+						}
+					}
+				}
+			} else if IsPageBreakRow(row) {
+				// Repeated column header mid-file — omit so following continuation lines
+				// still merge into the prior real transaction (see Indian Bank PDF→CSV).
+				continue
+			} else {
+				// Empty continuation, non-txn, or separator — pass through for caller to skip
+				result = append(result, row)
+			}
+		} else {
+			// Non-continuation, non-date row (headers, footers, etc.)
+			result = append(result, row)
+		}
+	}
+	return result
 }
 
 // IsStatementOpeningCarryRow identifies narration that marks opening/closing carry-over
@@ -407,6 +705,12 @@ func userFriendlyUploadError(err error) string {
 
 	msg := err.Error()
 
+	if strings.Contains(msg, "not found in master data") {
+		return "Bank account not found in the system for this statement. Please check the account number in master data."
+	}
+	if strings.Contains(msg, "convert:") || strings.Contains(msg, "decode response:") {
+		return "PDF conversion service returned an error. Please try again in a few minutes, or contact support if this keeps happening."
+	}
 	if strings.Contains(msg, "transaction header row not found") {
 		return "Could not detect the transactions table in the statement. Please upload the original bank statement in the supported format (Excel/XLS/CSV)."
 	}
@@ -436,7 +740,6 @@ func userFriendlyUploadError(err error) string {
 	if errors.As(err, &pqErr) && pqErr.Code == "22003" {
 		return "Some transaction amounts/balances in this statement are too large to be saved. Please try uploading the Excel version, or contact support with this file."
 	}
-	log.Println("Debug raw mesage", msg)
 	if strings.Contains(msg, "failed to begin db transaction") ||
 		strings.Contains(msg, "failed to insert bank statement") ||
 		strings.Contains(msg, "failed to upsert bank_balances_manual") ||
@@ -448,6 +751,11 @@ func userFriendlyUploadError(err error) string {
 
 	if strings.Contains(msg, "pq:") || strings.Contains(msg, "SQLSTATE") {
 		return "Database error while processing the bank statement. Please try again !!"
+	}
+
+	// Generic staging/preview wrapper errors — keep last so more specific matchers win.
+	if strings.Contains(msg, "build preview:") || strings.Contains(msg, "stage statement:") {
+		return "We could not finish preparing this PDF for review. Please try again with the original bank PDF, or upload CSV/Excel if the problem continues."
 	}
 
 	return msg

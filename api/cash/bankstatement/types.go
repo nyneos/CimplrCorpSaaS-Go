@@ -50,8 +50,11 @@ type UploadOpts struct {
 
 // RecalculateInput matches the user's bank statement format
 type RecalculateInput struct {
-	UserID string               `json:"user_id"`
-	Clean  RecalculateCleanData `json:"clean"`
+	UserID string `json:"user_id"`
+	// StagingID is the pdf_staging_statement.staging_id. When set, recalculate runs in staging mode:
+	// account number and opening balance are not required (user may edit metadata before commit).
+	StagingID string               `json:"staging_id,omitempty"`
+	Clean     RecalculateCleanData `json:"clean"`
 }
 
 type RecalculateCleanData struct {

@@ -31,7 +31,7 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {
-	w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
 }

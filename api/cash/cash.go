@@ -57,6 +57,8 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/staging/batch/get", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetStagingBatchHandler(db)))
 	mux.Handle("/cash/staging/statement/get", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetStagingStatementHandler(db)))
 	mux.Handle("/cash/staging/statement/update", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UpdateStagingStatementHandler(db)))
+	mux.Handle("/cash/staging/statement/delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DeleteStagingStatementHandler(db)))
+	mux.Handle("/cash/staging/batch/delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DeleteStagingBatchHandler(db)))
 	mux.Handle("/cash/staging/list", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ListStagingByUserHandler(db)))
 	// Category Master APIs
 	mux.Handle("/cash/category/create", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CreateTransactionCategoryHandler(db)))

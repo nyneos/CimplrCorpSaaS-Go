@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"bytes"
 	"context"
 	"database/sql"
@@ -74,7 +75,7 @@ func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, passwor
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
 
 	// Access token — env name intentionally unrelated to the backing service.
 	if tok := strings.TrimSpace(os.Getenv("CONVERT_SVC_KEY")); tok != "" {
@@ -121,7 +122,7 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes 
 		csvFilename = noExt + ".csv"
 	}
 
-	txns, err := processSingleFilePreviewFlat(ctx, db, csvBytes, csvFilename, false, nil)
+	txns, err := processSingleFilePreviewFlat(ctx, db, csvBytes, csvFilename, false, nil, accountOverride)
 	if err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
@@ -133,7 +134,9 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes 
 
 // BuildPreviewResponsesFromCSVBytes returns one preview payload per account.
 // For single-account converted CSVs this returns exactly one entry.
-func BuildPreviewResponsesFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes []byte, filename string) ([]map[string]interface{}, error) {
+// When accountOverride is set (forced single account from the upload form), the multi-account
+// split path is skipped so preview and staging resolve the same master row as CSV/XLS uploads.
+func BuildPreviewResponsesFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes []byte, filename string, accountOverride string) ([]map[string]interface{}, error) {
 	csvFilename := filename
 	if !strings.HasSuffix(strings.ToLower(csvFilename), ".csv") {
 		noExt := strings.TrimSuffix(csvFilename, ".pdf")
@@ -142,30 +145,32 @@ func BuildPreviewResponsesFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes
 	}
 
 	// Prefer multi-account parser first so one converted CSV can stage N statements.
-	if txns, err := processMultiAccountCSVPreviewFlat(ctx, db, csvBytes); err == nil && len(txns) > 0 {
-		grouped := map[string][]map[string]interface{}{}
-		order := make([]string, 0)
-		for _, t := range txns {
-			acc, _ := t["account_number"].(string)
-			acc = strings.TrimSpace(acc)
-			if acc == "" {
-				acc = "__unknown__"
+	if strings.TrimSpace(accountOverride) == "" {
+		if txns, err := processMultiAccountCSVPreviewFlat(ctx, db, csvBytes); err == nil && len(txns) > 0 {
+			grouped := map[string][]map[string]interface{}{}
+			order := make([]string, 0)
+			for _, t := range txns {
+				acc, _ := t["account_number"].(string)
+				acc = strings.TrimSpace(acc)
+				if acc == "" {
+					acc = "__unknown__"
+				}
+				if _, ok := grouped[acc]; !ok {
+					order = append(order, acc)
+				}
+				grouped[acc] = append(grouped[acc], t)
 			}
-			if _, ok := grouped[acc]; !ok {
-				order = append(order, acc)
+			if len(grouped) > 0 {
+				out := make([]map[string]interface{}, 0, len(grouped))
+				for _, acc := range order {
+					out = append(out, buildPreviewResponseFromTxnMaps(grouped[acc], csvBytes, acc))
+				}
+				return out, nil
 			}
-			grouped[acc] = append(grouped[acc], t)
-		}
-		if len(grouped) > 0 {
-			out := make([]map[string]interface{}, 0, len(grouped))
-			for _, acc := range order {
-				out = append(out, buildPreviewResponseFromTxnMaps(grouped[acc], csvBytes, acc))
-			}
-			return out, nil
 		}
 	}
 
-	single, err := BuildPreviewResponseFromCSVBytes(ctx, db, csvBytes, filename, "")
+	single, err := BuildPreviewResponseFromCSVBytes(ctx, db, csvBytes, filename, accountOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -201,10 +206,10 @@ func buildPreviewResponseFromTxnMaps(txns []map[string]interface{}, csvBytes []b
 
 	periodStartStr, periodEndStr := "", ""
 	if !periodStart.IsZero() {
-		periodStartStr = periodStart.Format("2006-01-02")
+		periodStartStr = periodStart.Format(constants.DateFormat)
 	}
 	if !periodEnd.IsZero() {
-		periodEndStr = periodEnd.Format("2006-01-02")
+		periodEndStr = periodEnd.Format(constants.DateFormat)
 	}
 
 	meta := Metadata{
@@ -261,7 +266,7 @@ func flatTxnToRecalculate(t map[string]interface{}) RecalculateTransaction {
 
 func normDateStr(v string) string {
 	if t, err := time.Parse(time.RFC3339, v); err == nil {
-		return t.Format("2006-01-02")
+		return t.Format(constants.DateFormat)
 	}
 	if len(v) >= 10 {
 		return v[:10]
@@ -278,7 +283,7 @@ func extractPeriodFromTxnMaps(txns []map[string]interface{}) (start, end time.Ti
 		var dt time.Time
 		if p, err := time.Parse(time.RFC3339, v); err == nil {
 			dt = p
-		} else if p, err := time.Parse("2006-01-02", v); err == nil {
+		} else if p, err := time.Parse(constants.DateFormat, v); err == nil {
 			dt = p
 		}
 		if dt.IsZero() {
