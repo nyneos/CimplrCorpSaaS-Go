@@ -77,6 +77,123 @@ var (
 		ParentTable:   "investment.accounting_activity",
 		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
 	}
+	fdBookingFilesDefinition = investmentFileDefinition{
+		Module:        "fd-booking-additional",
+		ParentIDField: "booking_id",
+		TableName:     "investment.fd_booking_request_files",
+		ParentColumn:  "booking_id",
+		ParentTable:   "investment.fd_booking_request",
+		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+	}
+	fdConfirmationFilesDefinition = investmentFileDefinition{
+		Module:        "fd-confirmation-additional",
+		ParentIDField: "confirmation_id",
+		TableName:     "investment.fd_confirmation_files",
+		ParentColumn:  "confirmation_id",
+		ParentTable:   "investment.fd_confirmation",
+		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+	}
+	fdMasterFilesDefinition = investmentFileDefinition{
+		Module:        "fd-master-additional",
+		ParentIDField: "fd_id",
+		TableName:     "investment.fd_master_files",
+		ParentColumn:  "fd_id",
+		ParentTable:   "investment.fd_master",
+		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+	}
+	fdClosureFilesDefinition = investmentFileDefinition{
+		Module:        "fd-closure-additional",
+		ParentIDField: "closure_request_id",
+		TableName:     "investment.fd_closure_request_files",
+		ParentColumn:  "closure_request_id",
+		ParentTable:   "investment.fd_closure_request",
+		ParentFilter: `AND COALESCE(p.is_deleted, FALSE) = FALSE
+		  AND COALESCE(p.closure_type, '') <> 'ROLLOVER'
+		  AND EXISTS (
+		    SELECT 1 FROM investment.fd_master m
+		    WHERE m.fd_id = p.fd_id
+		      AND COALESCE(m.is_deleted, FALSE) = FALSE
+		  )`,
+	}
+	fdRolloverFilesDefinition = investmentFileDefinition{
+		Module:        "fd-rollover-additional",
+		ParentIDField: "closure_request_id",
+		TableName:     "investment.fd_rollover_request_files",
+		ParentColumn:  "closure_request_id",
+		ParentTable:   "investment.fd_closure_request",
+		ParentFilter: `AND COALESCE(p.is_deleted, FALSE) = FALSE
+		  AND COALESCE(p.closure_type, '') = 'ROLLOVER'
+		  AND EXISTS (
+		    SELECT 1 FROM investment.fd_master m
+		    WHERE m.fd_id = p.fd_id
+		      AND COALESCE(m.is_deleted, FALSE) = FALSE
+		  )`,
+	}
+	fdCashflowFilesDefinition = investmentFileDefinition{
+		Module:        "fd-cashflow-additional",
+		ParentIDField: "fd_id",
+		TableName:     "investment.fd_cashflow_files",
+		ParentColumn:  "fd_id",
+		ParentTable:   "investment.fd_master",
+		ParentFilter: `AND COALESCE(p.is_deleted, FALSE) = FALSE
+		  AND (
+		    EXISTS (SELECT 1 FROM investment.fd_cashflow_schedule c WHERE c.fd_id = p.fd_id)
+		    OR EXISTS (SELECT 1 FROM investment.fd_master_cashflow_schedule c WHERE c.fd_id = p.fd_id)
+		  )`,
+	}
+	fdInterestReceiptFilesDefinition = investmentFileDefinition{
+		Module:        "fd-interest-receipt-additional",
+		ParentIDField: "receipt_id",
+		TableName:     "investment.fd_interest_receipt_files",
+		ParentColumn:  "receipt_id",
+		ParentTable:   "investment.fd_interest_receipt",
+		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+	}
+	fdTDSReceiptFilesDefinition = investmentFileDefinition{
+		Module:        "fd-tds-receipt-additional",
+		ParentIDField: "tds_id",
+		TableName:     "investment.fd_tds_receipt_files",
+		ParentColumn:  "tds_id",
+		ParentTable:   "investment.fd_tds_receipt",
+		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+	}
+	fdReconcileResultFilesDefinition = investmentFileDefinition{
+		Module:        "fd-reconcile-result-additional",
+		ParentIDField: "result_id",
+		TableName:     "investment.fd_receipt_reconcile_result_files",
+		ParentColumn:  "result_id",
+		ParentTable:   "investment.fd_receipt_reconcile_result",
+	}
+	fdReceiptExceptionFilesDefinition = investmentFileDefinition{
+		Module:        "fd-receipt-exception-additional",
+		ParentIDField: "exception_id",
+		TableName:     "investment.fd_receipt_exception_files",
+		ParentColumn:  "exception_id",
+		ParentTable:   "investment.fd_receipt_exception",
+		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+	}
+	fdAccrualRunFilesDefinition = investmentFileDefinition{
+		Module:        "fd-accrual-run-additional",
+		ParentIDField: "run_id",
+		TableName:     "investment.fd_accrual_run_files",
+		ParentColumn:  "run_id",
+		ParentTable:   "investment.fd_accrual_run",
+	}
+	fdAccrualLedgerFilesDefinition = investmentFileDefinition{
+		Module:        "fd-accrual-ledger-additional",
+		ParentIDField: "ledger_id",
+		TableName:     "investment.fd_accrual_ledger_files",
+		ParentColumn:  "ledger_id",
+		ParentTable:   "investment.fd_accrual_ledger",
+		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+	}
+	fdAccountingJournalFilesDefinition = investmentFileDefinition{
+		Module:        "fd-accounting-journal-additional",
+		ParentIDField: "entry_id",
+		TableName:     "investment.fd_accounting_journal_entry_files",
+		ParentColumn:  "entry_id",
+		ParentTable:   "investment.accounting_journal_entry",
+	}
 )
 
 func ListOnboardAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -217,6 +334,266 @@ func DownloadSelectedAccountingActivityAdditionalFilesHandler(pool *pgxpool.Pool
 
 func DeleteAccountingActivityAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(accountingActivityFilesDefinition))
+}
+
+func ListFDBookingAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdBookingFilesDefinition))
+}
+
+func UploadFDBookingAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdBookingFilesDefinition))
+}
+
+func DownloadFDBookingAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdBookingFilesDefinition))
+}
+
+func DownloadSelectedFDBookingAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdBookingFilesDefinition))
+}
+
+func DeleteFDBookingAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdBookingFilesDefinition))
+}
+
+func ListFDConfirmationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdConfirmationFilesDefinition))
+}
+
+func UploadFDConfirmationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdConfirmationFilesDefinition))
+}
+
+func DownloadFDConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdConfirmationFilesDefinition))
+}
+
+func DownloadSelectedFDConfirmationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdConfirmationFilesDefinition))
+}
+
+func DeleteFDConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdConfirmationFilesDefinition))
+}
+
+func ListFDMasterAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdMasterFilesDefinition))
+}
+
+func UploadFDMasterAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdMasterFilesDefinition))
+}
+
+func DownloadFDMasterAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdMasterFilesDefinition))
+}
+
+func DownloadSelectedFDMasterAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdMasterFilesDefinition))
+}
+
+func DeleteFDMasterAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdMasterFilesDefinition))
+}
+
+func ListFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+}
+
+func UploadFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+}
+
+func DownloadFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+}
+
+func DownloadSelectedFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+}
+
+func DeleteFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+}
+
+func ListFDRolloverAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdRolloverFilesDefinition))
+}
+
+func UploadFDRolloverAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdRolloverFilesDefinition))
+}
+
+func DownloadFDRolloverAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdRolloverFilesDefinition))
+}
+
+func DownloadSelectedFDRolloverAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdRolloverFilesDefinition))
+}
+
+func DeleteFDRolloverAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdRolloverFilesDefinition))
+}
+
+func ListFDCashflowAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdCashflowFilesDefinition))
+}
+
+func UploadFDCashflowAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdCashflowFilesDefinition))
+}
+
+func DownloadFDCashflowAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdCashflowFilesDefinition))
+}
+
+func DownloadSelectedFDCashflowAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdCashflowFilesDefinition))
+}
+
+func DeleteFDCashflowAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdCashflowFilesDefinition))
+}
+
+func ListFDInterestReceiptAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdInterestReceiptFilesDefinition))
+}
+
+func UploadFDInterestReceiptAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdInterestReceiptFilesDefinition))
+}
+
+func DownloadFDInterestReceiptAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdInterestReceiptFilesDefinition))
+}
+
+func DownloadSelectedFDInterestReceiptAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdInterestReceiptFilesDefinition))
+}
+
+func DeleteFDInterestReceiptAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdInterestReceiptFilesDefinition))
+}
+
+func ListFDTDSReceiptAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdTDSReceiptFilesDefinition))
+}
+
+func UploadFDTDSReceiptAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdTDSReceiptFilesDefinition))
+}
+
+func DownloadFDTDSReceiptAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdTDSReceiptFilesDefinition))
+}
+
+func DownloadSelectedFDTDSReceiptAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdTDSReceiptFilesDefinition))
+}
+
+func DeleteFDTDSReceiptAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdTDSReceiptFilesDefinition))
+}
+
+func ListFDReconcileResultAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdReconcileResultFilesDefinition))
+}
+
+func UploadFDReconcileResultAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdReconcileResultFilesDefinition))
+}
+
+func DownloadFDReconcileResultAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdReconcileResultFilesDefinition))
+}
+
+func DownloadSelectedFDReconcileResultAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdReconcileResultFilesDefinition))
+}
+
+func DeleteFDReconcileResultAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdReconcileResultFilesDefinition))
+}
+
+func ListFDReceiptExceptionAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdReceiptExceptionFilesDefinition))
+}
+
+func UploadFDReceiptExceptionAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdReceiptExceptionFilesDefinition))
+}
+
+func DownloadFDReceiptExceptionAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdReceiptExceptionFilesDefinition))
+}
+
+func DownloadSelectedFDReceiptExceptionAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdReceiptExceptionFilesDefinition))
+}
+
+func DeleteFDReceiptExceptionAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdReceiptExceptionFilesDefinition))
+}
+
+func ListFDAccrualRunAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdAccrualRunFilesDefinition))
+}
+
+func UploadFDAccrualRunAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdAccrualRunFilesDefinition))
+}
+
+func DownloadFDAccrualRunAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdAccrualRunFilesDefinition))
+}
+
+func DownloadSelectedFDAccrualRunAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdAccrualRunFilesDefinition))
+}
+
+func DeleteFDAccrualRunAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccrualRunFilesDefinition))
+}
+
+func ListFDAccrualLedgerAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdAccrualLedgerFilesDefinition))
+}
+
+func UploadFDAccrualLedgerAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdAccrualLedgerFilesDefinition))
+}
+
+func DownloadFDAccrualLedgerAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdAccrualLedgerFilesDefinition))
+}
+
+func DownloadSelectedFDAccrualLedgerAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdAccrualLedgerFilesDefinition))
+}
+
+func DeleteFDAccrualLedgerAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccrualLedgerFilesDefinition))
+}
+
+func ListFDAccountingJournalAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdAccountingJournalFilesDefinition))
+}
+
+func UploadFDAccountingJournalAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdAccountingJournalFilesDefinition))
+}
+
+func DownloadFDAccountingJournalAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdAccountingJournalFilesDefinition))
+}
+
+func DownloadSelectedFDAccountingJournalAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdAccountingJournalFilesDefinition))
+}
+
+func DeleteFDAccountingJournalAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccountingJournalFilesDefinition))
 }
 
 func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Config {

@@ -262,6 +262,32 @@ func moduleDefaultPrefix(module string) string {
 		return "fd/maturity-payout-processing/"
 	case "fd-premature-closure":
 		return "fd/premature-closure/"
+	case "fd-booking-additional":
+		return "fd/fd-booking/"
+	case "fd-confirmation-additional":
+		return "fd/fd-confirmation/"
+	case "fd-master-additional":
+		return "fd/fd-master/"
+	case "fd-closure-additional":
+		return "fd/fd-closure/"
+	case "fd-rollover-additional":
+		return "fd/fd-rollover/"
+	case "fd-cashflow-additional":
+		return "fd/fd-cashflow/"
+	case "fd-interest-receipt-additional":
+		return "fd/fd-interest-receipt/"
+	case "fd-tds-receipt-additional":
+		return "fd/fd-tds-receipt/"
+	case "fd-reconcile-result-additional":
+		return "fd/fd-reconcile-result/"
+	case "fd-receipt-exception-additional":
+		return "fd/fd-receipt-exception/"
+	case "fd-accrual-run-additional":
+		return "fd/fd-accrual-run/"
+	case "fd-accrual-ledger-additional":
+		return "fd/fd-accrual-ledger/"
+	case "fd-accounting-journal-additional":
+		return "fd/fd-accounting-journal/"
 	default:
 		return ""
 	}
