@@ -1361,6 +1361,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 				UploadFileName:        uploadFileName,
 				UploadedBy:            requestedByFromCtx(r.Context(), r.FormValue("user_id")),
 				Password:              r.FormValue("password"),
+				PgxPool:               pgxPool,
 			},
 		)
 		if err != nil {
@@ -1801,6 +1802,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 					AccountNumberOverride: accountOverride,
 					UploadFileName:        ze.name,
 					UploadedBy:            requestedByFromCtx(ctx, r.FormValue("user_id")),
+					PgxPool:               pool,
 				},
 			)
 			if err != nil {

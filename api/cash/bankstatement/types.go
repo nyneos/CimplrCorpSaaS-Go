@@ -2,6 +2,8 @@ package bankstatement
 
 // Types used by streaming and recalculate/commit handlers
 
+import "github.com/jackc/pgx/v5/pgxpool"
+
 type CompleteResponse struct {
 	Status string    `json:"status"`
 	Clean  CleanData `json:"clean"`
@@ -46,6 +48,10 @@ type UploadOpts struct {
 	UploadFileName        string
 	UploadedBy            string
 	Password              string
+	// PgxPool is optional; when provided the smart categorization engine runs
+	// after the upload commit so that new transactions are classified via the
+	// full 10-step waterfall rather than the legacy engine.
+	PgxPool *pgxpool.Pool
 }
 
 // RecalculateInput matches the user's bank statement format

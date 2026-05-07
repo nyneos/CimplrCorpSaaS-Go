@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -100,6 +101,7 @@ func LoadSmartCaches(ctx context.Context, pool *pgxpool.Pool) (*SmartCaches, err
 		CounterpartyByName: make(map[string]cpDefault),
 		GLMapping:          make(map[string]glDefault),
 		AccountDefaults:    make(map[string]accountDefault),
+		AccountGLID:        make(map[string]string),
 	}
 
 	// Step 2 — counterparties with default_category_id
@@ -184,8 +186,34 @@ func LoadSmartCaches(ctx context.Context, pool *pgxpool.Pool) (*SmartCaches, err
 		return nil, err
 	}
 
-	log.Printf("[SMART-CAT] Caches: %d counterparties, %d GL mappings, %d account defaults",
-		len(caches.CounterpartyByName), len(caches.GLMapping), len(caches.AccountDefaults))
+	// Step 3 ERP enrichment — GL account IDs for cash/bank accounts.
+	// masterglaccount is a standalone master (PK: gl_account_id like GLA-XXXXXXX).
+	// We read it via the erp_ref column which stores the bank account number when
+	// the GL account represents a bank/cash account (is_cash_bank = TRUE).
+	// This is non-fatal: if masterglaccount is not yet linked the engine still runs.
+	glIDRows, glErr := pool.Query(ctx, `
+		SELECT COALESCE(erp_ref, ''), gl_account_id
+		FROM public.masterglaccount
+		WHERE is_cash_bank = TRUE
+		  AND (is_deleted = FALSE OR is_deleted IS NULL)
+		  AND erp_ref IS NOT NULL
+		  AND erp_ref <> ''
+	`)
+	if glErr != nil {
+		// Non-fatal: log and continue without GL enrichment.
+		log.Printf("[SMART-CAT] GL enrichment unavailable (masterglaccount query): %v", glErr)
+	} else {
+		defer glIDRows.Close()
+		for glIDRows.Next() {
+			var acctNum, glID string
+			if err := glIDRows.Scan(&acctNum, &glID); err == nil {
+				caches.AccountGLID[acctNum] = glID
+			}
+		}
+	}
+
+	log.Printf("[SMART-CAT] Caches: %d counterparties, %d GL mappings, %d account defaults, %d account GL IDs",
+		len(caches.CounterpartyByName), len(caches.GLMapping), len(caches.AccountDefaults), len(caches.AccountGLID))
 	return caches, nil
 }
 
@@ -232,7 +260,7 @@ func SmartCategorize(
 	}
 
 	// Step 5: Trigram similarity against confirmed transactions (DB, GIN-indexed)
-	if r, ok := lookupSimilarity(ctx, pool, narration.Stemmed, txn.EntityID); ok {
+	if r, ok := lookupSimilarity(ctx, pool, narration.Stemmed, txn.EntityID, txn); ok {
 		if r.Confidence >= MinConfidenceForActuals {
 			return r
 		}
@@ -244,7 +272,13 @@ func SmartCategorize(
 		return r
 	}
 
-	// Step 7: Unallocated
+	// Step 9: AI / Intelligent Inference — only when all deterministic steps failed.
+	// The LLM call is skipped when AI_INFERENCE_URL is not configured.
+	if r, ok := InferWithAI(ctx, pool, narration, txn); ok {
+		return r
+	}
+
+	// Step 10: Unallocated
 	return ClassificationResult{
 		Step:       StepUnallocated,
 		Confidence: 0,
@@ -544,14 +578,25 @@ func matchComponent(comp smartRuleComp, descLower string, channel IndianBankChan
 }
 
 // ── Step 2: Counterparty lookup (in-memory) ───────────────────
+// Keys are iterated longest-first so a more-specific name (e.g. "HDFC BANK")
+// always wins over a shorter subset (e.g. "HDFC"), making matches deterministic.
 
 func lookupCPMemory(narrationClean string, caches *SmartCaches) (ClassificationResult, bool) {
 	if caches == nil || len(caches.CounterpartyByName) == 0 {
 		return ClassificationResult{}, false
 	}
 	lower := strings.ToLower(narrationClean)
-	for cpKey, cp := range caches.CounterpartyByName {
+
+	// Collect keys sorted by descending length for longest-match-first semantics.
+	keys := make([]string, 0, len(caches.CounterpartyByName))
+	for k := range caches.CounterpartyByName {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
+
+	for _, cpKey := range keys {
 		if strings.Contains(lower, cpKey) {
+			cp := caches.CounterpartyByName[cpKey]
 			return ClassificationResult{
 				CategoryID:   cp.CategoryID,
 				CategoryName: cp.CatName,
@@ -699,18 +744,24 @@ func lookupCorrection(ctx context.Context, pool *pgxpool.Pool, narrationClean, s
 }
 
 // ── Step 5: Trigram similarity against confirmed transactions ─
+// Only matches transactions flowing in the SAME direction (debit↔debit,
+// credit↔credit) to prevent cross-direction misclassification.
 
-func lookupSimilarity(ctx context.Context, pool *pgxpool.Pool, stemmed, entityID string) (ClassificationResult, bool) {
+func lookupSimilarity(ctx context.Context, pool *pgxpool.Pool, stemmed, entityID string, txn TxnInput) (ClassificationResult, bool) {
 	if stemmed == "" {
 		return ClassificationResult{}, false
 	}
 	var catID, catName string
 	var sim float64
 
+	// Direction filter: match only same-direction transactions so that
+	// "NEFT FROM VENDOR" (credit) never misclassifies a debit payment.
+	isDebit := txn.Withdrawal != nil && *txn.Withdrawal > 0
+
 	err := pool.QueryRow(ctx, `
 		SELECT t.category_id,
 		       COALESCE(mc.category_name, ''),
-		       similarity(t.narration_stemmed, $1) AS sim
+		       similarity(t.narration_stemmed, $1)::FLOAT8 AS sim
 		FROM cimplrcorpsaas.bank_statement_transactions t
 		JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
 		LEFT JOIN public.mastercashflowcategory mc ON mc.category_id = t.category_id
@@ -719,9 +770,13 @@ func lookupSimilarity(ctx context.Context, pool *pgxpool.Pool, stemmed, entityID
 		  AND t.confidence_score >= 0.90
 		  AND t.narration_stemmed IS NOT NULL
 		  AND similarity(t.narration_stemmed, $1) > 0.70
+		  AND (
+		        ($3 = TRUE  AND t.withdrawal_amount > 0)
+		     OR ($3 = FALSE AND t.deposit_amount    > 0)
+		  )
 		ORDER BY sim DESC
 		LIMIT 1
-	`, stemmed, entityID).Scan(&catID, &catName, &sim)
+	`, stemmed, entityID, isDebit).Scan(&catID, &catName, &sim)
 
 	if err != nil {
 		if err != pgx.ErrNoRows {

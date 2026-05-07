@@ -12,6 +12,7 @@ const (
 	StepCorrection      = "CORRECTION"
 	StepSimilarity      = "SIMILARITY"
 	StepAccountDefault  = "ACCOUNT_DEFAULT" // account-level inflow/outflow/charges/interest defaults
+	StepAIInference     = "AI_INFERENCE"    // LLM-based intelligent inference (Step 9)
 	StepUnallocated     = "UNALLOCATED"
 
 	// MinConfidenceForActuals: below this → review queue, category NOT set.
@@ -117,4 +118,15 @@ type SmartCaches struct {
 	GLMapping map[string]glDefault
 	// key: account_number — per-account category defaults (Step 6)
 	AccountDefaults map[string]accountDefault
+	// key: account_number → gl_account_id (ERP enrichment, Step 3)
+	AccountGLID map[string]string
+}
+
+// GLAccountIDForAccount returns the ERP GL account ID linked to a bank account,
+// or "" if no mapping exists.
+func (c *SmartCaches) GLAccountIDForAccount(accountNumber string) string {
+	if c == nil {
+		return ""
+	}
+	return c.AccountGLID[accountNumber]
 }

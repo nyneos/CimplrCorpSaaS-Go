@@ -79,6 +79,14 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/smart-cat/review-action", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ReviewActionHandler(pgxPool)))
 	mux.Handle("/cash/smart-cat/correction", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.SaveCorrectionHandler(pgxPool)))
 	mux.Handle("/cash/smart-cat/gl-mapping/create", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CreateGLMappingHandler(pgxPool)))
+	// AI Rule Manager (list/approve/reject AI_SUGGESTED rules)
+	mux.Handle("/cash/smart-cat/rules/ai-suggested", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ListAISuggestedRulesHandler(pgxPool)))
+	mux.Handle("/cash/smart-cat/rule/approve", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ApproveAIRuleHandler(pgxPool)))
+	mux.Handle("/cash/smart-cat/rule/reject", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RejectAIRuleHandler(pgxPool)))
+	// AI Bulk Suggest — batch-classify all PENDING UNALLOCATED review queue items
+	mux.Handle("/cash/smart-cat/ai-bulk-suggest", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.AiBulkSuggestHandler(pgxPool)))
+	// Bulk Correct — apply a category to N transactions at once
+	mux.Handle("/cash/smart-cat/bulk-correct", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.BulkCorrectHandler(pgxPool)))
 	// V2 Bank Statement APIs
 	mux.Handle("/cash/bank-statements/v2/get", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetAllBankStatementsHandler(db)))
 	mux.Handle("/cash/bank-statements/v2/transactions", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementTransactionsHandler(db)))

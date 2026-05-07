@@ -89,16 +89,21 @@ func RunCategorizationScheduler(cfg *CategorizationConfig, db *pgxpool.Pool) err
 	return nil
 }
 
-// ProcessUncategorizedTransactions performs a full smart recategorization of all
-// bank statement transactions using the 6-step waterfall in internal/services/categorizer.
+// ProcessUncategorizedTransactions performs a full smart recategorization of
+// bank statement transactions using the 10-step waterfall in internal/services/categorizer.
+//
+// Safety guarantees:
+//   - A PostgreSQL advisory lock (hashtext('smart-cat-batch')) prevents concurrent runs.
+//   - Transactions already classified by a human (CORRECTION / CONFIRMATION) are skipped.
 //
 // Pipeline:
-//  1. Load all active rules (once, in memory).
-//  2. Load counterparty + GL caches (once).
-//  3. Stream transactions in batches of batchSize ordered by value_date DESC.
-//  4. For each batch: process narration → filter rules → run waterfall → collect results.
-//  5. Persist via PersistBatch (pgx.Batch pipeline, 4 ops per item).
-//  6. Track affected bank statements and insert audit approval rows.
+//  1. Acquire advisory lock — abort if already held by another caller.
+//  2. Load all active rules (once, in memory).
+//  3. Load counterparty + GL caches (once), including per-account GL account IDs.
+//  4. Stream only engine-classifiable transactions in batches (value_date DESC).
+//  5. For each batch: process narration → filter rules → run waterfall → collect results.
+//  6. Persist via PersistBatch (pgx.Batch pipeline, 4 ops per item).
+//  7. Track affected bank statements and insert audit approval rows afterwards.
 func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
 	defer cancel()
@@ -106,6 +111,24 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 	if batchSize <= 0 {
 		batchSize = 1000
 	}
+
+	// ── 0. Advisory lock — prevent concurrent runs ────────────────────────────
+	// hashtext('smart-cat-batch') = a stable int4 key for this job.
+	var lockAcquired bool
+	if err := db.QueryRow(ctx,
+		`SELECT pg_try_advisory_lock(hashtext('smart-cat-batch'))`,
+	).Scan(&lockAcquired); err != nil {
+		return fmt.Errorf("advisory lock check: %w", err)
+	}
+	if !lockAcquired {
+		auditLog("Smart-categorization: another instance is already running — skipping")
+		return nil
+	}
+	defer func() {
+		if _, err := db.Exec(ctx, `SELECT pg_advisory_unlock(hashtext('smart-cat-batch'))`); err != nil {
+			log.Printf("[SMART-CAT] advisory unlock error: %v", err)
+		}
+	}()
 
 	auditLog("Smart-categorization: loading rules and caches…")
 
@@ -160,6 +183,10 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 			LEFT JOIN public.masterbankaccount m
 			    ON m.account_number = bs.account_number
 			WHERE t.bank_statement_id IS NOT NULL
+			  AND (
+			        t.classification_step IS NULL
+			        OR t.classification_step NOT IN ('CORRECTION', 'CONFIRMATION')
+			  )
 			ORDER BY t.value_date DESC
 			LIMIT $1 OFFSET $2
 		`, batchSize, offset)
@@ -205,6 +232,8 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		persistItems := make([]cat.BatchClassification, 0, len(batch))
 		for _, rd := range batch {
 			filtered := cat.FilterRulesForTxn(allRules, rd.input.AccountNumber, rd.input.EntityID, rd.input.Currency)
+			// M2: Populate GL account ID from per-account ERP mapping in caches
+			rd.input.GLAccountID = caches.GLAccountIDForAccount(rd.input.AccountNumber)
 			narration := cat.ProcessNarration(rd.input.Description)
 			result := cat.SmartCategorize(ctx, db, narration, filtered, caches, rd.input)
 			persistItems = append(persistItems, cat.BatchClassification{

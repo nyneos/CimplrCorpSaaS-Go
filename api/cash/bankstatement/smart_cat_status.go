@@ -97,6 +97,9 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 				SELECT DISTINCT ON (transaction_id)
 					transaction_id, classification_step
 				FROM cimplrcorpsaas.classification_audit_log
+				WHERE transaction_id IN (
+					SELECT transaction_id FROM cimplrcorpsaas.bank_statement_transactions
+				)
 				ORDER BY transaction_id, classified_at DESC
 			)
 			SELECT classification_step, COUNT(*)

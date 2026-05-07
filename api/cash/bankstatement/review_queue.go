@@ -48,14 +48,16 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 		ctx := r.Context()
 		qStr := `
 			SELECT
-				q.queue_id, q.transaction_id, q.suggested_cat, q.confidence,
+				q.queue_id, q.transaction_id, q.suggested_cat,
+				q.confidence::FLOAT8,
 				q.step, q.status, q.created_at,
 				bs.account_number,
 				COALESCE(t.description, ''),
 				COALESCE(t.narration_clean, ''),
 				COALESCE(t.narration_ref, ''),
 				COALESCE(t.payment_channel, ''),
-				t.withdrawal_amount, t.deposit_amount, t.value_date,
+				t.withdrawal_amount::FLOAT8, t.deposit_amount::FLOAT8,
+				t.value_date,
 				bs.entity_id,
 				COALESCE(mba.account_nickname, bs.account_number),
 				COALESCE(mc.category_name, '')
@@ -65,7 +67,7 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			JOIN cimplrcorpsaas.bank_statements bs
 			    ON bs.bank_statement_id = t.bank_statement_id
 			LEFT JOIN public.masterbankaccount mba ON mba.account_number = bs.account_number
-			LEFT JOIN public.mastercashflowcategory mc ON mc.category_id = q.suggested_cat
+			LEFT JOIN public.mastercashflowcategory mc ON mc.category_id::text = q.suggested_cat
 			WHERE q.status = $1`
 
 		args := []interface{}{req.Status}
@@ -132,11 +134,22 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			out = append(out, row)
 		}
 
+		// Count must use the same JOINs as the main query so orphaned queue rows
+		// (where the transaction has been deleted) are not included in the total.
+		cntStr := `
+			SELECT COUNT(*)
+			FROM cimplrcorpsaas.categorization_review_queue q
+			JOIN cimplrcorpsaas.bank_statement_transactions t ON t.transaction_id = q.transaction_id
+			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
+			WHERE q.status = $1`
+		cntArgs := []interface{}{req.Status}
+		cn := 2
+		if req.EntityID != "" {
+			cntStr += ` AND bs.entity_id = $` + strconv.Itoa(cn)
+			cntArgs = append(cntArgs, req.EntityID)
+		}
 		var total int
-		_ = pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM cimplrcorpsaas.categorization_review_queue WHERE status = $1`,
-			req.Status,
-		).Scan(&total)
+		_ = pool.QueryRow(ctx, cntStr, cntArgs...).Scan(&total)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -192,11 +205,63 @@ func ReviewActionHandler(pool *pgxpool.Pool) http.Handler {
 
 		switch req.Action {
 		case "CONFIRM":
-			_, opErr = pool.Exec(ctx, `
+			// Fetch the engine's suggested category from the queue so we can
+			// commit it to the transaction and write an audit row.
+			var suggestedCat *string
+			var suggestedConf *float64
+			var suggestedStep string
+			fetchErr := pool.QueryRow(ctx, `
+				SELECT suggested_cat, confidence::FLOAT8, COALESCE(step,'')
+				FROM cimplrcorpsaas.categorization_review_queue
+				WHERE transaction_id = $1
+			`, req.TransactionID).Scan(&suggestedCat, &suggestedConf, &suggestedStep)
+			if fetchErr != nil {
+				writeErrJSON(w, "failed to fetch queue entry: "+fetchErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			if suggestedCat == nil || *suggestedCat == "" {
+				writeErrJSON(w, "no suggested category to confirm", http.StatusBadRequest)
+				return
+			}
+			conf := 0.90
+			if suggestedConf != nil {
+				conf = *suggestedConf
+			}
+
+			confirmTx, txErr := pool.Begin(ctx)
+			if txErr != nil {
+				writeErrJSON(w, "begin tx: "+txErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer confirmTx.Rollback(ctx) //nolint:errcheck
+
+			// 1. Write category + mark as human-confirmed on the transaction
+			if _, opErr = confirmTx.Exec(ctx, `
+				UPDATE cimplrcorpsaas.bank_statement_transactions
+				SET category_id=$1,
+				    classification_step='CONFIRMATION',
+				    confidence_score=$2
+				WHERE transaction_id=$3
+			`, *suggestedCat, conf, req.TransactionID); opErr != nil {
+				break
+			}
+			// 2. Immutable audit log entry — classified_by = analyst name
+			if _, opErr = confirmTx.Exec(ctx, `
+				INSERT INTO cimplrcorpsaas.classification_audit_log
+				    (transaction_id, category_id, confidence, classification_step, source_ref, classified_by)
+				VALUES ($1, $2, $3, 'CONFIRMATION', 'analyst_confirm', $4)
+			`, req.TransactionID, *suggestedCat, conf, reviewedBy); opErr != nil {
+				break
+			}
+			// 3. Mark queue entry confirmed
+			_, opErr = confirmTx.Exec(ctx, `
 				UPDATE cimplrcorpsaas.categorization_review_queue
 				SET status='CONFIRMED', reviewed_by=$1, reviewed_at=now()
 				WHERE transaction_id=$2
 			`, reviewedBy, req.TransactionID)
+			if opErr == nil {
+				opErr = confirmTx.Commit(ctx)
+			}
 
 		case "CORRECT":
 			opErr = applyCorrection(ctx, pool, req.TransactionID, req.CategoryID, reviewedBy)
@@ -361,11 +426,22 @@ func applyCorrection(ctx context.Context, pool *pgxpool.Pool, txnID int64, categ
 		return fmt.Errorf("update category: %w", err)
 	}
 
-	// 2. Save correction for Step 4 future lookups
+	// 2. Save correction for Step 4 future lookups.
+	// ON CONFLICT: same narration_clean → update with newest correction so
+	// lookupCorrection always finds the most-recent human decision.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO cimplrcorpsaas.categorization_corrections
 		    (narration_clean, narration_stemmed, category_id, corrected_by, transaction_id, entity_id)
 		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (narration_clean)
+		DO UPDATE SET
+		    category_id      = EXCLUDED.category_id,
+		    narration_stemmed = EXCLUDED.narration_stemmed,
+		    corrected_by     = EXCLUDED.corrected_by,
+		    corrected_at     = now(),
+		    transaction_id   = EXCLUDED.transaction_id,
+		    entity_id        = EXCLUDED.entity_id,
+		    is_active        = TRUE
 	`, narrationClean, narrationStemmed, categoryID, correctedBy, txnID, entityID); err != nil {
 		return fmt.Errorf("save correction: %w", err)
 	}
