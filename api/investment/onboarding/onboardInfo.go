@@ -424,12 +424,13 @@ func GetAllBatches(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ApprovalStatus string         `json:"approval_status"`
 			CreatedAt      time.Time      `json:"created_at"`
 			CompletedAt    *time.Time     `json:"completed_at,omitempty"`
+			UploadS3Key    string         `json:"upload_s3_key"`
 			EntityCounts   map[string]int `json:"entity_counts"`
 		}
 
 		rows, err := pgxPool.Query(ctx, `
 			SELECT ob.batch_id, ob.user_id, ob.user_email, ob.source, ob.total_records, 
-			       ob.status, ob.approval_status, ob.created_at, ob.completed_at,
+			       ob.status, ob.approval_status, ob.created_at, ob.completed_at, COALESCE(ob.upload_s3_key, '') AS upload_s3_key,
 			       (SELECT COUNT(*) FROM investment.masteramc WHERE batch_id::text = ob.batch_id::text) as amc_count,
 			       (SELECT COUNT(*) FROM investment.masterscheme WHERE batch_id::text = ob.batch_id::text) as scheme_count,
 			       (SELECT COUNT(*) FROM investment.masterdepositoryparticipant WHERE batch_id::text = ob.batch_id::text) as dp_count,
@@ -452,7 +453,7 @@ func GetAllBatches(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var amcCount, schemeCount, dpCount, dematCount, folioCount int
 
 			err = rows.Scan(&batch.BatchID, &batch.UserID, &batch.UserEmail, &batch.Source,
-				&batch.TotalRecords, &batch.Status, &batch.ApprovalStatus, &batch.CreatedAt, &completedAt,
+				&batch.TotalRecords, &batch.Status, &batch.ApprovalStatus, &batch.CreatedAt, &completedAt, &batch.UploadS3Key,
 				&amcCount, &schemeCount, &dpCount, &dematCount, &folioCount)
 			if err != nil {
 				continue

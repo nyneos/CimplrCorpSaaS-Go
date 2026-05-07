@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -231,6 +232,12 @@ func moduleDefaultPrefix(module string) string {
 		return "cash/sweep-planning/"
 	case "sweep-initiation":
 		return "cash/sweep-initiation/"
+	case "investment-onboarding":
+		return "investment/onboarding center/"
+	case "investment-confirmation":
+		return "investment/confirmation/"
+	case "investment-fvo":
+		return "investment/financial closing work bench/"
 	default:
 		return ""
 	}
@@ -414,6 +421,43 @@ func PutObjectToS3(ctx context.Context, key string, body []byte, contentType str
 		return fmt.Errorf("upload to s3 (bucket %s, key %s): %w", bucket, key, err)
 	}
 	return nil
+}
+
+func UploadFirstMultipartFile(ctx context.Context, module, uploadedBy string, headers []*multipart.FileHeader) (string, error) {
+	if len(headers) == 0 || headers[0] == nil {
+		return "", nil
+	}
+
+	header := headers[0]
+	file, err := header.Open()
+	if err != nil {
+		return "", fmt.Errorf("open upload file: %w", err)
+	}
+	defer file.Close()
+
+	body, err := io.ReadAll(file)
+	if err != nil {
+		return "", fmt.Errorf("read upload file: %w", err)
+	}
+
+	uploadedAt := time.Now().UTC()
+	s3Key := BuildUploadedS3Key(GetStoragePrefix(module), "", header.Filename, uploadedBy, uploadedAt)
+	if err := PutObjectToS3(ctx, s3Key, body, DetectContentType(body)); err != nil {
+		return "", err
+	}
+
+	return s3Key, nil
+}
+
+func CollectMultipartFiles(form *multipart.Form, keys ...string) []*multipart.FileHeader {
+	if form == nil {
+		return nil
+	}
+	files := make([]*multipart.FileHeader, 0)
+	for _, key := range keys {
+		files = append(files, form.File[key]...)
+	}
+	return files
 }
 
 func isMissingObjectError(err error) bool {
