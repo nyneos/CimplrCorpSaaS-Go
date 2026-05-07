@@ -40,6 +40,8 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux.Handle("/investment/onboard/demat-enriched", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.GetDematWithDPInfo(pool))))
 	mux.Handle("/investment/onboard/dps-enriched", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.GetAllDPs(pool))))
 	mux.Handle("/investment/onboard/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.UploadInvestmentBulkk(pool))))
+	mux.Handle("/investment/onboard/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.GetOnboardDownloadURL(pool))))
+	mux.Handle("/investment/onboard/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.GetOnboardBulkDownloadURL(pool))))
 	mux.Handle("/investment/onboard/kpi", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.PostPortfolioSnapshot(pool))))
 	mux.Handle("/investment/onboard/snapshot/refresh", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.RefreshPortfolioSnapshot(pool))))
 
@@ -73,6 +75,8 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 
 	// Investment confirmation endpoints
 	mux.Handle("/investment/confirmation/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.CreateConfirmationSingle(pool))))
+	mux.Handle("/investment/confirmation/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetConfirmationDownloadURL(pool))))
+	mux.Handle("/investment/confirmation/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetConfirmationBulkDownloadURL(pool))))
 	mux.Handle("/investment/confirmation/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.CreateConfirmationBulk(pool))))
 	mux.Handle("/investment/confirmation/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.UpdateConfirmation(pool))))
 	mux.Handle("/investment/confirmation/update-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.UpdateConfirmationBulk(pool))))
@@ -103,6 +107,8 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 
 	// Redemption confirmation endpoints
 	mux.Handle("/investment/redemption/confirmation/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.CreateRedemptionConfirmationSingle(pool))))
+	mux.Handle("/investment/redemption/confirmation/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetRedemptionConfirmationDownloadURL(pool))))
+	mux.Handle("/investment/redemption/confirmation/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetRedemptionConfirmationBulkDownloadURL(pool))))
 	mux.Handle("/investment/redemption/confirmation/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.CreateRedemptionConfirmationBulk(pool))))
 	mux.Handle("/investment/redemption/confirmation/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.UpdateRedemptionConfirmation(pool))))
 	mux.Handle("/investment/redemption/confirmation/update-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.UpdateRedemptionConfirmationBulk(pool))))
@@ -148,6 +154,8 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 
 	// Accounting Workbench - Fair Value Override endpoints
 	mux.Handle("/investment/accounting/fvo/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateFVOSingle(pool))))
+	mux.Handle("/investment/accounting/fvo/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetFVODownloadURL(pool))))
+	mux.Handle("/investment/accounting/fvo/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetFVOBulkDownloadURL(pool))))
 	mux.Handle("/investment/accounting/fvo/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateFVOBulk(pool))))
 	mux.Handle("/investment/accounting/fvo/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.UpdateFVO(pool))))
 	mux.Handle("/investment/accounting/fvo/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetFVOsWithAudit(pool))))

@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -1267,8 +1268,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		// helper to find Cr/Dr indicator columns
 		findCrDrLike := func() int {
 			for colName, idx := range colIdx {
-				lcName := strings.ToLower(colName)
-				if strings.Contains(lcName, "cr/dr") || strings.Contains(lcName, "crdr") || strings.Contains(lcName, "cr / dr") || strings.TrimSpace(lcName) == "cr" || strings.TrimSpace(lcName) == "dr" || strings.Contains(lcName, "credit/debit") || strings.Contains(lcName, "debit/credit") {
+				lcName := strings.ToLower(strings.TrimSpace(colName))
+				if strings.Contains(lcName, "cr/dr") || strings.Contains(lcName, "crdr") ||
+					strings.Contains(lcName, "cr / dr") ||
+					strings.Contains(lcName, "dr/cr") || strings.Contains(lcName, "dr / cr") ||
+					strings.Contains(lcName, "dr|cr") || strings.Contains(lcName, "cr|dr") ||
+					strings.Contains(lcName, "dr | cr") || strings.Contains(lcName, "cr | dr") ||
+					lcName == "cr" || lcName == "dr" ||
+					strings.Contains(lcName, "credit/debit") || strings.Contains(lcName, "debit/credit") {
 					return idx
 				}
 			}
@@ -2673,6 +2680,18 @@ RETURNING bank_statement_id
 		return nil, fmt.Errorf("failed to commit: %w", err)
 	}
 
+	// M7: Trigger full smart-categorization waterfall after commit so newly
+	// uploaded transactions are classified via the 10-step engine (rules,
+	// counterparty defaults, corrections, similarity, account defaults, AI).
+	if opts.PgxPool != nil {
+		pool := opts.PgxPool
+		go func() {
+			if err := cashjobs.ProcessUncategorizedTransactions(pool, 500); err != nil {
+				log.Printf("[SMART-CAT] post-upload trigger failed: %v", err)
+			}
+		}()
+	}
+
 	// KPIs and category details
 	kpiCats := []map[string]interface{}{}
 	foundCategories := []map[string]interface{}{}
@@ -3327,7 +3346,7 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			fileHash := fmt.Sprintf("%x", h.Sum(nil))
 
 			// Call structured ingestion
-			res, upErr := ProcessBankStatementFromStructuredInput(ctx, db, stm, fileHash)
+			res, upErr := ProcessBankStatementFromStructuredInput(ctx, db, stm, fileHash, nil)
 			if upErr != nil {
 				results[resultKey] = map[string]interface{}{"success": false, "message": userFriendlyUploadError(upErr)}
 				continue

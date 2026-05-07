@@ -4,10 +4,13 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/notification/catalog"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +39,115 @@ type CreateConfirmationRequest struct {
 	Status             string  `json:"status,omitempty"`
 }
 
+func GetConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID         string `json:"user_id"`
+			ConfirmationID string `json:"confirmation_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		if strings.TrimSpace(req.ConfirmationID) == "" {
+			api.RespondWithResult(w, false, "confirmation_id required")
+			return
+		}
+
+		var uploadS3Key sql.NullString
+		if err := pgxPool.QueryRow(r.Context(), `
+			SELECT upload_s3_key
+			FROM investment.investment_confirmation
+			WHERE confirmation_id = $1
+		`, req.ConfirmationID).Scan(&uploadS3Key); err != nil {
+			api.RespondWithResult(w, false, "file not found")
+			return
+		}
+
+		key := strings.TrimSpace(uploadS3Key.String)
+		if !uploadS3Key.Valid || key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"confirmation_id": req.ConfirmationID,
+				"download_url":    downloadURL,
+			},
+		})
+	}
+}
+
+func GetConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID          string   `json:"user_id"`
+			ConfirmationIDs []string `json:"confirmation_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		if len(req.ConfirmationIDs) == 0 {
+			api.RespondWithResult(w, false, "confirmation_ids required")
+			return
+		}
+
+		files := make([]map[string]string, 0, len(req.ConfirmationIDs))
+		failedIDs := make([]string, 0)
+		for _, rawID := range req.ConfirmationIDs {
+			confirmationID := strings.TrimSpace(rawID)
+			if confirmationID == "" {
+				continue
+			}
+
+			var uploadS3Key sql.NullString
+			if err := pgxPool.QueryRow(r.Context(), `
+				SELECT upload_s3_key
+				FROM investment.investment_confirmation
+				WHERE confirmation_id = $1
+			`, confirmationID).Scan(&uploadS3Key); err != nil {
+				failedIDs = append(failedIDs, confirmationID)
+				continue
+			}
+
+			key := strings.TrimSpace(uploadS3Key.String)
+			if !uploadS3Key.Valid || key == "" {
+				failedIDs = append(failedIDs, confirmationID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, confirmationID)
+				continue
+			}
+			files = append(files, map[string]string{
+				"confirmation_id": confirmationID,
+				"download_url":    downloadURL,
+			})
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: len(files) > 0,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
+	}
+}
+
 type UpdateConfirmationRequest struct {
 	UserID         string                 `json:"user_id"`
 	ConfirmationID string                 `json:"confirmation_id"`
@@ -49,8 +161,8 @@ type UpdateConfirmationRequest struct {
 
 func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req CreateConfirmationRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		req, isMultipart, err := decodeCreateConfirmationRequest(r)
+		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
@@ -76,6 +188,16 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		uploadS3Key := ""
+		if isMultipart {
+			var uploadErr error
+			uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, "investment-confirmation", userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "file", "files"))
+			if uploadErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "upload file failed: "+uploadErr.Error())
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
@@ -102,8 +224,8 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		insertQ := `
 			INSERT INTO investment.investment_confirmation (
 				initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
-				actual_nav, actual_allotted_units, variance_nav, variance_units, resolution_comment, resolution_variance, status
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+				actual_nav, actual_allotted_units, variance_nav, variance_units, resolution_comment, resolution_variance, status, upload_s3_key
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULLIF($14, ''))
 			RETURNING confirmation_id
 		`
 		var confirmationID string
@@ -121,6 +243,7 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.ResolutionComments,
 			req.ResolutionVariance,
 			status,
+			uploadS3Key,
 		).Scan(&confirmationID); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
 			return
@@ -156,6 +279,38 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"requested":       userEmail,
 		})
 	}
+}
+
+func decodeCreateConfirmationRequest(r *http.Request) (CreateConfirmationRequest, bool, error) {
+	var req CreateConfirmationRequest
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			return req, true, err
+		}
+		req.UserID = strings.TrimSpace(r.FormValue("user_id"))
+		req.InitiationID = strings.TrimSpace(r.FormValue("initiation_id"))
+		req.NAVDate = strings.TrimSpace(r.FormValue("nav_date"))
+		req.NAV = formFloat(r, "nav")
+		req.AllottedUnits = formFloat(r, "allotted_units")
+		req.StampDuty = formFloat(r, "stamp_duty")
+		req.NetAmount = formFloat(r, "net_amount")
+		req.ActualNAV = formFloat(r, "actual_nav")
+		req.ActualUnits = formFloat(r, "actual_allotted_units")
+		req.ResolutionComments = strings.TrimSpace(r.FormValue("resolution_comment"))
+		req.ResolutionVariance = strings.TrimSpace(r.FormValue("resolution_variance"))
+		req.Status = strings.TrimSpace(r.FormValue("status"))
+		return req, true, nil
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return req, false, err
+	}
+	return req, false, nil
+}
+
+func formFloat(r *http.Request, key string) float64 {
+	value, _ := strconv.ParseFloat(strings.TrimSpace(r.FormValue(key)), 64)
+	return value
 }
 
 // ---------------------------
@@ -1031,6 +1186,7 @@ func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []str
 			m.old_resolution_variance,
 			m.status,
 			m.old_status,
+			COALESCE(m.upload_s3_key, '') AS upload_s3_key,
 			m.confirmed_by,
 			TO_CHAR(m.confirmed_at, 'YYYY-MM-DD HH24:MI:SS') AS confirmed_at,
 			m.is_deleted,

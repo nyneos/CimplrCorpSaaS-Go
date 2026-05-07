@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/utils/s3storage"
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -545,7 +547,7 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		query := `
 			SELECT 
 				u.utilization_id, u.limit_id, u.utilization_date, u.currency_code, u.utilized_amount,
-				u.remarks, u.reference_doc, u.entry_mode, u.status,
+				u.remarks, u.reference_doc, u.entry_mode, u.status, u.upload_s3_key,
 				u.old_utilization_date, u.old_currency_code, u.old_utilized_amount, u.old_remarks, u.old_reference_doc,
 				a.action_type, a.processing_status, a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason,
 
@@ -589,7 +591,7 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var utilizationID, limitID, currencyCode, entryMode, status string
 			var utilizationDate *time.Time
 			var utilizedAmount float64
-			var remarks, referenceDoc *string
+			var remarks, referenceDoc, uploadS3Key *string
 
 			// Old values (utilization)
 			var oldUtilizationDate *time.Time
@@ -623,7 +625,7 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			err := rows.Scan(
 				&utilizationID, &limitID, &utilizationDate, &currencyCode, &utilizedAmount,
-				&remarks, &referenceDoc, &entryMode, &status,
+				&remarks, &referenceDoc, &entryMode, &status, &uploadS3Key,
 				&oldUtilizationDate, &oldCurrencyCode, &oldUtilizedAmount, &oldRemarks, &oldReferenceDoc,
 				&actionType, &procStatus, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason,
 
@@ -663,6 +665,7 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"reference_doc":    stringOrEmpty(referenceDoc),
 				"entry_mode":       entryMode,
 				"status":           status,
+				"upload_s3_key":    stringOrEmpty(uploadS3Key),
 
 				"old_utilization_date": timeOrEmpty(oldUtilizationDate),
 				"old_currency_code":    stringOrEmpty(oldCurrencyCode),
@@ -1259,13 +1262,19 @@ func UploadUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer f.Close()
 
+		fileBytes, err := io.ReadAll(f)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "failed to read file: "+err.Error())
+			return
+		}
+
 		ext := strings.ToLower(filepath.Ext(file.Filename))
 		var rows [][]string
 
 		if ext == ".csv" {
-			rows, err = parseCSVUtilization(f)
+			rows, err = parseCSVUtilization(bytes.NewReader(fileBytes))
 		} else if ext == ".xlsx" || ext == ".xls" {
-			rows, err = parseXLSXUtilization(file, f)
+			rows, err = parseXLSXUtilization(file, bytes.NewReader(fileBytes))
 		} else {
 			api.RespondWithError(w, http.StatusBadRequest, "unsupported file type. Use CSV or XLSX")
 			return
@@ -1281,8 +1290,26 @@ func UploadUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if err := ensureNoDuplicateUtilizationRows(ctx, pgxPool, rows); err != nil {
+			api.RespondWithError(w, http.StatusConflict, err.Error())
+			return
+		}
+
+		uploadedAt := time.Now().UTC()
+		storedFileName := s3storage.BuildUploadedFilename(file.Filename, requestedBy, uploadedAt)
+		uploadFolder := strings.Trim(strings.TrimSpace(s3storage.GetStoragePrefix("limit-utilization")), "/")
+		if uploadFolder == "" {
+			uploadFolder = "cash/limit utilization"
+		}
+		uploadS3Key := s3storage.BuildNamedS3Key(uploadFolder, "", storedFileName)
+		contentType := s3storage.DetectContentType(fileBytes)
+		if err := s3storage.PutObjectToS3(ctx, uploadS3Key, fileBytes, contentType); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to upload file to S3: "+err.Error())
+			return
+		}
+
 		// Process rows and create utilizations
-		results := processUtilizationRows(ctx, pgxPool, rows, requestedBy)
+		results := processUtilizationRows(ctx, pgxPool, rows, requestedBy, uploadS3Key)
 
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
 		// Notify: utilization file uploaded with FULL record data
@@ -1312,19 +1339,19 @@ func UploadUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func parseCSVUtilization(f multipart.File) ([][]string, error) {
+func parseCSVUtilization(f io.Reader) ([][]string, error) {
 	reader := csv.NewReader(f)
 	reader.TrimLeadingSpace = true
 	return reader.ReadAll()
 }
 
-func parseXLSXUtilization(fileHeader *multipart.FileHeader, f multipart.File) ([][]string, error) {
+func parseXLSXUtilization(fileHeader *multipart.FileHeader, f io.Reader) ([][]string, error) {
 	tmpFile, err := io.ReadAll(f)
 	if err != nil {
 		return nil, err
 	}
 
-	xlsx, err := excelize.OpenReader(strings.NewReader(string(tmpFile)))
+	xlsx, err := excelize.OpenReader(bytes.NewReader(tmpFile))
 	if err != nil {
 		return nil, err
 	}
@@ -1339,7 +1366,52 @@ func parseXLSXUtilization(fileHeader *multipart.FileHeader, f multipart.File) ([
 	return rows, nil
 }
 
-func processUtilizationRows(ctx context.Context, pgxPool *pgxpool.Pool, rows [][]string, requestedBy string) []map[string]interface{} {
+func ensureNoDuplicateUtilizationRows(ctx context.Context, pgxPool *pgxpool.Pool, rows [][]string) error {
+	header := rows[0]
+	colMap := make(map[string]int)
+	for i, h := range header {
+		colMap[strings.ToLower(strings.TrimSpace(h))] = i
+	}
+
+	seen := make(map[string]int)
+	for i := 1; i < len(rows); i++ {
+		row := rows[i]
+		limitID := getCellValue(row, colMap, "limit_id")
+		utilizationDate := getCellValue(row, colMap, "utilization_date")
+		currencyCode := strings.ToUpper(getCellValue(row, colMap, "currency_code"))
+		if limitID == "" || utilizationDate == "" || currencyCode == "" {
+			continue
+		}
+
+		key := limitID + "|" + utilizationDate + "|" + currencyCode
+		if _, ok := seen[key]; ok {
+			return fmt.Errorf("duplicate upload: file already exists")
+		}
+		seen[key] = i + 1
+
+		var exists bool
+		err := pgxPool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM cimplrcorpsaas.bank_limit_utilization
+				WHERE limit_id = $1
+				  AND utilization_date = $2::date
+				  AND UPPER(currency_code) = $3
+				  AND COALESCE(is_deleted, false) = false
+			)
+		`, limitID, utilizationDate, currencyCode).Scan(&exists)
+		if err != nil {
+			return fmt.Errorf("failed to check duplicate utilization rows: %v", err)
+		}
+		if exists {
+			return fmt.Errorf("duplicate upload: file already exists")
+		}
+	}
+
+	return nil
+}
+
+func processUtilizationRows(ctx context.Context, pgxPool *pgxpool.Pool, rows [][]string, requestedBy string, uploadS3Key string) []map[string]interface{} {
 	header := rows[0]
 	colMap := make(map[string]int)
 
@@ -1477,13 +1549,13 @@ func processUtilizationRows(ctx context.Context, pgxPool *pgxpool.Pool, rows [][
 
 			ins := `INSERT INTO cimplrcorpsaas.bank_limit_utilization (
 				limit_id, utilization_date, currency_code, utilized_amount,
-				remarks, reference_doc, entry_mode, status
-			) VALUES ($1,$2,$3,$4,$5,$6,'UPLOAD','DRAFT') RETURNING utilization_id`
+				remarks, reference_doc, entry_mode, status, upload_s3_key
+			) VALUES ($1,$2,$3,$4,$5,$6,'UPLOAD','DRAFT',$7) RETURNING utilization_id`
 
 			var utilizationID string
 			err = tx.QueryRow(ctx, ins,
 				vr.LimitID, vr.UtilizationDate, strings.ToUpper(vr.CurrencyCode), vr.UtilizedAmount,
-				nullifyEmpty(vr.Remarks), nullifyEmpty(vr.ReferenceDoc),
+				nullifyEmpty(vr.Remarks), nullifyEmpty(vr.ReferenceDoc), nullifyEmpty(uploadS3Key),
 			).Scan(&utilizationID)
 
 			if err != nil {
@@ -1528,4 +1600,125 @@ func getCellValue(row []string, colMap map[string]int, colName string) string {
 		return ""
 	}
 	return strings.TrimSpace(row[idx])
+}
+
+func DownloadUtilizationUploadFile(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID        string `json:"user_id"`
+			UtilizationID string `json:"utilization_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UtilizationID) == "" {
+			api.RespondWithResult(w, false, "utilization_id required")
+			return
+		}
+
+		ctx := r.Context()
+		var uploadS3Key *string
+		err := pgxPool.QueryRow(ctx, `
+			SELECT upload_s3_key
+			FROM cimplrcorpsaas.bank_limit_utilization
+			WHERE utilization_id = $1
+			  AND COALESCE(is_deleted, false) = false
+		`, req.UtilizationID).Scan(&uploadS3Key)
+		if err != nil {
+			api.RespondWithResult(w, false, "utilization not found")
+			return
+		}
+
+		key := strings.TrimSpace(stringOrEmpty(uploadS3Key))
+		if key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to generate download url")
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+func DownloadSelectedUtilizationUploadFiles(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID         string   `json:"user_id"`
+			UtilizationIDs []string `json:"utilization_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.UtilizationIDs) == 0 {
+			api.RespondWithResult(w, false, "utilization_ids required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(req.UtilizationIDs))
+		failedIDs := make([]string, 0)
+
+		for _, rawID := range req.UtilizationIDs {
+			utilizationID := strings.TrimSpace(rawID)
+			if utilizationID == "" {
+				continue
+			}
+
+			var uploadS3Key *string
+			err := pgxPool.QueryRow(ctx, `
+				SELECT upload_s3_key
+				FROM cimplrcorpsaas.bank_limit_utilization
+				WHERE utilization_id = $1
+				  AND COALESCE(is_deleted, false) = false
+			`, utilizationID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, utilizationID)
+				continue
+			}
+
+			key := strings.TrimSpace(stringOrEmpty(uploadS3Key))
+			if key == "" {
+				failedIDs = append(failedIDs, utilizationID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, utilizationID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"utilization_id": utilizationID,
+				"download_url":   downloadURL,
+			})
+		}
+
+		if len(files) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: false,
+				"message":              "no downloadable files found",
+				"data": map[string]interface{}{
+					"files":      []map[string]string{},
+					"failed_ids": failedIDs,
+				},
+			})
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
+	}
 }
