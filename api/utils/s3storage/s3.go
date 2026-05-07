@@ -206,6 +206,8 @@ func moduleDefaultPrefix(module string) string {
 		return "cash/bankstatements/"
 	case "bankbalance":
 		return "cash/bank-balance/"
+	case "rule-master":
+		return "cash/rule-master/"
 	case "entitylogo":
 		return "Entity logo/"
 	case "projection":
@@ -217,7 +219,9 @@ func moduleDefaultPrefix(module string) string {
 	case "fx-exposure":
 		return "fx/exposures/"
 	case "fx-exposure-bucketing":
-		return "fx/create exposure-bucket/"
+		return "fx/exposures/exposure bucketing/"
+	case "fx-pending-exposure-bucketing":
+		return "fx/exposures/pending exposure bucketing/"
 	case "fx-forward":
 		return "fx/forwards/"
 	case "fx-mtm":
