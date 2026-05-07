@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -11,6 +12,18 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// bytesMultipartFile wraps a *bytes.Reader to satisfy the mime/multipart.File
+// interface (Read + ReadAt + Seek + Close). Used so parseCashFlowCategoryFile
+// can be called with in-memory bytes after the original file has been closed.
+type bytesMultipartFile struct{ *bytes.Reader }
+
+func (bytesMultipartFile) Close() error { return nil }
+
+// newBytesMultipartFile returns a bytesMultipartFile backed by b.
+func newBytesMultipartFile(b []byte) bytesMultipartFile {
+	return bytesMultipartFile{bytes.NewReader(b)}
+}
 
 // investmentFilesHandlers groups the 5 HTTP handlers for one investment master module.
 type investmentFilesHandlers struct {

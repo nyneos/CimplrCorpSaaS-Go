@@ -4,6 +4,8 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/utils/s3storage"
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
@@ -70,14 +73,32 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer file.Close()
 
+		fileBytes, err := io.ReadAll(file)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read file: "+err.Error())
+			return
+		}
+		contentType := s3storage.DetectContentType(fileBytes)
+
+		s3Key := ""
+		if s3storage.IsS3UploadEnabled() {
+			folder := s3storage.GetStoragePrefix("master-counterparty-hub")
+			storedFileName := s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
+			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				return
+			}
+		}
+
 		filename := strings.ToLower(header.Filename)
 		var rows []map[string]string
 
 		switch {
 		case strings.HasSuffix(filename, ".csv"):
-			rows, err = parseCSV(file)
+			rows, err = parseCSV(bytes.NewReader(fileBytes))
 		case strings.HasSuffix(filename, ".xlsx"):
-			rows, err = parseXLSX(file)
+			rows, err = parseXLSX(bytes.NewReader(fileBytes))
 		default:
 			api.RespondWithError(w, http.StatusBadRequest, "Only CSV (.csv) and Excel (.xlsx) files are supported")
 			return
@@ -537,13 +558,31 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer file.Close()
 
+		fileBytes, err := io.ReadAll(file)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read file: "+err.Error())
+			return
+		}
+		contentType := s3storage.DetectContentType(fileBytes)
+
+		s3Key := ""
+		if s3storage.IsS3UploadEnabled() {
+			folder := s3storage.GetStoragePrefix("master-counterparty-hub-v2")
+			storedFileName := s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
+			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				return
+			}
+		}
+
 		filename := strings.ToLower(header.Filename)
 		var rows []map[string]string
 		switch {
 		case strings.HasSuffix(filename, ".csv"):
-			rows, err = parseCSV(file)
+			rows, err = parseCSV(bytes.NewReader(fileBytes))
 		case strings.HasSuffix(filename, ".xlsx"):
-			rows, err = parseXLSX(file)
+			rows, err = parseXLSX(bytes.NewReader(fileBytes))
 		default:
 			api.RespondWithError(w, http.StatusBadRequest, "Only .csv and .xlsx files are supported")
 			return

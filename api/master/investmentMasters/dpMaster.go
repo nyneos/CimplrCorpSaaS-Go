@@ -3,9 +3,11 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -172,8 +174,14 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
 				return
 			}
-			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+			fileBytes, err := io.ReadAll(f)
 			f.Close()
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
+				return
+			}
+			contentType := s3storage.DetectContentType(fileBytes)
+			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidOrEmptyFile)
 				return
@@ -196,6 +204,18 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, m := range mandatories {
 				if !contains(validCols, m) {
 					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("CSV must include column: %s", m))
+					return
+				}
+			}
+
+			// S3 upload before opening transaction
+			s3Key := ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-dp")
+				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
 					return
 				}
 			}
@@ -226,6 +246,12 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				copyRows[i] = vals
 			}
 
+			// Append s3Key as last column for CopyFrom
+			validCols = append(validCols, "upload_s3_key")
+			for i := range copyRows {
+				copyRows[i] = append(copyRows[i], s3Key)
+			}
+
 			// transaction: COPY -> set source -> audit insert
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
@@ -237,6 +263,9 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer func() {
 				if !committed {
 					tx.Rollback(ctx)
+					if s3Key != "" {
+						_ = s3storage.DeleteFromS3(ctx, s3Key)
+					}
 				}
 			}()
 

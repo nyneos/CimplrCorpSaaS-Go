@@ -30,6 +30,14 @@ func RegisterCounterpartyHubRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *s
 	mux.Handle("/master/v2/counterparty-hub/upload", pre(UploadCounterpartyHubV2(pool)))
 	mux.Handle("/master/v2/counterparty-hub/upload/template", pre(GetUploadTemplateV2(pool)))
 
+	// ── Additional Files (DMS / S3 document attachments per counterparty) ────
+	counterpartyHubMF := CounterpartyHubFilesHandlers(pool)
+	mux.Handle("/master/v2/counterparty-hub/additional-files/list", pre(counterpartyHubMF.List))
+	mux.Handle("/master/v2/counterparty-hub/additional-files/upload", pre(counterpartyHubMF.Upload))
+	mux.Handle("/master/v2/counterparty-hub/additional-files/download", pre(counterpartyHubMF.Download))
+	mux.Handle("/master/v2/counterparty-hub/additional-files/download-bulk", pre(counterpartyHubMF.DownloadBulk))
+	mux.Handle("/master/v2/counterparty-hub/additional-files/delete", pre(counterpartyHubMF.Delete))
+
 	// ── Per-type handlers below are superseded by the unified hub v2 routes ──
 	// They remain compiled but are not registered. Remove the comment prefix
 	// to re-enable individual type routes if needed for legacy compatibility.

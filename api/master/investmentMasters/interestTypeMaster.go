@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/utils/s3storage"
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
@@ -169,7 +171,13 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.LogError("File upload failed: %v", err)
 			return
 		}
-		defer file.Close()
+		fileBytes, err := io.ReadAll(file)
+		file.Close()
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
+			return
+		}
+		contentType := s3storage.DetectContentType(fileBytes)
 
 		ext := strings.ToLower(filepath.Ext(handler.Filename))
 		if ext != ".csv" && ext != ".xlsx" {
@@ -191,9 +199,9 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var rows [][]string
 		if ext == ".csv" {
-			rows, err = parseCSVFile(file)
+			rows, err = parseCSVFile(newBytesMultipartFile(fileBytes))
 		} else {
-			rows, err = parseXLSXFile(file)
+			rows, err = parseXLSXFile(newBytesMultipartFile(fileBytes))
 		}
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "File parsing failed: "+err.Error())
@@ -318,14 +326,37 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			validSourceRows = append(validSourceRows, rowIdx+2)
 		}
 
+		// S3 upload before transaction
+		s3Key := ""
+		if s3storage.IsS3UploadEnabled() {
+			folder := s3storage.GetStoragePrefix("master-interest-type")
+			storedFileName := s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
+			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				return
+			}
+		}
+
 		// ULTRA FAST: Single transaction for ALL inserts
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
+			if s3Key != "" {
+				_ = s3storage.DeleteFromS3(ctx, s3Key)
+			}
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Upload transaction begin failed: %v", err)
 			return
 		}
-		defer tx.Rollback(ctx)
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+				if s3Key != "" {
+					_ = s3storage.DeleteFromS3(ctx, s3Key)
+				}
+			}
+		}()
 
 		// EFFICIENT: Batch check for existing codes/names for large uploads
 		codes := make([]string, len(validInputs))
@@ -444,6 +475,13 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
+		// Store upload S3 key on inserted rows
+		if s3Key != "" && len(interestIDs) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE investment.fd_interest_type_master SET upload_s3_key = $1 WHERE interest_id = ANY($2)`, s3Key, interestIDs); err != nil {
+				api.LogError("Failed to store upload_s3_key: %v", err)
+			}
+		}
+
 		// Batch audit insert - ALL audits in ONE query
 		if len(interestIDs) > 0 {
 			auditValues := make([]string, len(interestIDs))
@@ -475,6 +513,7 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		committed = true
 
 		// Respond concisely
 		if len(insertedRecords) > 0 {

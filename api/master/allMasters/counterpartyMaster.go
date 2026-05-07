@@ -3,9 +3,11 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -1275,9 +1277,15 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file: "+fh.Filename)
 				return
 			}
-			ext := getFileExt(fh.Filename)
-			records, err := parseCashFlowCategoryFile(f, ext)
+			fileBytes, err := io.ReadAll(f)
 			f.Close()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				return
+			}
+			contentType := s3storage.DetectContentType(fileBytes)
+			ext := getFileExt(fh.Filename)
+			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), ext)
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
 				return
@@ -1317,6 +1325,17 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			columns := append([]string{"upload_batch_id"}, headerNorm...)
 
+			s3Key := ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-counterparty")
+				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					return
+				}
+			}
+
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
@@ -1326,6 +1345,9 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer func() {
 				if !committed {
 					tx.Rollback(ctx)
+					if s3Key != "" {
+						_ = s3storage.DeleteFromS3(ctx, s3Key)
+					}
 				}
 			}()
 
@@ -1375,8 +1397,12 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			srcColsStr := strings.Join(selectExprs, ", ")
 
-			insertSQL := fmt.Sprintf(`INSERT INTO mastercounterparty (%s) SELECT %s FROM input_counterparty_table s WHERE s.upload_batch_id = $1 RETURNING counterparty_id`, tgtColsStr, srcColsStr)
-			rows, err := tx.Query(ctx, insertSQL, batchID)
+			insertSQL := fmt.Sprintf(`INSERT INTO mastercounterparty (%s, upload_s3_key) SELECT %s, $2 FROM input_counterparty_table s WHERE s.upload_batch_id = $1 RETURNING counterparty_id`, tgtColsStr, srcColsStr)
+			var s3KeyPtr *string
+			if s3Key != "" {
+				s3KeyPtr = &s3Key
+			}
+			rows, err := tx.Query(ctx, insertSQL, batchID, s3KeyPtr)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
 				return
@@ -1467,8 +1493,14 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
 				return
 			}
-			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+			fileBytes, err := io.ReadAll(f)
 			f.Close()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				return
+			}
+			contentType := s3storage.DetectContentType(fileBytes)
+			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty CSV file")
 				return
@@ -1531,6 +1563,25 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				copyRows[i] = vals
 			}
 
+			s3Key := ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-counterparty")
+				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					return
+				}
+			}
+
+			// Inject upload_s3_key into each copy row
+			if s3Key != "" {
+				validCols = append(validCols, "upload_s3_key")
+				for i := range copyRows {
+					copyRows[i] = append(copyRows[i], s3Key)
+				}
+			}
+
 			// === Step 5: Transaction (sync all inserts) ===
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
@@ -1541,6 +1592,9 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer func() {
 				if !committed {
 					tx.Rollback(ctx)
+					if s3Key != "" {
+						_ = s3storage.DeleteFromS3(ctx, s3Key)
+					}
 				}
 			}()
 
@@ -1650,8 +1704,14 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
 				return
 			}
-			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+			fileBytes, err := io.ReadAll(f)
 			f.Close()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				return
+			}
+			contentType := s3storage.DetectContentType(fileBytes)
+			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty CSV file")
 				return
@@ -1709,6 +1769,25 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				copyRows[i] = vals
 			}
 
+			s3Key := ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-counterparty")
+				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					return
+				}
+			}
+
+			// Inject upload_s3_key into each copy row
+			if s3Key != "" {
+				validCols = append(validCols, "upload_s3_key")
+				for i := range copyRows {
+					copyRows[i] = append(copyRows[i], s3Key)
+				}
+			}
+
 			// --- Sync transaction: COPY + single audit INSERT ---
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
@@ -1719,6 +1798,9 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer func() {
 				if !committed {
 					tx.Rollback(ctx)
+					if s3Key != "" {
+						_ = s3storage.DeleteFromS3(ctx, s3Key)
+					}
 				}
 			}()
 
