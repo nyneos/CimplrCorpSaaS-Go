@@ -6,16 +6,94 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type fdConfirmationCaptureRequest struct {
+	UserID                   string           `json:"user_id"`
+	BookingID                string           `json:"booking_id"`
+	ConfirmedPrincipalAmount float64          `json:"confirmed_principal_amount"`
+	ConfirmedInterestRate    float64          `json:"confirmed_interest_rate"`
+	ConfirmedTenorDays       int              `json:"confirmed_tenor_days"`
+	ConfirmedTenorMonths     int              `json:"confirmed_tenor_months"`
+	ConfirmedTenorYears      int              `json:"confirmed_tenor_years"`
+	ConfirmedTenorType       string           `json:"confirmed_tenor_type"`
+	ConfirmedValueDate       string           `json:"confirmed_value_date"`
+	ConfirmedMaturityDate    string           `json:"confirmed_maturity_date"`
+	BankFDReference          string           `json:"bank_fd_reference"`
+	ReceiptDate              string           `json:"receipt_date"`
+	ConfirmedInterestType    string           `json:"confirmed_interest_type"`
+	ConfirmedFrequencyID     string           `json:"confirmed_frequency_id"`
+	PenaltyID                string           `json:"penalty_id"`
+	PayoutDates              *json.RawMessage `json:"payout_dates"`
+	CompoundingDates         *json.RawMessage `json:"compounding_dates"`
+	FirstPayoutDate          string           `json:"first_payout_date"`
+	FirstCapitalizationDate  string           `json:"first_capitalization_date"`
+	Notes                    string           `json:"notes"`
+}
+
+func fdFormFloat(r *http.Request, key string) float64 {
+	raw := strings.TrimSpace(r.FormValue(key))
+	if raw == "" {
+		return 0
+	}
+	value, _ := strconv.ParseFloat(raw, 64)
+	return value
+}
+
+func fdFormInt(r *http.Request, key string) int {
+	raw := strings.TrimSpace(r.FormValue(key))
+	if raw == "" {
+		return 0
+	}
+	value, _ := strconv.Atoi(raw)
+	return value
+}
+
+func fdFormRawJSON(r *http.Request, key string) *json.RawMessage {
+	raw := strings.TrimSpace(r.FormValue(key))
+	if raw == "" {
+		return nil
+	}
+	msg := json.RawMessage(raw)
+	return &msg
+}
+
+func fdConfirmationCaptureRequestFromForm(r *http.Request) fdConfirmationCaptureRequest {
+	return fdConfirmationCaptureRequest{
+		UserID:                   strings.TrimSpace(r.FormValue("user_id")),
+		BookingID:                strings.TrimSpace(r.FormValue("booking_id")),
+		ConfirmedPrincipalAmount: fdFormFloat(r, "confirmed_principal_amount"),
+		ConfirmedInterestRate:    fdFormFloat(r, "confirmed_interest_rate"),
+		ConfirmedTenorDays:       fdFormInt(r, "confirmed_tenor_days"),
+		ConfirmedTenorMonths:     fdFormInt(r, "confirmed_tenor_months"),
+		ConfirmedTenorYears:      fdFormInt(r, "confirmed_tenor_years"),
+		ConfirmedTenorType:       strings.TrimSpace(r.FormValue("confirmed_tenor_type")),
+		ConfirmedValueDate:       strings.TrimSpace(r.FormValue("confirmed_value_date")),
+		ConfirmedMaturityDate:    strings.TrimSpace(r.FormValue("confirmed_maturity_date")),
+		BankFDReference:          strings.TrimSpace(r.FormValue("bank_fd_reference")),
+		ReceiptDate:              strings.TrimSpace(r.FormValue("receipt_date")),
+		ConfirmedInterestType:    strings.TrimSpace(r.FormValue("confirmed_interest_type")),
+		ConfirmedFrequencyID:     strings.TrimSpace(r.FormValue("confirmed_frequency_id")),
+		PenaltyID:                strings.TrimSpace(r.FormValue("penalty_id")),
+		PayoutDates:              fdFormRawJSON(r, "payout_dates"),
+		CompoundingDates:         fdFormRawJSON(r, "compounding_dates"),
+		FirstPayoutDate:          strings.TrimSpace(r.FormValue("first_payout_date")),
+		FirstCapitalizationDate:  strings.TrimSpace(r.FormValue("first_capitalization_date")),
+		Notes:                    strings.TrimSpace(r.FormValue("notes")),
+	}
+}
 
 // ─── CaptureConfirmation ──────────────────────────────────────────────────────
 // POST /investment/fd/confirmation/capture
@@ -29,31 +107,19 @@ import (
 // To persist a confirmation that has variance, call /confirmation/variance-resolve first.
 func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID                   string           `json:"user_id"`
-			BookingID                string           `json:"booking_id"`
-			ConfirmedPrincipalAmount float64          `json:"confirmed_principal_amount"`
-			ConfirmedInterestRate    float64          `json:"confirmed_interest_rate"`
-			ConfirmedTenorDays       int              `json:"confirmed_tenor_days"`
-			ConfirmedTenorMonths     int              `json:"confirmed_tenor_months"`
-			ConfirmedTenorYears      int              `json:"confirmed_tenor_years"`
-			ConfirmedTenorType       string           `json:"confirmed_tenor_type"` // DAYS | MONTHS | YEARS
-			ConfirmedValueDate       string           `json:"confirmed_value_date"`
-			ConfirmedMaturityDate    string           `json:"confirmed_maturity_date"`
-			BankFDReference          string           `json:"bank_fd_reference"`
-			ReceiptDate              string           `json:"receipt_date"`
-			ConfirmedInterestType    string           `json:"confirmed_interest_type"` // SIMPLE | COMPOUND | STEPPED
-			ConfirmedFrequencyID     string           `json:"confirmed_frequency_id"`
-			PenaltyID                string           `json:"penalty_id"`
-			PayoutDates              *json.RawMessage `json:"payout_dates"`
-			CompoundingDates         *json.RawMessage `json:"compounding_dates"`
-			FirstPayoutDate          string           `json:"first_payout_date"`         // YYYY-MM-DD; actual first interest credit date
-			FirstCapitalizationDate  string           `json:"first_capitalization_date"` // YYYY-MM-DD; actual first capitalization date
-			Notes                    string           `json:"notes"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
+		var req fdConfirmationCaptureRequest
+		isMultipart := strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data")
+		if isMultipart {
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid multipart form: "+err.Error())
+				return
+			}
+			req = fdConfirmationCaptureRequestFromForm(r)
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+				return
+			}
 		}
 		if req.BookingID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "booking_id is required")
@@ -81,6 +147,20 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		uploadS3Key := ""
+		if isMultipart && r.MultipartForm != nil {
+			var uploadErr error
+			uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, "fd-bank-confirmation-capture", userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "attachment", "bank_statement", "file", "files"))
+			if uploadErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "S3 upload failed: "+uploadErr.Error())
+				return
+			}
+		}
+		cleanupUpload := func() {
+			if uploadS3Key != "" {
+				_ = s3storage.DeleteFromS3(ctx, uploadS3Key)
+			}
+		}
 
 		// ── Load booked values ────────────────────────────────────────────────
 		var bookedPrincipal, bookedRate float64
@@ -161,6 +241,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Variance found: return items, no DB ingestion ─────────────────────
 		if hasVariance {
+			cleanupUpload()
 			out := make([]map[string]interface{}, 0, len(varItems))
 			for _, v := range varItems {
 				out = append(out, map[string]interface{}{
@@ -199,6 +280,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
+			cleanupUpload()
 			msg, status := getUserFriendlyFDError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
@@ -240,6 +322,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					penalty_id                = NULLIF($15,''),
 					first_payout_date         = $18,
 					first_capitalization_date = $19,
+					upload_s3_key             = COALESCE(NULLIF($20,''), upload_s3_key),
 					updated_by                = $16,
 					updated_at                = now()
 				WHERE confirmation_id = $17`,
@@ -254,7 +337,9 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				req.PenaltyID,
 				userEmail, confirmationID,
 				coerceDateValue(req.FirstPayoutDate), coerceDateValue(req.FirstCapitalizationDate),
+				uploadS3Key,
 			); err != nil {
+				cleanupUpload()
 				msg, status := getUserFriendlyFDError(err, constants.ErrUpdateConfirmationFailed)
 				api.RespondWithError(w, status, msg)
 				return
@@ -277,6 +362,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					penalty_id,
 					first_payout_date,
 					first_capitalization_date,
+					upload_s3_key,
 					created_by
 				) VALUES (
 					$1,
@@ -293,6 +379,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					NULLIF($16,''),
 					$18,
 					$19,
+					NULLIF($20,''),
 					$17
 				) RETURNING confirmation_id`,
 				req.BookingID,
@@ -307,8 +394,10 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				req.PenaltyID,
 				userEmail,
 				coerceDateValue(req.FirstPayoutDate), coerceDateValue(req.FirstCapitalizationDate),
+				uploadS3Key,
 			).Scan(&confirmationID)
 			if err != nil {
+				cleanupUpload()
 				msg, status := getUserFriendlyFDError(err, "Insert confirmation failed")
 				api.RespondWithError(w, status, msg)
 				return
@@ -330,12 +419,14 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			coerceDateValue(bookedValueDate), coerceDateValue(bookedMaturityDate), bookingStatus,
 			tenorType, req.ConfirmedTenorDays, req.ConfirmedTenorMonths, req.ConfirmedTenorYears,
 		); err != nil {
+			cleanupUpload()
 			msg, status := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
+			cleanupUpload()
 			msg, status := getUserFriendlyFDError(err, constants.ErrCommitFailedCapitalized)
 			api.RespondWithError(w, status, msg)
 			return
@@ -383,6 +474,107 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 //	    Subsequent calls with corrected values will auto-resolve cleared fields.
 //
 // Separate exception path: use /confirmation/variance-exception to accept as-is.
+func GetFDConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID         string `json:"user_id"`
+			ConfirmationID string `json:"confirmation_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		confirmationID := strings.TrimSpace(req.ConfirmationID)
+		if confirmationID == "" {
+			api.RespondWithResult(w, false, "confirmation_id required")
+			return
+		}
+		var uploadS3Key sql.NullString
+		if err := pgxPool.QueryRow(r.Context(), `
+			SELECT upload_s3_key
+			FROM investment.fd_confirmation
+			WHERE confirmation_id = $1 AND COALESCE(is_deleted,false) = false
+		`, confirmationID).Scan(&uploadS3Key); err != nil {
+			api.RespondWithResult(w, false, "file not found")
+			return
+		}
+		key := strings.TrimSpace(uploadS3Key.String)
+		if !uploadS3Key.Valid || key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			return
+		}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"confirmation_id": confirmationID,
+				"download_url":    downloadURL,
+			},
+		})
+	}
+}
+
+func GetFDConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID          string   `json:"user_id"`
+			ConfirmationIDs []string `json:"confirmation_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		if len(req.ConfirmationIDs) == 0 {
+			api.RespondWithResult(w, false, "confirmation_ids required")
+			return
+		}
+		files := make([]map[string]string, 0, len(req.ConfirmationIDs))
+		failedIDs := make([]string, 0)
+		for _, rawID := range req.ConfirmationIDs {
+			confirmationID := strings.TrimSpace(rawID)
+			if confirmationID == "" {
+				continue
+			}
+			var uploadS3Key sql.NullString
+			if err := pgxPool.QueryRow(r.Context(), `
+				SELECT upload_s3_key
+				FROM investment.fd_confirmation
+				WHERE confirmation_id = $1 AND COALESCE(is_deleted,false) = false
+			`, confirmationID).Scan(&uploadS3Key); err != nil {
+				failedIDs = append(failedIDs, confirmationID)
+				continue
+			}
+			key := strings.TrimSpace(uploadS3Key.String)
+			if !uploadS3Key.Valid || key == "" {
+				failedIDs = append(failedIDs, confirmationID)
+				continue
+			}
+			downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, confirmationID)
+				continue
+			}
+			files = append(files, map[string]string{
+				"confirmation_id": confirmationID,
+				"download_url":    downloadURL,
+			})
+		}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: len(files) > 0,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
+	}
+}
+
 func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1752,6 +1944,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.penalty_id,'')                                              AS penalty_id,
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
 				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')        AS first_capitalization_date,
+				COALESCE(c.upload_s3_key,'')                                           AS upload_s3_key,
 				COALESCE(c.is_deleted,false)                                           AS is_deleted,
 				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')           AS record_created_at,
 
@@ -2130,6 +2323,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.is_deleted,false)                                           AS is_deleted,
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
 				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')        AS first_capitalization_date,
+				COALESCE(c.upload_s3_key,'')                                           AS upload_s3_key,
 				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')            AS record_created_at
 			FROM investment.fd_confirmation c
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id

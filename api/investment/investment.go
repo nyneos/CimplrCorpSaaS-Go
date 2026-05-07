@@ -7,6 +7,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	accountingworkbench "CimplrCorpSaas/api/investment/accountingWorkbench"
+	investmentfiles "CimplrCorpSaas/api/investment/additionalfiles"
 	amfisync "CimplrCorpSaas/api/investment/amfi-sync"
 	fdAccrual "CimplrCorpSaas/api/investment/fdAccrual"
 	fdBooking "CimplrCorpSaas/api/investment/fdBookingWorkbench"
@@ -42,6 +43,11 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux.Handle("/investment/onboard/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.UploadInvestmentBulkk(pool))))
 	mux.Handle("/investment/onboard/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.GetOnboardDownloadURL(pool))))
 	mux.Handle("/investment/onboard/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.GetOnboardBulkDownloadURL(pool))))
+	mux.Handle("/investment/onboard/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListOnboardAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/onboard/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadOnboardAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/onboard/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadOnboardAdditionalFileHandler(pool))))
+	mux.Handle("/investment/onboard/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadSelectedOnboardAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/onboard/additional-files/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DeleteOnboardAdditionalFileHandler(pool))))
 	mux.Handle("/investment/onboard/kpi", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.PostPortfolioSnapshot(pool))))
 	mux.Handle("/investment/onboard/snapshot/refresh", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.RefreshPortfolioSnapshot(pool))))
 
@@ -60,6 +66,11 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux.Handle("/investment/proposals/detail", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetProposalDetail(pool))))
 	mux.Handle("/investment/proposals/entity-holdings", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetEntitySchemeHoldings(pool))))
 	mux.Handle("/investment/proposals/entity-accounts", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetEntityAccounts(pool))))
+	mux.Handle("/investment/proposals/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListProposalAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/proposals/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadProposalAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/proposals/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadProposalAdditionalFileHandler(pool))))
+	mux.Handle("/investment/proposals/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadSelectedProposalAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/proposals/additional-files/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DeleteProposalAdditionalFileHandler(pool))))
 
 	// Investment initiation endpoints
 	// mux.Handle("/investment/initiation/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.UploadInitiationSimple(pool))))
@@ -72,6 +83,11 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux.Handle("/investment/initiation/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.BulkRejectInitiationActions(pool))))
 	mux.Handle("/investment/initiation/approved-active", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetApprovedActiveInitiations(pool))))
 	mux.Handle("/investment/initiation/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetInitiationsWithAudit(pool))))
+	mux.Handle("/investment/initiation/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListInitiationAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/initiation/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadInitiationAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/initiation/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadInitiationAdditionalFileHandler(pool))))
+	mux.Handle("/investment/initiation/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadSelectedInitiationAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/initiation/additional-files/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DeleteInitiationAdditionalFileHandler(pool))))
 
 	// Investment confirmation endpoints
 	mux.Handle("/investment/confirmation/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.CreateConfirmationSingle(pool))))
@@ -87,6 +103,11 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	// mux.Handle("/investment/confirmations/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetAllConfirmationsWithAudit(pool))))
 	mux.Handle("/investment/confirmation/approved", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetApprovedConfirmations(pool))))
 	mux.Handle("/investment/confirmation/confirm", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.ConfirmInvestment(pool))))
+	mux.Handle("/investment/confirmation/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListConfirmationAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/confirmation/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadConfirmationAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/confirmation/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadConfirmationAdditionalFileHandler(pool))))
+	mux.Handle("/investment/confirmation/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadSelectedConfirmationAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/confirmation/additional-files/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DeleteConfirmationAdditionalFileHandler(pool))))
 
 	// Investment redemption/portfolio endpoints
 	mux.Handle("/investment/portfolio/get", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetPortfolioWithTransactions(pool))))
@@ -104,6 +125,11 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux.Handle("/investment/redemption/initiation/detail", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetRedemptionInitiationDetail(pool))))
 	mux.Handle("/investment/redemption/initiation/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetRedemptionsWithAudit(pool))))
 	mux.Handle("/investment/redemption/initiation/approved", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetApprovedRedemptions(pool))))
+	mux.Handle("/investment/redemption/initiation/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListRedemptionInitiationAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/redemption/initiation/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadRedemptionInitiationAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/redemption/initiation/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadRedemptionInitiationAdditionalFileHandler(pool))))
+	mux.Handle("/investment/redemption/initiation/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadSelectedRedemptionInitiationAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/redemption/initiation/additional-files/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DeleteRedemptionInitiationAdditionalFileHandler(pool))))
 
 	// Redemption confirmation endpoints
 	mux.Handle("/investment/redemption/confirmation/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.CreateRedemptionConfirmationSingle(pool))))
@@ -118,6 +144,11 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux.Handle("/investment/redemption/confirmation/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetRedemptionConfirmationsWithAudit(pool))))
 	mux.Handle("/investment/redemption/confirmation/approved", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetApprovedRedemptionConfirmations(pool))))
 	mux.Handle("/investment/redemption/confirmation/confirm", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.ConfirmRedemption(pool))))
+	mux.Handle("/investment/redemption/confirmation/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListRedemptionConfirmationAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/redemption/confirmation/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadRedemptionConfirmationAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/redemption/confirmation/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadRedemptionConfirmationAdditionalFileHandler(pool))))
+	mux.Handle("/investment/redemption/confirmation/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadSelectedRedemptionConfirmationAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/redemption/confirmation/additional-files/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DeleteRedemptionConfirmationAdditionalFileHandler(pool))))
 
 	// Accounting Workbench - Main Activity endpoints
 	mux.Handle("/investment/accounting/activity/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateActivitySingle(pool))))
@@ -128,6 +159,11 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux.Handle("/investment/accounting/activity/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.BulkRejectActivityActions(pool))))
 	mux.Handle("/investment/accounting/activity/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetActivitiesWithAudit(pool))))
 	mux.Handle("/investment/accounting/activity/approved", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetApprovedActivities(pool))))
+	mux.Handle("/investment/accounting/activity/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListAccountingActivityAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/accounting/activity/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadAccountingActivityAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/accounting/activity/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadAccountingActivityAdditionalFileHandler(pool))))
+	mux.Handle("/investment/accounting/activity/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadSelectedAccountingActivityAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/accounting/activity/additional-files/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DeleteAccountingActivityAdditionalFileHandler(pool))))
 
 	// Accounting Workbench - Journal Entry endpoints
 	mux.Handle("/investment/accounting/journal-entries", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetJournalEntries(pool))))

@@ -238,10 +238,30 @@ func moduleDefaultPrefix(module string) string {
 		return "cash/sweep-initiation/"
 	case "investment-onboarding":
 		return "investment/onboarding center/"
+	case "investment-onboarding-additional":
+		return "investment/onboarding center/"
+	case "investment-proposal":
+		return "investment/proposal/"
+	case "investment-initiation":
+		return "investment/initiation/"
 	case "investment-confirmation":
 		return "investment/confirmation/"
+	case "investment-confirmation-additional":
+		return "investment/confirmation/"
+	case "investment-redemption-initiation":
+		return "investment/redemption/initiation/"
+	case "investment-redemption-confirmation-additional":
+		return "investment/redemption/confirmation/"
 	case "investment-fvo":
 		return "investment/financial closing work bench/"
+	case "investment-accounting-activity":
+		return "investment/financial closing work bench/"
+	case "fd-bank-confirmation-capture":
+		return "fd/bank-confirmation-capture/"
+	case "fd-maturity-payout-processing":
+		return "fd/maturity-payout-processing/"
+	case "fd-premature-closure":
+		return "fd/premature-closure/"
 	default:
 		return ""
 	}
