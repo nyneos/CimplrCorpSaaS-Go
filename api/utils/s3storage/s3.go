@@ -225,6 +225,54 @@ func moduleDefaultPrefix(module string) string {
 		return "cash/sweep-planning/"
 	case "sweep-initiation":
 		return "cash/sweep-initiation/"
+	// allMasters
+	case "master-bank":
+		return "masters/bank/"
+	case "master-currency":
+		return "masters/currency/"
+	case "master-bank-account":
+		return "masters/bank-account/"
+	case "master-counterparty":
+		return "masters/counterparty/"
+	case "master-gl-account":
+		return "masters/gl-account/"
+	case "master-cashflow-category":
+		return "masters/cashflow-category/"
+	case "master-costprofit-center":
+		return "masters/costprofit-center/"
+	case "master-payable-receivable":
+		return "masters/payable-receivable/"
+	case "master-entity-cash":
+		return "masters/entity-cash/"
+	case "master-entity":
+		return "masters/entity/"
+	// investmentMasters
+	case "master-amc":
+		return "masters/amc/"
+	case "master-scheme":
+		return "masters/scheme/"
+	case "master-dp":
+		return "masters/dp/"
+	case "master-demat":
+		return "masters/demat/"
+	case "master-folio":
+		return "masters/folio/"
+	case "master-interest-type":
+		return "masters/interest-type/"
+	case "master-penalty-structure":
+		return "masters/penalty-structure/"
+	case "master-compounding-frequency":
+		return "masters/compounding-frequency/"
+	case "master-tds-plan":
+		return "masters/tds-plan/"
+	case "master-calendar":
+		return "masters/calendar/"
+	case "master-day-count-convention":
+		return "masters/day-count-convention/"
+	case "master-bank-config":
+		return "masters/bank-config/"
+	case "master-bank-rate-card":
+		return "masters/bank-rate-card/"
 	default:
 		return ""
 	}
