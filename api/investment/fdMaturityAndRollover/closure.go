@@ -18,8 +18,10 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -463,9 +465,26 @@ type initiateClosureRequest struct {
 func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req initiateClosureRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
+		isMultipart := strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data")
+		if isMultipart {
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid multipart form: "+err.Error())
+				return
+			}
+			payload := strings.TrimSpace(r.FormValue("payload"))
+			if payload == "" {
+				api.RespondWithError(w, http.StatusBadRequest, "payload is required for multipart closure initiation")
+				return
+			}
+			if err := json.Unmarshal([]byte(payload), &req); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+				return
+			}
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+				return
+			}
 		}
 		if req.FDID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "fd_id is required")
@@ -482,6 +501,29 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+		uploadS3Key := ""
+		if isMultipart && r.MultipartForm != nil {
+			moduleKey := ""
+			switch req.ClosureType {
+			case "MATURITY":
+				moduleKey = "fd-maturity-payout-processing"
+			case "PREMATURE":
+				moduleKey = "fd-premature-closure"
+			}
+			if moduleKey != "" {
+				var uploadErr error
+				uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, moduleKey, userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "bank_advice", "bankAdviceDocument", "attachment", "file", "files"))
+				if uploadErr != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "S3 upload failed: "+uploadErr.Error())
+					return
+				}
+			}
+		}
+		cleanupUpload := func() {
+			if uploadS3Key != "" {
+				_ = s3storage.DeleteFromS3(ctx, uploadS3Key)
+			}
+		}
 
 		var (
 			bookingID, confirmationID string
@@ -659,6 +701,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
+			cleanupUpload()
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
 			return
 		}
@@ -678,6 +721,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			  variance_remark,
 			  submitted_by, submitted_by_email,
 			  accounting_posted, is_deleted,
+			  upload_s3_key,
 			  created_by, created_at, updated_by, updated_at
 			) VALUES (
 			  $1,$2,$3,$4,$5,
@@ -687,6 +731,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			  $14,$15,$16,$17,$18,$19,
 			  $20,
 			  $21,$22,false,false,
+			  NULLIF($23,''),
 			  $22,NOW(),$22,NOW()
 			) RETURNING closure_request_id`,
 			req.FDID, nullStrOrNil(bookingID), nullStrOrNil(confirmationID),
@@ -701,8 +746,10 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			nullStrOrNil(req.ClosureReason), nullStrOrNil(req.ClosureNotes),
 			nullStrOrNil(req.VarianceRemark),
 			req.UserID, userEmail,
+			uploadS3Key,
 		).Scan(&closureRequestID)
 		if err != nil {
+			cleanupUpload()
 			api.LogError("[FDClosure] InitiateClosure insert error: %v", err)
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to create closure request")
 			return
@@ -767,6 +814,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
+			cleanupUpload()
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
 			return
 		}
@@ -1366,6 +1414,7 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(cr.submitted_by,'') AS submitted_by,
 			  COALESCE(cr.submitted_by_email,'') AS submitted_by_email,
 			  COALESCE(cr.accounting_posted, false) AS accounting_posted,
+			  COALESCE(cr.upload_s3_key,'') AS upload_s3_key,
 			  COALESCE(cr.created_at::text,'') AS created_at,
 			  COALESCE(cr.updated_at::text,'') AS updated_at,
 			  COALESCE(m.bank_fd_ref_no,'') AS fd_reference_number,
@@ -1456,6 +1505,7 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			initiationDate, effectiveClosureDate, maturityDate                   string
 			settlementAccountID, settlementBankName, closureReason, closureNotes string
 			varianceRemark, approvalInstanceID, submittedBy, submittedByEmail    string
+			uploadS3Key                                                          string
 			rolloverFDID                                                         string
 			createdAt, updatedAt                                                 string
 			principalAmount, accruedInterest, tdsDeducted, penaltyAmount         float64
@@ -1504,6 +1554,7 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(cr.has_unresolved_variance,false),
 			  COALESCE(cr.submitted_by,''),
 			  COALESCE(cr.submitted_by_email,''),
+			  COALESCE(cr.upload_s3_key,''),
 			  COALESCE(cr.created_at::text,''),
 			  COALESCE(cr.updated_at::text,''),
 			  -- enriched: fd_master
@@ -1541,7 +1592,7 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			&rolloverAmount, &rolloverTenorDays, &rolloverInterestRate, &rolloverFDID,
 			&settlementAccountID, &settlementBankName, &closureReason, &closureNotes,
 			&varianceRemark, &approvalInstanceID, &hasUnresolvedVariance,
-			&submittedBy, &submittedByEmail, &createdAt, &updatedAt,
+			&submittedBy, &submittedByEmail, &uploadS3Key, &createdAt, &updatedAt,
 			&fdReferenceNumber, &bankName, &bankIDEnriched,
 			&fdInterestRate, &interestTypeCode, &tenureDays, &fdStartDate, &fdMaturityDate,
 			&originalPrincipal, &fdStatus, &fdMaturityInstructions,
@@ -1588,6 +1639,7 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			"has_unresolved_variance": hasUnresolvedVariance,
 			"submitted_by":            submittedBy,
 			"submitted_by_email":      submittedByEmail,
+			"upload_s3_key":           uploadS3Key,
 			"created_at":              createdAt,
 			"updated_at":              updatedAt,
 			// enriched fields
@@ -1687,6 +1739,107 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			"approval_workflow": approvalWorkflow,
 		})
 		_ = userEmail
+	}
+}
+
+func GetFDClosureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID           string `json:"user_id"`
+			ClosureRequestID string `json:"closure_request_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		closureRequestID := strings.TrimSpace(req.ClosureRequestID)
+		if closureRequestID == "" {
+			api.RespondWithResult(w, false, "closure_request_id required")
+			return
+		}
+		var uploadS3Key sql.NullString
+		if err := pool.QueryRow(r.Context(), `
+			SELECT upload_s3_key
+			FROM investment.fd_closure_request
+			WHERE closure_request_id = $1 AND COALESCE(is_deleted,false) = false
+		`, closureRequestID).Scan(&uploadS3Key); err != nil {
+			api.RespondWithResult(w, false, "file not found")
+			return
+		}
+		key := strings.TrimSpace(uploadS3Key.String)
+		if !uploadS3Key.Valid || key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			return
+		}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"closure_request_id": closureRequestID,
+				"download_url":       downloadURL,
+			},
+		})
+	}
+}
+
+func GetFDClosureBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID            string   `json:"user_id"`
+			ClosureRequestIDs []string `json:"closure_request_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		if len(req.ClosureRequestIDs) == 0 {
+			api.RespondWithResult(w, false, "closure_request_ids required")
+			return
+		}
+		files := make([]map[string]string, 0, len(req.ClosureRequestIDs))
+		failedIDs := make([]string, 0)
+		for _, rawID := range req.ClosureRequestIDs {
+			closureRequestID := strings.TrimSpace(rawID)
+			if closureRequestID == "" {
+				continue
+			}
+			var uploadS3Key sql.NullString
+			if err := pool.QueryRow(r.Context(), `
+				SELECT upload_s3_key
+				FROM investment.fd_closure_request
+				WHERE closure_request_id = $1 AND COALESCE(is_deleted,false) = false
+			`, closureRequestID).Scan(&uploadS3Key); err != nil {
+				failedIDs = append(failedIDs, closureRequestID)
+				continue
+			}
+			key := strings.TrimSpace(uploadS3Key.String)
+			if !uploadS3Key.Valid || key == "" {
+				failedIDs = append(failedIDs, closureRequestID)
+				continue
+			}
+			downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, closureRequestID)
+				continue
+			}
+			files = append(files, map[string]string{
+				"closure_request_id": closureRequestID,
+				"download_url":       downloadURL,
+			})
+		}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: len(files) > 0,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
 	}
 }
 

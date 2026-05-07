@@ -55,7 +55,7 @@ func callConvertXLSX(ctx context.Context, docBytes []byte, filename, password st
 
 func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, password, path string) ([]byte, error) {
 	target := r0() + path
-	log.Printf("[svc] POST **** file=%s size=%d", filename, len(docBytes))
+	log.Printf("[svc] POST %s file=%s size=%d", target, filename, len(docBytes))
 
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -92,13 +92,14 @@ func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, passwor
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
+	log.Printf("[svc] raw response status=%d body=%s", resp.StatusCode, string(raw))
 
 	var result convertSvcResponse
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("decode response: %w (%.200s)", err, string(raw))
 	}
 	if !result.Success {
-		return nil, fmt.Errorf("%s", result.Error)
+		return nil, fmt.Errorf("converter error (status=%d): %s", resp.StatusCode, result.Error)
 	}
 
 	out, err := base64.StdEncoding.DecodeString(result.DataB64)

@@ -238,10 +238,56 @@ func moduleDefaultPrefix(module string) string {
 		return "cash/sweep-initiation/"
 	case "investment-onboarding":
 		return "investment/onboarding center/"
+	case "investment-onboarding-additional":
+		return "investment/onboarding center/"
+	case "investment-proposal":
+		return "investment/proposal/"
+	case "investment-initiation":
+		return "investment/initiation/"
 	case "investment-confirmation":
 		return "investment/confirmation/"
+	case "investment-confirmation-additional":
+		return "investment/confirmation/"
+	case "investment-redemption-initiation":
+		return "investment/redemption/initiation/"
+	case "investment-redemption-confirmation-additional":
+		return "investment/redemption/confirmation/"
 	case "investment-fvo":
 		return "investment/financial closing work bench/"
+	case "investment-accounting-activity":
+		return "investment/financial closing work bench/"
+	case "fd-bank-confirmation-capture":
+		return "fd/bank-confirmation-capture/"
+	case "fd-maturity-payout-processing":
+		return "fd/maturity-payout-processing/"
+	case "fd-premature-closure":
+		return "fd/premature-closure/"
+	case "fd-booking-additional":
+		return "fd/fd-booking/"
+	case "fd-confirmation-additional":
+		return "fd/fd-confirmation/"
+	case "fd-master-additional":
+		return "fd/fd-master/"
+	case "fd-closure-additional":
+		return "fd/fd-closure/"
+	case "fd-rollover-additional":
+		return "fd/fd-rollover/"
+	case "fd-cashflow-additional":
+		return "fd/fd-cashflow/"
+	case "fd-interest-receipt-additional":
+		return "fd/fd-interest-receipt/"
+	case "fd-tds-receipt-additional":
+		return "fd/fd-tds-receipt/"
+	case "fd-reconcile-result-additional":
+		return "fd/fd-reconcile-result/"
+	case "fd-receipt-exception-additional":
+		return "fd/fd-receipt-exception/"
+	case "fd-accrual-run-additional":
+		return "fd/fd-accrual-run/"
+	case "fd-accrual-ledger-additional":
+		return "fd/fd-accrual-ledger/"
+	case "fd-accounting-journal-additional":
+		return "fd/fd-accounting-journal/"
 	// allMasters
 	case "master-bank":
 		return "masters/bank/"
