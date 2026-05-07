@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
+	"sync"
 	"time"
 
 	"CimplrCorpSaas/internal/config"
@@ -112,8 +114,18 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		batchSize = 1000
 	}
 
+	// Worker count: SMART_CAT_WORKERS env var, default min(8, 2*NumCPU).
+	workerCount := runtime.NumCPU() * 2
+	if workerCount > 8 {
+		workerCount = 8
+	}
+	if wc := os.Getenv("SMART_CAT_WORKERS"); wc != "" {
+		if n, err := parseInt(wc); err == nil && n > 0 {
+			workerCount = n
+		}
+	}
+
 	// ── 0. Advisory lock — prevent concurrent runs ────────────────────────────
-	// hashtext('smart-cat-batch') = a stable int4 key for this job.
 	var lockAcquired bool
 	if err := db.QueryRow(ctx,
 		`SELECT pg_try_advisory_lock(hashtext('smart-cat-batch'))`,
@@ -142,11 +154,12 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		return fmt.Errorf("load caches: %w", err)
 	}
 
-	// ── 2. Count total transactions ───────────────────────────────────────────
+	// ── 2. Count total eligible transactions ──────────────────────────────────
 	var totalCount int
 	if err := db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions
 		WHERE bank_statement_id IS NOT NULL
+		  AND (classification_step IS NULL OR classification_step NOT IN ('CORRECTION', 'CONFIRMATION'))
 	`).Scan(&totalCount); err != nil {
 		return fmt.Errorf("count transactions: %w", err)
 	}
@@ -154,15 +167,15 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		auditLog("No transactions found for smart-categorization")
 		return nil
 	}
-	log.Printf("[AUDIT] Smart-categorization: %d transactions to process", totalCount)
+	log.Printf("[AUDIT] Smart-categorization: %d transactions to process (workers=%d batch=%d)", totalCount, workerCount, batchSize)
 
-	// ── 3. Batch loop ─────────────────────────────────────────────────────────
-	offset := 0
+	// ── 3. Keyset-cursor batch loop ───────────────────────────────────────────
+	// Keyset on transaction_id is stable — rows that get classified mid-run don't
+	// shift the cursor position the way OFFSET does.
+	var lastID int64 = 0
 	totalProcessed := 0
 	totalUpdated := 0
 	progressAt := time.Now()
-
-	// Track affected bank-statement IDs to insert audit approval rows afterwards.
 	affectedBS := make(map[string]struct{})
 
 	for {
@@ -183,15 +196,16 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 			LEFT JOIN public.masterbankaccount m
 			    ON m.account_number = bs.account_number
 			WHERE t.bank_statement_id IS NOT NULL
+			  AND t.transaction_id > $1
 			  AND (
 			        t.classification_step IS NULL
 			        OR t.classification_step NOT IN ('CORRECTION', 'CONFIRMATION')
 			  )
-			ORDER BY t.value_date DESC
-			LIMIT $1 OFFSET $2
-		`, batchSize, offset)
+			ORDER BY t.transaction_id
+			LIMIT $2
+		`, lastID, batchSize)
 		if err != nil {
-			return fmt.Errorf("query batch at offset %d: %w", offset, err)
+			return fmt.Errorf("query batch after id=%d: %w", lastID, err)
 		}
 
 		type rowData struct {
@@ -228,19 +242,36 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 			break
 		}
 
-		// ── 4. Classify each transaction ──────────────────────────────────────
-		persistItems := make([]cat.BatchClassification, 0, len(batch))
+		// Advance keyset cursor.
+		lastID = batch[len(batch)-1].input.TransactionID
+
+		// ── 4. Classify transactions in parallel ──────────────────────────────
+		// Each goroutine is independent: allRules and caches are read-only;
+		// SmartCategorize only reads from DB (Steps 4 & 5). PersistBatch handles writes.
+		persistItems := make([]cat.BatchClassification, len(batch))
+		sem := make(chan struct{}, workerCount)
+		var wg sync.WaitGroup
+
+		for i, rd := range batch {
+			sem <- struct{}{}
+			wg.Add(1)
+			go func(idx int, rd rowData) {
+				defer func() { <-sem; wg.Done() }()
+				filtered := cat.FilterRulesForTxn(allRules, rd.input.AccountNumber, rd.input.EntityID, rd.input.Currency)
+				rd.input.GLAccountID = caches.GLAccountIDForAccount(rd.input.AccountNumber)
+				narration := cat.ProcessNarration(rd.input.Description)
+				result := cat.SmartCategorize(ctx, db, narration, filtered, caches, rd.input)
+				persistItems[idx] = cat.BatchClassification{
+					TxnID:     rd.input.TransactionID,
+					Narration: narration,
+					Result:    result,
+				}
+			}(i, rd)
+		}
+		wg.Wait()
+
+		// Collect affected bank-statement IDs (serial, safe).
 		for _, rd := range batch {
-			filtered := cat.FilterRulesForTxn(allRules, rd.input.AccountNumber, rd.input.EntityID, rd.input.Currency)
-			// M2: Populate GL account ID from per-account ERP mapping in caches
-			rd.input.GLAccountID = caches.GLAccountIDForAccount(rd.input.AccountNumber)
-			narration := cat.ProcessNarration(rd.input.Description)
-			result := cat.SmartCategorize(ctx, db, narration, filtered, caches, rd.input)
-			persistItems = append(persistItems, cat.BatchClassification{
-				TxnID:     rd.input.TransactionID,
-				Narration: narration,
-				Result:    result,
-			})
 			if rd.bsID != "" {
 				affectedBS[rd.bsID] = struct{}{}
 			}
@@ -250,7 +281,6 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		cat.PersistBatch(ctx, db, persistItems)
 		totalUpdated += len(persistItems)
 		totalProcessed += len(batch)
-		offset += len(batch)
 
 		if time.Since(progressAt) > 30*time.Second {
 			log.Printf("[AUDIT] Smart-categorization progress: processed=%d/%d updated=%d", totalProcessed, totalCount, totalUpdated)

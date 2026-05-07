@@ -3,6 +3,7 @@ package bankstatement
 import (
 	"CimplrCorpSaas/api/constants"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -91,6 +92,7 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 		byStep := map[string]int{
 			"RULE": 0, "COUNTERPARTY": 0, "GL": 0,
 			"CORRECTION": 0, "SIMILARITY": 0, "UNALLOCATED": 0,
+			"ACCOUNT_DEFAULT": 0, "AI_INFERENCE": 0,
 		}
 		stepRows, err := pool.Query(ctx, `
 			WITH latest AS (
@@ -107,14 +109,21 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 			GROUP BY classification_step
 		`)
 		if err == nil {
-			defer stepRows.Close()
 			for stepRows.Next() {
 				var step string
-				var cnt int
-				if err := stepRows.Scan(&step, &cnt); err == nil {
-					byStep[step] = cnt
+				var cnt int64
+				if scanErr := stepRows.Scan(&step, &cnt); scanErr == nil {
+					byStep[step] = int(cnt)
+				} else {
+					log.Printf("[SMART-CAT-STATUS] by_step scan error: %v", scanErr)
 				}
 			}
+			if rowsErr := stepRows.Err(); rowsErr != nil {
+				log.Printf("[SMART-CAT-STATUS] by_step rows error: %v", rowsErr)
+			}
+			stepRows.Close()
+		} else {
+			log.Printf("[SMART-CAT-STATUS] by_step query error: %v", err)
 		}
 
 		// ── 3. Confidence distribution ────────────────────────────────
@@ -144,14 +153,21 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 			SELECT status, COUNT(*) FROM cimplrcorpsaas.categorization_review_queue GROUP BY status
 		`)
 		if err == nil {
-			defer rqRows.Close()
 			for rqRows.Next() {
 				var status string
-				var cnt int
-				if err := rqRows.Scan(&status, &cnt); err == nil {
-					reviewQueue[status] = cnt
+				var cnt int64
+				if scanErr := rqRows.Scan(&status, &cnt); scanErr == nil {
+					reviewQueue[status] = int(cnt)
+				} else {
+					log.Printf("[SMART-CAT-STATUS] review_queue scan error: %v", scanErr)
 				}
 			}
+			if rowsErr := rqRows.Err(); rowsErr != nil {
+				log.Printf("[SMART-CAT-STATUS] review_queue rows error: %v", rowsErr)
+			}
+			rqRows.Close()
+		} else {
+			log.Printf("[SMART-CAT-STATUS] review_queue query error: %v", err)
 		}
 
 		// ── 5. Correction memory size ─────────────────────────────────

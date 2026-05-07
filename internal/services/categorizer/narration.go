@@ -131,11 +131,24 @@ func ProcessNarration(raw string) NarrationResult {
 	channel, afterPrefix := detectChannel(raw)
 	ref := extractRef(raw)
 
-	// Remove ref from clean text to avoid polluting similarity tokens
 	clean := afterPrefix
+
+	// Recognise "BRN-{ref}:{description}" format common in SBI/Indian bank charge narrations.
+	// Strip the "BRN-{ref}:" prefix so only the human-readable description body survives.
+	if ref != "" {
+		brnPrefix := "BRN-" + ref + ":"
+		if strings.HasPrefix(strings.ToUpper(clean), strings.ToUpper(brnPrefix)) {
+			clean = clean[len(brnPrefix):]
+		}
+	}
+
+	// Remove ref from clean text to avoid polluting similarity tokens
 	if ref != "" {
 		clean = strings.ReplaceAll(clean, ref, " ")
 	}
+	// Trim separator artifacts left at the front after ref removal.
+	// e.g. "/ foo bar" → "foo bar", " - WWS" → "WWS", ":CHRG" → "CHRG"
+	clean = strings.TrimLeft(clean, "/\\-: ")
 	// Collapse whitespace
 	clean = strings.Join(strings.Fields(clean), " ")
 	clean = strings.TrimSpace(clean)
