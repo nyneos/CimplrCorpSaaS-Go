@@ -101,7 +101,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/v2/cashflow-category/bulk-create-sync", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateAndSyncCashFlowCategories(pgxPool)))
 	mux.Handle("/master/cashflow-category/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCashFlowCategory(pgxPool)))
 
-	mux.Handle("/master/cashflow-category/upload-simple", (allMaster.UploadCashFlowCategorySimple(pgxPool)))
+	mux.Handle("/master/cashflow-category/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCashFlowCategorySimple(pgxPool)))
 	// Currency Master routes (pgx-backed)
 	mux.Handle("/master/currency/create", (allMaster.CreateCurrencyMaster(pgxPool)))
 	mux.Handle("/master/currency/all", (allMaster.GetAllCurrencyMaster(pgxPool)))
