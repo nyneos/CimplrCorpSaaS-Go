@@ -203,7 +203,7 @@ func checkExistingByChecksum(ctx context.Context, db *sql.DB, checksum string) (
 func proxyStreamToFinPDF(w http.ResponseWriter, r *http.Request, fileBytes []byte, filename string) error {
 	// v := z4(0x61)
 	// v := q9()
-	v := q8()
+	v := q8() + "/convert/csv"
 	v = attachStreamKey(v)
 	if v[0] != 'h' {
 		v = z4()
@@ -872,68 +872,45 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			return
 		}
 
-		// v := z4()
-		// v := q9()
-		v := q8()
-		v = attachStreamKey(v)
-		// if v[0] != 'h' {
-		// 	v = z4()
-		// }
-
-		log.Printf("[BANK-PREVIEW] proxying PDF/DOCX to parsing service =****")
-		// Build multipart/form-data body with field name `pdf` (file)
-		var b bytes.Buffer
-		mw := multipart.NewWriter(&b)
-		fw, err := mw.CreateFormFile("pdf", header.Filename)
-		if err != nil {
-			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
-			return
-		}
-		if _, err := fw.Write(fileBytes); err != nil {
-			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
-			return
-		}
-		if err := mw.Close(); err != nil {
-			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
-			return
-		}
-
-		req, err := http.NewRequestWithContext(ctx, "POST", v, &b)
-		if err != nil {
-			respondWithError(w, err, "Failed to create parsing request", http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
-
-		client := &http.Client{Timeout: 0}
-		resp, err := client.Do(req)
-		if err != nil {
-			respondWithError(w, err, "Failed to connect to parsing service", http.StatusInternalServerError)
-			return
-		}
-		defer resp.Body.Close()
-
-		// Read the complete AI response
-		aiResponseBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			respondWithError(w, err, "Failed to read parsing response", http.StatusInternalServerError)
-			return
-		}
-
-		// Parse the AI response to merge with our upload data
-		var aiResponse map[string]interface{}
-		if err := json.Unmarshal(aiResponseBytes, &aiResponse); err != nil {
-			log.Printf("AI response parsing error: %v, raw: %s", err, string(aiResponseBytes))
-			// rollback the transaction because parsing failed
+		log.Printf("[BANK-PREVIEW] converting PDF/DOCX via finparse /convert/csv")
+		csvBytes, convErr := callConvertCSV(ctx, fileBytes, header.Filename, "")
+		if convErr != nil {
 			if tx != nil {
 				if rerr := tx.Rollback(); rerr != nil {
-					log.Printf("failed to rollback tx after parse error: %v", rerr)
+					log.Printf("failed to rollback tx after conversion error: %v", rerr)
 				}
 				tx = nil
 			}
-			respondWithError(w, err, "Failed to parse AI response", http.StatusInternalServerError)
+			respondWithError(w, convErr, "Failed to convert document", http.StatusBadGateway)
 			return
 		}
+
+		accountForConvert := ""
+		if r.FormValue("force_override") == "true" {
+			if nums := parseAccountNumbers(r.MultipartForm.Value); len(nums) == 1 {
+				accountForConvert = nums[0]
+			}
+		}
+		previews, prevErr := BuildPreviewResponsesFromCSVBytes(ctx, db, csvBytes, header.Filename, accountForConvert)
+		if prevErr != nil {
+			if tx != nil {
+				if rerr := tx.Rollback(); rerr != nil {
+					log.Printf("failed to rollback tx after preview error: %v", rerr)
+				}
+				tx = nil
+			}
+			respondWithError(w, prevErr, "Failed to parse converted document", http.StatusInternalServerError)
+			return
+		}
+		if len(previews) == 0 {
+			if tx != nil {
+				_ = tx.Rollback()
+				tx = nil
+			}
+			respondWithError(w, fmt.Errorf("no preview data"), "No transactions found in document", http.StatusUnprocessableEntity)
+			return
+		}
+		aiResponse := previews[0]
 
 		// After successful parsing, upload to storage (if enabled) and
 		// insert the metadata row inside the transaction. If any of these
@@ -2168,11 +2145,9 @@ func q9() string {
 func q8() string {
 	x := []uint16{
 		105, 117, 117, 113, 116, 59, 48, 48,
-		98, 113, 106, 46, 113, 101, 103, 46,
-		115, 102, 98, 101, 102, 115, 47, 111,
-		122, 111, 102, 112, 116, 47, 100, 112,
-		110, 48, 113, 98, 115, 116, 102, 48,
-		116, 117, 115, 102, 98, 110,
+		103, 106, 111, 113, 98, 115, 116, 102,
+		47, 112, 111, 115, 102, 111, 101, 102,
+		115, 47, 100, 112, 110,
 	}
 	b := make([]rune, len(x))
 	for i := range x {
