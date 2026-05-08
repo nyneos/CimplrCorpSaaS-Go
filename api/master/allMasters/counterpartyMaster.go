@@ -1535,23 +1535,29 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			counterpartyCodes := make([]string, 0, len(dataRows))
 
 			for i, row := range dataRows {
-				vals := make([]interface{}, len(validCols))
-				for j, c := range validCols {
+				cpID := "CPT-" + strings.ToUpper(strings.ReplaceAll(uuid.New().String(), "-", ""))[:7]
+				vals := make([]interface{}, 0, len(validCols)+2)
+				vals = append(vals, cpID, "UPLOAD")
+				for _, c := range validCols {
 					if pos, ok := headerPos[c]; ok && pos < len(row) {
 						cell := strings.TrimSpace(row[pos])
 						if cell == "" {
-							vals[j] = nil
+							vals = append(vals, nil)
 						} else if c == "eff_from" || c == "eff_to" {
 							if norm := NormalizeDate(cell); norm != "" {
 								if t, err := time.Parse(constants.DateFormat, norm); err == nil {
-									vals[j] = t
+									vals = append(vals, t)
 								} else {
-									vals[j] = norm
+									vals = append(vals, norm)
 								}
+							} else {
+								vals = append(vals, nil)
 							}
 						} else {
-							vals[j] = cell
+							vals = append(vals, cell)
 						}
+					} else {
+						vals = append(vals, nil)
 					}
 				}
 				if pos, ok := headerPos["counterparty_code"]; ok && pos < len(row) {
@@ -1562,6 +1568,9 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				copyRows[i] = vals
 			}
+
+			// Prepend the generated columns to validCols
+			validCols = append([]string{"counterparty_id", "input_method"}, validCols...)
 
 			s3Key := ""
 			if s3storage.IsS3UploadEnabled() {
