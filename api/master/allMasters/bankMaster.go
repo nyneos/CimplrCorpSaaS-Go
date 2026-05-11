@@ -3,9 +3,11 @@ package allMaster
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	// "mime/multipart"
@@ -676,9 +678,15 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file: "+fh.Filename)
 				return
 			}
-			ext := getFileExt(fh.Filename)
-			records, err := parseCashFlowCategoryFile(f, ext)
+			fileBytes, err := io.ReadAll(f)
 			f.Close()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				return
+			}
+			contentType := s3storage.DetectContentType(fileBytes)
+			ext := getFileExt(fh.Filename)
+			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), ext)
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
 				return
@@ -720,6 +728,17 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			columns := append([]string{"upload_batch_id"}, headerNorm...)
 
+			s3Key := ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-bank")
+				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					return
+				}
+			}
+
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyBankError(err, "Transaction failed")
@@ -730,6 +749,9 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer func() {
 				if !committed {
 					tx.Rollback(ctx)
+					if s3Key != "" {
+						_ = s3storage.DeleteFromS3(ctx, s3Key)
+					}
 				}
 			}()
 
@@ -783,13 +805,17 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			srcColsStr := strings.Join(selectExprs, ", ")
 
 			insertSQL := fmt.Sprintf(`
-				INSERT INTO masterbank (%s)
-				SELECT %s
+				INSERT INTO masterbank (%s, upload_s3_key)
+				SELECT %s, $2
 				FROM input_bank_table s
 				WHERE s.upload_batch_id = $1
 				RETURNING bank_id
 			`, tgtColsStr, srcColsStr)
-			rows, err := tx.Query(ctx, insertSQL, batchID)
+			var s3KeyPtr *string
+			if s3Key != "" {
+				s3KeyPtr = &s3Key
+			}
+			rows, err := tx.Query(ctx, insertSQL, batchID, s3KeyPtr)
 			if err != nil {
 				tx.Rollback(ctx)
 				errMsg, statusCode := getUserFriendlyBankError(err, "Insert failed")

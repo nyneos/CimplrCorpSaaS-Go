@@ -101,7 +101,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/v2/cashflow-category/bulk-create-sync", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateAndSyncCashFlowCategories(pgxPool)))
 	mux.Handle("/master/cashflow-category/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCashFlowCategory(pgxPool)))
 
-	mux.Handle("/master/cashflow-category/upload-simple", (allMaster.UploadCashFlowCategorySimple(pgxPool)))
+	mux.Handle("/master/cashflow-category/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCashFlowCategorySimple(pgxPool)))
 	// Currency Master routes (pgx-backed)
 	mux.Handle("/master/currency/create", (allMaster.CreateCurrencyMaster(pgxPool)))
 	mux.Handle("/master/currency/all", (allMaster.GetAllCurrencyMaster(pgxPool)))
@@ -348,6 +348,192 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/bank-rate-card/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankRateCardAuditHistory(pgxPool)))
 	mux.Handle("/master/bank-rate-card/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadBankRateCardSimple(pgxPool)))
 	mux.Handle("/master/bank-rate-card/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankRateCard(pgxPool)))
+
+	// ── Additional Files routes (supporting document uploads per master record) ──
+
+	// Bank Master
+	bankMF := allMaster.BankMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/bank/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(bankMF.List))
+	mux.Handle("/master/bank/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(bankMF.Upload))
+	mux.Handle("/master/bank/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(bankMF.Download))
+	mux.Handle("/master/bank/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankMF.DownloadBulk))
+	mux.Handle("/master/bank/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(bankMF.Delete))
+
+	// Currency Master
+	currencyMF := allMaster.CurrencyMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/currency/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(currencyMF.List))
+	mux.Handle("/master/currency/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(currencyMF.Upload))
+	mux.Handle("/master/currency/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(currencyMF.Download))
+	mux.Handle("/master/currency/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(currencyMF.DownloadBulk))
+	mux.Handle("/master/currency/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(currencyMF.Delete))
+
+	// Bank Account Master
+	bankAccountMF := allMaster.BankAccountMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/bankaccount/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(bankAccountMF.List))
+	mux.Handle("/master/bankaccount/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(bankAccountMF.Upload))
+	mux.Handle("/master/bankaccount/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(bankAccountMF.Download))
+	mux.Handle("/master/bankaccount/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankAccountMF.DownloadBulk))
+	mux.Handle("/master/bankaccount/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(bankAccountMF.Delete))
+
+	// Counterparty Master
+	counterpartyMF := allMaster.CounterpartyMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/counterparty/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(counterpartyMF.List))
+	mux.Handle("/master/counterparty/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(counterpartyMF.Upload))
+	mux.Handle("/master/counterparty/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(counterpartyMF.Download))
+	mux.Handle("/master/counterparty/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(counterpartyMF.DownloadBulk))
+	mux.Handle("/master/counterparty/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(counterpartyMF.Delete))
+
+	// GL Account Master
+	glAccountMF := allMaster.GLAccountMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/glaccount/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(glAccountMF.List))
+	mux.Handle("/master/glaccount/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(glAccountMF.Upload))
+	mux.Handle("/master/glaccount/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(glAccountMF.Download))
+	mux.Handle("/master/glaccount/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(glAccountMF.DownloadBulk))
+	mux.Handle("/master/glaccount/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(glAccountMF.Delete))
+
+	// Cash Flow Category Master
+	cashflowCategoryMF := allMaster.CashFlowCategoryMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/cashflow-category/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(cashflowCategoryMF.List))
+	mux.Handle("/master/cashflow-category/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(cashflowCategoryMF.Upload))
+	mux.Handle("/master/cashflow-category/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(cashflowCategoryMF.Download))
+	mux.Handle("/master/cashflow-category/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(cashflowCategoryMF.DownloadBulk))
+	mux.Handle("/master/cashflow-category/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(cashflowCategoryMF.Delete))
+
+	// Cost Profit Center Master
+	costProfitCenterMF := allMaster.CostProfitCenterMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/costprofit-center/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(costProfitCenterMF.List))
+	mux.Handle("/master/costprofit-center/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(costProfitCenterMF.Upload))
+	mux.Handle("/master/costprofit-center/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(costProfitCenterMF.Download))
+	mux.Handle("/master/costprofit-center/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(costProfitCenterMF.DownloadBulk))
+	mux.Handle("/master/costprofit-center/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(costProfitCenterMF.Delete))
+
+	// Payable Receivable Master
+	payableReceivableMF := allMaster.PayableReceivableMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/payablereceivable/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(payableReceivableMF.List))
+	mux.Handle("/master/payablereceivable/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(payableReceivableMF.Upload))
+	mux.Handle("/master/payablereceivable/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(payableReceivableMF.Download))
+	mux.Handle("/master/payablereceivable/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(payableReceivableMF.DownloadBulk))
+	mux.Handle("/master/payablereceivable/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(payableReceivableMF.Delete))
+
+	// Entity Cash Master
+	entityCashMF := allMaster.EntityCashMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/entitycash/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(entityCashMF.List))
+	mux.Handle("/master/entitycash/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(entityCashMF.Upload))
+	mux.Handle("/master/entitycash/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(entityCashMF.Download))
+	mux.Handle("/master/entitycash/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(entityCashMF.DownloadBulk))
+	mux.Handle("/master/entitycash/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(entityCashMF.Delete))
+
+	// Entity Master
+	entityMF := allMaster.EntityMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/entity/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(entityMF.List))
+	mux.Handle("/master/entity/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(entityMF.Upload))
+	mux.Handle("/master/entity/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(entityMF.Download))
+	mux.Handle("/master/entity/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(entityMF.DownloadBulk))
+	mux.Handle("/master/entity/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(entityMF.Delete))
+
+	// AMC Master
+	amcMF := investmentMasters.AMCMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/amc/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(amcMF.List))
+	mux.Handle("/master/amc/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(amcMF.Upload))
+	mux.Handle("/master/amc/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(amcMF.Download))
+	mux.Handle("/master/amc/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(amcMF.DownloadBulk))
+	mux.Handle("/master/amc/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(amcMF.Delete))
+
+	// Scheme Master
+	schemeMF := investmentMasters.SchemeMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/scheme/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(schemeMF.List))
+	mux.Handle("/master/scheme/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(schemeMF.Upload))
+	mux.Handle("/master/scheme/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(schemeMF.Download))
+	mux.Handle("/master/scheme/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(schemeMF.DownloadBulk))
+	mux.Handle("/master/scheme/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(schemeMF.Delete))
+
+	// DP (Depository Participant) Master
+	dpMF := investmentMasters.DPMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/dp/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(dpMF.List))
+	mux.Handle("/master/dp/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(dpMF.Upload))
+	mux.Handle("/master/dp/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(dpMF.Download))
+	mux.Handle("/master/dp/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(dpMF.DownloadBulk))
+	mux.Handle("/master/dp/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(dpMF.Delete))
+
+	// Demat Master
+	dematMF := investmentMasters.DematMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/demat/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(dematMF.List))
+	mux.Handle("/master/demat/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(dematMF.Upload))
+	mux.Handle("/master/demat/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(dematMF.Download))
+	mux.Handle("/master/demat/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(dematMF.DownloadBulk))
+	mux.Handle("/master/demat/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(dematMF.Delete))
+
+	// Folio Master
+	folioMF := investmentMasters.FolioMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/folio/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(folioMF.List))
+	mux.Handle("/master/folio/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(folioMF.Upload))
+	mux.Handle("/master/folio/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(folioMF.Download))
+	mux.Handle("/master/folio/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(folioMF.DownloadBulk))
+	mux.Handle("/master/folio/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(folioMF.Delete))
+
+	// Interest Type Master
+	interestTypeMF := investmentMasters.InterestTypeMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/interest-type/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(interestTypeMF.List))
+	mux.Handle("/master/interest-type/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(interestTypeMF.Upload))
+	mux.Handle("/master/interest-type/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(interestTypeMF.Download))
+	mux.Handle("/master/interest-type/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(interestTypeMF.DownloadBulk))
+	mux.Handle("/master/interest-type/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(interestTypeMF.Delete))
+
+	// Penalty Structure Master
+	penaltyStructureMF := investmentMasters.PenaltyStructureMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/penalty-structure/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(penaltyStructureMF.List))
+	mux.Handle("/master/penalty-structure/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(penaltyStructureMF.Upload))
+	mux.Handle("/master/penalty-structure/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(penaltyStructureMF.Download))
+	mux.Handle("/master/penalty-structure/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(penaltyStructureMF.DownloadBulk))
+	mux.Handle("/master/penalty-structure/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(penaltyStructureMF.Delete))
+
+	// Compounding Frequency Master
+	compoundingFrequencyMF := investmentMasters.CompoundingFrequencyMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/compounding-frequency/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(compoundingFrequencyMF.List))
+	mux.Handle("/master/compounding-frequency/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(compoundingFrequencyMF.Upload))
+	mux.Handle("/master/compounding-frequency/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(compoundingFrequencyMF.Download))
+	mux.Handle("/master/compounding-frequency/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(compoundingFrequencyMF.DownloadBulk))
+	mux.Handle("/master/compounding-frequency/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(compoundingFrequencyMF.Delete))
+
+	// TDS Plan Master
+	tdsPlanMF := investmentMasters.TDSPlanMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/tds-plan/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(tdsPlanMF.List))
+	mux.Handle("/master/tds-plan/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(tdsPlanMF.Upload))
+	mux.Handle("/master/tds-plan/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(tdsPlanMF.Download))
+	mux.Handle("/master/tds-plan/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(tdsPlanMF.DownloadBulk))
+	mux.Handle("/master/tds-plan/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(tdsPlanMF.Delete))
+
+	// Calendar (Holiday) Master
+	calendarMF := investmentMasters.CalendarMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/calendar/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(calendarMF.List))
+	mux.Handle("/master/calendar/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(calendarMF.Upload))
+	mux.Handle("/master/calendar/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(calendarMF.Download))
+	mux.Handle("/master/calendar/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(calendarMF.DownloadBulk))
+	mux.Handle("/master/calendar/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(calendarMF.Delete))
+
+	// Day Count Convention Master
+	dayCountConventionMF := investmentMasters.DayCountConventionMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/day-count-convention/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(dayCountConventionMF.List))
+	mux.Handle("/master/day-count-convention/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(dayCountConventionMF.Upload))
+	mux.Handle("/master/day-count-convention/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(dayCountConventionMF.Download))
+	mux.Handle("/master/day-count-convention/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(dayCountConventionMF.DownloadBulk))
+	mux.Handle("/master/day-count-convention/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(dayCountConventionMF.Delete))
+
+	// Bank Config Master
+	bankConfigMF := investmentMasters.BankConfigMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/bank-config/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(bankConfigMF.List))
+	mux.Handle("/master/bank-config/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(bankConfigMF.Upload))
+	mux.Handle("/master/bank-config/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(bankConfigMF.Download))
+	mux.Handle("/master/bank-config/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankConfigMF.DownloadBulk))
+	mux.Handle("/master/bank-config/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(bankConfigMF.Delete))
+
+	// Bank Rate Card Master
+	bankRateCardMF := investmentMasters.BankRateCardMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/bank-rate-card/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(bankRateCardMF.List))
+	mux.Handle("/master/bank-rate-card/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(bankRateCardMF.Upload))
+	mux.Handle("/master/bank-rate-card/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(bankRateCardMF.Download))
+	mux.Handle("/master/bank-rate-card/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankRateCardMF.DownloadBulk))
+	mux.Handle("/master/bank-rate-card/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(bankRateCardMF.Delete))
 
 	// Counterparty Hub Master routes
 	counterpartyHub.RegisterCounterpartyHubRoutes(mux, pgxPool, db)

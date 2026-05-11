@@ -3,9 +3,11 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -839,9 +841,15 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file: "+fh.Filename)
 				return
 			}
-			ext := getFileExt(fh.Filename)
-			records, err := parseCashFlowCategoryFile(f, ext)
+			fileBytes, err := io.ReadAll(f)
 			f.Close()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				return
+			}
+			contentType := s3storage.DetectContentType(fileBytes)
+			ext := getFileExt(fh.Filename)
+			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), ext)
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
 				return
@@ -897,6 +905,17 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			columns := append([]string{"upload_batch_id"}, headerNorm...)
 
+			s3Key := ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-costprofit-center")
+				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					return
+				}
+			}
+
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
@@ -912,6 +931,9 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer func() {
 				if !committed {
 					tx.Rollback(ctx)
+					if s3Key != "" {
+						_ = s3storage.DeleteFromS3(ctx, s3Key)
+					}
 				}
 			}()
 
@@ -964,9 +986,13 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			srcColsStr := strings.Join(selectExprs, ", ")
 
 			// Build insert: don't include centre_id column (DB default will populate it). Use ON CONFLICT DO NOTHING.
-			insertSQL := fmt.Sprintf(`INSERT INTO mastercostprofitcenter (%s) SELECT %s FROM input_costprofitcenter s WHERE s.upload_batch_id = $1 ON CONFLICT (centre_code) DO NOTHING RETURNING centre_id, centre_code`, tgtColsStr, srcColsStr)
+			insertSQL := fmt.Sprintf(`INSERT INTO mastercostprofitcenter (%s, upload_s3_key) SELECT %s, $2 FROM input_costprofitcenter s WHERE s.upload_batch_id = $1 ON CONFLICT (centre_code) DO NOTHING RETURNING centre_id, centre_code`, tgtColsStr, srcColsStr)
 
-			insertedRows, err := tx.Query(ctx, insertSQL, batchID)
+			var s3KeyPtr *string
+			if s3Key != "" {
+				s3KeyPtr = &s3Key
+			}
+			insertedRows, err := tx.Query(ctx, insertSQL, batchID, s3KeyPtr)
 			if err != nil {
 				api.RespondWithResult(w, false, "Final insert error: "+err.Error())
 				return
@@ -2155,8 +2181,14 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
 				return
 			}
-			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+			fileBytes, err := io.ReadAll(f)
 			f.Close()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				return
+			}
+			contentType := s3storage.DetectContentType(fileBytes)
+			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidCSV)
 				return
@@ -2221,12 +2253,39 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				copyRows[i] = vals
 			}
 
+			s3Key := ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-costprofit-center")
+				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					return
+				}
+			}
+
+			// Inject upload_s3_key into each copy row
+			if s3Key != "" {
+				validCols = append(validCols, "upload_s3_key")
+				for i := range copyRows {
+					copyRows[i] = append(copyRows[i], s3Key)
+				}
+			}
+
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed")
 				return
 			}
-			defer tx.Rollback(ctx)
+			committed := false
+			defer func() {
+				if !committed {
+					tx.Rollback(ctx)
+					if s3Key != "" {
+						_ = s3storage.DeleteFromS3(ctx, s3Key)
+					}
+				}
+			}()
 
 			if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'"); err != nil {
 				log.Printf("warning: failed to set local statement_timeout: %v", err)
@@ -2242,6 +2301,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
+			committed = true
 
 			// Async sync + audit - pass the centre codes so we can find the newly inserted rows
 			go func(userName string, centreCodes []string) {

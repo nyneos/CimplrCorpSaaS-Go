@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/utils/s3storage"
 	"bufio"
 	"bytes"
 	"context"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"CimplrCorpSaas/api/constants"
 
@@ -277,11 +279,29 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
 				return
 			}
-			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+			fileBytes, err := io.ReadAll(f)
 			f.Close()
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
+				return
+			}
+			contentType := s3storage.DetectContentType(fileBytes)
+			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty CSV file")
 				return
+			}
+
+			// S3 upload before opening transaction
+			s3Key := ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-amc")
+				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					return
+				}
 			}
 
 			headers := normalizeHeader(records[0])
@@ -329,6 +349,12 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// === Step 4: Transaction (COPY + audit insert) ===
+			// Append s3Key as last column for CopyFrom
+			validCols = append(validCols, "upload_s3_key")
+			for i := range copyRows {
+				copyRows[i] = append(copyRows[i], s3Key)
+			}
+
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				msg, status := getUserFriendlyAMCError(err, constants.ErrTxBeginFailed)
@@ -339,6 +365,9 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer func() {
 				if !committed {
 					tx.Rollback(ctx)
+					if s3Key != "" {
+						_ = s3storage.DeleteFromS3(ctx, s3Key)
+					}
 				}
 			}()
 

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -205,6 +206,8 @@ func moduleDefaultPrefix(module string) string {
 		return "cash/bankstatements/"
 	case "bankbalance":
 		return "cash/bank-balance/"
+	case "rule-master":
+		return "cash/rule-master/"
 	case "entitylogo":
 		return "Entity logo/"
 	case "projection":
@@ -213,6 +216,126 @@ func moduleDefaultPrefix(module string) string {
 		return "cash/transactions/payables/"
 	case "receivables":
 		return "cash/transactions/receivables/"
+	case "fx-exposure":
+		return "fx/exposures/"
+	case "fx-exposure-bucketing":
+		return "fx/exposures/exposure bucketing/"
+	case "fx-pending-exposure-bucketing":
+		return "fx/exposures/pending exposure bucketing/"
+	case "fx-forward":
+		return "fx/forwards/"
+	case "fx-mtm":
+		return "fx/mtm/"
+	case "fund-planning":
+		return "cash/fund-planning/"
+	case "limit-utilization":
+		return "cash/limit utilization/"
+	case "limit-position":
+		return "cash/limit position/"
+	case "sweep-planning":
+		return "cash/sweep-planning/"
+	case "sweep-initiation":
+		return "cash/sweep-initiation/"
+	case "investment-onboarding":
+		return "investment/onboarding center/"
+	case "investment-onboarding-additional":
+		return "investment/onboarding center/"
+	case "investment-proposal":
+		return "investment/proposal/"
+	case "investment-initiation":
+		return "investment/initiation/"
+	case "investment-confirmation":
+		return "investment/confirmation/"
+	case "investment-confirmation-additional":
+		return "investment/confirmation/"
+	case "investment-redemption-initiation":
+		return "investment/redemption/initiation/"
+	case "investment-redemption-confirmation-additional":
+		return "investment/redemption/confirmation/"
+	case "investment-fvo":
+		return "investment/financial closing work bench/"
+	case "investment-accounting-activity":
+		return "investment/financial closing work bench/"
+	case "fd-bank-confirmation-capture":
+		return "fd/bank-confirmation-capture/"
+	case "fd-maturity-payout-processing":
+		return "fd/maturity-payout-processing/"
+	case "fd-premature-closure":
+		return "fd/premature-closure/"
+	case "fd-booking-additional":
+		return "fd/fd-booking/"
+	case "fd-confirmation-additional":
+		return "fd/fd-confirmation/"
+	case "fd-master-additional":
+		return "fd/fd-master/"
+	case "fd-closure-additional":
+		return "fd/fd-closure/"
+	case "fd-rollover-additional":
+		return "fd/fd-rollover/"
+	case "fd-cashflow-additional":
+		return "fd/fd-cashflow/"
+	case "fd-interest-receipt-additional":
+		return "fd/fd-interest-receipt/"
+	case "fd-tds-receipt-additional":
+		return "fd/fd-tds-receipt/"
+	case "fd-reconcile-result-additional":
+		return "fd/fd-reconcile-result/"
+	case "fd-receipt-exception-additional":
+		return "fd/fd-receipt-exception/"
+	case "fd-accrual-run-additional":
+		return "fd/fd-accrual-run/"
+	case "fd-accrual-ledger-additional":
+		return "fd/fd-accrual-ledger/"
+	case "fd-accounting-journal-additional":
+		return "fd/fd-accounting-journal/"
+	// allMasters
+	case "master-bank":
+		return "masters/bank/"
+	case "master-currency":
+		return "masters/currency/"
+	case "master-bank-account":
+		return "masters/bank-account/"
+	case "master-counterparty":
+		return "masters/counterparty/"
+	case "master-gl-account":
+		return "masters/gl-account/"
+	case "master-cashflow-category":
+		return "masters/cashflow-category/"
+	case "master-costprofit-center":
+		return "masters/costprofit-center/"
+	case "master-payable-receivable":
+		return "masters/payable-receivable/"
+	case "master-entity-cash":
+		return "masters/entity-cash/"
+	case "master-entity":
+		return "masters/entity/"
+	// investmentMasters
+	case "master-amc":
+		return "masters/amc/"
+	case "master-scheme":
+		return "masters/scheme/"
+	case "master-dp":
+		return "masters/dp/"
+	case "master-demat":
+		return "masters/demat/"
+	case "master-folio":
+		return "masters/folio/"
+	case "master-interest-type":
+		return "masters/interest-type/"
+	case "master-penalty-structure":
+		return "masters/penalty-structure/"
+	case "master-compounding-frequency":
+		return "masters/compounding-frequency/"
+	case "master-tds-plan":
+		return "masters/tds-plan/"
+	case "master-calendar":
+		return "masters/calendar/"
+	case "master-day-count-convention":
+		return "masters/day-count-convention/"
+	case "master-bank-config":
+		return "masters/bank-config/"
+	case "master-bank-rate-card":
+		return "masters/bank-rate-card/"
 	default:
 		return ""
 	}
@@ -396,6 +519,43 @@ func PutObjectToS3(ctx context.Context, key string, body []byte, contentType str
 		return fmt.Errorf("upload to s3 (bucket %s, key %s): %w", bucket, key, err)
 	}
 	return nil
+}
+
+func UploadFirstMultipartFile(ctx context.Context, module, uploadedBy string, headers []*multipart.FileHeader) (string, error) {
+	if len(headers) == 0 || headers[0] == nil {
+		return "", nil
+	}
+
+	header := headers[0]
+	file, err := header.Open()
+	if err != nil {
+		return "", fmt.Errorf("open upload file: %w", err)
+	}
+	defer file.Close()
+
+	body, err := io.ReadAll(file)
+	if err != nil {
+		return "", fmt.Errorf("read upload file: %w", err)
+	}
+
+	uploadedAt := time.Now().UTC()
+	s3Key := BuildUploadedS3Key(GetStoragePrefix(module), "", header.Filename, uploadedBy, uploadedAt)
+	if err := PutObjectToS3(ctx, s3Key, body, DetectContentType(body)); err != nil {
+		return "", err
+	}
+
+	return s3Key, nil
+}
+
+func CollectMultipartFiles(form *multipart.Form, keys ...string) []*multipart.FileHeader {
+	if form == nil {
+		return nil
+	}
+	files := make([]*multipart.FileHeader, 0)
+	for _, key := range keys {
+		files = append(files, form.File[key]...)
+	}
+	return files
 }
 
 func isMissingObjectError(err error) bool {

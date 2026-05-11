@@ -2379,10 +2379,16 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file: "+fh.Filename)
 				return
 			}
+			fileBytes, err := io.ReadAll(f)
+			f.Close()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				return
+			}
+			contentType := s3storage.DetectContentType(fileBytes)
 			ext := getFileExt(fh.Filename)
 			// reuse parseCashFlowCategoryFile for CSV/XLSX parsing which returns [][]string
-			records, err := parseCashFlowCategoryFile(f, ext)
-			f.Close()
+			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), ext)
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
 				return
@@ -2423,6 +2429,17 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			columns := append([]string{"upload_batch_id"}, headerNorm...)
 
+			s3Key := ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-entity-cash")
+				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					return
+				}
+			}
+
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
@@ -2438,6 +2455,9 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer func() {
 				if !committed {
 					tx.Rollback(ctx)
+					if s3Key != "" {
+						_ = s3storage.DeleteFromS3(ctx, s3Key)
+					}
 				}
 			}()
 
@@ -2505,8 +2525,12 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			srcColsStr := strings.Join(selectExprs, ", ")
 
-			insertSQL := fmt.Sprintf(`INSERT INTO masterentitycash (%s) SELECT %s FROM input_entitycash s WHERE s.upload_batch_id = $1 RETURNING entity_id`, tgtColsStr, srcColsStr)
-			rows2, err := tx.Query(ctx, insertSQL, batchID)
+			insertSQL := fmt.Sprintf(`INSERT INTO masterentitycash (%s, upload_s3_key) SELECT %s, $2 FROM input_entitycash s WHERE s.upload_batch_id = $1 RETURNING entity_id`, tgtColsStr, srcColsStr)
+			var s3KeyPtr *string
+			if s3Key != "" {
+				s3KeyPtr = &s3Key
+			}
+			rows2, err := tx.Query(ctx, insertSQL, batchID, s3KeyPtr)
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyEntityCashError(err, "Final insert error")
 				if statusCode == http.StatusOK {
@@ -2754,9 +2778,15 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uploadEntityError(w, http.StatusBadRequest, "No file found in the request. Please attach a CSV or XLSX file.")
 			return
 		}
-		defer f.Close()
+		fileBytes, err := io.ReadAll(f)
+		f.Close()
+		if err != nil {
+			uploadEntityError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+			return
+		}
+		contentType := s3storage.DetectContentType(fileBytes)
 
-		records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+		records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 		if err != nil || len(records) < 2 {
 			uploadEntityError(w, http.StatusBadRequest,
 				fmt.Sprintf("File '%s' is empty or could not be read. Ensure it has a header row and at least one data row.", fh.Filename))
@@ -3075,6 +3105,17 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// ── 9. Begin transaction & write ─────────────────────────────────
+		s3Key := ""
+		if s3storage.IsS3UploadEnabled() {
+			folder := s3storage.GetStoragePrefix("master-entity-cash")
+			storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+				uploadEntityError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
@@ -3084,6 +3125,9 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer func() {
 			if tx != nil {
 				_ = tx.Rollback(ctx)
+				if s3Key != "" {
+					_ = s3storage.DeleteFromS3(ctx, s3Key)
+				}
 			}
 		}()
 
@@ -3216,6 +3260,12 @@ WHERE m.entity_name IS NULL;
 			return
 		}
 		log.Printf("[UploadEntitySimple] INSERT elapsed=%v", time.Since(t1))
+
+		if s3Key != "" {
+			if _, err := tx.Exec(ctx, `UPDATE masterentitycash SET upload_s3_key = $1 WHERE entity_name IN (SELECT entity_name FROM tmp_me) AND upload_s3_key IS NULL AND is_deleted = false`, s3Key); err != nil {
+				log.Printf("[UploadEntitySimple] warn: failed to set upload_s3_key: %v", err)
+			}
+		}
 
 		// ── 9d. UPDATE changed existing entities ─────────────────────────
 		t2 := time.Now()
