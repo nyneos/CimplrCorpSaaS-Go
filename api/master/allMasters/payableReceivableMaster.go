@@ -1100,11 +1100,13 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		checkerBy := session.Name
 
 		ctx := r.Context()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
+		defer tx.Rollback(ctx)
 		defer tx.Rollback(ctx)
 
 		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
@@ -1196,11 +1198,13 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		checkerBy := session.Name
 
 		ctx := r.Context()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
+		defer tx.Rollback(ctx)
 		defer tx.Rollback(ctx)
 		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, actiontype, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
@@ -1470,6 +1474,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						tgt := mappedTargets[k]
 						if v != nil {
 							if s, ok := v.(string); ok && dateCols[tgt] {
+								norm := utils.NormalizeDateString(s)
 								norm := utils.NormalizeDateString(s)
 								if norm == "" {
 									vals[k+1] = nil

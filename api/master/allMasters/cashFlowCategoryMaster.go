@@ -28,6 +28,8 @@ import (
 
 	"CimplrCorpSaas/internal/logger")
 
+	"CimplrCorpSaas/internal/logger")
+
 // getUserFriendlyCashFlowCategoryError converts database errors to user-friendly messages
 // Returns (error message, HTTP status code)
 // Known/expected errors return 200 with error message, unexpected errors return 500/503
@@ -2262,6 +2264,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		timings = append(timings, map[string]interface{}{"phase": "copy_to_tmp", "rows": rowCount, "ms": copyDur.Milliseconds()})
 		logger.LogInfo("[UploadCashFlowCategorySimple] COPY rows=%d elapsed=%v file=%s", rowCount, copyDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] COPY rows=%d elapsed=%v file=%s", rowCount, copyDur, fh.Filename)
 
 		_, _ = tx.Exec(ctx, `CREATE INDEX ON tmp_mcc (category_name)`)
 
@@ -2333,6 +2336,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		validationDur := time.Since(validationStart)
 		timings = append(timings, map[string]interface{}{"phase": "validation", "ms": validationDur.Milliseconds()})
 		logger.LogInfo("[UploadCashFlowCategorySimple] validation elapsed=%v file=%s", validationDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] validation elapsed=%v file=%s", validationDur, fh.Filename)
 
 		insertSQL := `
 INSERT INTO mastercashflowcategory (
@@ -2372,6 +2376,7 @@ WHERE m.category_name IS NULL;
 		insertDur := time.Since(insertStart)
 		timings = append(timings, map[string]interface{}{"phase": "insert", "ms": insertDur.Milliseconds()})
 		logger.LogInfo("[UploadCashFlowCategorySimple] insert elapsed=%v file=%s", insertDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] insert elapsed=%v file=%s", insertDur, fh.Filename)
 
 		updateSQL := `
 UPDATE mastercashflowcategory m
@@ -2398,6 +2403,7 @@ AND (
 		}
 		updateDur := time.Since(updateStart)
 		timings = append(timings, map[string]interface{}{"phase": "update", "ms": updateDur.Milliseconds()})
+		logger.LogInfo("[UploadCashFlowCategorySimple] update elapsed=%v file=%s", updateDur, fh.Filename)
 		logger.LogInfo("[UploadCashFlowCategorySimple] update elapsed=%v file=%s", updateDur, fh.Filename)
 
 		hierarchySQL := `
@@ -2426,6 +2432,7 @@ WHERE m.category_id = a.category_id;
 		hierarchyDur := time.Since(hierarchyStart)
 		timings = append(timings, map[string]interface{}{"phase": "hierarchy", "ms": hierarchyDur.Milliseconds()})
 		logger.LogInfo("[UploadCashFlowCategorySimple] hierarchy elapsed=%v file=%s", hierarchyDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] hierarchy elapsed=%v file=%s", hierarchyDur, fh.Filename)
 
 		relationshipSQL := `
 INSERT INTO cashflowcategoryrelationships (parent_category_name, child_category_name, status)
@@ -2444,6 +2451,7 @@ ON CONFLICT (parent_category_name, child_category_name) DO NOTHING;
 		relDur := time.Since(relStart)
 		timings = append(timings, map[string]interface{}{"phase": "relationships", "ms": relDur.Milliseconds()})
 		logger.LogInfo("[UploadCashFlowCategorySimple] relationships elapsed=%v file=%s", relDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] relationships elapsed=%v file=%s", relDur, fh.Filename)
 
 		auditSQL := `
 INSERT INTO auditactioncashflowcategory(category_id, actiontype, processing_status, requested_by, requested_at)
@@ -2460,6 +2468,7 @@ ON CONFLICT DO NOTHING;
 		auditDur := time.Since(auditStart)
 		timings = append(timings, map[string]interface{}{"phase": "audit", "ms": auditDur.Milliseconds()})
 		logger.LogInfo("[UploadCashFlowCategorySimple] audit elapsed=%v file=%s", auditDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] audit elapsed=%v file=%s", auditDur, fh.Filename)
 
 		commitStart := time.Now()
 		if err := tx.Commit(ctx); err != nil {
@@ -2468,6 +2477,7 @@ ON CONFLICT DO NOTHING;
 		}
 		commitDur := time.Since(commitStart)
 		timings = append(timings, map[string]interface{}{"phase": "commit", "ms": commitDur.Milliseconds()})
+		logger.LogInfo("[UploadCashFlowCategorySimple] commit elapsed=%v file=%s", commitDur, fh.Filename)
 		logger.LogInfo("[UploadCashFlowCategorySimple] commit elapsed=%v file=%s", commitDur, fh.Filename)
 		tx = nil
 
@@ -2481,6 +2491,7 @@ ON CONFLICT DO NOTHING;
 			"batch_id":             uuid.New().String(),
 			"timings":              timings,
 		}
+		logger.LogInfo("[UploadCashFlowCategorySimple] finished rows=%d total_ms=%d file=%s", rowCount, dur.Milliseconds(), fh.Filename)
 		logger.LogInfo("[UploadCashFlowCategorySimple] finished rows=%d total_ms=%d file=%s", rowCount, dur.Milliseconds(), fh.Filename)
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)

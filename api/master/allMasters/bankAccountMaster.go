@@ -105,6 +105,7 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		createdBy := api.GetUserNameFromCtx(r.Context())
+		createdBy := api.GetUserNameFromCtx(r.Context())
 		if createdBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "User session not found or Name missing")
 			return
@@ -273,6 +274,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrMissingUserID})
 			return
 		}
+		updatedBy := api.GetUserNameFromCtx(r.Context())
 		updatedBy := api.GetUserNameFromCtx(r.Context())
 		if updatedBy == "" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -630,6 +632,9 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					// mark existing clearing codes as deleted (soft-delete)
 					if _, delErr := tx.Exec(ctx, `UPDATE masterclearingcode SET is_deleted = true WHERE account_id=$1`, updatedAccountID); delErr != nil {
 						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to soft-delete old clearing codes: " + delErr.Error(), "account_id": updatedAccountID})
+					// mark existing clearing codes as deleted (soft-delete)
+					if _, delErr := tx.Exec(ctx, `UPDATE masterclearingcode SET is_deleted = true WHERE account_id=$1`, updatedAccountID); delErr != nil {
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to soft-delete old clearing codes: " + delErr.Error(), "account_id": updatedAccountID})
 						return
 					}
 
@@ -705,6 +710,7 @@ func BulkDeleteBankAccountAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		requestedBy := api.GetUserNameFromCtx(r.Context())
+		requestedBy := api.GetUserNameFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -740,6 +746,7 @@ func BulkRejectBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide account_ids")
 			return
 		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
@@ -781,15 +788,19 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 		checkerBy := api.GetUserNameFromCtx(r.Context())
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		// First, handle audit rows that requested DELETE (Soft Delete)
+		// First, handle audit rows that requested DELETE (Soft Delete)
 		var delRows pgx.Rows
 		var delErr error
 		var deleted []string
 		var accountIDsToDelete []string
+		delQuery := `UPDATE auditactionbankaccount SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2 WHERE account_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, account_id`
+		delRows, delErr = pgxPool.Query(r.Context(), delQuery, checkerBy, req.Comment, pq.Array(req.AccountIDs))
 		delQuery := `UPDATE auditactionbankaccount SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2 WHERE account_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, account_id`
 		delRows, delErr = pgxPool.Query(r.Context(), delQuery, checkerBy, req.Comment, pq.Array(req.AccountIDs))
 		if delErr == nil {
@@ -924,6 +935,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 					c.account_id,
 					STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
 				FROM public.masterclearingcode c
+				WHERE COALESCE(c.is_deleted, false) = false
 				WHERE COALESCE(c.is_deleted, false) = false
 				GROUP BY c.account_id
 			)
@@ -1217,6 +1229,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Step 2: Fetch user name from active sessions
+		userName := api.GetUserNameFromCtx(r.Context())
 		userName := api.GetUserNameFromCtx(r.Context())
 		if userName == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
@@ -1547,6 +1560,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							continue
 						}
 						if s, ok := v.(string); ok {
+							norm := utils.NormalizeDateString(s)
 							norm := utils.NormalizeDateString(s)
 							if norm == "" {
 								newCopyRows[i][colIdx+1] = nil
@@ -1974,6 +1988,8 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
                         'old_code_value', COALESCE(c.old_code_value, '')
                     ))
                     FROM masterclearingcode c
+                    WHERE c.account_id = a.account_id AND COALESCE(c.is_deleted, false) = false
+                    ORDER BY c.clearing_id
                     WHERE c.account_id = a.account_id AND COALESCE(c.is_deleted, false) = false
                     ORDER BY c.clearing_id
                 ), '[]'::json

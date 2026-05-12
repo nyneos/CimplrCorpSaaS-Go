@@ -742,6 +742,7 @@ func userFriendlyUploadError(err error) string {
 		return "Some transaction amounts/balances in this statement are too large to be saved. Please try uploading the Excel version, or contact support with this file."
 	}
 	logger.LogInfo("Debug raw mesage", msg)
+	logger.LogInfo("Debug raw mesage", msg)
 	if strings.Contains(msg, "failed to begin db transaction") ||
 		strings.Contains(msg, "failed to insert bank statement") ||
 		strings.Contains(msg, "failed to upsert bank_balances_manual") ||

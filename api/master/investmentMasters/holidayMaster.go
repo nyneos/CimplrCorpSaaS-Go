@@ -24,6 +24,8 @@ import (
 
 	"CimplrCorpSaas/internal/logger")
 
+	"CimplrCorpSaas/internal/logger")
+
 type CreateCalendarReq struct {
 	UserID             string `json:"user_id"`
 	CalendarCode       string `json:"calendar_code"`
@@ -243,6 +245,7 @@ func CreateCalendarSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.IngestionSource = "Manual"
 		}
 
+		ctx := r.Context()
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -811,6 +814,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE calendar_code = ANY($1) AND is_deleted=false
 			`, codes)
 			if err != nil {
+				logger.LogError("[WARN] failed to fetch calendar mapping: %v", err)
 				logger.LogError("[WARN] failed to fetch calendar mapping: %v", err)
 			} else {
 				for rows.Next() {
@@ -1510,6 +1514,7 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, 500, "tx begin failed")
@@ -1632,6 +1637,7 @@ func BulkRejectCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		ctx := r.Context()
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {

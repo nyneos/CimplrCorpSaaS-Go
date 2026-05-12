@@ -28,6 +28,8 @@ import (
 
 	"CimplrCorpSaas/internal/logger")
 
+	"CimplrCorpSaas/internal/logger")
+
 type BankPDFUpload struct {
 	ID               string         `json:"id" db:"id"`
 	UserID           sql.NullString `json:"user_id" db:"user_id"`
@@ -145,6 +147,7 @@ func deleteFromSupabase(ctx context.Context, objectPath string) error {
 // respondWithError logs the internal error and returns a standardized JSON error
 func respondWithError(w http.ResponseWriter, err error, userMsg string, code int) {
 	if err != nil {
+		logger.LogError("[bankstatement] internal error: %v", err)
 		logger.LogError("[bankstatement] internal error: %v", err)
 	}
 	if userMsg == "" && err != nil {
@@ -422,6 +425,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 	accountNumbers := parseAccountNumbers(baseFormValues)
 	forceOverride := r.FormValue("force_override") == "true"
 	logger.LogError("[ZIP-PREVIEW] force_override=%v account_numbers=%v", forceOverride, accountNumbers)
+	logger.LogError("[ZIP-PREVIEW] force_override=%v account_numbers=%v", forceOverride, accountNumbers)
 
 	// --- Collect processable entries first so we can validate 1:1 counts ---
 	type previewEntry struct {
@@ -538,9 +542,11 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 			perFileFormValues["account_numbers"] = []string{accountNumbers[fileIdx]}
 			perFileFormValues["force_override"] = []string{"true"}
 			logger.LogInfo("[ZIP-PREVIEW] force+N: file[%d] %s → account %s", fileIdx, filename, accountNumbers[fileIdx])
+			logger.LogInfo("[ZIP-PREVIEW] force+N: file[%d] %s → account %s", fileIdx, filename, accountNumbers[fileIdx])
 
 		case forceOverride && len(accountNumbers) == 1:
 			// All files → single account (already in baseFormValues, keep force_override=true)
+			logger.LogInfo("[ZIP-PREVIEW] force+1: file %s → account %s", filename, accountNumbers[0])
 			logger.LogInfo("[ZIP-PREVIEW] force+1: file %s → account %s", filename, accountNumbers[0])
 
 		case forceOverride && len(accountNumbers) == 0:
@@ -605,6 +611,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 		bID, batchErr := insertStagingBatch(ctx, db, userID, header.Filename, len(pdfEntries))
 		if batchErr != nil {
 			logger.LogError("[ZIP-PDF] failed to create staging batch: %v", batchErr)
+			logger.LogError("[ZIP-PDF] failed to create staging batch: %v", batchErr)
 			for _, pe := range pdfEntries {
 				results = append(results, map[string]interface{}{"file": pe.filename, "status": "failed", "error": "failed to create staging batch"})
 				failedCount++
@@ -621,6 +628,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 				for _, f := range files {
 					stagingIDs, err := processPDFViaPDFCo(bgCtx, db, f.data, f.filename, bgBatchID, "")
 					if err != nil {
+						logger.LogError("[ZIP-PDF-BG] failed %s: %v", f.filename, err)
 						logger.LogError("[ZIP-PDF-BG] failed %s: %v", f.filename, err)
 						_, _ = insertStagingStatement(bgCtx, db, bgBatchID, f.filename, "", nil, "failed", err.Error())
 						failed++
@@ -722,6 +730,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		ctx := r.Context()
 
 		logger.LogInfo("[BANK-PREVIEW] /cash/preview start: remote=%s method=%s", r.RemoteAddr, r.Method)
+		logger.LogInfo("[BANK-PREVIEW] /cash/preview start: remote=%s method=%s", r.RemoteAddr, r.Method)
 
 		// parse multipart form (support file field named "file")
 		if err := r.ParseMultipartForm(50 << 20); err != nil {
@@ -738,13 +747,16 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		fh := r.MultipartForm.File["file"][0]
 		ext := strings.ToLower(filepath.Ext(fh.Filename))
 		logger.LogInfo("[BANK-PREVIEW] uploaded filename=%s ext=%s", fh.Filename, ext)
+		logger.LogInfo("[BANK-PREVIEW] uploaded filename=%s ext=%s", fh.Filename, ext)
 		// try to log user_id field if present
 		uploadUserID := ""
 		if vals := r.MultipartForm.Value["user_id"]; len(vals) > 0 {
 			uploadUserID = vals[0]
 			logger.LogInfo("[BANK-PREVIEW] user_id=%s", vals[0])
+			logger.LogInfo("[BANK-PREVIEW] user_id=%s", vals[0])
 		}
 		if ext == ".zip" {
+			logger.LogInfo("[BANK-PREVIEW] zip upload detected filename=%s", fh.Filename)
 			logger.LogInfo("[BANK-PREVIEW] zip upload detected filename=%s", fh.Filename)
 			handleZipBankStatementUpload(db, pool, w, r)
 			return
@@ -753,6 +765,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// Accept PDF and DOCX for streaming to external AI parser; others go to V2
 		if ext != ".pdf" && ext != ".docx" {
 			// delegate to existing V2 handler for Excel/CSV
+			logger.LogInfo("[BANK-PREVIEW] delegating to V2 handler for extension=%s", ext)
 			logger.LogInfo("[BANK-PREVIEW] delegating to V2 handler for extension=%s", ext)
 			h := UploadBankStatementV2Handler(db, pool)
 			h.ServeHTTP(w, r)
@@ -804,6 +817,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			// already exists — rollback the open transaction but continue parsing
 			// so the caller receives the full preview data instead of a bare {exists} stub
 			if rerr := tx.Rollback(); rerr != nil {
+				logger.LogError("failed to rollback tx after existing-check: %v", rerr)
 				logger.LogError("failed to rollback tx after existing-check: %v", rerr)
 			}
 			tx = nil
@@ -886,6 +900,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// }
 
 		logger.LogInfo("[BANK-PREVIEW] proxying PDF/DOCX to parsing service =****")
+		logger.LogInfo("[BANK-PREVIEW] proxying PDF/DOCX to parsing service =****")
 		// Build multipart/form-data body with field name `pdf` (file)
 		var b bytes.Buffer
 		mw := multipart.NewWriter(&b)
@@ -929,9 +944,11 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		var aiResponse map[string]interface{}
 		if err := json.Unmarshal(aiResponseBytes, &aiResponse); err != nil {
 			logger.LogError("AI response parsing error: %v, raw: %s", err, string(aiResponseBytes))
+			logger.LogError("AI response parsing error: %v, raw: %s", err, string(aiResponseBytes))
 			// rollback the transaction because parsing failed
 			if tx != nil {
 				if rerr := tx.Rollback(); rerr != nil {
+					logger.LogError("failed to rollback tx after parse error: %v", rerr)
 					logger.LogError("failed to rollback tx after parse error: %v", rerr)
 				}
 				tx = nil
@@ -978,9 +995,11 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 				if tx != nil {
 					if rerr := tx.Rollback(); rerr != nil {
 						logger.LogError("failed to rollback tx after supabase upload failure: %v", rerr)
+						logger.LogError("failed to rollback tx after supabase upload failure: %v", rerr)
 					}
 					tx = nil
 				}
+				logger.LogError("supabase upload failed: %v", upErr)
 				logger.LogError("supabase upload failed: %v", upErr)
 				respondWithError(w, upErr, "Failed to upload file to storage", http.StatusInternalServerError)
 				return
@@ -1022,6 +1041,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		if tx != nil {
 			if cerr := tx.Commit(); cerr != nil {
 				logger.LogError("failed to commit upload metadata: %v", cerr)
+				logger.LogError("failed to commit upload metadata: %v", cerr)
 				respondWithError(w, cerr, "Failed to persist upload metadata", http.StatusInternalServerError)
 				return
 			}
@@ -1032,6 +1052,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(combinedResponse); err != nil {
+			logger.LogError("failed to write response: %v", err)
 			logger.LogError("failed to write response: %v", err)
 		}
 
@@ -1241,6 +1262,7 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 					   SET raw_statement = $1, status = 'parsed', updated_at = now()
 					 WHERE staging_id = $2 AND status != 'committed'
 				`, raw, sid); uerr != nil {
+					logger.LogError("[RECALCULATE] failed to persist staging statement %s: %v", sid, uerr)
 					logger.LogError("[RECALCULATE] failed to persist staging statement %s: %v", sid, uerr)
 				}
 			}
@@ -2036,6 +2058,16 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 				LIMIT 1
 			`, storagePath.String).Scan(&bankStatementID)
 		}
+
+		var bankStatementID sql.NullString
+		if storagePath.Valid && strings.TrimSpace(storagePath.String) != "" {
+			_ = db.QueryRowContext(r.Context(), `
+				SELECT bank_statement_id
+				FROM cimplrcorpsaas.bank_statements
+				WHERE upload_s3_key = $1
+				LIMIT 1
+			`, storagePath.String).Scan(&bankStatementID)
+		}
 		// entity validation: if DB row has entity_name, ensure requester is allowed
 		// try to get entity from request header `X-Entity-Name` or context
 		requesterEntity := r.Header.Get("X-Entity-Name")
@@ -2095,6 +2127,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			body, _ := io.ReadAll(resp.Body)
 			logger.LogError("download failed: %d %s", resp.StatusCode, string(body))
+			logger.LogError("download failed: %d %s", resp.StatusCode, string(body))
 			respondWithError(w, fmt.Errorf("download failed: %d", resp.StatusCode), "Failed to download file from storage", http.StatusInternalServerError)
 			return
 		}
@@ -2121,6 +2154,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 		go func() {
 			// best-effort; log on error
 			if err := insertDownloadAudit(r.Context(), db, id, userID, ip, entityName); err != nil {
+				logger.LogError("failed to insert download audit: %v", err)
 				logger.LogError("failed to insert download audit: %v", err)
 			}
 		}()
