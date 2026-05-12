@@ -2198,6 +2198,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.actual_start_date,'YYYY-MM-DD'),'') AS confirmed_value_date,
 				COALESCE(TO_CHAR(c.actual_maturity_date,'YYYY-MM-DD'),'') AS confirmed_maturity_date,
 				COALESCE(c.bank_fd_ref_no,'') AS bank_fd_reference,
+				COALESCE(c.bank_fd_ref_no,'') AS bank_reference_number,
 				COALESCE(c.tenor_type,'') AS confirmed_tenor_type,
 				COALESCE(c.tenor_days,0) AS confirmed_tenor_days,
 				COALESCE(c.tenor_months,0) AS confirmed_tenor_months,
