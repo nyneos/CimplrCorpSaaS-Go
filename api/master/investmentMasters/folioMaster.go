@@ -4,7 +4,6 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/utils/s3storage"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1435,7 +1434,6 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "tx")
@@ -1558,7 +1556,6 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := r.Context()
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {

@@ -4,7 +4,6 @@ import (
 	"CimplrCorpSaas/api"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/utils/s3storage"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1040,13 +1039,11 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		checkerBy := session.Name
 
 		ctx := r.Context()
-		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		defer tx.Rollback(ctx)
 		defer tx.Rollback(ctx)
 
 		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) ORDER BY counterparty_id, requested_at DESC`
@@ -1136,13 +1133,11 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		checkerBy := session.Name
 
 		ctx := r.Context()
-		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		defer tx.Rollback(ctx)
 		defer tx.Rollback(ctx)
 
 		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, actiontype, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) ORDER BY counterparty_id, requested_at DESC`

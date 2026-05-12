@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -22,9 +23,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
-
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // getUserFriendlyEntityCashError returns a user-friendly error message and HTTP status code
 func getUserFriendlyEntityCashError(err error, context string) (string, int) {
@@ -319,7 +319,6 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Get created_by from session
 		createdBy := api.GetUserNameFromCtx(r.Context())
-		createdBy := api.GetUserNameFromCtx(r.Context())
 		if createdBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -412,7 +411,6 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				if uploadedS3Key != "" {
 					if cleanupErr := s3storage.DeleteFromS3(ctx, uploadedS3Key); cleanupErr != nil {
-						logger.LogError("[CreateAndSyncCashEntities] failed to cleanup s3 key=%s after insert error: %v", uploadedS3Key, cleanupErr)
 						logger.LogError("[CreateAndSyncCashEntities] failed to cleanup s3 key=%s after insert error: %v", uploadedS3Key, cleanupErr)
 					}
 				}
@@ -513,16 +511,13 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			sampleIDs = sampleIDs[:5]
 		}
 		logger.LogInfo("[DEBUG] accessible entity ids count=%d sample=%v", len(accessibleEntityIDs), sampleIDs)
-		logger.LogInfo("[DEBUG] accessible entity ids count=%d sample=%v", len(accessibleEntityIDs), sampleIDs)
 
 		// Quick DB checks to help debug mismatches between middleware IDs and stored rows
 		var matchedCount int
 		countQ := `SELECT count(*) FROM masterentitycash WHERE entity_id = ANY($1)`
 		if err := pgxPool.QueryRow(ctx, countQ, accessibleEntityIDs).Scan(&matchedCount); err != nil {
 			logger.LogError("[DEBUG] failed to run count query for accessible IDs: %v", err)
-			logger.LogError("[DEBUG] failed to run count query for accessible IDs: %v", err)
 		} else {
-			logger.LogInfo("[DEBUG] masterentitycash rows matching accessible ids: %d", matchedCount)
 			logger.LogInfo("[DEBUG] masterentitycash rows matching accessible ids: %d", matchedCount)
 		}
 		// Also fetch up to 5 matching entity_ids to show actual stored formats
@@ -538,13 +533,10 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if len(found) > 0 {
 				logger.LogInfo("[DEBUG] sample entity_ids found in DB for your accessible ids: %v", found)
-				logger.LogInfo("[DEBUG] sample entity_ids found in DB for your accessible ids: %v", found)
 			} else {
-				logger.LogInfo("[DEBUG] no sample entity_ids found in DB for the provided accessible ids")
 				logger.LogInfo("[DEBUG] no sample entity_ids found in DB for the provided accessible ids")
 			}
 		} else {
-			logger.LogError("[DEBUG] sample query failed: %v", serr)
 			logger.LogError("[DEBUG] sample query failed: %v", serr)
 		}
 
@@ -625,7 +617,6 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&isTop, &isDel,
 				&procStatus, &reqBy, &reqAt, &actType, &actID, &checkerBy, &checkerAt, &checkerComment, &reason,
 			); err != nil {
-				logger.LogError("[DEBUG] rows.Scan failed: %v", err)
 				logger.LogError("[DEBUG] rows.Scan failed: %v", err)
 				continue
 			}
@@ -791,7 +782,6 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			} else {
 				logger.LogError("[DEBUG] relRows.Scan failed: %v", err)
-				logger.LogError("[DEBUG] relRows.Scan failed: %v", err)
 			}
 		}
 
@@ -802,9 +792,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				limit = len(unmatchedRels)
 			}
 			logger.LogInfo("[DEBUG] unmatched relationships count=%d sample=%v", len(unmatchedRels), unmatchedRels[:limit])
-			logger.LogInfo("[DEBUG] unmatched relationships count=%d sample=%v", len(unmatchedRels), unmatchedRels[:limit])
 		} else {
-			logger.LogInfo("[DEBUG] no unmatched relationships found in cashentityrelationships")
 			logger.LogInfo("[DEBUG] no unmatched relationships found in cashentityrelationships")
 		}
 
@@ -843,12 +831,10 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		logger.LogInfo("[DEBUG] parentMap size=%d nameToID size=%d fallbackAdded=%d", len(parentMap), len(nameToID), fallbackAdded)
-		logger.LogInfo("[DEBUG] parentMap size=%d nameToID size=%d fallbackAdded=%d", len(parentMap), len(nameToID), fallbackAdded)
 		// Log up to 10 parent entries to inspect mapping (parentID -> childrenIDs)
 		cnt := 0
 		for pid, children := range parentMap {
 			if cnt < 10 {
-				logger.LogInfo("[DEBUG] parentID=%s children=%v", pid, children)
 				logger.LogInfo("[DEBUG] parentID=%s children=%v", pid, children)
 			}
 			cnt++
@@ -925,7 +911,6 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		logger.LogInfo("✅ Hierarchy built (%d entities, %d roots) in %v", len(entityMap), len(top), time.Since(start))
-		logger.LogInfo("✅ Hierarchy built (%d entities, %d roots) in %v", len(entityMap), len(top), time.Since(start))
 	}
 }
 
@@ -946,7 +931,6 @@ func GetCashEntityLogoURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		validSession := api.GetSessionFromCtx(r.Context()) != nil
 		validSession := api.GetSessionFromCtx(r.Context()) != nil
 		if !validSession {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
@@ -1008,7 +992,6 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		// Get updated_by from session
-		updatedBy := api.GetUserNameFromCtx(r.Context())
 		updatedBy := api.GetUserNameFromCtx(r.Context())
 		if updatedBy == "" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -1078,7 +1061,6 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						tx.Rollback(ctx)
 						if uploadedS3Key != "" {
 							if cleanupErr := s3storage.DeleteFromS3(ctx, uploadedS3Key); cleanupErr != nil {
-								logger.LogError("[UpdateCashEntityBulk] failed to cleanup s3 key=%s after update error: %v", uploadedS3Key, cleanupErr)
 								logger.LogError("[UpdateCashEntityBulk] failed to cleanup s3 key=%s after update error: %v", uploadedS3Key, cleanupErr)
 							}
 						}
@@ -1614,7 +1596,6 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 2. Validate session ─────────────────────────────
 		requestedBy := api.GetUserNameFromCtx(r.Context())
-		requestedBy := api.GetUserNameFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -1752,7 +1733,6 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Get checker_by from session
 		checkerBy := api.GetUserNameFromCtx(r.Context())
-		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -1814,21 +1794,8 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
-		}
-		defer tx.Rollback(ctx)
 		// Update processing_status to 'REJECTED' in auditactionentity for all
 		query := `UPDATE auditactionentity SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) RETURNING action_id, entity_id`
-		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to reject entity actions")
@@ -1898,7 +1865,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Get checker_by from session
 		checkerBy := api.GetUserNameFromCtx(r.Context())
-		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -1959,24 +1925,11 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
-		}
-		defer tx.Rollback(ctx)
 		// For each entity, check approval_status
 		var allUpdated []map[string]interface{}
 		var anyError error
 		for _, eid := range req.EntityIDs {
 			var status string
-			err := tx.QueryRow(ctx, `SELECT processing_status FROM auditactionentity WHERE entity_id = $1 ORDER BY requested_at DESC LIMIT 1`, eid).Scan(&status)
 			err := tx.QueryRow(ctx, `SELECT processing_status FROM auditactionentity WHERE entity_id = $1 ORDER BY requested_at DESC LIMIT 1`, eid).Scan(&status)
 			if err == pgx.ErrNoRows {
 				continue
@@ -1987,7 +1940,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if status == "PENDING_DELETE_APPROVAL" {
 				// Mark all descendants as deleted (do not approve them)
 				descendants := getAllDescendants([]string{eid})
-				rows, err := tx.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, descendants)
 				rows, err := tx.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, descendants)
 				if err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to mark entities as deleted")
@@ -2012,7 +1964,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				// Also update the audit rows for these descendants: mark their delete actions as APPROVED
 				auditRows, aerr := tx.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, descendants)
-				auditRows, aerr := tx.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, descendants)
 				if aerr != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(aerr, "Failed to approve delete actions")
 					if statusCode == http.StatusOK {
@@ -2036,7 +1987,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			} else {
 				// Approve only this entity: update auditactionentity processing_status
-				rows, err := tx.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = $3 AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, eid)
 				rows, err := tx.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = $3 AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, eid)
 				if err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to approve entity action")
@@ -2120,7 +2070,6 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Validate user session
-		validUser := api.GetSessionFromCtx(r.Context()) != nil
 		validUser := api.GetSessionFromCtx(r.Context()) != nil
 		if !validUser {
 			w.WriteHeader(http.StatusBadRequest)
@@ -2421,7 +2370,6 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		userName := api.GetUserNameFromCtx(r.Context())
 		userName := api.GetUserNameFromCtx(r.Context())
 		if userName == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
@@ -2825,7 +2773,6 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		userName := api.GetUserNameFromCtx(r.Context())
-		userName := api.GetUserNameFromCtx(r.Context())
 		if userName == "" {
 			uploadEntityError(w, http.StatusUnauthorized, "Invalid or expired session. Please log in again.")
 			return
@@ -3200,7 +3147,6 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Ensure index (non-fatal, outside tx to avoid temp-table conflicts)
 		{
 			cctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-			cctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 			defer cancel()
 			_, _ = pgxPool.Exec(cctx,
 				`CREATE UNIQUE INDEX IF NOT EXISTS idx_masterentitycash_name ON masterentitycash (entity_name)`)
@@ -3284,12 +3230,10 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		logger.LogInfo("[UploadEntitySimple] COPY rows=%d elapsed=%v", len(copyRows), time.Since(tCopy))
-		logger.LogInfo("[UploadEntitySimple] COPY rows=%d elapsed=%v", len(copyRows), time.Since(tCopy))
 
 		if _, err := tx.Exec(ctx,
 			`CREATE INDEX IF NOT EXISTS idx_tmp_me_name ON tmp_me (entity_name)`,
 		); err != nil {
-			logger.LogError("[UploadEntitySimple] warn: index on tmp_me: %v", err)
 			logger.LogError("[UploadEntitySimple] warn: index on tmp_me: %v", err)
 		}
 
@@ -3393,7 +3337,6 @@ WHERE m.entity_name = t.entity_name
 			return
 		}
 		logger.LogInfo("[UploadEntitySimple] UPDATE elapsed=%v", time.Since(t2))
-		logger.LogInfo("[UploadEntitySimple] UPDATE elapsed=%v", time.Since(t2))
 
 		// ── 9e. Hierarchy sync (cascade to descendants up to L3) ─────────
 		t3 := time.Now()
@@ -3443,7 +3386,6 @@ WHERE m.entity_id = s.entity_id
 			return
 		}
 		logger.LogInfo("[UploadEntitySimple] hierarchy sync elapsed=%v", time.Since(t3))
-		logger.LogInfo("[UploadEntitySimple] hierarchy sync elapsed=%v", time.Since(t3))
 
 		// ── 9f. Sync cashentityrelationships ─────────────────────────────
 		t4 := time.Now()
@@ -3465,7 +3407,6 @@ ON CONFLICT (parent_entity_name, child_entity_name) DO UPDATE
 			uploadEntityError(w, statusCode, errMsg)
 			return
 		}
-		logger.LogInfo("[UploadEntitySimple] relationships elapsed=%v", time.Since(t4))
 		logger.LogInfo("[UploadEntitySimple] relationships elapsed=%v", time.Since(t4))
 
 		// ── 9g. Audit log ────────────────────────────────────────────────
@@ -3532,7 +3473,6 @@ ON CONFLICT (parent_entity_name, child_entity_name) DO UPDATE
 			}
 		}
 		logger.LogInfo("[UploadEntitySimple] audit rows=%d elapsed=%v", len(auditRows), time.Since(t5))
-		logger.LogInfo("[UploadEntitySimple] audit rows=%d elapsed=%v", len(auditRows), time.Since(t5))
 
 		// ── 10. Commit ────────────────────────────────────────────────────
 		if err := tx.Commit(ctx); err != nil {
@@ -3543,7 +3483,6 @@ ON CONFLICT (parent_entity_name, child_entity_name) DO UPDATE
 		tx = nil
 
 		totalDur := time.Since(startOverall)
-		logger.LogInfo("[UploadEntitySimple] done rows=%d total_ms=%d", len(parsed), totalDur.Milliseconds())
 		logger.LogInfo("[UploadEntitySimple] done rows=%d total_ms=%d", len(parsed), totalDur.Milliseconds())
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

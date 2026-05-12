@@ -9,13 +9,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // convertSvcResponse mirrors the JSON returned by the conversion service.
 type convertSvcResponse struct {

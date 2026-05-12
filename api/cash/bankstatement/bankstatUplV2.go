@@ -31,7 +31,8 @@ import (
 	"github.com/shakinm/xlsReader/xls"
 	"github.com/xuri/excelize/v2"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 const bankStatementUploadModule = "bankstatement"
 
@@ -641,7 +642,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	storedFileName := s3storage.BuildUploadedFilename(uploadFileName, uploadedBy, time.Now().UTC())
 	folder := s3storage.GetStoragePrefix(bankStatementUploadModule)
-	s3Key := s3storage.BuildNamedS3Key(folder,"",storedFileName)
+	s3Key := s3storage.BuildNamedS3Key(folder, "", storedFileName)
 	var uploadS3Key sql.NullString
 	var s3URL string
 	if s3storage.IsS3UploadEnabled() {
@@ -721,7 +722,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		}
 		// Fallback for headless PDF-to-CSV exports (e.g. SBI)
-		// Fallback for headless PDF-to-CSV exports (e.g. SBI)
 		if txnHeaderIdx == -1 {
 			for i, row := range rows {
 				if len(row) >= 14 && len(row[0]) >= 8 && len(row[2]) >= 8 {
@@ -742,7 +742,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 						rows = newRows
 						txnHeaderIdx = i
 						log.Printf("[BANK-UPLOAD-DEBUG] Headless SBI table detected. Inserted synthetic header at row %d", txnHeaderIdx)
-						
+
 						// Fix shifted columns in the data rows for this headless table
 						for r := txnHeaderIdx + 1; r < len(rows); r++ {
 							if len(rows[r]) >= 14 {
@@ -782,6 +782,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			log.Printf("[BANK-UPLOAD-DEBUG] CSV header detection FAILED. Dumping first 100 rows:")
 			for i := 0; i < 100 && i < len(rows); i++ {
 				log.Printf("[BANK-UPLOAD-DEBUG] CSV row[%d]=%q", i, rows[i])
+			}
 			logger.LogError("[BANK-UPLOAD-DEBUG] CSV header detection FAILED. Dumping first 30 rows:")
 			for i := 0; i < 30 && i < len(rows); i++ {
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] CSV row[%d]=%q", i, rows[i])
@@ -1540,6 +1541,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	dataRows = MergeMultiLineDescriptions(dataRows, mergeDateIdx, mergeDescIdx)
 
 	// iterate with index so we can log original row number
+continueRowExcel:
 	for ri, row := range dataRows {
 		rowNum := txnHeaderIdx + 1 + ri
 		totalRows++
@@ -1764,7 +1766,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					if amtStr != "" {
 						var amt float64
 						fmt.Sscanf(amtStr, "%f", &amt)
-						
+
 						crIdx := -1
 						for k, v := range colIdx {
 							lk := strings.ToLower(k)
@@ -1776,7 +1778,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 								crIdx = v
 							}
 						}
-						
+
 						if crIdx >= 0 && crIdx < len(row) {
 							crdr := strings.ToLower(strings.TrimSpace(row[crIdx]))
 							if strings.HasPrefix(crdr, "cr") || strings.Contains(crdr, "credit") || strings.HasPrefix(crdr, "c") {
@@ -2081,7 +2083,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 							cumulative = openingBalance
 							logger.LogInfo("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected (Excel fallback): %.2f", openingBalance)
 							skippedOpeningBalanceRows++
-							goto continueRowExcel
+							continue continueRowExcel
 						}
 					}
 				}
@@ -2100,7 +2102,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 							cumulative = openingBalance
 							logger.LogInfo("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected (Excel scan fallback): %.2f", openingBalance)
 							skippedOpeningBalanceRows++
-							goto continueRowExcel
+							continue continueRowExcel
 						}
 					}
 				}

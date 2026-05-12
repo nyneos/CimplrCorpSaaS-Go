@@ -7,13 +7,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/lib/pq"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
 
@@ -258,7 +260,6 @@ func GetStagingStatementHandler(db *sql.DB) http.Handler {
 		var rawStatementParsed interface{}
 		if len(rawStmt) > 0 {
 			if err := json.Unmarshal(rawStmt, &rawStatementParsed); err != nil {
-				logger.LogError("[staging] warn: failed to parse raw_statement for %s: %v", stagingID, err)
 				logger.LogError("[staging] warn: failed to parse raw_statement for %s: %v", stagingID, err)
 				rawStatementParsed = nil
 			}
