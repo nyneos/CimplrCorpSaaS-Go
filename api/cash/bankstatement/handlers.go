@@ -25,7 +25,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 func auditActorDisplayName(ctx context.Context, userID string) string {
 	if session := middlewares.GetSessionFromContext(ctx); session != nil {
@@ -365,7 +366,8 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 			if err := insertDownloadAudit(
 				ctx,
 				db,
-				auditFileID.String,
+				auditFileID,
+				sql.NullString{String: strings.TrimSpace(body.BankStatementID), Valid: strings.TrimSpace(body.BankStatementID) != ""},
 				requestedBy,
 				r.RemoteAddr,
 				entityName,
@@ -444,7 +446,8 @@ func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 				if err := insertDownloadAudit(
 					ctx,
 					db,
-					auditFileID.String,
+					auditFileID,
+					sql.NullString{String: strings.TrimSpace(bankStatementID), Valid: strings.TrimSpace(bankStatementID) != ""},
 					requestedBy,
 					r.RemoteAddr,
 					entityName,

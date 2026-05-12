@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"sync"
@@ -137,19 +138,6 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		auditLog("Smart-categorization: another instance is already running — skipping")
 		return nil
 	}
-	logger.LogAudit("Total transactions to consider for recategorization: %d", totalCount)
-
-	// Load all rules once
-	logger.LogAudit("Loading all active categorization rules for recategorization...")
-	allRules, err := loadAllCategoryRules(ctx, sqlDB)
-	if err != nil {
-		return fmt.Errorf("load rules: %w", err)
-	}
-	caches, err := cat.LoadSmartCaches(ctx, db)
-	if err != nil {
-		return fmt.Errorf("load caches: %w", err)
-	}
-
 	// ── 2. Count total eligible transactions ──────────────────────────────────
 	var totalCount int
 	if err := db.QueryRow(ctx, `
@@ -163,7 +151,19 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		auditLog("No transactions found for smart-categorization")
 		return nil
 	}
+	logger.LogAudit("Total transactions to consider for recategorization: %d", totalCount)
 	log.Printf("[AUDIT] Smart-categorization: %d transactions to process (workers=%d batch=%d)", totalCount, workerCount, batchSize)
+
+	// Load all rules once
+	logger.LogAudit("Loading all active categorization rules for recategorization...")
+	allRules, err := cat.LoadAllSmartRules(ctx, db)
+	if err != nil {
+		return fmt.Errorf("load rules: %w", err)
+	}
+	caches, err := cat.LoadSmartCaches(ctx, db)
+	if err != nil {
+		return fmt.Errorf("load caches: %w", err)
+	}
 
 	// ── 3. Keyset-cursor batch loop ───────────────────────────────────────────
 	// Keyset on transaction_id is stable — rows that get classified mid-run don't
@@ -278,13 +278,10 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		totalUpdated += len(persistItems)
 		totalProcessed += len(batch)
 
-		totalProcessed += len(txns)
-		offset += len(txns)
-
 		// small progress log
-		if time.Since(startTime) > 30*time.Second {
+		if time.Since(progressAt) > 30*time.Second {
 			logger.LogAudit("Recategorization progress: processed %d/%d, updated %d", totalProcessed, totalCount, totalUpdated)
-			startTime = time.Now()
+			progressAt = time.Now()
 		}
 	}
 

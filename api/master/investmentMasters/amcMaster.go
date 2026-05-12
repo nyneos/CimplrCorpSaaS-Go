@@ -2,7 +2,6 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"bufio"
 	"bytes"
@@ -233,14 +232,7 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		userName := session.Email
-		session := api.GetSessionFromCtx(r.Context())
-		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
-			return
-		}
-		userName := session.Email
 		if userName == "" {
-			userName = session.Name
 			userName = session.Name
 		}
 
@@ -459,7 +451,6 @@ func CreateAMCsingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// --- Get user email from active sessions ---
 		userEmail := api.GetUserEmailFromCtx(r.Context())
-		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -579,7 +570,6 @@ func CreateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// 🔍 Identify user
 		userEmail := api.GetUserEmailFromCtx(r.Context())
-		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -696,7 +686,6 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := api.GetUserEmailFromCtx(r.Context())
 		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
@@ -854,7 +843,6 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// --- Identify user ---
 		userEmail := api.GetUserEmailFromCtx(r.Context())
-		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -976,7 +964,6 @@ func DeleteAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		requestedBy := api.GetUserEmailFromCtx(r.Context())
-		requestedBy := api.GetUserEmailFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1029,13 +1016,11 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		checkerBy := api.GetUserEmailFromCtx(r.Context())
-		checkerBy := api.GetUserEmailFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := r.Context()
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -1105,13 +1090,11 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// 🔍 Identify the checker
 		checkerBy := api.GetUserEmailFromCtx(r.Context())
-		checkerBy := api.GetUserEmailFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := r.Context()
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {

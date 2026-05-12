@@ -3,8 +3,8 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	middlewares "CimplrCorpSaas/api/middlewares"
-	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/utils"
+	"CimplrCorpSaas/api/utils/s3storage"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1100,7 +1100,6 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		checkerBy := session.Name
 
 		ctx := r.Context()
-		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
@@ -1197,7 +1196,6 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 		checkerBy := session.Name
 
-		ctx := r.Context()
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -1474,7 +1472,6 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						tgt := mappedTargets[k]
 						if v != nil {
 							if s, ok := v.(string); ok && dateCols[tgt] {
-								norm := utils.NormalizeDateString(s)
 								norm := utils.NormalizeDateString(s)
 								if norm == "" {
 									vals[k+1] = nil

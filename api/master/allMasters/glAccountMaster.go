@@ -2,13 +2,10 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/utils/s3storage"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -19,9 +16,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
-
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // getUserFriendlyGLAccountError returns a user-friendly error message and HTTP status code
 func getUserFriendlyGLAccountError(err error, context string) (string, int) {
@@ -188,7 +184,6 @@ func FindParentGLAccountAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		valid := api.GetSessionFromCtx(r.Context()) != nil
-		valid := api.GetSessionFromCtx(r.Context()) != nil
 		if !valid {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -210,7 +205,6 @@ func FindParentGLAccountAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND LOWER(m.status) = 'active'
 			  AND a.processing_status = 'APPROVED'
 		`
-		rows, err := pgxPool.Query(r.Context(), q, parentLevel)
 		rows, err := pgxPool.Query(r.Context(), q, parentLevel)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to fetch parent GL accounts")
@@ -245,7 +239,6 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		createdBy := api.GetUserNameFromCtx(r.Context())
 		createdBy := api.GetUserNameFromCtx(r.Context())
 		if createdBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
@@ -478,7 +471,6 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		valid := api.GetSessionFromCtx(r.Context()) != nil
 		valid := api.GetSessionFromCtx(r.Context()) != nil
 		if !valid {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
@@ -800,7 +792,6 @@ func GetApprovedActiveGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		valid := api.GetSessionFromCtx(r.Context()) != nil
-		valid := api.GetSessionFromCtx(r.Context()) != nil
 		if !valid {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -871,7 +862,6 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		updatedBy := api.GetUserNameFromCtx(r.Context())
 		updatedBy := api.GetUserNameFromCtx(r.Context())
 		if updatedBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
@@ -1166,7 +1156,6 @@ func DeleteGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		requestedBy := api.GetUserNameFromCtx(r.Context())
-		requestedBy := api.GetUserNameFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -1247,12 +1236,10 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		checkerBy := api.GetUserNameFromCtx(r.Context())
-		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		ctx := r.Context()
 		ctx := r.Context()
 
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
@@ -1311,21 +1298,7 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrTxStartFailed)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
-		}
-		defer tx.Rollback(ctx)
-
 		query := `UPDATE auditactionglaccount SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE gl_account_id = ANY($3) RETURNING action_id, gl_account_id`
-		rows2, err := tx.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		rows2, err := tx.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to reject GL account actions")
@@ -1389,12 +1362,10 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		checkerBy := api.GetUserNameFromCtx(r.Context())
-		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		ctx := r.Context()
 		ctx := r.Context()
 
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
@@ -1452,21 +1423,7 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrTxStartFailed)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
-		}
-		defer tx.Rollback(ctx)
-
 		query := `UPDATE auditactionglaccount SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE gl_account_id = ANY($3) RETURNING action_id, gl_account_id, actiontype`
-		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToApprove)
 		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToApprove)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to approve GL account actions")
@@ -1495,7 +1452,6 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(deleteIDs) > 0 {
 			updQ := `UPDATE masterglaccount SET is_deleted=true WHERE gl_account_id = ANY($1)`
 			if _, err := tx.Exec(ctx, updQ, deleteIDs); err != nil {
-			if _, err := tx.Exec(ctx, updQ, deleteIDs); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to set is_deleted: "+err.Error())
 				return
 			}
@@ -1506,16 +1462,6 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
 		if !success {
 			resp["message"] = constants.ErrNoRowsUpdated
-		}
-		if err := tx.Commit(ctx); err != nil {
-			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrCommitFailedCapitalized)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrCommitFailedCapitalized)
@@ -1549,7 +1495,6 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userName := api.GetUserNameFromCtx(r.Context())
 		userName := api.GetUserNameFromCtx(r.Context())
 		if userName == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
@@ -1867,7 +1812,6 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		userName := api.GetUserNameFromCtx(r.Context())
-		userName := api.GetUserNameFromCtx(r.Context())
 		if userName == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -2105,7 +2049,6 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			logger.LogInfo("UploadGLAccountSimple: COPY inserted %d rows in %v", len(copyRowsMaster), time.Since(tStartCopy))
-			logger.LogInfo("UploadGLAccountSimple: COPY inserted %d rows in %v", len(copyRowsMaster), time.Since(tStartCopy))
 
 			// Collect gl_account_code values we inserted to look up IDs for audit
 			codes := make([]string, 0, len(copyRowsMaster))
@@ -2150,11 +2093,9 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Run sync + audit async
 			go func(codesForAudit []string) {
 				ctx2 := r.Context()
-				ctx2 := r.Context()
 				// open a new transaction for sync and audit
 				tx2, err := pgxPool.Begin(ctx2)
 				if err != nil {
-					logger.LogError("UploadGLAccountSimple: async sync begin failed: %v", err)
 					logger.LogError("UploadGLAccountSimple: async sync begin failed: %v", err)
 					return
 				}
@@ -2200,7 +2141,6 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`
 				if _, err := tx2.Exec(ctx2, syncSQL); err != nil {
 					logger.LogError("UploadGLAccountSimple: async sync failed: %v", err)
-					logger.LogError("UploadGLAccountSimple: async sync failed: %v", err)
 					return
 				}
 
@@ -2208,18 +2148,15 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					auditSQL := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT gl_account_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterglaccount WHERE gl_account_code = ANY($2)`
 					if _, err := tx2.Exec(ctx2, auditSQL, userName, codesForAudit); err != nil {
 						logger.LogError("UploadGLAccountSimple: async audit insert failed: %v", err)
-						logger.LogError("UploadGLAccountSimple: async audit insert failed: %v", err)
 						// continue to commit/close
 					}
 				}
 
 				if err := tx2.Commit(ctx2); err != nil {
 					logger.LogError("UploadGLAccountSimple: async commit failed: %v", err)
-					logger.LogError("UploadGLAccountSimple: async commit failed: %v", err)
 					return
 				}
 				tx2 = nil
-				logger.LogInfo("UploadGLAccountSimple: async sync+audit finished for %d codes", len(codesForAudit))
 				logger.LogInfo("UploadGLAccountSimple: async sync+audit finished for %d codes", len(codesForAudit))
 			}(newCodes)
 		}
