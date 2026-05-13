@@ -536,6 +536,9 @@ type SimulateCashflowRequest struct {
 	// and all subsequent value_dates of that event type are shifted by the same offset.
 	FirstPayoutDate         *string `json:"first_payout_date,omitempty"`
 	FirstCapitalizationDate *string `json:"first_capitalization_date,omitempty"`
+	// ResetType for COMPOUND FDs: "AT_EACH_PAYOUT" resets principal to original after each
+	// interest receipt; "AT_MATURITY" (default) compounds continuously.
+	ResetType *string `json:"reset_type,omitempty"`
 }
 
 // SimulateCashflowResponse is what the handler returns.
@@ -614,6 +617,7 @@ type SimulatedCashflowRow struct {
 	AccrRevK          float64 `json:"accr_rev_k"`                  // cumulative prior accruals reversed into payout
 	TDSRevL           float64 `json:"tds_rev_l"`                   // TDS on AccrRevK
 	ProvisionalTDS    float64 `json:"provisional_tds"`             // indicative TDS on this period's accrual (= InterestAccrued × TDSRate/100)
+	NetAmount         float64 `json:"net_amount,omitempty"`        // CO: J(latestCap) for cap/maturity rows; G for payout rows
 	AccrualFrequency  string  `json:"accrual_frequency,omitempty"`  // interest_payout_frequency / compounding_frequency
 	DayCountCode      string  `json:"day_count_code,omitempty"`
 	Divisor           int     `json:"divisor,omitempty"`
@@ -815,6 +819,9 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 		if cd, cerr := time.Parse(constants.DateFormat, *req.FirstCapitalizationDate); cerr == nil {
 			fd.FirstCapitalizationDate = cd
 		}
+	}
+	if req.ResetType != nil && *req.ResetType != "" {
+		fd.ResetType = strings.ToUpper(strings.TrimSpace(*req.ResetType))
 	}
 	rawRows = applyFirstPayoutDateOverride(rawRows, fd)
 
@@ -1102,6 +1109,7 @@ func cashflowRowToSim(row CashflowRow) SimulatedCashflowRow {
 		CumulativeInterestFY:    row.CumulativeInterestFY,
 		CumulativeTDSFY:         row.CumulativeTDSFY,
 		CumulativeInterestTotal: row.CumulativeInterestTotal,
+		NetAmount:               row.NetAmount,
 	}
 }
 
