@@ -209,9 +209,6 @@ func validateBankConfigFields(input BankConfigInput) error {
 	if strings.TrimSpace(input.DayCountCode) == "" {
 		return fmt.Errorf(constants.ErrDayCountCodeRequired)
 	}
-	if strings.TrimSpace(input.HolidayCalendarCode) == "" {
-		return fmt.Errorf("holiday_calendar_code is required")
-	}
 	if strings.TrimSpace(input.CapitalizationScheduleType) == "" {
 		return fmt.Errorf("capitalization_schedule_type is required")
 	}
