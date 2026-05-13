@@ -118,9 +118,9 @@ func validateMasterFields(moduleCode, approvalOrder string, minAmount, maxAmount
 }
 
 func validateEyeFields(eyeCount, position int, slaHours *int) error {
-	// if eyeCount != 2 && eyeCount != 4 && eyeCount != 6 {
-	// 	return errors.New("eye_count must be 2, 4, or 6")
-	// }
+	// eye_count is auto-normalised by CreateApprovalMatrix to match the DB check
+	// constraint (2/4/6). We no longer reject odd member counts up-front, the
+	// only hard rules are: 1 ≤ members ≤ 5 and escalation requires an approver.
 	if position < 1 {
 		return errors.New("position must be >= 1")
 	}
@@ -128,6 +128,19 @@ func validateEyeFields(eyeCount, position int, slaHours *int) error {
 		return errors.New("sla_hours must be > 0")
 	}
 	return nil
+}
+
+// normaliseEyeCount rounds an actual member count (1..5) up to the smallest
+// value the uam_appr_eye_count_chk check constraint accepts (2, 4, or 6).
+func normaliseEyeCount(memberCount int) int {
+	switch {
+	case memberCount <= 2:
+		return 2
+	case memberCount <= 4:
+		return 4
+	default:
+		return 6
+	}
 }
 
 func validateMemberFields(memberType, assignmentType string, roleID, userID *string, slotOrder int) error {
@@ -190,6 +203,7 @@ type MatrixDetail struct {
 	MatrixID        string   `json:"matrix_id"`
 	ModuleCode      string   `json:"module_code"`
 	EntityCode      string   `json:"entity_code"`
+	EntityName      string   `json:"entity_name"`
 	TransactionType string   `json:"transaction_type"`
 	MinAmount       *float64 `json:"min_amount"`
 	MaxAmount       *float64 `json:"max_amount"`
@@ -367,19 +381,23 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("eye[%d]: %s", i, err.Error()))
 				return
 			}
-			// Ensure every slot is filled: members count must equal eye_count
+			// New rules:
+			//   - Each eye must have between 1 and 5 members
+			//   - If the eye contains ESCALATION member(s) it must also contain at least 1 APPROVER member
+			//   - eye_count is auto-normalised below to a value the DB check constraint accepts (2/4/6)
 			if len(eye.Members) == 0 {
 				api.RespondWithError(w, http.StatusBadRequest,
-					fmt.Sprintf("eye[%d] (position %d): eye_count is %d but 0 members provided — every slot must have an assigned person",
-						i, eye.Position, eye.EyeCount))
+					fmt.Sprintf("eye[%d] (position %d): at least 1 member is required",
+						i, eye.Position))
 				return
 			}
-			if len(eye.Members) != eye.EyeCount {
+			if len(eye.Members) > 5 {
 				api.RespondWithError(w, http.StatusBadRequest,
-					fmt.Sprintf("eye[%d] (position %d): eye_count is %d but %d member(s) provided — all %d slots must be filled",
-						i, eye.Position, eye.EyeCount, len(eye.Members), eye.EyeCount))
+					fmt.Sprintf("eye[%d] (position %d): a maximum of 5 members is allowed (got %d)",
+						i, eye.Position, len(eye.Members)))
 				return
 			}
+			hasApprover, hasEscalation := false, false
 			for j, m := range eye.Members {
 				if m.SlotOrder == 0 {
 					req.Eyes[i].Members[j].SlotOrder = 1
@@ -388,11 +406,25 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("eye[%d].member[%d]: %s", i, j, err.Error()))
 					return
 				}
+				switch m.MemberType {
+				case "APPROVER":
+					hasApprover = true
+				case "ESCALATION":
+					hasEscalation = true
+				}
 				// Collect user_ids for existence check
 				if (m.AssignmentType == "USER_ONLY" || m.AssignmentType == "ROLE_USER") && m.UserID != nil && *m.UserID != "" {
 					allUserIDs = append(allUserIDs, *m.UserID)
 				}
 			}
+			if hasEscalation && !hasApprover {
+				api.RespondWithError(w, http.StatusBadRequest,
+					fmt.Sprintf("eye[%d] (position %d): an ESCALATION eye must contain at least one APPROVER member (role/user) in addition to its ESCALATION member(s)",
+						i, eye.Position))
+				return
+			}
+			// Normalise eye_count so it satisfies uam_appr_eye_count_chk (2/4/6).
+			req.Eyes[i].EyeCount = normaliseEyeCount(len(eye.Members))
 		}
 
 		ctx := r.Context()
@@ -1208,7 +1240,9 @@ func GetApprovalMatrixAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			GROUP BY matrix_id
 		)
 		SELECT
-			m.matrix_id, m.module_code, m.entity_code, m.transaction_type,
+			m.matrix_id, m.module_code, m.entity_code,
+			COALESCE(me.entity_name,'')       AS entity_name,
+			m.transaction_type,
 			m.min_amount, m.max_amount, m.description, m.approval_order,
 			m.sla_hours, m.is_active,
 			COALESCE(l.processing_status,'')  AS processing_status,
@@ -1235,6 +1269,10 @@ func GetApprovalMatrixAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		LEFT JOIN latest_audit l ON l.matrix_id = m.matrix_id
 		LEFT JOIN audit_history h ON h.matrix_id = m.matrix_id
 		LEFT JOIN eye_summary e   ON e.matrix_id = m.matrix_id
+		-- entity_name is fetched by matching the approval matrix's entity_code
+		-- against masterentitycash.entity_id. We do NOT filter by is_deleted
+		-- here, so historical/soft-deleted entities still resolve to a name.
+		LEFT JOIN public.masterentitycash me ON me.entity_id = m.entity_code
 		WHERE m.is_deleted=false`
 
 		var whereParts []string
@@ -1339,7 +1377,9 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamptz),COALESCE(checker_at,'1970-01-01'::timestamptz)) DESC
 				LIMIT 1
 			)
-			SELECT m.matrix_id, m.module_code, m.entity_code, m.transaction_type,
+			SELECT m.matrix_id, m.module_code, m.entity_code,
+				COALESCE(me.entity_name,'') AS entity_name,
+				m.transaction_type,
 				m.min_amount, m.max_amount, m.description, m.approval_order, m.sla_hours, m.is_active,
 				COALESCE(la.processing_status,''),
 				COALESCE(la.checker_by,''), COALESCE(la.checker_at,''), COALESCE(la.checker_comment,''),
@@ -1352,9 +1392,10 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM uam.approval_matrix_master m
 			CROSS JOIN audit_history h
 			LEFT JOIN latest_audit la ON true
+			LEFT JOIN public.masterentitycash me ON me.entity_id = m.entity_code
 			WHERE m.matrix_id=$1 AND m.is_deleted=false`, matrixID,
 		).Scan(
-			&detail.MatrixID, &detail.ModuleCode, &detail.EntityCode, &detail.TransactionType,
+			&detail.MatrixID, &detail.ModuleCode, &detail.EntityCode, &detail.EntityName, &detail.TransactionType,
 			&detail.MinAmount, &detail.MaxAmount, &detail.Description, &detail.ApprovalOrder,
 			&detail.SlaHours, &detail.IsActive,
 			&processingStatus, &checkerBy, &checkerAt, &checkerComment,
@@ -1865,7 +1906,9 @@ func GetApprovedActiveMatrices(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		baseQ := `
-			SELECT m.matrix_id, m.module_code, m.entity_code, m.transaction_type,
+			SELECT m.matrix_id, m.module_code, m.entity_code,
+				COALESCE(me.entity_name,'') AS entity_name,
+				m.transaction_type,
 				m.min_amount, m.max_amount, m.approval_order, m.sla_hours, m.is_active,
 				MAX(CASE WHEN a.action_type='CREATE' THEN a.requested_by END) AS created_by,
 				MAX(CASE WHEN a.action_type='CREATE' THEN TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
@@ -1873,6 +1916,7 @@ func GetApprovedActiveMatrices(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				MAX(CASE WHEN a.action_type='EDIT'   THEN TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at
 			FROM uam.approval_matrix_master m
 			INNER JOIN uam.audit_approval_matrix_master a ON a.matrix_id=m.matrix_id
+			LEFT JOIN public.masterentitycash me ON me.entity_id = m.entity_code
 			WHERE a.processing_status='APPROVED' AND m.is_active=true AND m.is_deleted=false`
 
 		var whereParts []string
@@ -1899,7 +1943,7 @@ func GetApprovedActiveMatrices(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(whereParts) > 0 {
 			fullQ += " " + strings.Join(whereParts, " ")
 		}
-		fullQ += " GROUP BY m.matrix_id, m.module_code, m.entity_code, m.transaction_type, m.min_amount, m.max_amount, m.approval_order, m.sla_hours, m.is_active"
+		fullQ += " GROUP BY m.matrix_id, m.module_code, m.entity_code, me.entity_name, m.transaction_type, m.min_amount, m.max_amount, m.approval_order, m.sla_hours, m.is_active"
 		fullQ += " ORDER BY m.entity_code, m.transaction_type, m.min_amount"
 
 		rows, err := pgxPool.Query(ctx, fullQ, args...)
@@ -1954,6 +1998,15 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if len(req.Members) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "at least 1 member is required")
+			return
+		}
+		if len(req.Members) > 5 {
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("a maximum of 5 members is allowed (got %d)", len(req.Members)))
+			return
+		}
+		hasApprover, hasEscalation := false, false
 		for i, m := range req.Members {
 			if m.SlotOrder == 0 {
 				req.Members[i].SlotOrder = 1
@@ -1962,7 +2015,19 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("member[%d]: %s", i, err.Error()))
 				return
 			}
+			switch m.MemberType {
+			case "APPROVER":
+				hasApprover = true
+			case "ESCALATION":
+				hasEscalation = true
+			}
 		}
+		if hasEscalation && !hasApprover {
+			api.RespondWithError(w, http.StatusBadRequest,
+				"an ESCALATION eye must contain at least one APPROVER member (role/user) in addition to its ESCALATION member(s)")
+			return
+		}
+		req.EyeCount = normaliseEyeCount(len(req.Members))
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
