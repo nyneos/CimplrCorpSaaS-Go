@@ -168,6 +168,29 @@ func resolveFDBookingAccountColumn(ctx context.Context, exec fdSchemaQueryExecut
 	return pickFirstExistingFDColumn(columns, "source_account_id", "bank_account_id", "account_id", "bank_account"), nil
 }
 
+// fdConfirmationHasUploadS3Key returns true when investment.fd_confirmation
+// currently has the upload_s3_key column. The deployment target sometimes ships
+// without that column (the file-upload feature is optional / behind a later
+// migration), so every query that touches it must guard against its absence.
+func fdConfirmationHasUploadS3Key(ctx context.Context, exec fdSchemaQueryExecutor) bool {
+	columns, err := loadFDTableColumns(ctx, exec, "investment", "fd_confirmation")
+	if err != nil {
+		return false
+	}
+	return columns["upload_s3_key"]
+}
+
+// resolveFDConfirmationUploadKeyExpression returns a SELECT-list expression
+// that yields the upload_s3_key value when the column exists in the live
+// database, or an empty string literal otherwise. The returned snippet is
+// safe to embed inline (it already includes the `AS upload_s3_key` alias).
+func resolveFDConfirmationUploadKeyExpression(ctx context.Context, exec fdSchemaQueryExecutor, tableAlias string) string {
+	if fdConfirmationHasUploadS3Key(ctx, exec) {
+		return fmt.Sprintf("COALESCE(%s.upload_s3_key,'') AS upload_s3_key", tableAlias)
+	}
+	return "''::text AS upload_s3_key"
+}
+
 func resolveFDBookingAccountExpression(ctx context.Context, exec fdSchemaQueryExecutor, tableAlias string) (string, error) {
 	columnName, err := resolveFDBookingAccountColumn(ctx, exec)
 	if err != nil {

@@ -489,6 +489,12 @@ func GetFDConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "confirmation_id required")
 			return
 		}
+		// Guard against deployments where upload_s3_key column was never added
+		// — without this the SELECT below would return SQLSTATE 42703 to the user.
+		if !fdConfirmationHasUploadS3Key(r.Context(), pgxPool) {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
 		var uploadS3Key sql.NullString
 		if err := pgxPool.QueryRow(r.Context(), `
 			SELECT upload_s3_key
@@ -535,9 +541,15 @@ func GetFDConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		files := make([]map[string]string, 0, len(req.ConfirmationIDs))
 		failedIDs := make([]string, 0)
+		// Skip the entire SELECT loop when the column doesn't exist in the live DB.
+		hasUploadKey := fdConfirmationHasUploadS3Key(r.Context(), pgxPool)
 		for _, rawID := range req.ConfirmationIDs {
 			confirmationID := strings.TrimSpace(rawID)
 			if confirmationID == "" {
+				continue
+			}
+			if !hasUploadKey {
+				failedIDs = append(failedIDs, confirmationID)
 				continue
 			}
 			var uploadS3Key sql.NullString
@@ -1351,19 +1363,40 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
+		// Build the entity_id / principal SELECT expressions dynamically — these
+		// columns existed on older fd_confirmation schemas as fallbacks but were
+		// dropped on some deployments. Without runtime detection the query
+		// returns SQLSTATE 42703 (column does not exist).
+		confCols, err := loadFDTableColumns(ctx, pgxPool, "investment", "fd_confirmation")
+		if err != nil {
+			msg, status := getUserFriendlyFDError(err, "Load confirmation schema failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		entityIDExpr := "COALESCE(b.entity_id,'')"
+		if confCols["entity_id"] {
+			entityIDExpr = "COALESCE(c.entity_id, b.entity_id, '')"
+		}
+		principalExpr := "COALESCE(c.actual_principal,0)"
+		if confCols["confirmed_principal_amount"] {
+			principalExpr = "COALESCE(c.actual_principal, c.confirmed_principal_amount, 0)"
+		}
+
 		// Fetch confirmation state — LEFT JOIN so confirmations without a matching
 		// booking row (e.g. directly-created VRN-* entries) still resolve correctly.
-		// entity_id is taken from fd_confirmation first, falling back to the booking.
+		// entity_id is taken from fd_confirmation first (when that column exists),
+		// falling back to the booking row.
 		var currentStatus, bookingID, entityID string
 		var confPrincipal float64
-		err := pgxPool.QueryRow(ctx, `
+		err = pgxPool.QueryRow(ctx, fmt.Sprintf(`
 			SELECT c.confirmation_status,
 			       COALESCE(c.booking_id,''),
-			       COALESCE(c.entity_id, b.entity_id, ''),
-			       COALESCE(c.actual_principal, c.confirmed_principal_amount, 0)
+			       %s,
+			       %s
 			FROM investment.fd_confirmation c
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false`,
+			entityIDExpr, principalExpr),
 			req.ConfirmationID,
 		).Scan(&currentStatus, &bookingID, &entityID, &confPrincipal)
 		if err != nil {
@@ -1879,6 +1912,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		uploadKeyExpr := resolveFDConfirmationUploadKeyExpression(ctx, pgxPool, "c")
 
 		q := fmt.Sprintf(`
 			WITH latest_audit AS (
@@ -1944,7 +1978,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.penalty_id,'')                                              AS penalty_id,
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
 				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')        AS first_capitalization_date,
-				COALESCE(c.upload_s3_key,'')                                           AS upload_s3_key,
+				%s,
 				COALESCE(c.is_deleted,false)                                           AS is_deleted,
 				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')           AS record_created_at,
 
@@ -1996,7 +2030,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY GREATEST(
 				COALESCE(l.requested_at,'1970-01-01'::timestamp),
 				COALESCE(l.checker_at,'1970-01-01'::timestamp)
-			) DESC`, bookingAccountExpr)
+			) DESC`, bookingAccountExpr, uploadKeyExpr)
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
@@ -2291,6 +2325,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		uploadKeyExpr := resolveFDConfirmationUploadKeyExpression(ctx, pgxPool, "c")
 
 		// ── Confirmation row ─────────────────────────────────────────────────
 		confRows, err := pgxPool.Query(ctx, fmt.Sprintf(`
@@ -2324,11 +2359,11 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.is_deleted,false)                                           AS is_deleted,
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
 				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')        AS first_capitalization_date,
-				COALESCE(c.upload_s3_key,'')                                           AS upload_s3_key,
+				%s,
 				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')            AS record_created_at
 			FROM investment.fd_confirmation c
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
-			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false`, bookingAccountExpr),
+			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false`, bookingAccountExpr, uploadKeyExpr),
 			confirmationID)
 		if err != nil {
 			msg, httpStatus := getUserFriendlyFDError(err, constants.ErrQueryFailed)
