@@ -2460,25 +2460,58 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 					if dueNotAccrued < 0 {
 						dueNotAccrued = 0
 					}
+
+					// RECEIPT-mode TDS: deduct at every INTEREST_RECEIPT when the payout
+					// crosses the threshold. Phase A deliberately deferred (tdsThisPeriod = 0)
+					// at CAPITALIZATION for RECEIPT mode — this is where it lands.
+					// ACCRUAL/ACCRUAL_ANNUAL/MATURITY-mode TDS is already handled in Phase A
+					// cap rows or at the final maturity emission, so this gate intentionally
+					// fires only for RECEIPT — guarantees no double-count.
+					intermediateTDS := 0.0
+					if hasTDS && tdsCfg != nil && normTiming == "RECEIPT" && payoutG >= tdsCfg.ThresholdAmount {
+						intermediateTDS = applyRounding(payoutG*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, false)
+					}
+
+					payoutVD := resolveValueDate("INTEREST_RECEIPT", payoutDate, cfg, calInfo)
 					seq++
 					rows = append(rows, CashflowRow{
 						PeriodNumber:    seq,
 						EventType:       "INTEREST_RECEIPT",
 						EventDate:       payoutDate,
-						ValueDate:       resolveValueDate("INTEREST_RECEIPT", payoutDate, cfg, calInfo),
+						ValueDate:       payoutVD,
 						CashflowType:    "INFLOW",
 						PeriodStartDate: lastPayout,
 						PeriodEndDate:   payoutDate,
 						PeriodDays:      periodDays,
 						InterestAccrued: payoutG,
-						TDSAmount:       0,
-						NetCashFlow:     payoutG,
+						TDSAmount:       intermediateTDS,
+						NetCashFlow:     payoutG - intermediateTDS,
 						NetAmount:       payoutG,
 						AccrRevK:        accrRevK,
 						TDSRevL:         tdsRevL,
 						DueNotAccrued:   dueNotAccrued,
 						DayCountCode:    effectiveDayCountCode,
 					})
+
+					// Emit matching TDS_DEDUCTION row when TDS was taken (mirrors SI path).
+					if intermediateTDS > 0 {
+						seq++
+						rows = append(rows, CashflowRow{
+							PeriodNumber:     seq,
+							EventType:        "TDS_DEDUCTION",
+							EventDate:        payoutDate,
+							ValueDate:        payoutVD,
+							CashflowType:     "OUTFLOW",
+							PeriodStartDate:  lastPayout,
+							PeriodEndDate:    payoutDate,
+							OpeningPrincipal: fd.PrincipalAmount,
+							TDSAmount:        intermediateTDS,
+							NetCashFlow:      -intermediateTDS,
+							ClosingPrincipal: fd.PrincipalAmount,
+							DayCountCode:     effectiveDayCountCode,
+							FormulaUsed:      fmt.Sprintf("TDS_RECEIPT = %.2f × %.4f%%", payoutG, tdsCfg.TDSRate),
+						})
+					}
 				}
 				lastPayout = payoutDate
 				lastPayoutEndDate = payoutDate
