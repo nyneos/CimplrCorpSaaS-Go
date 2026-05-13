@@ -24,3 +24,6 @@ api/investment/fdMaster/cashflow_golden_test.go
 
 # Golden test data
 api/investment/fdMaster/testdata/
+
+bin/
+setup_fd_notifications.py

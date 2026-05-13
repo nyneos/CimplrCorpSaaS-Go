@@ -78,7 +78,11 @@ func stampCumulativeFields(rows []CashflowRow, fd *FDRecord, tdsRate float64) []
 			fyTDS = 0
 			currentFY = fy
 		}
-		if rows[i].EventType == "ACCRUAL" || rows[i].EventType == "INTEREST_RECEIPT" {
+		// Interest is realized on INTEREST_RECEIPT, MATURITY, and CAPITALIZATION rows.
+		// ACCRUAL is pre-recognition bookkeeping — including it would double-count the receipt.
+		if rows[i].EventType == "INTEREST_RECEIPT" ||
+			rows[i].EventType == "MATURITY" ||
+			rows[i].EventType == "CAPITALIZATION" {
 			fyInterest += rows[i].InterestAccrued
 			totalInterest += rows[i].InterestAccrued
 		}

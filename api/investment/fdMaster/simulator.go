@@ -1210,8 +1210,13 @@ func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 			s.TotalTDSDeducted += row.TDSAmount
 		case "MATURITY":
 			s.MaturityAmount = row.NetCashFlow
-			// InterestAccrued on MATURITY == final cap-period interest, already
-			// counted above. TDS already in TDS_DEDUCTION. Nothing to add.
+			// For SI payout FDs, the final period ends as MATURITY (not INTEREST_RECEIPT).
+			// Its interest has NOT been counted by any other case — add it now.
+			// For COMPOUND FDs, CAPITALIZATION rows already summed all interest; skip.
+			if !isCompound && row.InterestAccrued > 0 {
+				s.TotalInterestAccrued += row.InterestAccrued
+				s.InterestReceiptCount++
+			}
 		case "GRACE_PERIOD":
 			s.TotalInterestAccrued += row.InterestAccrued
 		}
