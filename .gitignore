@@ -12,3 +12,15 @@ SSO_MFA_INTEGRATION_CONTEXT.md
 *.bak
 
 *.exe
+# Excel scenarios
+FD_Scenarios_v1.3 (1).xlsx
+
+# Temp/debug docs
+api/fix.MD
+context.MD
+
+# Golden parity tests
+api/investment/fdMaster/cashflow_golden_test.go
+
+# Golden test data
+api/investment/fdMaster/testdata/
