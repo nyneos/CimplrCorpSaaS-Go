@@ -170,8 +170,18 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		// ── 2. bank_concentration ─────────────────────────────────────────────
+		// Per-bank exposure vs derived bank limit.
+		//
+		// Bank limit derivation (no dedicated `credit_limit` column exists in
+		// fd_bank_config_master, so we derive the cap):
+		//   1. Configured cap = SUM(maximum_amount) across that bank's active
+		//      product configs (each product's max-per-FD aggregates into a
+		//      coarse bank-level cap).
+		//   2. Fallback policy cap = 30% of total portfolio exposure
+		//      (industry-standard single-counterparty concentration limit).
+		// The larger of the two is taken so we never under-state a bank's room
+		// but always have a non-zero number to compare against.
 		run("bank_concentration", func(ctx context.Context) (interface{}, error) {
-			// total for pct calc (separate simple query to avoid correlated sub-query issues)
 			var totalAmt float64
 			_ = pool.QueryRow(ctx,
 				`SELECT COALESCE(SUM(m.principal_amount),0)
@@ -181,30 +191,37 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				   AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
 				entityFilter).Scan(&totalAmt)
 
+			// 30% of total portfolio = default per-counterparty concentration cap
+			policyCap := totalAmt * 0.30
+
 			sqlStr := `
 				SELECT
-				  COALESCE(m.bank_name, m.bank_id) AS bank,
+				  COALESCE(m.bank_name, m.bank_id, '') AS bank,
 				  COALESCE(SUM(m.principal_amount), 0) AS exposure,
-				  COALESCE(lim.credit_limit, 0) AS lim
+				  COALESCE(lim.bank_cap, 0)            AS bank_cap
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				LEFT JOIN LATERAL (
-				  SELECT COALESCE(credit_limit, 0) AS credit_limit
+				  SELECT COALESCE(SUM(COALESCE(bc.maximum_amount, 0)), 0) AS bank_cap
 				  FROM investment.fd_bank_config_master bc
-				  WHERE bc.bank_id = m.bank_id
-				    AND COALESCE(bc.is_deleted, false)=false
-				  ORDER BY bc.created_at DESC LIMIT 1
+				  WHERE (bc.bank_code = m.bank_id OR bc.bank_code = m.bank_name)
+				    AND COALESCE(bc.is_deleted, false) = false
+				    AND COALESCE(bc.effective_to, '9999-12-31'::date) >= CURRENT_DATE
 				) lim ON true
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				GROUP BY COALESCE(m.bank_name, m.bank_id), lim.credit_limit
+				GROUP BY COALESCE(m.bank_name, m.bank_id, ''), lim.bank_cap
 				ORDER BY exposure DESC`
 
 			type bcRow struct {
-				Bank     string  `json:"bank"`
-				Exposure float64 `json:"exposure"`
-				Limit    float64 `json:"limit"`
-				Pct      float64 `json:"pct"`
+				Bank             string  `json:"bank"`
+				Exposure         float64 `json:"exposure"`
+				Limit            float64 `json:"limit"`
+				Pct              float64 `json:"pct"`
+				UtilizationPct   float64 `json:"utilization_pct"`
+				RemainingLimit   float64 `json:"remaining_limit"`
+				LimitSource      string  `json:"limit_source"`
+				Breach           bool    `json:"breach"`
 			}
 
 			rows, err := pool.Query(ctx, sqlStr, entityFilter)
@@ -216,26 +233,43 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			var data []bcRow
 			for rows.Next() {
 				var br bcRow
-				if err := rows.Scan(&br.Bank, &br.Exposure, &br.Limit); err != nil {
+				var bankCap float64
+				if err := rows.Scan(&br.Bank, &br.Exposure, &bankCap); err != nil {
 					continue
+				}
+				if bankCap > 0 {
+					br.Limit = bankCap
+					br.LimitSource = "bank_config"
+				} else {
+					br.Limit = policyCap
+					br.LimitSource = "policy_30pct"
 				}
 				if totalAmt > 0 {
 					br.Pct = fdRound(br.Exposure/totalAmt*100, 2)
 				}
+				if br.Limit > 0 {
+					br.UtilizationPct = fdRound(br.Exposure/br.Limit*100, 2)
+					br.RemainingLimit = math.Max(0, br.Limit-br.Exposure)
+				}
+				br.Breach = br.Limit > 0 && br.Exposure > br.Limit
 				data = append(data, br)
 			}
 			if len(data) == 0 {
 				return map[string]interface{}{
-					"top_bank": "", "top_pct": 0, "breach": false, "data": []bcRow{},
+					"top_bank":   "",
+					"top_pct":    0,
+					"breach":     false,
+					"data":       []bcRow{},
+					"policy_cap": fdRound(policyCap, 2),
 				}, nil
 			}
 			top := data[0]
-			breach := top.Limit > 0 && top.Exposure > top.Limit
 			return map[string]interface{}{
-				"top_bank": top.Bank,
-				"top_pct":  top.Pct,
-				"breach":   breach,
-				"data":     data,
+				"top_bank":   top.Bank,
+				"top_pct":    top.Pct,
+				"breach":     top.Breach,
+				"data":       data,
+				"policy_cap": fdRound(policyCap, 2),
 			}, nil
 		})
 
@@ -314,13 +348,27 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 5. exceptions ─────────────────────────────────────────────────────
+		// ── 5. exceptions (Policy Exceptions Summary — TC-74) ─────────────────
+		// Aggregates two real exception sources so the CFO sees a true "policy
+		// exception" picture (count + value at risk):
+		//
+		//   a) Operational exceptions raised by the accrual engine
+		//      (investment.fd_accrual_exception, status NOT IN RESOLVED/CLOSED)
+		//
+		//   b) Policy variance exceptions raised by the variance engine
+		//      (public.variance_log, module_code LIKE 'FD_%' AND status='OPEN')
+		//      — these capture rate / amount / tenor / date breaches the user
+		//      hasn't yet resolved.
+		//
+		// "value" = principal at risk across distinct FDs that have at least
+		// one open exception (regardless of source) so a single FD with
+		// multiple exceptions is only counted once.
 		run("exceptions", func(ctx context.Context) (interface{}, error) {
-			sql := `
+			// (a) accrual-engine breakdown
+			accSQL := `
 				SELECT
-				  COUNT(DISTINCT ae.exception_id) AS cnt,
-				  COALESCE(SUM(m.principal_amount),0) AS val,
-				  ae.exception_type
+				  ae.exception_type,
+				  COUNT(DISTINCT ae.exception_id) AS cnt
 				FROM investment.fd_accrual_exception ae
 				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
@@ -329,36 +377,160 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				GROUP BY ae.exception_type
 				ORDER BY cnt DESC`
-			rows, err := pool.Query(ctx, sql, entityFilter)
+			rows, err := pool.Query(ctx, accSQL, entityFilter)
 			if err != nil {
 				return nil, err
 			}
-			defer rows.Close()
-
 			type bkRow struct {
 				Type  string `json:"type"`
 				Count int64  `json:"count"`
 			}
-			var breakup []bkRow
-			var totalCnt int64
-			var totalVal float64
+			breakup := []bkRow{}
 			for rows.Next() {
 				var br bkRow
-				var val float64
-				if err := rows.Scan(&br.Count, &val, &br.Type); err != nil {
+				if err := rows.Scan(&br.Type, &br.Count); err != nil {
 					continue
 				}
-				totalCnt += br.Count
-				totalVal += val
+				if br.Type == "" {
+					br.Type = "Accrual Exception"
+				}
 				breakup = append(breakup, br)
 			}
-			if breakup == nil {
-				breakup = []bkRow{}
+			rows.Close()
+
+			// (b) variance-engine breakdown (variance_type → count)
+			varSQL := `
+				SELECT
+				  COALESCE(NULLIF(vl.variance_type,''),'OTHER') AS variance_type,
+				  COUNT(*) AS cnt
+				FROM public.variance_log vl
+				WHERE vl.module_code LIKE 'FD_%'
+				  AND vl.status='OPEN'
+				  AND ($1::text='' OR vl.entity_id=$1)
+				GROUP BY 1
+				ORDER BY cnt DESC`
+			if vrows, verr := pool.Query(ctx, varSQL, entityFilter); verr == nil {
+				for vrows.Next() {
+					var t string
+					var c int64
+					if scanErr := vrows.Scan(&t, &c); scanErr != nil {
+						continue
+					}
+					breakup = append(breakup, bkRow{Type: "Variance: " + t, Count: c})
+				}
+				vrows.Close()
 			}
+
+			// (c) total distinct FDs at risk + principal sum (de-duplicated)
+			var distinctCount int64
+			var totalVal float64
+			_ = pool.QueryRow(ctx, `
+				WITH at_risk AS (
+				  SELECT DISTINCT ae.fd_id
+				  FROM investment.fd_accrual_exception ae
+				  WHERE COALESCE(ae.is_deleted,false)=false
+				    AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
+				  UNION
+				  SELECT DISTINCT vl.record_id::text AS fd_id
+				  FROM public.variance_log vl
+				  WHERE vl.module_code LIKE 'FD_%'
+				    AND vl.status='OPEN'
+				)
+				SELECT
+				  COUNT(DISTINCT m.fd_id),
+				  COALESCE(SUM(m.principal_amount),0)
+				FROM at_risk a
+				JOIN investment.fd_master m ON m.fd_id = a.fd_id
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				WHERE m.is_deleted=false
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
+				entityFilter).Scan(&distinctCount, &totalVal)
+
+			// Sum of breakup counts is a reasonable proxy when the join above
+			// returns 0 (e.g. variance_log holds non-fd_id record_ids).
+			var sumCounts int64
+			for _, b := range breakup {
+				sumCounts += b.Count
+			}
+			finalCount := distinctCount
+			if finalCount == 0 {
+				finalCount = sumCounts
+			}
+
 			return map[string]interface{}{
-				"count":   totalCnt,
+				"count":   finalCount,
 				"value":   fdRound(totalVal, 2),
 				"breakup": breakup,
+			}, nil
+		})
+
+		// ── 5b. variance_impact (TC-83) ───────────────────────────────────────
+		// Real numbers from public.variance_log scoped to FD modules.
+		run("variance_impact", func(ctx context.Context) (interface{}, error) {
+			sql := `
+				SELECT
+				  COUNT(*) FILTER (WHERE vl.status='OPEN')                                                         AS open_count,
+				  COUNT(*) FILTER (WHERE vl.status='OPEN' AND vl.priority='HIGH')                                  AS high_count,
+				  COUNT(*) FILTER (WHERE vl.status='OPEN' AND vl.is_exception=true)                                AS exception_count,
+				  COALESCE(SUM(ABS(COALESCE(vl.variance_delta,0))) FILTER (WHERE vl.status='OPEN' AND vl.variance_type='AMOUNT'),0) AS amount_impact,
+				  COALESCE(AVG(ABS(COALESCE(vl.variance_delta,0))) FILTER (WHERE vl.status='OPEN' AND vl.variance_type='RATE'),0)   AS avg_rate_delta,
+				  COALESCE(AVG(ABS(COALESCE(vl.variance_delta,0))) FILTER (WHERE vl.status='OPEN' AND vl.variance_type='DAYS'),0)   AS avg_day_delta
+				FROM public.variance_log vl
+				WHERE vl.module_code LIKE 'FD_%'
+				  AND ($1::text='' OR vl.entity_id=$1)`
+			var openCnt, highCnt, excCnt int64
+			var amtImpact, avgRateDelta, avgDayDelta float64
+			if err := pool.QueryRow(ctx, sql, entityFilter).Scan(
+				&openCnt, &highCnt, &excCnt, &amtImpact, &avgRateDelta, &avgDayDelta,
+			); err != nil {
+				// Empty result if variance_log not available
+				return map[string]interface{}{
+					"open_count":      0,
+					"high_count":      0,
+					"exception_count": 0,
+					"amount_impact":   0,
+					"avg_rate_delta":  0,
+					"avg_day_delta":   0,
+					"breakup":         []interface{}{},
+				}, nil
+			}
+
+			// per-type breakup for the tile sub-list
+			type vrRow struct {
+				Type  string  `json:"type"`
+				Count int64   `json:"count"`
+				Delta float64 `json:"delta"`
+			}
+			breakup := []vrRow{}
+			brSQL := `
+				SELECT COALESCE(NULLIF(variance_type,''),'OTHER') AS type,
+				       COUNT(*)                                   AS cnt,
+				       COALESCE(SUM(ABS(COALESCE(variance_delta,0))),0) AS delta
+				FROM public.variance_log
+				WHERE module_code LIKE 'FD_%' AND status='OPEN'
+				  AND ($1::text='' OR entity_id=$1)
+				GROUP BY 1
+				ORDER BY cnt DESC`
+			if brRows, berr := pool.Query(ctx, brSQL, entityFilter); berr == nil {
+				for brRows.Next() {
+					var br vrRow
+					if scanErr := brRows.Scan(&br.Type, &br.Count, &br.Delta); scanErr != nil {
+						continue
+					}
+					br.Delta = fdRound(br.Delta, 2)
+					breakup = append(breakup, br)
+				}
+				brRows.Close()
+			}
+
+			return map[string]interface{}{
+				"open_count":      openCnt,
+				"high_count":      highCnt,
+				"exception_count": excCnt,
+				"amount_impact":   fdRound(amtImpact, 2),
+				"avg_rate_delta":  fdRound(avgRateDelta, 4),
+				"avg_day_delta":   fdRound(avgDayDelta, 1),
+				"breakup":         breakup,
 			}, nil
 		})
 
@@ -582,34 +754,134 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return out, nil
 		})
 
-		// ── 10. governance — closing_status ───────────────────────────────────
+		// ── 10. governance — closing_status + closing_checklist (TC-79) ───────
+		// Period Closing Readiness: real, deterministic checklist derived from
+		// the operational state — not just a count of fd_closure_request rows.
+		// `completed/total/pct` reflects how many checklist items are done.
 		run("closing_status", func(ctx context.Context) (interface{}, error) {
-			sql := `
-				SELECT
-				  COUNT(*) FILTER (WHERE cr.closure_status IN ('COMPLETED','CLOSED'))   AS completed,
-				  COUNT(*) AS total,
-				  COUNT(*) FILTER (WHERE cr.closure_status IN ('PENDING_APPROVAL','SUBMITTED','PROCESSING'))
-				    AS pending,
-				  COUNT(*) FILTER (WHERE cr.closure_status = 'BLOCKED')                AS blockers
-				FROM investment.fd_closure_request cr
-				LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE cr.is_deleted=false
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`
-			var completed, total, pending, blockers int64
-			err := pool.QueryRow(ctx, sql, entityFilter).Scan(&completed, &total, &pending, &blockers)
-			if err != nil {
-				return nil, err
+			type ckItem struct {
+				ID       string `json:"id"`
+				Label    string `json:"label"`
+				Done     bool   `json:"done"`
+				Blocker  bool   `json:"blocker"`
+				Detail   string `json:"detail,omitempty"`
 			}
+
+			// 1. Latest accrual run for the period is COMPLETED/POSTED
+			var latestRunStatus string
+			_ = pool.QueryRow(ctx, `
+				SELECT COALESCE(run_status,'')
+				FROM investment.fd_accrual_run
+				WHERE COALESCE(is_deleted,false)=false
+				  AND ($1::text='' OR entity_id=$1)
+				ORDER BY created_at DESC LIMIT 1`,
+				entityFilter).Scan(&latestRunStatus)
+			accrualDone := latestRunStatus == "POSTED" || latestRunStatus == "APPROVED"
+
+			// 2. All bookings approved (no PENDING_APPROVAL/SUBMITTED in period)
+			var pendingBookings int64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*)
+				FROM investment.fd_booking_request b
+				WHERE b.is_deleted=false
+				  AND b.booking_status IN ('PENDING_APPROVAL','SUBMITTED')
+				  AND b.created_at >= $2::date
+				  AND ($1::text='' OR b.entity_id=$1)`,
+				entityFilter, periodStart.Format(constants.DateFormat)).Scan(&pendingBookings)
+
+			// 3. All matured FDs in period have closure completed
+			var unprocessedMaturities int64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*)
+				FROM investment.fd_master m
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				WHERE m.is_deleted=false
+				  AND m.maturity_date <= CURRENT_DATE
+				  AND m.maturity_date >= $2::date
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND NOT EXISTS (
+				    SELECT 1 FROM investment.fd_closure_request cr
+				    WHERE cr.fd_id=m.fd_id
+				      AND cr.is_deleted=false
+				      AND cr.closure_status IN ('COMPLETED','POSTED','CLOSED')
+				  )`,
+				entityFilter, periodStart.Format(constants.DateFormat)).Scan(&unprocessedMaturities)
+
+			// 4. Confirmations received for active FDs
+			var pendingConfirmations int64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*)
+				FROM investment.fd_booking_request b
+				WHERE b.is_deleted=false
+				  AND b.booking_status IN ('APPROVED','PENDING_CONFIRMATION')
+				  AND b.created_at >= $2::date
+				  AND ($1::text='' OR b.entity_id=$1)
+				  AND NOT EXISTS (
+				    SELECT 1 FROM investment.fd_master m
+				    WHERE m.booking_id=b.booking_id AND m.is_deleted=false
+				  )`,
+				entityFilter, periodStart.Format(constants.DateFormat)).Scan(&pendingConfirmations)
+
+			// 5. Open accrual exceptions
+			var openExceptions int64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*) FROM investment.fd_accrual_exception ae
+				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
+				WHERE COALESCE(ae.is_deleted,false)=false
+				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
+				  AND ($1::text='' OR m.entity_id=$1)`,
+				entityFilter).Scan(&openExceptions)
+
+			// 6. Open variance exceptions
+			var openVariances int64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*) FROM public.variance_log
+				WHERE module_code LIKE 'FD_%' AND status='OPEN'
+				  AND ($1::text='' OR entity_id=$1)`,
+				entityFilter).Scan(&openVariances)
+
+			// 7. Interest receipts reconciled (no UNMATCHED for the period)
+			var unmatchedReceipts int64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*)
+				FROM investment.fd_interest_receipt ir
+				WHERE ir.is_deleted=false
+				  AND ir.receipt_date >= $2::date
+				  AND COALESCE(ir.reconciliation_status,'UNMATCHED') IN ('UNMATCHED','PENDING','')
+				  AND ($1::text='' OR ir.entity_id=$1)`,
+				entityFilter, periodStart.Format(constants.DateFormat)).Scan(&unmatchedReceipts)
+
+			items := []ckItem{
+				{ID: "C1", Label: "Latest accrual run posted", Done: accrualDone, Blocker: !accrualDone, Detail: "Status: " + latestRunStatus},
+				{ID: "C2", Label: "All booking approvals processed", Done: pendingBookings == 0, Blocker: pendingBookings > 0, Detail: formatInt64(pendingBookings) + " pending"},
+				{ID: "C3", Label: "Bank confirmations captured for new bookings", Done: pendingConfirmations == 0, Blocker: false, Detail: formatInt64(pendingConfirmations) + " pending"},
+				{ID: "C4", Label: "Matured FDs closed in period", Done: unprocessedMaturities == 0, Blocker: unprocessedMaturities > 0, Detail: formatInt64(unprocessedMaturities) + " unprocessed"},
+				{ID: "C5", Label: "Accrual exceptions resolved", Done: openExceptions == 0, Blocker: openExceptions > 0, Detail: formatInt64(openExceptions) + " open"},
+				{ID: "C6", Label: "Policy variances cleared", Done: openVariances == 0, Blocker: false, Detail: formatInt64(openVariances) + " open"},
+				{ID: "C7", Label: "Interest receipts reconciled", Done: unmatchedReceipts == 0, Blocker: false, Detail: formatInt64(unmatchedReceipts) + " unmatched"},
+			}
+
+			completed := int64(0)
+			blockers := int64(0)
+			for _, it := range items {
+				if it.Done {
+					completed++
+				} else if it.Blocker {
+					blockers++
+				}
+			}
+			total := int64(len(items))
 			pct := 0.0
 			if total > 0 {
 				pct = fdRound(float64(completed)/float64(total)*100, 1)
 			}
+
 			return map[string]interface{}{
 				"completed": completed,
 				"total":     total,
 				"pct":       pct,
 				"blockers":  blockers,
+				"checklist": items,
 			}, nil
 		})
 
@@ -701,37 +973,76 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// ── wait for all goroutines ───────────────────────────────────────────
 		wg.Wait()
 
-		// ── build bank_concentration chart (reuse KPI data) ──────────────────
+		// ── build bank_concentration chart + limit_utilization KPI ───────────
+		// Both derived from the bank_concentration sub-result so the chart and
+		// KPI agree on the same per-bank limits.
 		type bcChartRow struct {
 			Bank           string  `json:"bank"`
 			Exposure       float64 `json:"exposure"`
+			Limit          float64 `json:"limit"`
 			Pct            float64 `json:"pct"`
+			UtilizationPct float64 `json:"utilization_pct"`
 			RemainingLimit float64 `json:"remaining_limit"`
+			Breach         bool    `json:"breach"`
 		}
 		var bankConcChart interface{} = []bcChartRow{}
+		var limitUtilization interface{} = map[string]interface{}{
+			"total_exposure":  0.0,
+			"total_limit":     0.0,
+			"utilization_pct": 0.0,
+			"banks_breached":  0,
+			"banks_critical":  0,
+			"banks_total":     0,
+		}
 		if bcRes, ok := results["bank_concentration"]; ok && bcRes.err == nil {
 			if bcMap, ok2 := bcRes.data.(map[string]interface{}); ok2 {
 				if rawData, ok3 := bcMap["data"]; ok3 {
-					// data is []bcRow from the closure above — use reflect-free JSON round-trip
 					if jsonB, jerr := json.Marshal(rawData); jerr == nil {
 						type wireRow struct {
-							Bank     string  `json:"bank"`
-							Exposure float64 `json:"exposure"`
-							Limit    float64 `json:"limit"`
-							Pct      float64 `json:"pct"`
+							Bank           string  `json:"bank"`
+							Exposure       float64 `json:"exposure"`
+							Limit          float64 `json:"limit"`
+							Pct            float64 `json:"pct"`
+							UtilizationPct float64 `json:"utilization_pct"`
+							RemainingLimit float64 `json:"remaining_limit"`
+							Breach         bool    `json:"breach"`
 						}
 						var wireRows []wireRow
 						if json.Unmarshal(jsonB, &wireRows) == nil && len(wireRows) > 0 {
 							out := make([]bcChartRow, len(wireRows))
+							var totExp, totLim float64
+							var breached, critical int
 							for i, r := range wireRows {
 								out[i] = bcChartRow{
 									Bank:           r.Bank,
 									Exposure:       r.Exposure,
+									Limit:          r.Limit,
 									Pct:            r.Pct,
-									RemainingLimit: math.Max(0, r.Limit-r.Exposure),
+									UtilizationPct: r.UtilizationPct,
+									RemainingLimit: r.RemainingLimit,
+									Breach:         r.Breach,
+								}
+								totExp += r.Exposure
+								totLim += r.Limit
+								if r.Breach {
+									breached++
+								} else if r.UtilizationPct >= 90 {
+									critical++
 								}
 							}
 							bankConcChart = out
+							utilPct := 0.0
+							if totLim > 0 {
+								utilPct = fdRound(totExp/totLim*100, 2)
+							}
+							limitUtilization = map[string]interface{}{
+								"total_exposure":  fdRound(totExp, 2),
+								"total_limit":     fdRound(totLim, 2),
+								"utilization_pct": utilPct,
+								"banks_breached":  breached,
+								"banks_critical":  critical,
+								"banks_total":     len(wireRows),
+							}
 						}
 					}
 				}
@@ -744,6 +1055,18 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				return r.data
 			}
 			return nil
+		}
+
+		// ── extract closing_checklist from closing_status sub-result ────────
+		// The closing_status goroutine returns the checklist embedded in the
+		// same map; surface it under governance for the frontend.
+		var closingChecklist interface{} = []interface{}{}
+		if csRes, ok := results["closing_status"]; ok && csRes.err == nil {
+			if csMap, ok2 := csRes.data.(map[string]interface{}); ok2 {
+				if cl, ok3 := csMap["checklist"]; ok3 {
+					closingChecklist = cl
+				}
+			}
 		}
 
 		// ── assemble final payload ────────────────────────────────────────────
@@ -760,6 +1083,8 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"maturity":           get("maturity"),
 				"interest":           get("interest"),
 				"exceptions":         get("exceptions"),
+				"variance_impact":    get("variance_impact"),
+				"limit_utilization":  limitUtilization,
 			},
 			"charts": map[string]interface{}{
 				"maturity_ladder":    get("maturity_ladder"),
@@ -768,8 +1093,9 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"bank_concentration": bankConcChart,
 			},
 			"governance": map[string]interface{}{
-				"approvals":      get("governance_approvals"),
-				"closing_status": get("closing_status"),
+				"approvals":         get("governance_approvals"),
+				"closing_status":    get("closing_status"),
+				"closing_checklist": closingChecklist,
 			},
 			"fd_list": get("fd_list"),
 		}

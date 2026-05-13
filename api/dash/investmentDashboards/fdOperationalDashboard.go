@@ -302,33 +302,15 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 5. variance & exception cases ─────────────────────────────────────
+		// ── 5. variance & exception cases (TC-132) ───────────────────────────
+		// Merges two real sources so the operational team sees every open
+		// variance / exception that needs human review:
+		//   a) Accrual engine exceptions (investment.fd_accrual_exception)
+		//   b) Policy / data variance log entries scoped to FD modules
+		//      (public.variance_log, status='OPEN')
+		// Total/impact figures use COUNT(*)/SUM aggregated separately so the
+		// KPI matches the table even when the row list is paginated.
 		run("exceptions", func(ctx context.Context) (interface{}, error) {
-			rows, err := pool.Query(ctx, `
-				SELECT
-				  ae.exception_id,
-				  ae.fd_id AS fd_ref,
-				  COALESCE(m.bank_name, m.bank_id,'') AS bank,
-				  COALESCE(b.entity_name,'') AS entity,
-				  COALESCE(ae.variance_amount,0) AS variance_amount,
-				  COALESCE(ae.variance_pct,0) AS variance_pct,
-				  COALESCE(ae.exception_type,'') AS exception_type,
-				  COALESCE(ae.exception_status,'Open') AS status,
-				  COALESCE(ae.reason_required,false) AS reason_required
-				FROM investment.fd_accrual_exception ae
-				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE COALESCE(ae.is_deleted,false)=false
-				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				ORDER BY ae.created_at DESC
-				LIMIT 200`, entityFilter)
-			if err != nil {
-				api.LogError("[OperationalDash] exceptions query error: %v", err)
-				return map[string]interface{}{"rows": []interface{}{}, "count": 0, "impact": 0}, nil
-			}
-			defer rows.Close()
-
 			type excRow struct {
 				ExceptionID    string  `json:"exception_id"`
 				FDRef          string  `json:"fd_ref"`
@@ -337,25 +319,118 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				VarianceAmount float64 `json:"variance_amount"`
 				VariancePct    float64 `json:"variance_pct"`
 				ExceptionType  string  `json:"exception_type"`
+				Source         string  `json:"source"`
 				Status         string  `json:"status"`
 				ReasonRequired bool    `json:"reason_required"`
+				FieldName      string  `json:"field_name,omitempty"`
+				CreatedAt      string  `json:"created_at,omitempty"`
 			}
+
 			out := []excRow{}
 			totalImpact := 0.0
-			for rows.Next() {
-				var er excRow
-				if err2 := rows.Scan(&er.ExceptionID, &er.FDRef, &er.Bank, &er.Entity,
-					&er.VarianceAmount, &er.VariancePct, &er.ExceptionType,
-					&er.Status, &er.ReasonRequired); err2 == nil {
-					er.VarianceAmount = fdRound(er.VarianceAmount, 2)
-					er.VariancePct = fdRound(er.VariancePct, 2)
-					totalImpact += er.VarianceAmount
-					out = append(out, er)
+
+			// (a) accrual engine exceptions
+			accRows, err := pool.Query(ctx, `
+				SELECT
+				  COALESCE(ae.exception_id,'')                    AS exception_id,
+				  COALESCE(ae.fd_id,'')                           AS fd_ref,
+				  COALESCE(m.bank_name, m.bank_id,'')             AS bank,
+				  COALESCE(b.entity_name, m.entity_name,'')       AS entity,
+				  COALESCE(ae.variance_amount,0)                  AS variance_amount,
+				  COALESCE(ae.variance_pct,0)                     AS variance_pct,
+				  COALESCE(ae.exception_type,'Accrual Exception') AS exception_type,
+				  COALESCE(ae.exception_status,'Open')            AS status,
+				  COALESCE(ae.reason_required,false)              AS reason_required,
+				  COALESCE(TO_CHAR(ae.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS created_at
+				FROM investment.fd_accrual_exception ae
+				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				WHERE COALESCE(ae.is_deleted,false)=false
+				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				ORDER BY ae.created_at DESC
+				LIMIT 200`, entityFilter)
+			if err == nil {
+				for accRows.Next() {
+					var er excRow
+					if scanErr := accRows.Scan(&er.ExceptionID, &er.FDRef, &er.Bank, &er.Entity,
+						&er.VarianceAmount, &er.VariancePct, &er.ExceptionType,
+						&er.Status, &er.ReasonRequired, &er.CreatedAt); scanErr == nil {
+						er.VarianceAmount = fdRound(er.VarianceAmount, 2)
+						er.VariancePct = fdRound(er.VariancePct, 2)
+						er.Source = "accrual_exception"
+						totalImpact += er.VarianceAmount
+						out = append(out, er)
+					}
 				}
+				accRows.Close()
+			} else {
+				api.LogError("[OperationalDash] exceptions accrual query error: %v", err)
 			}
+
+			// (b) variance engine entries (open) — joined to fd_master where possible
+			varRows, vErr := pool.Query(ctx, `
+				SELECT
+				  COALESCE(vl.variance_id,'')                                  AS exception_id,
+				  COALESCE(vl.record_id,'')                                    AS fd_ref,
+				  COALESCE(m.bank_name, m.bank_id,'')                          AS bank,
+				  COALESCE(b.entity_name, m.entity_name, vl.entity_id,'')      AS entity,
+				  COALESCE(ABS(vl.variance_delta),0)                           AS variance_amount,
+				  0::numeric                                                   AS variance_pct,
+				  COALESCE(NULLIF(vl.variance_type,''),'OTHER')                AS variance_type,
+				  COALESCE(vl.field_name,'')                                   AS field_name,
+				  COALESCE(vl.status,'OPEN')                                   AS status,
+				  COALESCE(vl.is_exception,false)                              AS reason_required,
+				  COALESCE(TO_CHAR(vl.created_at,'YYYY-MM-DD HH24:MI:SS'),'')  AS created_at
+				FROM public.variance_log vl
+				LEFT JOIN investment.fd_master m ON m.fd_id = vl.record_id
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id OR b.booking_id = vl.record_id
+				WHERE vl.module_code LIKE 'FD_%'
+				  AND vl.status = 'OPEN'
+				  AND ($1::text='' OR vl.entity_id=$1)
+				ORDER BY vl.created_at DESC
+				LIMIT 200`, entityFilter)
+			if vErr == nil {
+				for varRows.Next() {
+					var er excRow
+					var vType string
+					if scanErr := varRows.Scan(&er.ExceptionID, &er.FDRef, &er.Bank, &er.Entity,
+						&er.VarianceAmount, &er.VariancePct, &vType, &er.FieldName,
+						&er.Status, &er.ReasonRequired, &er.CreatedAt); scanErr == nil {
+						er.VarianceAmount = fdRound(er.VarianceAmount, 2)
+						er.ExceptionType = "Variance: " + vType
+						if er.FieldName != "" {
+							er.ExceptionType += " (" + er.FieldName + ")"
+						}
+						er.Source = "variance_log"
+						if vType == "AMOUNT" {
+							totalImpact += er.VarianceAmount
+						}
+						out = append(out, er)
+					}
+				}
+				varRows.Close()
+			}
+
+			// True totals (independent of LIMIT) for KPI accuracy (TC-145)
+			var totalCount int64
+			_ = pool.QueryRow(ctx, `
+				SELECT
+				  (SELECT COUNT(*) FROM investment.fd_accrual_exception ae
+				   LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
+				   LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				   WHERE COALESCE(ae.is_deleted,false)=false
+				     AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
+				     AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1))
+				  +
+				  (SELECT COUNT(*) FROM public.variance_log
+				   WHERE module_code LIKE 'FD_%' AND status='OPEN'
+				     AND ($1::text='' OR entity_id=$1))`,
+				entityFilter).Scan(&totalCount)
+
 			return map[string]interface{}{
 				"rows":   out,
-				"count":  len(out),
+				"count":  totalCount,
 				"impact": fdRound(totalImpact, 2),
 			}, nil
 		})
@@ -713,7 +788,289 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 11. full FD list with all info ────────────────────────────────────
+		// ── 11. top_mismatch_causes (TC-138) ──────────────────────────────────
+		// Aggregates the most frequent causes of mismatches/exceptions across
+		// the operational data so the team can target root-cause fixes.
+		// Sources merged (each row tagged with `source`):
+		//   • accrual_exception.exception_type
+		//   • variance_log.field_name + variance_type (FD modules, OPEN)
+		//   • fd_interest_receipt.reconcile_status (UNMATCHED/PENDING)
+		run("top_mismatch_causes", func(ctx context.Context) (interface{}, error) {
+			type causeRow struct {
+				Cause   string  `json:"cause"`
+				Count   int64   `json:"count"`
+				Impact  float64 `json:"impact"`
+				Source  string  `json:"source"`
+			}
+			out := []causeRow{}
+
+			// (a) accrual exception causes
+			if rows, err := pool.Query(ctx, `
+				SELECT
+				  COALESCE(NULLIF(ae.exception_type,''),'Accrual Exception') AS cause,
+				  COUNT(*)                                                   AS cnt,
+				  COALESCE(SUM(ABS(COALESCE(ae.variance_amount,0))),0)       AS impact
+				FROM investment.fd_accrual_exception ae
+				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
+				WHERE COALESCE(ae.is_deleted,false)=false
+				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
+				  AND ($1::text='' OR m.entity_id=$1)
+				GROUP BY 1
+				ORDER BY cnt DESC
+				LIMIT 10`, entityFilter); err == nil {
+				for rows.Next() {
+					var c causeRow
+					if rows.Scan(&c.Cause, &c.Count, &c.Impact) == nil {
+						c.Impact = fdRound(c.Impact, 2)
+						c.Source = "accrual_exception"
+						out = append(out, c)
+					}
+				}
+				rows.Close()
+			}
+
+			// (b) variance log causes (variance_type + field_name)
+			if rows, err := pool.Query(ctx, `
+				SELECT
+				  CONCAT(COALESCE(NULLIF(variance_type,''),'OTHER'),
+				         CASE WHEN COALESCE(field_name,'')='' THEN ''
+				              ELSE ' / ' || field_name END)                  AS cause,
+				  COUNT(*)                                                   AS cnt,
+				  COALESCE(SUM(ABS(COALESCE(variance_delta,0))),0)           AS impact
+				FROM public.variance_log
+				WHERE module_code LIKE 'FD_%' AND status='OPEN'
+				  AND ($1::text='' OR entity_id=$1)
+				GROUP BY 1
+				ORDER BY cnt DESC
+				LIMIT 10`, entityFilter); err == nil {
+				for rows.Next() {
+					var c causeRow
+					if rows.Scan(&c.Cause, &c.Count, &c.Impact) == nil {
+						c.Impact = fdRound(c.Impact, 2)
+						c.Source = "variance_log"
+						out = append(out, c)
+					}
+				}
+				rows.Close()
+			}
+
+			// (c) unmatched receipts — group by status / no fd_id reason
+			if rows, err := pool.Query(ctx, `
+				SELECT
+				  CASE
+				    WHEN ir.fd_id IS NULL OR ir.fd_id = '' THEN 'Unmatched: No FD reference'
+				    WHEN COALESCE(ir.reconcile_status,'') IN ('UNMATCHED','PENDING','') THEN
+				      'Unmatched: ' || COALESCE(NULLIF(ir.reconcile_status,''),'PENDING')
+				    ELSE 'Unmatched: Other'
+				  END                                                        AS cause,
+				  COUNT(*)                                                   AS cnt,
+				  COALESCE(SUM(ABS(COALESCE(ir.gross_interest_received,0))),0) AS impact
+				FROM investment.fd_interest_receipt ir
+				WHERE ir.is_deleted=false
+				  AND (ir.fd_id IS NULL OR ir.fd_id='' OR ir.reconcile_status IN ('UNMATCHED','PENDING',''))
+				  AND ($1::text='' OR ir.entity_id=$1)
+				GROUP BY 1
+				ORDER BY cnt DESC
+				LIMIT 5`, entityFilter); err == nil {
+				for rows.Next() {
+					var c causeRow
+					if rows.Scan(&c.Cause, &c.Count, &c.Impact) == nil {
+						c.Impact = fdRound(c.Impact, 2)
+						c.Source = "interest_receipt"
+						out = append(out, c)
+					}
+				}
+				rows.Close()
+			}
+
+			// Sort merged list by count desc, return top 10
+			for i := 0; i < len(out); i++ {
+				for j := i + 1; j < len(out); j++ {
+					if out[j].Count > out[i].Count {
+						out[i], out[j] = out[j], out[i]
+					}
+				}
+			}
+			if len(out) > 10 {
+				out = out[:10]
+			}
+			return out, nil
+		})
+
+		// ── 12. lifecycle_pipeline (TC-146) ───────────────────────────────────
+		// End-to-end Booking → Confirmation → Activation → Accrual → Posting
+		// stage counts so the dashboard can render the full lifecycle and
+		// flag any stage where records are stuck.
+		run("lifecycle_pipeline", func(ctx context.Context) (interface{}, error) {
+			type stage struct {
+				ID         string  `json:"id"`
+				Label      string  `json:"label"`
+				Count      int64   `json:"count"`
+				Stuck      int64   `json:"stuck"`
+				StuckLabel string  `json:"stuck_label,omitempty"`
+				Amount     float64 `json:"amount"`
+			}
+
+			// Stage 1: Booking Requests created in period
+			var bookingTotal int64
+			var bookingPendingApproval int64
+			var bookingAmt float64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*),
+				       COUNT(*) FILTER (WHERE booking_status IN ('DRAFT','APPROVAL_PENDING')),
+				       COALESCE(SUM(principal_amount),0)
+				FROM investment.fd_booking_request
+				WHERE is_deleted=false
+				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR entity_id=$1)`,
+				entityFilter, startDateStr, endDateStr).Scan(&bookingTotal, &bookingPendingApproval, &bookingAmt)
+
+			// Stage 2: Sent to Bank
+			var sentTotal, sentStuck int64
+			var sentAmt float64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*),
+				       COUNT(*) FILTER (WHERE EXTRACT(DAY FROM NOW()-created_at) >= 3),
+				       COALESCE(SUM(principal_amount),0)
+				FROM investment.fd_booking_request
+				WHERE is_deleted=false
+				  AND booking_status IN ('SENT_TO_BANK','APPROVED','APPROVAL_PENDING')
+				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR entity_id=$1)`,
+				entityFilter, startDateStr, endDateStr).Scan(&sentTotal, &sentStuck, &sentAmt)
+
+			// Stage 3: Confirmation captured (fd_master row exists)
+			var confTotal int64
+			var confAmt float64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*), COALESCE(SUM(m.principal_amount),0)
+				FROM investment.fd_master m
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				WHERE m.is_deleted=false
+				  AND COALESCE(b.created_at, m.created_at) >= $2::date
+				  AND COALESCE(b.created_at, m.created_at) <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
+				entityFilter, startDateStr, endDateStr).Scan(&confTotal, &confAmt)
+
+			// Stage 4: Activated FDs
+			var activeTotal, activeStuck int64
+			var activeAmt float64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*),
+				       COUNT(*) FILTER (WHERE COALESCE(cashflow_generated,false)=false),
+				       COALESCE(SUM(principal_amount),0)
+				FROM investment.fd_master
+				WHERE is_deleted=false
+				  AND fd_status='ACTIVE'
+				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR entity_id=$1)`,
+				entityFilter, startDateStr, endDateStr).Scan(&activeTotal, &activeStuck, &activeAmt)
+
+			// Stage 5: Accrued (FDs with accrual_ledger entries)
+			var accrualTotal int64
+			var accrualAmt float64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(DISTINCT al.fd_id),
+				       COALESCE(SUM(DISTINCT m.principal_amount),0)
+				FROM investment.fd_accrual_ledger al
+				LEFT JOIN investment.fd_master m ON m.fd_id = al.fd_id
+				WHERE COALESCE(al.is_deleted,false)=false
+				  AND al.accrual_period_end >= $2::date
+				  AND ($1::text='' OR m.entity_id=$1)`,
+				entityFilter, startDateStr).Scan(&accrualTotal, &accrualAmt)
+
+			// Stage 6: Posted (journal posting batches)
+			var postedTotal, postedFailed int64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*),
+				       COUNT(*) FILTER (WHERE posting_status IN ('FAILED','Failed'))
+				FROM investment.fd_journal_posting_batch
+				WHERE created_at >= $1::date`, startDateStr).Scan(&postedTotal, &postedFailed)
+
+			stages := []stage{
+				{ID: "booking", Label: "Booking Requests", Count: bookingTotal, Stuck: bookingPendingApproval, StuckLabel: "pending approval", Amount: fdRound(bookingAmt, 2)},
+				{ID: "sent", Label: "Sent to Bank", Count: sentTotal, Stuck: sentStuck, StuckLabel: "≥3 days aged", Amount: fdRound(sentAmt, 2)},
+				{ID: "confirmation", Label: "Confirmation Captured", Count: confTotal, Amount: fdRound(confAmt, 2)},
+				{ID: "activation", Label: "Activated FDs", Count: activeTotal, Stuck: activeStuck, StuckLabel: "no cashflow yet", Amount: fdRound(activeAmt, 2)},
+				{ID: "accrual", Label: "Accrued", Count: accrualTotal, Amount: fdRound(accrualAmt, 2)},
+				{ID: "posting", Label: "Posted to GL", Count: postedTotal, Stuck: postedFailed, StuckLabel: "failed batches"},
+			}
+
+			// Conversion percentages stage-over-stage
+			type pipelineOut struct {
+				Stages    []stage `json:"stages"`
+				HealthPct float64 `json:"health_pct"`
+				Bottleneck string `json:"bottleneck,omitempty"`
+			}
+			healthPct := 0.0
+			if bookingTotal > 0 {
+				healthPct = fdRound(float64(postedTotal)/float64(bookingTotal)*100, 1)
+			}
+			bottleneck := ""
+			maxDrop := int64(0)
+			for i := 1; i < len(stages); i++ {
+				drop := stages[i-1].Count - stages[i].Count
+				if drop > maxDrop {
+					maxDrop = drop
+					bottleneck = stages[i-1].Label + " → " + stages[i].Label
+				}
+			}
+			return pipelineOut{Stages: stages, HealthPct: healthPct, Bottleneck: bottleneck}, nil
+		})
+
+		// ── 13. accurate_counts (TC-145) ──────────────────────────────────────
+		// Authoritative COUNT(*) per category — independent of the LIMIT N row
+		// fetch above so KPI tiles always agree with the underlying tables.
+		run("accurate_counts", func(ctx context.Context) (interface{}, error) {
+			res := map[string]int64{
+				"booking_requests":      0,
+				"pending_confirmations": 0,
+				"pending_overdue":       0,
+				"unmatched_receipts":    0,
+				"posting_total":         0,
+				"posting_failed":        0,
+			}
+
+			var bk, conf, confOverdue, unm, postT, postF int64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*) FROM investment.fd_booking_request b
+				WHERE b.is_deleted=false
+				  AND b.booking_status IN ('DRAFT','APPROVAL_PENDING')
+				  AND ($1::text='' OR b.entity_id=$1)
+				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')`,
+				entityFilter, startDateStr, endDateStr).Scan(&bk)
+
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*),
+				       COUNT(*) FILTER (WHERE EXTRACT(DAY FROM NOW()-b.created_at) >= 3)
+				FROM investment.fd_booking_request b
+				WHERE b.is_deleted=false
+				  AND b.booking_status IN ('SENT_TO_BANK','APPROVED')
+				  AND ($1::text='' OR b.entity_id=$1)
+				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')`,
+				entityFilter, startDateStr, endDateStr).Scan(&conf, &confOverdue)
+
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*) FROM investment.fd_interest_receipt ir
+				WHERE ir.is_deleted=false
+				  AND (ir.fd_id IS NULL OR ir.fd_id='' OR ir.reconcile_status IN ('UNMATCHED','PENDING',''))
+				  AND ($1::text='' OR ir.entity_id=$1)`, entityFilter).Scan(&unm)
+
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*),
+				       COUNT(*) FILTER (WHERE posting_status IN ('FAILED','Failed'))
+				FROM investment.fd_journal_posting_batch`).Scan(&postT, &postF)
+
+			res["booking_requests"] = bk
+			res["pending_confirmations"] = conf
+			res["pending_overdue"] = confOverdue
+			res["unmatched_receipts"] = unm
+			res["posting_total"] = postT
+			res["posting_failed"] = postF
+			return res, nil
+		})
+
+		// ── 14. full FD list with all info ────────────────────────────────────
 		run("fd_list", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
 				SELECT
@@ -792,77 +1149,73 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return nil
 		}
 
-		// Build operational summary KPI counts from results
-		bookingCount := 0
-		confirmCount, confirmOverdue := 0, 0
-		unmatchedCount := 0
-		tdsCount := 0
-		excCount := 0
-		failedPostings := 0
-		receiptsPendingCount := 0
-		tdsPendingApprovalCount := 0
+		// ── KPI assembly (TC-145: authoritative counts) ──────────────────────
+		// Pull from accurate_counts (real COUNT(*)) so KPIs always match the
+		// underlying tables — even when the row list is paginated.
+		var bookingCount, confirmCount, confirmOverdue, unmatchedCount int64
+		var failedPostings int64
+		var tdsCount int64
+		var excCount int64
+		var receiptsPendingCount, tdsPendingApprovalCount int64
 
-		if v := get("booking_requests"); v != nil {
+		if ac, ok := get("accurate_counts").(map[string]int64); ok {
+			bookingCount = ac["booking_requests"]
+			confirmCount = ac["pending_confirmations"]
+			confirmOverdue = ac["pending_overdue"]
+			unmatchedCount = ac["unmatched_receipts"]
+			failedPostings = ac["posting_failed"]
+		}
+		// Fallback: derive from row list when accurate_counts is unavailable.
+		if v := get("booking_requests"); v != nil && bookingCount == 0 {
 			if m, ok := v.(map[string]interface{}); ok {
-				if c, ok2 := m["count"].(int); ok2 {
-					bookingCount = c
+				bookingCount = readInt(m["count"])
+			}
+		}
+		if v := get("pending_confirmations"); v != nil && confirmCount == 0 {
+			if m, ok := v.(map[string]interface{}); ok {
+				confirmCount = readInt(m["count"])
+				if confirmOverdue == 0 {
+					confirmOverdue = readInt(m["overdue"])
 				}
 			}
 		}
-		if v := get("pending_confirmations"); v != nil {
+		if v := get("unmatched_receipts"); v != nil && unmatchedCount == 0 {
 			if m, ok := v.(map[string]interface{}); ok {
-				if c, ok2 := m["count"].(int); ok2 {
-					confirmCount = c
-				}
-				if c, ok2 := m["overdue"].(int); ok2 {
-					confirmOverdue = c
-				}
-			}
-		}
-		if v := get("unmatched_receipts"); v != nil {
-			if m, ok := v.(map[string]interface{}); ok {
-				if c, ok2 := m["count"].(int); ok2 {
-					unmatchedCount = c
-				}
+				unmatchedCount = readInt(m["count"])
 			}
 		}
 		if v := get("tds_pending"); v != nil {
 			if m, ok := v.(map[string]interface{}); ok {
-				if c, ok2 := m["count"].(int64); ok2 {
-					tdsCount = int(c)
-				}
+				tdsCount = readInt(m["count"])
 			}
 		}
 		if v := get("exceptions"); v != nil {
 			if m, ok := v.(map[string]interface{}); ok {
-				if c, ok2 := m["count"].(int); ok2 {
-					excCount = c
-				}
+				excCount = readInt(m["count"])
 			}
 		}
 		if v := get("receipts"); v != nil {
 			if m, ok := v.(map[string]interface{}); ok {
-				if c, ok2 := m["pending_count"].(int); ok2 {
-					receiptsPendingCount = c
-				}
+				receiptsPendingCount = readInt(m["pending_count"])
 			}
 		}
 		if v := get("tds_receipts"); v != nil {
 			if m, ok := v.(map[string]interface{}); ok {
-				if c, ok2 := m["pending_count"].(int); ok2 {
-					tdsPendingApprovalCount = c
-				}
+				tdsPendingApprovalCount = readInt(m["pending_count"])
 			}
 		}
-		if v := get("posting_queue"); v != nil {
-			b, _ := json.Marshal(v)
-			var prRows []struct {
-				Status string `json:"status"`
-			}
-			if json.Unmarshal(b, &prRows) == nil {
-				for _, pr := range prRows {
-					if pr.Status == "Failed" || pr.Status == "FAILED" {
-						failedPostings++
+		// failed posting fallback from posting_queue if accurate_counts missed it
+		if failedPostings == 0 {
+			if v := get("posting_queue"); v != nil {
+				b, _ := json.Marshal(v)
+				var prRows []struct {
+					Status string `json:"status"`
+				}
+				if json.Unmarshal(b, &prRows) == nil {
+					for _, pr := range prRows {
+						if pr.Status == "Failed" || pr.Status == "FAILED" {
+							failedPostings++
+						}
 					}
 				}
 			}
@@ -878,18 +1231,18 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"end_date":   endDateStr,
 			},
 			"kpis": map[string]interface{}{
-				"booking_requests_pending": bookingCount,
-				"confirmations_pending":    confirmCount,
-				"confirmations_overdue":    confirmOverdue,
-				"unmatched_receipts":       unmatchedCount,
-				"tds_pending_count":        tdsCount,
-				"tds_pending_amount":       getNestedFloat(get("tds_pending"), "total_amount"),
-				"exceptions_open":              excCount,
-				"exceptions_impact":            getNestedFloat(get("exceptions"), "impact"),
-				"failed_posting_batches":       failedPostings,
-				"receipts_pending_approval":    receiptsPendingCount,
-				"tds_pending_approval":         tdsPendingApprovalCount,
-				"total_work_items":             bookingCount + confirmCount + unmatchedCount + tdsCount + excCount + receiptsPendingCount + tdsPendingApprovalCount,
+				"booking_requests_pending":  bookingCount,
+				"confirmations_pending":     confirmCount,
+				"confirmations_overdue":     confirmOverdue,
+				"unmatched_receipts":        unmatchedCount,
+				"tds_pending_count":         tdsCount,
+				"tds_pending_amount":        getNestedFloat(get("tds_pending"), "total_amount"),
+				"exceptions_open":           excCount,
+				"exceptions_impact":         getNestedFloat(get("exceptions"), "impact"),
+				"failed_posting_batches":    failedPostings,
+				"receipts_pending_approval": receiptsPendingCount,
+				"tds_pending_approval":      tdsPendingApprovalCount,
+				"total_work_items":          bookingCount + confirmCount + unmatchedCount + tdsCount + excCount + receiptsPendingCount + tdsPendingApprovalCount,
 			},
 			"tables": map[string]interface{}{
 				"booking_requests":      get("booking_requests"),
@@ -901,13 +1254,31 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"posting_queue":         get("posting_queue"),
 				"fd_list":               get("fd_list"),
 			},
-			"accrual_run":      get("accrual_run"),
-			"tds_pending":      get("tds_pending"),
-			"sla_distribution": get("sla_distribution"),
+			"top_mismatch_causes": get("top_mismatch_causes"),
+			"lifecycle_pipeline":  get("lifecycle_pipeline"),
+			"accrual_run":         get("accrual_run"),
+			"tds_pending":         get("tds_pending"),
+			"sla_distribution":    get("sla_distribution"),
 		}
 
 		api.RespondWithPayload(w, true, "", payload)
 	}
+}
+
+// readInt extracts an int64 value from common numeric types returned via
+// `interface{}` (Go's int / int64 / float64). Returns 0 for nil/unknown types.
+func readInt(v interface{}) int64 {
+	switch n := v.(type) {
+	case int:
+		return int64(n)
+	case int32:
+		return int64(n)
+	case int64:
+		return n
+	case float64:
+		return int64(n)
+	}
+	return 0
 }
 
 // getNestedFloat safely extracts a float64 from a map[string]interface{}.

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -454,65 +455,165 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return out, nil
 		})
 
-		// ── 9. booking confirmation SLA tracking ──────────────────────────────────────────────────────────────────────────────────────
+		// ── 9. booking confirmation SLA tracking (TC-105) ─────────────────────
+		// Returns the full confirmation pipeline so users can clearly see WHY
+		// each booking is "pending":
+		//   • booking_status (raw)            — DRAFT / APPROVAL_PENDING / APPROVED / SENT_TO_BANK
+		//   • confirmation_state              — Pending Maker / Pending Approval / Sent to Bank /
+		//                                       Confirmed / Activated / Rejected (human readable)
+		//   • approval_progress               — "2/3 approvals" derived from approval_instance_eye
+		//   • last_actor_email + last_action_at — for accountability
+		//   • fd_id / activation_date         — present only after the bank has confirmed
 		run("booking_confirmations", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
 				SELECT
 				  b.booking_id,
-				  COALESCE(b.entity_name,'') AS entity,
-				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
-				  COALESCE(b.principal_amount,0) AS amount,
-				  COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD"T"HH24:MI:SS'),'') AS sent_at,
-				  b.booking_status,
-				  COALESCE(EXTRACT(EPOCH FROM (NOW()-b.created_at))/3600,0) AS elapsed_hours
+				  COALESCE(b.entity_name,'')                                                       AS entity,
+				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'')                      AS bank,
+				  COALESCE(b.principal_amount,0)                                                   AS amount,
+				  COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD"T"HH24:MI:SS'),'')                     AS sent_at,
+				  b.booking_status                                                                 AS booking_status,
+				  COALESCE(b.created_by,'')                                                        AS created_by,
+				  COALESCE(EXTRACT(EPOCH FROM (NOW()-b.created_at))/3600,0)                        AS elapsed_hours,
+				  COALESCE(m.fd_id,'')                                                             AS fd_id,
+				  COALESCE(m.fd_status,'')                                                         AS fd_status,
+				  COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS'),'')                     AS activation_date,
+				  COALESCE(ai.instance_status,'')                                                  AS approval_status,
+				  COALESCE(ai.approvals_received,0)                                                AS approvals_received,
+				  COALESCE(ai.approvals_required,0)                                                AS approvals_required,
+				  COALESCE(ai.last_actor,'')                                                       AS last_actor,
+				  COALESCE(TO_CHAR(ai.last_action_at,'YYYY-MM-DD"T"HH24:MI:SS'),'')                AS last_action_at
 				FROM investment.fd_booking_request b
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
+				LEFT JOIN LATERAL (
+				  SELECT
+				    i.status                              AS instance_status,
+				    SUM(ie.approvals_received)::int       AS approvals_received,
+				    SUM(ie.approvals_required)::int       AS approvals_required,
+				    (SELECT ia.actor_email FROM uam.approval_instance_action ia
+				     JOIN uam.approval_instance_eye ie2 ON ie2.instance_eye_id = ia.instance_eye_id
+				     WHERE ie2.instance_id = i.instance_id ORDER BY ia.acted_at DESC NULLS LAST LIMIT 1) AS last_actor,
+				    (SELECT ia.acted_at FROM uam.approval_instance_action ia
+				     JOIN uam.approval_instance_eye ie2 ON ie2.instance_eye_id = ia.instance_eye_id
+				     WHERE ie2.instance_id = i.instance_id ORDER BY ia.acted_at DESC NULLS LAST LIMIT 1) AS last_action_at
+				  FROM uam.approval_instance i
+				  LEFT JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
+				  WHERE i.is_deleted=false
+				    AND i.module_code = 'FIXED_DEPOSIT'
+				    AND i.record_id = b.booking_id
+				  GROUP BY i.instance_id, i.status
+				  ORDER BY MAX(i.submitted_at) DESC
+				  LIMIT 1
+				) ai ON true
 				WHERE b.is_deleted=false
 				  AND b.booking_status IN ('APPROVAL_PENDING','SENT_TO_BANK','APPROVED','DRAFT')
 				  AND ($1::text='' OR b.entity_id=$1)
 				ORDER BY b.created_at ASC
-				LIMIT 50`, entityFilter)
+				LIMIT 100`, entityFilter)
 			if err != nil {
-				return []interface{}{}, nil
+				api.LogError("[TreasuryDash] booking_confirmations query error: %v", err)
+				return map[string]interface{}{
+					"rows": []interface{}{}, "total": 0,
+					"overdue": 0, "at_risk": 0, "confirmed": 0, "pending_approval": 0, "sent_to_bank": 0,
+				}, nil
 			}
 			defer rows.Close()
 
 			type confRow struct {
-				BookingID    string  `json:"booking_id"`
-				Entity       string  `json:"entity"`
-				Bank         string  `json:"bank"`
-				Amount       float64 `json:"amount"`
-				SentAt       string  `json:"sent_at"`
-				Status       string  `json:"status"`
-				ElapsedHours float64 `json:"elapsed_hours"`
-				SLAHours     float64 `json:"sla_hours"`
-				SLAStatus    string  `json:"sla_status"`
+				BookingID          string  `json:"booking_id"`
+				Entity             string  `json:"entity"`
+				Bank               string  `json:"bank"`
+				Amount             float64 `json:"amount"`
+				SentAt             string  `json:"sent_at"`
+				Status             string  `json:"status"`              // raw booking_status
+				CreatedBy          string  `json:"created_by"`
+				ConfirmationState  string  `json:"confirmation_state"`  // human-readable lifecycle stage
+				ConfirmationStage  int     `json:"confirmation_stage"`  // 1..6 (Maker..Activated)
+				FDID               string  `json:"fd_id,omitempty"`
+				FDStatus           string  `json:"fd_status,omitempty"`
+				ActivationDate     string  `json:"activation_date,omitempty"`
+				ApprovalStatus     string  `json:"approval_status,omitempty"`
+				ApprovalsReceived  int     `json:"approvals_received"`
+				ApprovalsRequired  int     `json:"approvals_required"`
+				ApprovalProgress   string  `json:"approval_progress"`
+				LastActor          string  `json:"last_actor,omitempty"`
+				LastActionAt       string  `json:"last_action_at,omitempty"`
+				ElapsedHours       float64 `json:"elapsed_hours"`
+				SLAHours           float64 `json:"sla_hours"`
+				SLAStatus          string  `json:"sla_status"`
 			}
 			out := []confRow{}
+			confirmed, pendingApproval, sentToBank, drafts := 0, 0, 0, 0
 			for rows.Next() {
 				var cr confRow
-				if err2 := rows.Scan(&cr.BookingID, &cr.Entity, &cr.Bank, &cr.Amount,
-					&cr.SentAt, &cr.Status, &cr.ElapsedHours); err2 == nil {
-					cr.Amount = fdRound(cr.Amount, 2)
-					cr.ElapsedHours = fdRound(cr.ElapsedHours, 1)
-					cr.SLAHours = 24 // configurable; default 24h
-					ratio := cr.ElapsedHours / cr.SLAHours
-					switch {
-					case ratio >= 1:
-						cr.SLAStatus = "Overdue"
-					case ratio >= 0.75:
-						cr.SLAStatus = "At Risk"
-					default:
-						cr.SLAStatus = "On Track"
-					}
-					out = append(out, cr)
+				if err2 := rows.Scan(
+					&cr.BookingID, &cr.Entity, &cr.Bank, &cr.Amount,
+					&cr.SentAt, &cr.Status, &cr.CreatedBy, &cr.ElapsedHours,
+					&cr.FDID, &cr.FDStatus, &cr.ActivationDate,
+					&cr.ApprovalStatus, &cr.ApprovalsReceived, &cr.ApprovalsRequired,
+					&cr.LastActor, &cr.LastActionAt,
+				); err2 != nil {
+					api.LogError("[TreasuryDash] booking_confirmations scan error: %v", err2)
+					continue
 				}
+				cr.Amount = fdRound(cr.Amount, 2)
+				cr.ElapsedHours = fdRound(cr.ElapsedHours, 1)
+				cr.SLAHours = 24
+
+				// Derive a clear confirmation lifecycle state.
+				switch {
+				case cr.FDStatus == "ACTIVE":
+					cr.ConfirmationState = "Activated"
+					cr.ConfirmationStage = 6
+				case cr.FDID != "":
+					cr.ConfirmationState = "Confirmed by Bank"
+					cr.ConfirmationStage = 5
+				case cr.Status == "SENT_TO_BANK":
+					cr.ConfirmationState = "Sent to Bank — Awaiting Confirmation"
+					cr.ConfirmationStage = 4
+					sentToBank++
+				case cr.Status == "APPROVED":
+					cr.ConfirmationState = "Approved — Ready to Send"
+					cr.ConfirmationStage = 3
+				case cr.Status == "APPROVAL_PENDING":
+					cr.ConfirmationState = "Pending Approval"
+					cr.ConfirmationStage = 2
+					pendingApproval++
+				case cr.Status == "DRAFT":
+					cr.ConfirmationState = "Draft — Pending Maker"
+					cr.ConfirmationStage = 1
+					drafts++
+				default:
+					cr.ConfirmationState = cr.Status
+				}
+				if cr.FDID != "" {
+					confirmed++
+				}
+
+				if cr.ApprovalsRequired > 0 {
+					cr.ApprovalProgress = fmtApprovalProgress(cr.ApprovalsReceived, cr.ApprovalsRequired)
+				}
+
+				ratio := cr.ElapsedHours / cr.SLAHours
+				switch {
+				case ratio >= 1:
+					cr.SLAStatus = "Overdue"
+				case ratio >= 0.75:
+					cr.SLAStatus = "At Risk"
+				default:
+					cr.SLAStatus = "On Track"
+				}
+				out = append(out, cr)
 			}
 			return map[string]interface{}{
-				"rows":    out,
-				"total":   len(out),
-				"overdue": countSLAStatus(out, "Overdue"),
-				"at_risk": countSLAStatus(out, "At Risk"),
+				"rows":             out,
+				"total":            len(out),
+				"overdue":          countSLAStatus(out, "Overdue"),
+				"at_risk":          countSLAStatus(out, "At Risk"),
+				"confirmed":        confirmed,
+				"pending_approval": pendingApproval,
+				"sent_to_bank":     sentToBank,
+				"drafts":           drafts,
 			}, nil
 		})
 
@@ -630,6 +731,234 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return out, nil
 		})
 
+		// ── 11. approval_workflow (TC-117) ────────────────────────────────────
+		// Concise per-instance approval status for FD bookings/confirmations
+		// so the Treasury dashboard can render the multi-step workflow
+		// (Maker → Checker → Approver → Resolved) and highlight what is stuck.
+		run("approval_workflow", func(ctx context.Context) (interface{}, error) {
+			rows, err := pool.Query(ctx, `
+				SELECT
+				  i.instance_id,
+				  i.transaction_type,
+				  i.record_id,
+				  i.status                                                         AS instance_status,
+				  COALESCE(i.submitted_by_email,'')                                AS submitted_by,
+				  COALESCE(TO_CHAR(i.submitted_at,'YYYY-MM-DD"T"HH24:MI:SS'),'')   AS submitted_at,
+				  COALESCE(i.resolved_by_email,'')                                 AS resolved_by,
+				  COALESCE(TO_CHAR(i.resolved_at,'YYYY-MM-DD"T"HH24:MI:SS'),'')    AS resolved_at,
+				  COALESCE(b.principal_amount, 0)                                  AS amount,
+				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id, '')     AS bank,
+				  COALESCE(b.entity_name, '')                                      AS entity,
+				  COALESCE(b.booking_status,'')                                    AS booking_status,
+				  COALESCE(SUM(ie.approvals_received)::int, 0)                     AS approvals_received,
+				  COALESCE(SUM(ie.approvals_required)::int, 0)                     AS approvals_required,
+				  COALESCE(MAX(ie.position), 1)                                    AS total_steps,
+				  COALESCE((
+				     SELECT MIN(ie2.position) FROM uam.approval_instance_eye ie2
+				     WHERE ie2.instance_id = i.instance_id AND ie2.status='ACTIVE'
+				  ), 0)                                                            AS current_step,
+				  COALESCE(BOOL_OR(ie.is_escalated), false)                        AS is_escalated,
+				  COALESCE(MIN(ie.sla_deadline), NULL)                             AS sla_deadline
+				FROM uam.approval_instance i
+				LEFT JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = i.record_id
+				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
+				WHERE i.is_deleted = false
+				  AND i.module_code = 'FIXED_DEPOSIT'
+				  AND i.submitted_at >= $1::date
+				  AND ($2::text='' OR i.entity_code=$2 OR b.entity_id=$2)
+				GROUP BY i.instance_id, i.transaction_type, i.record_id, i.status,
+				         i.submitted_by_email, i.submitted_at, i.resolved_by_email, i.resolved_at,
+				         b.principal_amount, m.bank_name, m.bank_id, b.bank_name, b.bank_id,
+				         b.entity_name, b.booking_status
+				ORDER BY i.submitted_at DESC
+				LIMIT 60`, startDateStr, entityFilter)
+			if err != nil {
+				api.LogError("[TreasuryDash] approval_workflow query error: %v", err)
+				return map[string]interface{}{
+					"rows": []interface{}{}, "total": 0,
+					"pending": 0, "approved": 0, "rejected": 0, "escalated": 0,
+				}, nil
+			}
+			defer rows.Close()
+
+			type wfRow struct {
+				InstanceID        string     `json:"instance_id"`
+				TransactionType   string     `json:"transaction_type"`
+				RecordID          string     `json:"record_id"`
+				InstanceStatus    string     `json:"instance_status"`
+				SubmittedBy       string     `json:"submitted_by"`
+				SubmittedAt       string     `json:"submitted_at"`
+				ResolvedBy        string     `json:"resolved_by,omitempty"`
+				ResolvedAt        string     `json:"resolved_at,omitempty"`
+				Amount            float64    `json:"amount"`
+				Bank              string     `json:"bank"`
+				Entity            string     `json:"entity"`
+				BookingStatus     string     `json:"booking_status"`
+				ApprovalsReceived int        `json:"approvals_received"`
+				ApprovalsRequired int        `json:"approvals_required"`
+				CurrentStep       int        `json:"current_step"`
+				TotalSteps        int        `json:"total_steps"`
+				IsEscalated       bool       `json:"is_escalated"`
+				SlaDeadline       *time.Time `json:"sla_deadline,omitempty"`
+				ProgressPct       int        `json:"progress_pct"`
+				StatusLabel       string     `json:"status_label"`
+			}
+			out := []wfRow{}
+			pending, approved, rejected, escalated := 0, 0, 0, 0
+			for rows.Next() {
+				var w wfRow
+				if err2 := rows.Scan(
+					&w.InstanceID, &w.TransactionType, &w.RecordID, &w.InstanceStatus,
+					&w.SubmittedBy, &w.SubmittedAt, &w.ResolvedBy, &w.ResolvedAt,
+					&w.Amount, &w.Bank, &w.Entity, &w.BookingStatus,
+					&w.ApprovalsReceived, &w.ApprovalsRequired,
+					&w.TotalSteps, &w.CurrentStep, &w.IsEscalated, &w.SlaDeadline,
+				); err2 != nil {
+					api.LogError("[TreasuryDash] approval_workflow scan error: %v", err2)
+					continue
+				}
+				w.Amount = fdRound(w.Amount, 2)
+				if w.ApprovalsRequired > 0 {
+					w.ProgressPct = int(float64(w.ApprovalsReceived) / float64(w.ApprovalsRequired) * 100)
+				}
+				switch w.InstanceStatus {
+				case "PENDING", "ACTIVE", "SUBMITTED":
+					pending++
+					w.StatusLabel = "In Progress"
+				case "APPROVED", "RESOLVED", "COMPLETED":
+					approved++
+					w.StatusLabel = "Approved"
+				case "REJECTED", "DECLINED":
+					rejected++
+					w.StatusLabel = "Rejected"
+				default:
+					w.StatusLabel = w.InstanceStatus
+				}
+				if w.IsEscalated {
+					escalated++
+				}
+				out = append(out, w)
+			}
+			return map[string]interface{}{
+				"rows":      out,
+				"total":     len(out),
+				"pending":   pending,
+				"approved":  approved,
+				"rejected":  rejected,
+				"escalated": escalated,
+			}, nil
+		})
+
+		// ── 12. lifecycle_summary (TC-120) ────────────────────────────────────
+		// Single source of truth for the end-to-end FD workflow on the Treasury
+		// dashboard so that figures across the page never disagree:
+		//   Booking → Approval → Sent to Bank → Confirmed → Activated → Matured
+		run("lifecycle_summary", func(ctx context.Context) (interface{}, error) {
+			type stage struct {
+				ID         string  `json:"id"`
+				Label      string  `json:"label"`
+				Count      int64   `json:"count"`
+				Amount     float64 `json:"amount"`
+				Stuck      int64   `json:"stuck"`
+				StuckLabel string  `json:"stuck_label,omitempty"`
+			}
+
+			var bkTotal, bkApprovalPending int64
+			var bkAmt float64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*),
+				       COUNT(*) FILTER (WHERE booking_status IN ('DRAFT','APPROVAL_PENDING')),
+				       COALESCE(SUM(principal_amount),0)
+				FROM investment.fd_booking_request
+				WHERE is_deleted=false
+				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR entity_id=$1)`,
+				entityFilter, startDateStr, endDateStr).Scan(&bkTotal, &bkApprovalPending, &bkAmt)
+
+			var apTotal int64
+			var apAmt float64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*), COALESCE(SUM(principal_amount),0)
+				FROM investment.fd_booking_request
+				WHERE is_deleted=false
+				  AND booking_status='APPROVED'
+				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR entity_id=$1)`,
+				entityFilter, startDateStr, endDateStr).Scan(&apTotal, &apAmt)
+
+			var sentTotal, sentStuck int64
+			var sentAmt float64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*),
+				       COUNT(*) FILTER (WHERE EXTRACT(DAY FROM NOW()-created_at) >= 2),
+				       COALESCE(SUM(principal_amount),0)
+				FROM investment.fd_booking_request
+				WHERE is_deleted=false
+				  AND booking_status='SENT_TO_BANK'
+				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR entity_id=$1)`,
+				entityFilter, startDateStr, endDateStr).Scan(&sentTotal, &sentStuck, &sentAmt)
+
+			var confTotal int64
+			var confAmt float64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*), COALESCE(SUM(m.principal_amount),0)
+				FROM investment.fd_master m
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				WHERE m.is_deleted=false
+				  AND COALESCE(b.created_at, m.created_at) >= $2::date
+				  AND COALESCE(b.created_at, m.created_at) <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
+				entityFilter, startDateStr, endDateStr).Scan(&confTotal, &confAmt)
+
+			var activeTotal int64
+			var activeAmt float64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*), COALESCE(SUM(principal_amount),0)
+				FROM investment.fd_master
+				WHERE is_deleted=false
+				  AND fd_status='ACTIVE'
+				  AND ($1::text='' OR entity_id=$1)`, entityFilter).Scan(&activeTotal, &activeAmt)
+
+			var maturedTotal int64
+			var maturedAmt float64
+			_ = pool.QueryRow(ctx, `
+				SELECT COUNT(*), COALESCE(SUM(principal_amount),0)
+				FROM investment.fd_master
+				WHERE is_deleted=false
+				  AND fd_status IN ('MATURED','CLOSED')
+				  AND ($1::text='' OR entity_id=$1)`, entityFilter).Scan(&maturedTotal, &maturedAmt)
+
+			stages := []stage{
+				{ID: "booking", Label: "Booking Created", Count: bkTotal, Amount: fdRound(bkAmt, 2), Stuck: bkApprovalPending, StuckLabel: "awaiting approval"},
+				{ID: "approved", Label: "Approved", Count: apTotal, Amount: fdRound(apAmt, 2)},
+				{ID: "sent", Label: "Sent to Bank", Count: sentTotal, Amount: fdRound(sentAmt, 2), Stuck: sentStuck, StuckLabel: "≥2 days unconfirmed"},
+				{ID: "confirmed", Label: "Confirmed by Bank", Count: confTotal, Amount: fdRound(confAmt, 2)},
+				{ID: "active", Label: "Active FDs", Count: activeTotal, Amount: fdRound(activeAmt, 2)},
+				{ID: "matured", Label: "Matured / Closed", Count: maturedTotal, Amount: fdRound(maturedAmt, 2)},
+			}
+
+			conversion := 0.0
+			if bkTotal > 0 {
+				conversion = fdRound(float64(confTotal)/float64(bkTotal)*100, 1)
+			}
+			bottleneck := ""
+			maxDrop := int64(0)
+			for i := 1; i < len(stages); i++ {
+				drop := stages[i-1].Count - stages[i].Count
+				if drop > maxDrop {
+					maxDrop = drop
+					bottleneck = stages[i-1].Label + " → " + stages[i].Label
+				}
+			}
+			return map[string]interface{}{
+				"stages":         stages,
+				"conversion_pct": conversion,
+				"bottleneck":     bottleneck,
+			}, nil
+		})
+
 		// wait for all
 		wg.Wait()
 
@@ -667,12 +996,23 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"booking_confirmations": get("booking_confirmations"),
 				"negotiations":          get("negotiations"),
 				"fd_list":               get("fd_list"),
+				"approval_workflow":     get("approval_workflow"),
 			},
-			"period_start": periodStart.Format(constants.DateFormat),
+			"approval_workflow": get("approval_workflow"),
+			"lifecycle_summary": get("lifecycle_summary"),
+			"period_start":      periodStart.Format(constants.DateFormat),
 		}
 
 		api.RespondWithPayload(w, true, "", payload)
 	}
+}
+
+// fmtApprovalProgress renders an "n/N approvals" label.
+func fmtApprovalProgress(received, required int) string {
+	if required <= 0 {
+		return ""
+	}
+	return strconv.Itoa(received) + "/" + strconv.Itoa(required) + " approvals"
 }
 
 // countSLAStatus counts rows of a specific SLA status in the booking confirmations result.
