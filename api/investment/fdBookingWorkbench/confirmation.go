@@ -1408,9 +1408,10 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"Cannot accept variance exception on an APPROVED confirmation — the FD is live and immutable")
 			return
 		}
-		if currentStatus != "VARIANCE_PENDING" {
+		if currentStatus != "VARIANCE_PENDING" && currentStatus != "REJECTED" &&
+			currentStatus != "PENDING_APPROVAL" && currentStatus != "PENDING_EDIT_APPROVAL" {
 			api.RespondWithError(w, http.StatusBadRequest,
-				fmt.Sprintf("variance-exception only allowed on VARIANCE_PENDING confirmations (current: %s)", currentStatus))
+				fmt.Sprintf("variance-exception not allowed on confirmations with status %s", currentStatus))
 			return
 		}
 
@@ -1438,6 +1439,12 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		vrows.Close()
+
+		if len(varIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest,
+				"No open variance rows found for this confirmation — nothing to accept as exception")
+			return
+		}
 
 		for _, vid := range varIDs {
 			resolveReq.VarianceID = vid
