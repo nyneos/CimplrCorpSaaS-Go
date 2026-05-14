@@ -1287,80 +1287,77 @@ func buildCapitalizationDates(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 	current := fd.ValueDate
 	const maxPeriods = 1200 // 100 years of monthly — hard guard against infinite loops
 
+	// Determine cap-period months from freq FIRST. The bank's capitalization_schedule_type
+	// is a fallback used only when frequency is unspecified.
+	freqMonths := 0
+	if freq != nil {
+		freqMonths = freqTypeToMonths(firstNonEmpty(freq.FrequencyType, freq.FrequencyCode, freq.FrequencyName))
+	}
+
 	for iter := 0; iter < maxPeriods && current.Before(fd.MaturityDate); iter++ {
 		var next time.Time
 
-		switch capType {
-		case "CALENDAR_QTR_END":
-			// Find the next unadjusted quarter-end strictly after current.
-			raw := nextCalendarQuarterEnd(current)
-			if !raw.After(current) {
-				raw = nextCalendarQuarterEnd(current.AddDate(0, 1, 0))
-			}
-			next = adjustToWorkingDay(raw, cfg.CapitalizationDateAdjustment, cfg, cal)
-			// Guard: if adjustment moved next backwards to <= current (e.g. PRECEDING on a
-			// weekend quarter-end), bump past the raw quarter-end and try the next one.
-			if !next.After(current) {
-				raw = nextCalendarQuarterEnd(raw.AddDate(0, 1, 0))
-				next = adjustToWorkingDay(raw, cfg.CapitalizationDateAdjustment, cfg, cal)
-			}
-			// Last-resort safety — if still stuck, skip forward one quarter.
-			if !next.After(current) {
-				next = current.AddDate(0, 3, 1)
-			}
-		case "ANNIVERSARY":
-			// Use DaysPerPeriod from freq when available, otherwise fall back to
-			// configured 90-day behaviour or compute from periods-per-year.
-			offsetDays := 91 // default quarterly fallback
-			if freq != nil && freq.DaysPerPeriod > 0 {
-				offsetDays = freq.DaysPerPeriod
-			} else if qDef == "90_DAYS" {
-				offsetDays = 90
-			} else if freq != nil && freq.CompoundingPeriodsPerYear > 0 {
-				offsetDays = 365 / freq.CompoundingPeriodsPerYear
-			}
-			next = current.AddDate(0, 0, offsetDays)
-			next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
-			if !next.After(current) {
-				next = current.AddDate(0, 0, offsetDays+1)
-			}
-		case "MONTH_END":
-			// Next month-end strictly after current.
-			y, m, _ := current.Date()
-			next = lastDayOfMonth(y, m)
-			if !next.After(current) {
-				m++
-				if m > 12 {
-					m = 1
-					y++
-				}
-				next = lastDayOfMonth(y, m)
-			}
-			next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
-			if !next.After(current) {
-				next = current.AddDate(0, 1, 1)
-			}
-		case "FIXED_DAY":
-			// Not implemented in v1 — treat same as ANNIVERSARY (quarterly)
-			next = current.AddDate(0, 3, 0)
-			next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
-			if !next.After(current) {
-				next = current.AddDate(0, 3, 1)
-			}
-		default:
-			// Derive period months from freq.FrequencyType; fall back to quarterly.
-			capMonths := 3
-			if freq != nil {
-				if m := freqTypeToMonths(firstNonEmpty(freq.FrequencyType, freq.FrequencyCode, freq.FrequencyName)); m > 0 {
-					capMonths = m
-				}
-			}
-			// Use lastDayOfMonth to avoid Go's date-overflow (e.g. Dec31+6mo=Jul01 instead of Jun30).
-			tm := int(current.Month()) + capMonths - 1
+		if freqMonths > 0 {
+			// Path 1: explicit freq drives cap cadence (preferred).
+			tm := int(current.Month()) + freqMonths - 1
 			next = lastDayOfMonth(current.Year()+tm/12, time.Month(tm%12+1))
+			next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
 			if !next.After(current) {
+				// Adjustment moved next backwards — bump forward one period.
 				tm++
 				next = lastDayOfMonth(current.Year()+tm/12, time.Month(tm%12+1))
+			}
+		} else {
+			// Path 2: no freq provided — honour bank_config capitalization_schedule_type.
+			switch capType {
+			case "CALENDAR_QTR_END":
+				raw := nextCalendarQuarterEnd(current)
+				if !raw.After(current) {
+					raw = nextCalendarQuarterEnd(current.AddDate(0, 1, 0))
+				}
+				next = adjustToWorkingDay(raw, cfg.CapitalizationDateAdjustment, cfg, cal)
+				if !next.After(current) {
+					raw = nextCalendarQuarterEnd(raw.AddDate(0, 1, 0))
+					next = adjustToWorkingDay(raw, cfg.CapitalizationDateAdjustment, cfg, cal)
+				}
+				if !next.After(current) {
+					next = current.AddDate(0, 3, 1)
+				}
+			case "ANNIVERSARY":
+				offsetDays := 91
+				if freq != nil && freq.DaysPerPeriod > 0 {
+					offsetDays = freq.DaysPerPeriod
+				} else if qDef == "90_DAYS" {
+					offsetDays = 90
+				} else if freq != nil && freq.CompoundingPeriodsPerYear > 0 {
+					offsetDays = 365 / freq.CompoundingPeriodsPerYear
+				}
+				next = current.AddDate(0, 0, offsetDays)
+				next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
+				if !next.After(current) {
+					next = current.AddDate(0, 0, offsetDays+1)
+				}
+			case "MONTH_END":
+				y, m, _ := current.Date()
+				next = lastDayOfMonth(y, m)
+				if !next.After(current) {
+					m++
+					if m > 12 {
+						m = 1
+						y++
+					}
+					next = lastDayOfMonth(y, m)
+				}
+				next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
+				if !next.After(current) {
+					next = current.AddDate(0, 1, 1)
+				}
+			default:
+				// No freq and no recognized capType — default to quarterly anniversary.
+				next = current.AddDate(0, 3, 0)
+				if !next.After(current) {
+					next = current.AddDate(0, 3, 1)
+				}
 			}
 		}
 
@@ -2227,7 +2224,6 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 		fyEndYear++
 	}
 	lastTDSFYEnd := time.Date(fyEndYear, time.March, 31, 0, 0, 0, 0, time.UTC)
-	lastPayoutEndDate := fd.ValueDate
 	lastCapDate := fd.ValueDate
 
 	// ── Phase A: cap loop — compute per-cap interest directly and emit CAPITALIZATION rows ──
@@ -2387,7 +2383,11 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 		))
 		compMonths := freqTypeToMonths(compFreqType)
 
-		emitPayouts := payoutMonths > 0 && (normTiming == "RECEIPT" || payoutMonths != compMonths || isAtEachPayout)
+		// emitPayouts fires when there are real intermediate cash receipts:
+		// payout cadence differs from compounding cadence, or AT_EACH_PAYOUT reset.
+		// For AT_MATURITY reset with payout==comp cadence, no intermediate cash flows;
+		// the single MATURITY payout at end handles everything.
+		emitPayouts := payoutMonths > 0 && (payoutMonths != compMonths || isAtEachPayout)
 		if emitPayouts {
 			var payoutDates []time.Time
 			if (normTiming == "RECEIPT" || isAtEachPayout) && payoutMonths == compMonths {
@@ -2514,7 +2514,6 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 					}
 				}
 				lastPayout = payoutDate
-				lastPayoutEndDate = payoutDate
 			}
 		}
 	}
@@ -2565,9 +2564,6 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 			continue
 		}
 		reportedStart := a.PeriodStart
-		if lastPayoutEndDate.After(reportedStart) {
-			reportedStart = lastPayoutEndDate
-		}
 		seq++
 		rows = append(rows, CashflowRow{
 			PeriodNumber:      seq,

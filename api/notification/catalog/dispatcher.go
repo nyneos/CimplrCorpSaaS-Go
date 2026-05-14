@@ -302,10 +302,10 @@ func dispatchNotification(
 	// Other identifiers (username_or_employee_id, mobile, employee_name) are
 	// accepted as fallbacks — see resolveActorEntity for the full priority chain.
 	actorValue := payloadString(payload,
-		"UserID",                           // ← preferred: stable CIMPLR00… ID
-		"user_id", "actor_user_id",         // ← lowercase aliases used by FD/booking callers
+		"UserID",                   // ← preferred: stable CIMPLR00… ID
+		"user_id", "actor_user_id", // ← lowercase aliases used by FD/booking callers
 		"ApprovedByEmail", "ApproverEmail", // ← preferred: email
-		"actor_email", "email",             // ← lowercase email aliases
+		"actor_email", "email", // ← lowercase email aliases
 		"ApprovedBy", "CheckerBy", // may be email OR name depending on caller
 		"RejectedBy",
 		"RequestedBy",
@@ -799,7 +799,7 @@ func lookupEvents(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) (
 //
 // Uses a BIDIRECTIONAL recursive CTE on cashentityrelationships to build the actor's full
 // "org pool": self + all ancestors + all descendants. Any event scoped to any entity in
-// this pool — or globally (entity_name='') — is eligible.
+// this pool — or globally (entity_name=”) — is eligible.
 //
 // This implements the org-pool model: a notification event created for a parent entity is
 // valid for children, and vice versa. The full organisation shares one notification pool.

@@ -10,7 +10,7 @@ SSO_MFA_INTEGRATION_CONTEXT.md
 # Salesforce DX generated files
 .sfdx/
 *.bak
-
+__pycache__/
 *.exe
 # Excel scenarios
 FD_Scenarios_v1.3 (1).xlsx
