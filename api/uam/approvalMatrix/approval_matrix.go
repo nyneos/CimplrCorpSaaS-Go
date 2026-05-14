@@ -539,6 +539,27 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		// Eye/member INSERT paths omit is_active; DB defaults are typically true.
+		// When the master is inactive, align child rows so list "active eyes" and UI stay consistent.
+		if !isActive {
+			if _, err := tx.Exec(ctx, `
+				UPDATE uam.approval_matrix_eye SET is_active = false
+				WHERE matrix_id = $1 AND is_deleted = false`, matrixID); err != nil {
+				logDBError(err, "CreateApprovalMatrix deactivate eyes")
+				msg, status := getUserFriendlyApprovalMatrixError(err, "Deactivate eyes after inactive create failed")
+				api.RespondWithError(w, status, msg)
+				return
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE uam.approval_matrix_eye_member SET is_active = false
+				WHERE matrix_id = $1 AND is_deleted = false`, matrixID); err != nil {
+				logDBError(err, "CreateApprovalMatrix deactivate members")
+				msg, status := getUserFriendlyApprovalMatrixError(err, "Deactivate members after inactive create failed")
+				api.RespondWithError(w, status, msg)
+				return
+			}
+		}
+
 		if err := tx.Commit(ctx); err != nil {
 			logDBError(err, "CreateApprovalMatrix commit")
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedUser)
