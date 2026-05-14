@@ -1234,15 +1234,19 @@ func extractEventDates(rows []SimulatedCashflowRow, eventType string) *json.RawM
 func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 	var s SimulateSummary
 
-	// Detect schedule shape once.
+	// First pass: detect schedule shape and build set of dates that have a TDS_DEDUCTION row.
+	// Same-date TDS_DEDUCTION rows take precedence over CAP/MATURITY tds_amount (avoids double-count).
 	isCompound := false
 	hasInterestReceipt := false
+	tdsDeductionDates := make(map[string]bool) // YYYY-MM-DD keys
 	for _, row := range rows {
 		switch row.EventType {
 		case "CAPITALIZATION":
 			isCompound = true
 		case "INTEREST_RECEIPT":
 			hasInterestReceipt = true
+		case "TDS_DEDUCTION":
+			tdsDeductionDates[row.EventDate.Format(constants.DateFormat)] = true
 		}
 	}
 
@@ -1251,43 +1255,45 @@ func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 		case "ACCRUAL":
 			s.AccrualPeriodCount++
 			if !isCompound && !hasInterestReceipt {
-				// AT_MATURITY simple FD: ACCRUAL rows are the only source of interest.
 				s.TotalInterestAccrued += row.InterestAccrued
 			}
-			// Payout FDs: interest is canonical in INTEREST_RECEIPT rows (below).
-			// Compound FDs: interest is canonical in CAPITALIZATION rows (below).
+			// ACCRUAL.TDSAmount is ProvisionalTDS — NEVER include in TotalTDSDeducted.
 		case "CAPITALIZATION":
 			s.TotalCapitalized += row.CapitalizedAmount
 			s.CapitalizationCount++
 			if isCompound {
-				// COMPOUND FD: each CAPITALIZATION row's InterestAccrued is the
-				// canonical per-period interest total (sum of its ACCRUAL sub-rows).
 				s.TotalInterestAccrued += row.InterestAccrued
+			}
+			// CO+RECEIPT/ACCRUAL: TDS sits on cap row; include unless paired TDS_DEDUCTION exists.
+			if row.TDSAmount > 0 && !tdsDeductionDates[row.EventDate.Format(constants.DateFormat)] {
+				s.TotalTDSDeducted += row.TDSAmount
 			}
 		case "INTEREST_RECEIPT":
 			s.InterestReceiptCount++
 			if !isCompound && hasInterestReceipt {
-				// SIMPLE payout FD: INTEREST_RECEIPT is the canonical interest source.
-				// It covers the full quarter including the "due_not_accrued" slice.
 				s.TotalInterestAccrued += row.InterestAccrued
+			}
+			// SI+RECEIPT: TDS sits on receipt row AND a paired TDS_DEDUCTION row exists.
+			// If no paired TDS_DEDUCTION row, include here.
+			if row.TDSAmount > 0 && !tdsDeductionDates[row.EventDate.Format(constants.DateFormat)] {
+				s.TotalTDSDeducted += row.TDSAmount
 			}
 		case "TDS_DEDUCTION":
 			s.TotalTDSDeducted += row.TDSAmount
 		case "MATURITY":
 			s.MaturityAmount = row.NetCashFlow
-			// For SI payout FDs, the final period ends as MATURITY (not INTEREST_RECEIPT).
-			// Its interest has NOT been counted by any other case — add it now.
-			// For COMPOUND FDs, CAPITALIZATION rows already summed all interest; skip.
 			if !isCompound && row.InterestAccrued > 0 {
 				s.TotalInterestAccrued += row.InterestAccrued
 				s.InterestReceiptCount++
+			}
+			if row.TDSAmount > 0 && !tdsDeductionDates[row.EventDate.Format(constants.DateFormat)] {
+				s.TotalTDSDeducted += row.TDSAmount
 			}
 		case "GRACE_PERIOD":
 			s.TotalInterestAccrued += row.InterestAccrued
 		}
 	}
 
-	// Effective yield = net interest (post TDS) / principal * 100
 	if fd.PrincipalAmount > 0 && fd.TenorDays > 0 {
 		netInterest := s.TotalInterestAccrued - s.TotalTDSDeducted
 		s.EffectiveYield = netInterest / fd.PrincipalAmount * (365.0 / float64(fd.TenorDays)) * 100
