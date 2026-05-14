@@ -86,7 +86,7 @@ func stampCumulativeFields(rows []CashflowRow, fd *FDRecord, tdsRate float64) []
 			fyInterest += rows[i].InterestAccrued
 			totalInterest += rows[i].InterestAccrued
 		}
-		if rows[i].EventType == "TDS" {
+		if rows[i].EventType == "TDS_DEDUCTION" {
 			fyTDS += rows[i].TDSAmount
 		}
 		rows[i].InterestRate = fd.InterestRate
@@ -2871,15 +2871,33 @@ type SaveCashflowBatchParams struct {
 
 // saveCashflowBatch is the shared batch-INSERT engine used by both
 // SaveCashflowScheduleWithCreator and SaveCashflowScheduleWithRecord.
+// dbAllowedEventTypes is the set of event_type values permitted by fd_cashflow_event_type_chk.
+// INITIAL_INVESTMENT and PRINCIPAL_RETURN are internal-only types used for cashflow
+// display/simulation but must never be written to fd_cashflow_schedule.
+var dbAllowedEventTypes = map[string]bool{
+	"ACCRUAL":          true,
+	"CAPITALIZATION":   true,
+	"INTEREST_RECEIPT": true,
+	"TDS_DEDUCTION":    true,
+	"MATURITY":         true,
+}
+
 func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
 	exec := p.Exec
 	table := p.Table
 	fdCol := p.FDCol
 	cols := p.Cols
 	fdID := p.FDID
-	rows := p.Rows
 	createdBy := p.CreatedBy
 	masterEntityID := p.MasterEntityID
+
+	// Filter out rows with event types not allowed by fd_cashflow_event_type_chk.
+	rows := make([]CashflowRow, 0, len(p.Rows))
+	for _, r := range p.Rows {
+		if dbAllowedEventTypes[r.EventType] {
+			rows = append(rows, r)
+		}
+	}
 	masterEntityName := p.MasterEntityName
 	masterBankID := p.MasterBankID
 	masterBankName := p.MasterBankName
