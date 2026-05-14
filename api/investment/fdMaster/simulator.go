@@ -859,6 +859,22 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 		DayCountConvention:      dcRef,
 	}
 
+	// ── Apply user-supplied first payout / capitalization date and reset-type overrides ──
+	// Must be set BEFORE generateCashflowSchedule runs so the engine sees them.
+	if req.FirstPayoutDate != nil && *req.FirstPayoutDate != "" {
+		if pd, perr := time.Parse(constants.DateFormat, *req.FirstPayoutDate); perr == nil {
+			fd.FirstPayoutDate = pd
+		}
+	}
+	if req.FirstCapitalizationDate != nil && *req.FirstCapitalizationDate != "" {
+		if cd, cerr := time.Parse(constants.DateFormat, *req.FirstCapitalizationDate); cerr == nil {
+			fd.FirstCapitalizationDate = cd
+		}
+	}
+	if req.ResetType != nil && *req.ResetType != "" {
+		fd.ResetType = strings.ToUpper(strings.TrimSpace(*req.ResetType))
+	}
+
 	// ── Parse accrual frequency ───────────────────────────────────────────
 	accrualFreqMonths := 1
 	if code := strings.ToUpper(strings.TrimSpace(req.AccrualFrequencyCode)); code != "" {
@@ -885,20 +901,6 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 	}
 	rawRows = stampCumulativeFields(rawRows, fd, simTDSRate)
 
-	// ── Apply user-supplied first payout / capitalization date overrides ──
-	if req.FirstPayoutDate != nil && *req.FirstPayoutDate != "" {
-		if pd, perr := time.Parse(constants.DateFormat, *req.FirstPayoutDate); perr == nil {
-			fd.FirstPayoutDate = pd
-		}
-	}
-	if req.FirstCapitalizationDate != nil && *req.FirstCapitalizationDate != "" {
-		if cd, cerr := time.Parse(constants.DateFormat, *req.FirstCapitalizationDate); cerr == nil {
-			fd.FirstCapitalizationDate = cd
-		}
-	}
-	if req.ResetType != nil && *req.ResetType != "" {
-		fd.ResetType = strings.ToUpper(strings.TrimSpace(*req.ResetType))
-	}
 	rawRows = applyFirstPayoutDateOverride(rawRows, fd)
 
 	// ── Convert to sim rows ───────────────────────────────────────────────
