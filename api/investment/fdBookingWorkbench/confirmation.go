@@ -166,22 +166,28 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Load booked values ────────────────────────────────────────────────
 		var bookedPrincipal, bookedRate float64
-		var bookedTenorDays int
-		var bookedValueDate, bookedMaturityDate, entityID, bookingStatus string
+		var bookedTenorDays, bookedTenorMonths, bookedTenorYears int
+		var bookedValueDate, bookedMaturityDate, bookedInterestTypeCode, bookedFrequencyID, bookedTenorType, entityID, bookingStatus string
 		err := pgxPool.QueryRow(ctx, `
 			SELECT
 				COALESCE(principal_amount,0),
 				COALESCE(interest_rate,0),
 				COALESCE(tenure_days,0),
+				COALESCE(tenure_months,0),
+				COALESCE(tenure_years,0),
 				COALESCE(TO_CHAR(value_date,'YYYY-MM-DD'),''),
 				COALESCE(TO_CHAR(expected_maturity_date,'YYYY-MM-DD'),''),
+				COALESCE(interest_type_code,''),
+				COALESCE(frequency_id,''),
+				COALESCE(tenor_type,''),
 				COALESCE(entity_id,''),
 				COALESCE(booking_status,'')
 			FROM investment.fd_booking_request
 			WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false`,
 			req.BookingID,
-		).Scan(&bookedPrincipal, &bookedRate, &bookedTenorDays,
-			&bookedValueDate, &bookedMaturityDate, &entityID, &bookingStatus)
+		).Scan(&bookedPrincipal, &bookedRate, &bookedTenorDays, &bookedTenorMonths, &bookedTenorYears,
+			&bookedValueDate, &bookedMaturityDate, &bookedInterestTypeCode, &bookedFrequencyID, &bookedTenorType,
+			&entityID, &bookingStatus)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Fetch booking failed: "+err.Error())
 			return
@@ -190,46 +196,16 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── Run variance engine ───────────────────────────────────────────────
 		runID := varianceengine.NewRunID()
 		varRules := []varianceengine.Rule{
-			{
-				FieldName:     "interest_rate",
-				VarianceType:  varianceengine.TypeRate,
-				ExpectedValue: formatNumber(bookedRate),
-				ActualValue:   formatNumber(req.ConfirmedInterestRate),
-				Priority:      varianceengine.PriorityHigh,
-				Tolerance:     0,
-			},
-			{
-				FieldName:     "principal_amount",
-				VarianceType:  varianceengine.TypeAmount,
-				ExpectedValue: formatNumber(bookedPrincipal),
-				ActualValue:   formatNumber(req.ConfirmedPrincipalAmount),
-				Priority:      varianceengine.PriorityHigh,
-				Tolerance:     0,
-			},
-			{
-				FieldName:     "tenor_days",
-				VarianceType:  varianceengine.TypeDays,
-				ExpectedValue: fmt.Sprintf("%d", bookedTenorDays),
-				ActualValue:   fmt.Sprintf("%d", req.ConfirmedTenorDays),
-				Priority:      varianceengine.PriorityMedium,
-				Tolerance:     0,
-			},
-			{
-				FieldName:     "value_date",
-				VarianceType:  varianceengine.TypeDate,
-				ExpectedValue: bookedValueDate,
-				ActualValue:   req.ConfirmedValueDate,
-				Priority:      varianceengine.PriorityMedium,
-				Tolerance:     0,
-			},
-			{
-				FieldName:     "maturity_date",
-				VarianceType:  varianceengine.TypeDate,
-				ExpectedValue: bookedMaturityDate,
-				ActualValue:   req.ConfirmedMaturityDate,
-				Priority:      varianceengine.PriorityHigh,
-				Tolerance:     0,
-			},
+			{FieldName: "interest_rate", VarianceType: varianceengine.TypeRate, ExpectedValue: formatNumber(bookedRate), ActualValue: formatNumber(req.ConfirmedInterestRate), Priority: varianceengine.PriorityHigh},
+			{FieldName: "principal_amount", VarianceType: varianceengine.TypeAmount, ExpectedValue: formatNumber(bookedPrincipal), ActualValue: formatNumber(req.ConfirmedPrincipalAmount), Priority: varianceengine.PriorityHigh},
+			{FieldName: "tenor_days", VarianceType: varianceengine.TypeDays, ExpectedValue: fmt.Sprintf("%d", bookedTenorDays), ActualValue: fmt.Sprintf("%d", req.ConfirmedTenorDays), Priority: varianceengine.PriorityMedium},
+			{FieldName: "tenor_months", VarianceType: varianceengine.TypeDays, ExpectedValue: fmt.Sprintf("%d", bookedTenorMonths), ActualValue: fmt.Sprintf("%d", req.ConfirmedTenorMonths), Priority: varianceengine.PriorityMedium},
+			{FieldName: "tenor_years", VarianceType: varianceengine.TypeDays, ExpectedValue: fmt.Sprintf("%d", bookedTenorYears), ActualValue: fmt.Sprintf("%d", req.ConfirmedTenorYears), Priority: varianceengine.PriorityMedium},
+			{FieldName: "value_date", VarianceType: varianceengine.TypeDate, ExpectedValue: bookedValueDate, ActualValue: req.ConfirmedValueDate, Priority: varianceengine.PriorityMedium},
+			{FieldName: "maturity_date", VarianceType: varianceengine.TypeDate, ExpectedValue: bookedMaturityDate, ActualValue: req.ConfirmedMaturityDate, Priority: varianceengine.PriorityHigh},
+			{FieldName: "interest_type_code", VarianceType: varianceengine.TypeIdentity, ExpectedValue: bookedInterestTypeCode, ActualValue: req.ConfirmedInterestType, Priority: varianceengine.PriorityHigh},
+			{FieldName: "frequency_id", VarianceType: varianceengine.TypeIdentity, ExpectedValue: bookedFrequencyID, ActualValue: req.ConfirmedFrequencyID, Priority: varianceengine.PriorityMedium},
+			{FieldName: "tenor_type", VarianceType: varianceengine.TypeIdentity, ExpectedValue: bookedTenorType, ActualValue: strings.ToUpper(strings.TrimSpace(req.ConfirmedTenorType)), Priority: varianceengine.PriorityLow},
 		}
 		varItems := varianceengine.Compare("FD_CONFIRMATION", req.BookingID, entityID, runID, varRules)
 
@@ -1022,6 +998,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Load current confirmation + linked booking (FOR UPDATE) ─────────────
 		var bookingID, entityID, currentStatus, oldTenorType, oldPenaltyID string
+		var oldInterestTypeCode, oldFrequencyID string
 		var oldPrincipal, oldRate float64
 		var oldTenorDays, oldTenorMonths, oldTenorYears int
 		var oldValueDate, oldMaturityDate string
@@ -1030,6 +1007,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT
 				COALESCE(c.booking_id,''), COALESCE(b.entity_id,''),
 				COALESCE(c.confirmation_status,''), COALESCE(c.tenor_type,''), COALESCE(c.penalty_id,''),
+				COALESCE(c.confirmed_interest_type_code,''), COALESCE(c.confirmed_frequency_id,''),
 				COALESCE(c.actual_principal,0), COALESCE(c.confirmed_rate,0),
 				COALESCE(c.tenor_days,0), COALESCE(c.tenor_months,0), COALESCE(c.tenor_years,0),
 				COALESCE(TO_CHAR(c.actual_start_date,'YYYY-MM-DD'),''),
@@ -1039,6 +1017,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false
 			FOR UPDATE`, req.ConfirmationID).
 			Scan(&bookingID, &entityID, &currentStatus, &oldTenorType, &oldPenaltyID,
+				&oldInterestTypeCode, &oldFrequencyID,
 				&oldPrincipal, &oldRate,
 				&oldTenorDays, &oldTenorMonths, &oldTenorYears,
 				&oldValueDate, &oldMaturityDate)
@@ -1063,17 +1042,20 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Load booked baseline for variance comparison ──────────────────────
 		var bookedPrincipal, bookedRate float64
-		var bookedTenorDays int
-		var bookedValueDate, bookedMaturityDate string
+		var bookedTenorDays, bookedTenorMonths, bookedTenorYears int
+		var bookedValueDate, bookedMaturityDate, bookedInterestTypeCode, bookedFrequencyID, bookedTenorType string
 		if bookingID != "" {
 			_ = pgxPool.QueryRow(ctx, `
 				SELECT
-					COALESCE(principal_amount,0), COALESCE(interest_rate,0), COALESCE(tenure_days,0),
+					COALESCE(principal_amount,0), COALESCE(interest_rate,0),
+					COALESCE(tenure_days,0), COALESCE(tenure_months,0), COALESCE(tenure_years,0),
 					COALESCE(TO_CHAR(value_date,'YYYY-MM-DD'),''),
-					COALESCE(TO_CHAR(expected_maturity_date,'YYYY-MM-DD'),'')
+					COALESCE(TO_CHAR(expected_maturity_date,'YYYY-MM-DD'),''),
+					COALESCE(interest_type_code,''), COALESCE(frequency_id,''), COALESCE(tenor_type,'')
 				FROM investment.fd_booking_request
 				WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false`, bookingID).
-				Scan(&bookedPrincipal, &bookedRate, &bookedTenorDays, &bookedValueDate, &bookedMaturityDate)
+				Scan(&bookedPrincipal, &bookedRate, &bookedTenorDays, &bookedTenorMonths, &bookedTenorYears,
+					&bookedValueDate, &bookedMaturityDate, &bookedInterestTypeCode, &bookedFrequencyID, &bookedTenorType)
 		}
 
 		// ── Merge req.Fields into effective new values ────────────────────────
@@ -1081,8 +1063,13 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		effPrincipal := oldPrincipal
 		effRate := oldRate
 		effTenorDays := oldTenorDays
+		effTenorMonths := oldTenorMonths
+		effTenorYears := oldTenorYears
 		effValueDate := oldValueDate
 		effMaturityDate := oldMaturityDate
+		effInterestTypeCode := oldInterestTypeCode
+		effFrequencyID := oldFrequencyID
+		effTenorType := oldTenorType
 
 		if v, ok := req.Fields["actual_principal"]; ok {
 			if fv, ok2 := v.(float64); ok2 {
@@ -1102,6 +1089,22 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				effTenorDays = iv
 			}
 		}
+		if v, ok := req.Fields["tenor_months"]; ok {
+			switch iv := v.(type) {
+			case float64:
+				effTenorMonths = int(iv)
+			case int:
+				effTenorMonths = iv
+			}
+		}
+		if v, ok := req.Fields["tenor_years"]; ok {
+			switch iv := v.(type) {
+			case float64:
+				effTenorYears = int(iv)
+			case int:
+				effTenorYears = iv
+			}
+		}
 		if v, ok := req.Fields["actual_start_date"]; ok {
 			if sv, ok2 := v.(string); ok2 && sv != "" {
 				effValueDate = sv
@@ -1112,47 +1115,37 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				effMaturityDate = sv
 			}
 		}
+		if v, ok := req.Fields["confirmed_interest_type_code"]; ok {
+			if sv, ok2 := v.(string); ok2 && sv != "" {
+				effInterestTypeCode = sv
+			}
+		}
+		if v, ok := req.Fields["confirmed_frequency_id"]; ok {
+			if sv, ok2 := v.(string); ok2 && sv != "" {
+				effFrequencyID = sv
+			}
+		}
+		if v, ok := req.Fields["tenor_type"]; ok {
+			if sv, ok2 := v.(string); ok2 && sv != "" {
+				effTenorType = strings.ToUpper(strings.TrimSpace(sv))
+			}
+		}
 
 		// ── Run variance engine against booked baseline ───────────────────────
 		runID := varianceengine.NewRunID()
 		var varItems []varianceengine.VarianceItem
 		if bookedPrincipal > 0 || bookedRate > 0 {
 			varRules := []varianceengine.Rule{
-				{
-					FieldName:     "interest_rate",
-					VarianceType:  varianceengine.TypeRate,
-					ExpectedValue: formatNumber(bookedRate),
-					ActualValue:   formatNumber(effRate),
-					Priority:      varianceengine.PriorityHigh,
-				},
-				{
-					FieldName:     "principal_amount",
-					VarianceType:  varianceengine.TypeAmount,
-					ExpectedValue: formatNumber(bookedPrincipal),
-					ActualValue:   formatNumber(effPrincipal),
-					Priority:      varianceengine.PriorityHigh,
-				},
-				{
-					FieldName:     "tenor_days",
-					VarianceType:  varianceengine.TypeDays,
-					ExpectedValue: fmt.Sprintf("%d", bookedTenorDays),
-					ActualValue:   fmt.Sprintf("%d", effTenorDays),
-					Priority:      varianceengine.PriorityMedium,
-				},
-				{
-					FieldName:     "value_date",
-					VarianceType:  varianceengine.TypeDate,
-					ExpectedValue: bookedValueDate,
-					ActualValue:   effValueDate,
-					Priority:      varianceengine.PriorityMedium,
-				},
-				{
-					FieldName:     "maturity_date",
-					VarianceType:  varianceengine.TypeDate,
-					ExpectedValue: bookedMaturityDate,
-					ActualValue:   effMaturityDate,
-					Priority:      varianceengine.PriorityHigh,
-				},
+				{FieldName: "interest_rate", VarianceType: varianceengine.TypeRate, ExpectedValue: formatNumber(bookedRate), ActualValue: formatNumber(effRate), Priority: varianceengine.PriorityHigh},
+				{FieldName: "principal_amount", VarianceType: varianceengine.TypeAmount, ExpectedValue: formatNumber(bookedPrincipal), ActualValue: formatNumber(effPrincipal), Priority: varianceengine.PriorityHigh},
+				{FieldName: "tenor_days", VarianceType: varianceengine.TypeDays, ExpectedValue: fmt.Sprintf("%d", bookedTenorDays), ActualValue: fmt.Sprintf("%d", effTenorDays), Priority: varianceengine.PriorityMedium},
+				{FieldName: "tenor_months", VarianceType: varianceengine.TypeDays, ExpectedValue: fmt.Sprintf("%d", bookedTenorMonths), ActualValue: fmt.Sprintf("%d", effTenorMonths), Priority: varianceengine.PriorityMedium},
+				{FieldName: "tenor_years", VarianceType: varianceengine.TypeDays, ExpectedValue: fmt.Sprintf("%d", bookedTenorYears), ActualValue: fmt.Sprintf("%d", effTenorYears), Priority: varianceengine.PriorityMedium},
+				{FieldName: "value_date", VarianceType: varianceengine.TypeDate, ExpectedValue: bookedValueDate, ActualValue: effValueDate, Priority: varianceengine.PriorityMedium},
+				{FieldName: "maturity_date", VarianceType: varianceengine.TypeDate, ExpectedValue: bookedMaturityDate, ActualValue: effMaturityDate, Priority: varianceengine.PriorityHigh},
+				{FieldName: "interest_type_code", VarianceType: varianceengine.TypeIdentity, ExpectedValue: bookedInterestTypeCode, ActualValue: effInterestTypeCode, Priority: varianceengine.PriorityHigh},
+				{FieldName: "frequency_id", VarianceType: varianceengine.TypeIdentity, ExpectedValue: bookedFrequencyID, ActualValue: effFrequencyID, Priority: varianceengine.PriorityMedium},
+				{FieldName: "tenor_type", VarianceType: varianceengine.TypeIdentity, ExpectedValue: bookedTenorType, ActualValue: effTenorType, Priority: varianceengine.PriorityLow},
 			}
 			varItems = varianceengine.Compare("FD_CONFIRMATION", bookingID, entityID, runID, varRules)
 			if persistErr := varianceengine.PersistVariances(ctx, pgxPool, varItems); persistErr != nil {
@@ -1302,20 +1295,19 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}(req.ConfirmationID, req.UserID, userEmail, entityID, updateAmount)
 
-		// Build variance items response
+		// Build variance items response — return ALL fields so UI can render full comparison table
 		varOut := make([]map[string]interface{}, 0, len(varItems))
 		for _, v := range varItems {
-			if v.HasVariance {
-				varOut = append(varOut, map[string]interface{}{
-					"field_name":     v.FieldName,
-					"variance_type":  v.VarianceType,
-					"expected_value": v.ExpectedValue,
-					"actual_value":   v.ActualValue,
-					"variance_delta": v.VarianceDelta,
-					"priority":       v.Priority,
-					"system_comment": v.SystemComment,
-				})
-			}
+			varOut = append(varOut, map[string]interface{}{
+				"field_name":     v.FieldName,
+				"variance_type":  v.VarianceType,
+				"expected_value": v.ExpectedValue,
+				"actual_value":   v.ActualValue,
+				"variance_delta": v.VarianceDelta,
+				"priority":       v.Priority,
+				"has_variance":   v.HasVariance,
+				"system_comment": v.SystemComment,
+			})
 		}
 
 		confirmMsg := "Confirmation updated successfully"
