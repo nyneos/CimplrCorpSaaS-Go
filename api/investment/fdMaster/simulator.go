@@ -355,6 +355,37 @@ type MaturityDateRequest struct {
 	DateAdjustment string `json:"date_adjustment"` // FOLLOWING_WD | PRECEDING_WD | NO_ADJUST (overrides bank config)
 }
 
+// UnmarshalJSON accepts float-typed tenor fields (e.g. 10.98) and truncates to int.
+func (r *MaturityDateRequest) UnmarshalJSON(data []byte) error {
+	type Alias MaturityDateRequest
+	var aux struct {
+		Alias
+		TenorDays   *json.Number `json:"tenor_days"`
+		TenorMonths *json.Number `json:"tenor_months"`
+		TenorYears  *json.Number `json:"tenor_years"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*r = MaturityDateRequest(aux.Alias)
+	if aux.TenorDays != nil {
+		if f, err := aux.TenorDays.Float64(); err == nil {
+			r.TenorDays = int(f)
+		}
+	}
+	if aux.TenorMonths != nil {
+		if f, err := aux.TenorMonths.Float64(); err == nil {
+			r.TenorMonths = int(f)
+		}
+	}
+	if aux.TenorYears != nil {
+		if f, err := aux.TenorYears.Float64(); err == nil {
+			r.TenorYears = int(f)
+		}
+	}
+	return nil
+}
+
 // MaturityDateResponse is what the endpoint returns.
 type MaturityDateResponse struct {
 	StartDate            string `json:"start_date"`
@@ -543,6 +574,38 @@ type SimulateCashflowRequest struct {
 	// E.g. "M" for monthly, "Q" for quarterly, "H" for half-yearly, "Y" for yearly.
 	// Defaults to "M" (monthly) when empty.
 	AccrualFrequencyCode string `json:"accrual_frequency_code,omitempty"`
+}
+
+// UnmarshalJSON accepts float-typed tenor fields (e.g. 10.98) and truncates to int.
+// This tolerates frontend payloads where tenor_months/tenor_years arrive as floats.
+func (r *SimulateCashflowRequest) UnmarshalJSON(data []byte) error {
+	type Alias SimulateCashflowRequest
+	var aux struct {
+		Alias
+		TenorDays   *json.Number `json:"tenor_days"`
+		TenorMonths *json.Number `json:"tenor_months"`
+		TenorYears  *json.Number `json:"tenor_years"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*r = SimulateCashflowRequest(aux.Alias)
+	if aux.TenorDays != nil {
+		if f, err := aux.TenorDays.Float64(); err == nil {
+			r.TenorDays = int(f)
+		}
+	}
+	if aux.TenorMonths != nil {
+		if f, err := aux.TenorMonths.Float64(); err == nil {
+			r.TenorMonths = int(f)
+		}
+	}
+	if aux.TenorYears != nil {
+		if f, err := aux.TenorYears.Float64(); err == nil {
+			r.TenorYears = int(f)
+		}
+	}
+	return nil
 }
 
 // SimulateCashflowResponse is what the handler returns.
