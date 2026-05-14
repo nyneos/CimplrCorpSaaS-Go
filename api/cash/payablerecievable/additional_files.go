@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -31,6 +32,18 @@ func DeletePayableAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, transactionAdditionalFilesConfig("payable"))
 }
 
+func AuditPayableAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, transactionAdditionalFilesConfig("payable"))
+}
+
+func ApprovePayableAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, transactionAdditionalFilesConfig("payable"))
+}
+
+func RejectPayableAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, transactionAdditionalFilesConfig("payable"))
+}
+
 func ListReceivableAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewListHandler(pool, transactionAdditionalFilesConfig("receivable"))
 }
@@ -51,28 +64,56 @@ func DeleteReceivableAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc 
 	return additionalfiles.NewDeleteHandler(pool, transactionAdditionalFilesConfig("receivable"))
 }
 
+func AuditReceivableAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, transactionAdditionalFilesConfig("receivable"))
+}
+
+func ApproveReceivableAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, transactionAdditionalFilesConfig("receivable"))
+}
+
+func RejectReceivableAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, transactionAdditionalFilesConfig("receivable"))
+}
+
 func transactionAdditionalFilesConfig(kind string) additionalfiles.Config {
 	if strings.EqualFold(kind, "receivable") {
 		return additionalfiles.Config{
-			Module:        "receivables",
-			ParentIDField: "receivable_id",
-			List:          listReceivableAdditionalFiles,
-			Create:        createReceivableAdditionalFile,
-			GetOne:        getReceivableAdditionalFile,
-			GetMany:       getReceivableAdditionalFiles,
-			SoftDelete:    deleteReceivableAdditionalFile,
+			Module:                "receivables",
+			AuditSource:           "RECEIVABLE",
+			ParentIDField:         "receivable_id",
+			List:                  listReceivableAdditionalFiles,
+			CreateReturning:       createReceivableAdditionalFile,
+			GetOne:                getReceivableAdditionalFile,
+			GetAnyFile:            getAnyReceivableAdditionalFile,
+			GetMany:               getReceivableAdditionalFiles,
+			SoftDelete:            deleteReceivableAdditionalFile,
+			SoftDeleteTx:          deleteReceivableAdditionalFileTx,
+			RecordMainUploadAudit: recordReceivableMainUploadAudit,
 		}
 	}
 
 	return additionalfiles.Config{
-		Module:        "payables",
-		ParentIDField: "payable_id",
-		List:          listPayableAdditionalFiles,
-		Create:        createPayableAdditionalFile,
-		GetOne:        getPayableAdditionalFile,
-		GetMany:       getPayableAdditionalFiles,
-		SoftDelete:    deletePayableAdditionalFile,
+		Module:                "payables",
+		AuditSource:           "PAYABLE",
+		ParentIDField:         "payable_id",
+		List:                  listPayableAdditionalFiles,
+		CreateReturning:       createPayableAdditionalFile,
+		GetOne:                getPayableAdditionalFile,
+		GetAnyFile:            getAnyPayableAdditionalFile,
+		GetMany:               getPayableAdditionalFiles,
+		SoftDelete:            deletePayableAdditionalFile,
+		SoftDeleteTx:          deletePayableAdditionalFileTx,
+		RecordMainUploadAudit: recordPayableMainUploadAudit,
 	}
+}
+
+func recordPayableMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionpayable", "payable_id", "actiontype", parentID, payload)
+}
+
+func recordReceivableMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionreceivable", "receivable_id", "actiontype", parentID, payload)
 }
 
 func listPayableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
@@ -84,8 +125,8 @@ func listPayableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentI
 	`), parentID)
 }
 
-func createPayableAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
-	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "public.payable_files", "payable_id", input, `
+func createPayableAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
+	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "public.payable_files", "payable_id", input, `
 		SELECT p.payable_id AS parent_id
 		FROM public.tr_payables p
 		WHERE p.payable_id = $8
@@ -94,10 +135,22 @@ func createPayableAdditionalFile(ctx context.Context, tx pgx.Tx, input additiona
 }
 
 func getPayableAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getPayableAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnyPayableAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getPayableAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getPayableAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
+	}
 	return additionalfiles.FirstFile(ctx, pool, payableQuery(`
 		WHERE f.payable_id = $1
 		  AND f.file_id = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  `+deletedClause+`
 		  AND COALESCE(p.is_deleted, FALSE) = FALSE
 	`), parentID, fileID)
 }
@@ -118,7 +171,19 @@ func getPayableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID
 }
 
 func deletePayableAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
-	result, execErr := pool.Exec(ctx, `
+	return deletePayableAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deletePayableAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deletePayableAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+type transactionFileExec interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+}
+
+func deletePayableAdditionalFileExec(ctx context.Context, exec transactionFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	result, execErr := exec.Exec(ctx, `
 		UPDATE public.payable_files f
 		SET is_deleted = TRUE,
 		    deleted_by = $3,
@@ -145,8 +210,8 @@ func listReceivableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, pare
 	`), parentID)
 }
 
-func createReceivableAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
-	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "public.receivable_files", "receivable_id", input, `
+func createReceivableAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
+	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "public.receivable_files", "receivable_id", input, `
 		SELECT r.receivable_id AS parent_id
 		FROM public.tr_receivables r
 		WHERE r.receivable_id = $8
@@ -155,10 +220,22 @@ func createReceivableAdditionalFile(ctx context.Context, tx pgx.Tx, input additi
 }
 
 func getReceivableAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getReceivableAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnyReceivableAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getReceivableAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getReceivableAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
+	}
 	return additionalfiles.FirstFile(ctx, pool, receivableQuery(`
 		WHERE f.receivable_id = $1
 		  AND f.file_id = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  `+deletedClause+`
 		  AND COALESCE(r.is_deleted, FALSE) = FALSE
 	`), parentID, fileID)
 }
@@ -179,7 +256,15 @@ func getReceivableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, paren
 }
 
 func deleteReceivableAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
-	result, execErr := pool.Exec(ctx, `
+	return deleteReceivableAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteReceivableAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteReceivableAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteReceivableAdditionalFileExec(ctx context.Context, exec transactionFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	result, execErr := exec.Exec(ctx, `
 		UPDATE public.receivable_files f
 		SET is_deleted = TRUE,
 		    deleted_by = $3,

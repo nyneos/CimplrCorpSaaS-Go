@@ -20,7 +20,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 func StartCashService(db *sql.DB, port string) {
 
@@ -74,6 +75,9 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/rule-master/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DownloadRuleMasterAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/rule-master/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DownloadSelectedRuleMasterAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/rule-master/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DeleteRuleMasterAdditionalFileHandler(pgxPool)))
+	mux.Handle("/cash/rule-master/additional-files/delete/approve", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ApproveRuleMasterAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/rule-master/additional-files/delete/reject", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RejectRuleMasterAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/rule-master/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.AuditRuleMasterAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/category/delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DeleteMultipleTransactionCategoriesHandler(db)))
 	mux.Handle("/cash/transactions/map-category", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.MapTransactionsToCategoryHandler(db)))
 	mux.Handle("/cash/transactions/categorize-uncategorized", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CategorizeUncategorizedTransactionsHandler(db)))
@@ -103,6 +107,9 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/bank-statements/v2/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DownloadAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DownloadSelectedAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DeleteAdditionalFileHandler(pgxPool)))
+	mux.Handle("/cash/bank-statements/v2/additional-files/delete/approve", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ApproveAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/bank-statements/v2/additional-files/delete/reject", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RejectAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/bank-statements/v2/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.AuditAdditionalFileHandler(pgxPool)))
 	// Audit bank statement
 	mux.Handle("/cash/bank-statements/v2/audit", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementAuditHandler(db)))
 	mux.Handle("/cash/bank-statements/v2/audit/downloads", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementDownloadAuditHandler(db)))
@@ -138,11 +145,17 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/transactions/payables/additional-files/download", api.BusinessUnitMiddleware(db)(payablerecievable.DownloadPayableAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/transactions/payables/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(payablerecievable.DownloadSelectedPayableAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/transactions/payables/additional-files/delete", api.BusinessUnitMiddleware(db)(payablerecievable.DeletePayableAdditionalFileHandler(pgxPool)))
+	mux.Handle("/cash/transactions/payables/additional-files/delete/approve", api.BusinessUnitMiddleware(db)(payablerecievable.ApprovePayableAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/transactions/payables/additional-files/delete/reject", api.BusinessUnitMiddleware(db)(payablerecievable.RejectPayableAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/transactions/payables/additional-files/audit", api.BusinessUnitMiddleware(db)(payablerecievable.AuditPayableAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/transactions/receivables/additional-files/list", api.BusinessUnitMiddleware(db)(payablerecievable.ListReceivableAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/transactions/receivables/additional-files/upload", api.BusinessUnitMiddleware(db)(payablerecievable.UploadReceivableAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/transactions/receivables/additional-files/download", api.BusinessUnitMiddleware(db)(payablerecievable.DownloadReceivableAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/transactions/receivables/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(payablerecievable.DownloadSelectedReceivableAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/transactions/receivables/additional-files/delete", api.BusinessUnitMiddleware(db)(payablerecievable.DeleteReceivableAdditionalFileHandler(pgxPool)))
+	mux.Handle("/cash/transactions/receivables/additional-files/delete/approve", api.BusinessUnitMiddleware(db)(payablerecievable.ApproveReceivableAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/transactions/receivables/additional-files/delete/reject", api.BusinessUnitMiddleware(db)(payablerecievable.RejectReceivableAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/transactions/receivables/additional-files/audit", api.BusinessUnitMiddleware(db)(payablerecievable.AuditReceivableAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/transactions/audit", api.BusinessUnitMiddleware(db)(payablerecievable.GetTransactionAuditHandler(pgxPool)))
 	mux.Handle("/cash/transactions/all", api.BusinessUnitMiddleware(db)(payablerecievable.GetAllPayableReceivable(pgxPool)))
 
@@ -160,6 +173,9 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/fund-planning/additional-files/download", api.BusinessUnitMiddleware(db)(fundplanning.DownloadAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/fund-planning/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(fundplanning.DownloadSelectedAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/fund-planning/additional-files/delete", api.BusinessUnitMiddleware(db)(fundplanning.DeleteAdditionalFileHandler(pgxPool)))
+	mux.Handle("/cash/fund-planning/additional-files/delete/approve", api.BusinessUnitMiddleware(db)(fundplanning.ApproveAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/fund-planning/additional-files/delete/reject", api.BusinessUnitMiddleware(db)(fundplanning.RejectAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/fund-planning/additional-files/audit", api.BusinessUnitMiddleware(db)(fundplanning.AuditAdditionalFileHandler(pgxPool)))
 
 	// Sweep configuration routes (load entity, bank and approved accounts into context)
 	mux.Handle("/cash/sweep-config/create", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.CreateSweepConfiguration(pgxPool)))
@@ -189,6 +205,9 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/sweep-planning/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.DownloadSweepPlanningAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/sweep-planning/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.DownloadSelectedSweepPlanningAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/sweep-planning/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.DeleteSweepPlanningAdditionalFileHandler(pgxPool)))
+	mux.Handle("/cash/sweep-planning/additional-files/delete/approve", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ApproveSweepPlanningAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/sweep-planning/additional-files/delete/reject", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.RejectSweepPlanningAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/sweep-planning/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.AuditSweepPlanningAdditionalFileHandler(pgxPool)))
 
 	// Sweep V2 initiation routes (manual/scheduled initiation with overrides)
 	mux.Handle("/cash/sweep-initiation/create", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.CreateSweepInitiation(pgxPool)))
@@ -205,6 +224,9 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/sweep-initiation/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.DownloadSweepInitiationAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.DownloadSelectedSweepInitiationAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.DeleteSweepInitiationAdditionalFileHandler(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/additional-files/delete/approve", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ApproveSweepInitiationAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/additional-files/delete/reject", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.RejectSweepInitiationAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.AuditSweepInitiationAdditionalFileHandler(pgxPool)))
 
 	// Sweep V2 execution routes (logs, statistics, manual trigger)
 	mux.Handle("/cash/sweep-execution-v2/logs", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepExecutionLogsV2(pgxPool)))
@@ -258,6 +280,9 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/projection/v2/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(projection.DownloadAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/projection/v2/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(projection.DownloadSelectedAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/projection/v2/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(projection.DeleteAdditionalFileHandler(pgxPool)))
+	mux.Handle("/cash/projection/v2/additional-files/delete/approve", middlewares.PreValidationMiddleware(pgxPool)(projection.ApproveAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/projection/v2/additional-files/delete/reject", middlewares.PreValidationMiddleware(pgxPool)(projection.RejectAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/projection/v2/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(projection.AuditAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/projections/audit", middlewares.PreValidationMiddleware(pgxPool)(projection.GetProjectionAuditHandler(pgxPool)))
 
 	//bank balance
@@ -276,6 +301,9 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/bank-balances/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.DownloadAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/bank-balances/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.DownloadSelectedAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/bank-balances/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.DeleteAdditionalFileHandler(pgxPool)))
+	mux.Handle("/cash/bank-balances/additional-files/delete/approve", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.ApproveAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/bank-balances/additional-files/delete/reject", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.RejectAdditionalFileDeleteHandler(pgxPool)))
+	mux.Handle("/cash/bank-balances/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.AuditAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/bank-balances/update", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.UpdateBankBalance(pgxPool)))
 
 	// Fund Availability - Combined Actuals & Projections

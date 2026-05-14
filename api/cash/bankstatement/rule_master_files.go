@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -34,15 +35,30 @@ func DeleteRuleMasterAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc 
 	return additionalfiles.NewDeleteHandler(pool, ruleMasterAdditionalFilesConfig())
 }
 
+func AuditRuleMasterAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, ruleMasterAdditionalFilesConfig())
+}
+
+func ApproveRuleMasterAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, ruleMasterAdditionalFilesConfig())
+}
+
+func RejectRuleMasterAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, ruleMasterAdditionalFilesConfig())
+}
+
 func ruleMasterAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:        "rule-master",
-		ParentIDField: "rule_id",
-		List:          listRuleMasterAdditionalFiles,
-		Create:        createRuleMasterAdditionalFile,
-		GetOne:        getRuleMasterAdditionalFile,
-		GetMany:       getRuleMasterAdditionalFiles,
-		SoftDelete:    deleteRuleMasterAdditionalFile,
+		Module:          "rule-master",
+		AuditSource:     "RULE_MASTER",
+		ParentIDField:   "rule_id",
+		List:            listRuleMasterAdditionalFiles,
+		CreateReturning: createRuleMasterAdditionalFile,
+		GetOne:          getRuleMasterAdditionalFile,
+		GetAnyFile:      getAnyRuleMasterAdditionalFile,
+		GetMany:         getRuleMasterAdditionalFiles,
+		SoftDelete:      deleteRuleMasterAdditionalFile,
+		SoftDeleteTx:    deleteRuleMasterAdditionalFileTx,
 	}
 }
 
@@ -61,9 +77,9 @@ func listRuleMasterAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, pare
 	return additionalfiles.QueryFiles(ctx, pool, query, strings.TrimSpace(parentID))
 }
 
-func createRuleMasterAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
+func createRuleMasterAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
 	if err := validateRuleMasterFileAccess(ctx, tx, input.ParentID); err != nil {
-		return err
+		return "", err
 	}
 
 	parentScope := `
@@ -71,12 +87,25 @@ func createRuleMasterAdditionalFile(ctx context.Context, tx pgx.Tx, input additi
 		FROM cimplrcorpsaas.category_rules r
 		WHERE r.rule_id::text = $8
 	`
-	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "cimplrcorpsaas.category_rule_files", "rule_id", input, parentScope, strings.TrimSpace(input.ParentID))
+	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "cimplrcorpsaas.category_rule_files", "rule_id", input, parentScope, strings.TrimSpace(input.ParentID))
 }
 
 func getRuleMasterAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getRuleMasterAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnyRuleMasterAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getRuleMasterAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getRuleMasterAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
 	if err := validateRuleMasterFileAccess(ctx, pool, parentID); err != nil {
 		return nil, err
+	}
+
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
 	}
 
 	query := `
@@ -84,7 +113,7 @@ func getRuleMasterAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parent
 		FROM cimplrcorpsaas.category_rule_files f
 		WHERE f.rule_id::text = $1
 		  AND f.file_id = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  ` + deletedClause + `
 	`
 	return additionalfiles.FirstFile(ctx, pool, query, strings.TrimSpace(parentID), strings.TrimSpace(fileID))
 }
@@ -112,7 +141,20 @@ func getRuleMasterAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, paren
 }
 
 func deleteRuleMasterAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
-	if err := validateRuleMasterFileAccess(ctx, pool, parentID); err != nil {
+	return deleteRuleMasterAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteRuleMasterAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteRuleMasterAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+type ruleMasterFileExec interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...interface{}) pgx.Row
+}
+
+func deleteRuleMasterAdditionalFileExec(ctx context.Context, exec ruleMasterFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	if err := validateRuleMasterFileAccess(ctx, exec, parentID); err != nil {
 		return false, err
 	}
 
@@ -125,7 +167,7 @@ func deleteRuleMasterAdditionalFile(ctx context.Context, pool *pgxpool.Pool, par
 		  AND file_id = $2
 		  AND COALESCE(is_deleted, FALSE) = FALSE
 	`
-	result, err := pool.Exec(ctx, query, strings.TrimSpace(parentID), strings.TrimSpace(fileID), deletedBy, deletedAt)
+	result, err := exec.Exec(ctx, query, strings.TrimSpace(parentID), strings.TrimSpace(fileID), deletedBy, deletedAt)
 	if err != nil {
 		return false, err
 	}
