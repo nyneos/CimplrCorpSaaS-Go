@@ -11,12 +11,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -1041,6 +1043,12 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldTenorDays, &oldTenorMonths, &oldTenorYears,
 				&oldValueDate, &oldMaturityDate)
 		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				api.RespondWithError(w, http.StatusNotFound,
+					"Confirmation not found, was removed, or is no longer editable. Refresh and try again.")
+				return
+			}
+			api.LogError("[EditConfirmation] linkage query failed confirmation_id=%s: %v", req.ConfirmationID, err)
 			msg, status := getUserFriendlyFDError(err, "Fetch confirmation linkage failed")
 			api.RespondWithError(w, status, msg)
 			return
@@ -1819,7 +1827,8 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				// finalizeRecord already set processing_status=REJECTED; flip confirmation status.
 				if _, execErr := pgxPool.Exec(ctx,
-					`UPDATE investment.fd_confirmation SET confirmation_status='REJECTED'
+					`UPDATE investment.fd_confirmation SET confirmation_status='REJECTED',
+					 variance_action = 'PENDING'
 					 WHERE confirmation_id=$1 AND confirmation_status NOT IN ('CONFIRMED','VARIANCE_REJECTED')`, cID,
 				); execErr != nil {
 					api.LogError("[FDConfirmation] confirmation_status→REJECTED failed for %s: %v", cID, execErr)
@@ -1850,7 +1859,8 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					FROM investment.fd_confirmation c
 					WHERE a.confirmation_id=c.confirmation_id AND a.confirmation_id=$3
 					  AND a.processing_status LIKE '%PENDING%'`, userEmail, req.Comment, cID)
-				_, err2 := tx.Exec(ctx, `UPDATE investment.fd_confirmation SET confirmation_status='REJECTED'
+				_, err2 := tx.Exec(ctx, `UPDATE investment.fd_confirmation SET confirmation_status='REJECTED',
+					variance_action = 'PENDING'
 					WHERE confirmation_id=$1
 					  AND confirmation_status NOT IN ('CONFIRMED','VARIANCE_REJECTED')`, cID)
 				_, err3 := tx.Exec(ctx, `UPDATE investment.fd_booking_request SET booking_status='SENT_TO_BANK'
@@ -2327,6 +2337,17 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		uploadKeyExpr := resolveFDConfirmationUploadKeyExpression(ctx, pgxPool, "c")
 
+		confCols, err := loadFDTableColumns(ctx, pgxPool, "investment", "fd_confirmation")
+		if err != nil {
+			msg, status := getUserFriendlyFDError(err, "Load confirmation schema failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		bankReferenceNumberSQL := "COALESCE(c.bank_fd_ref_no,'')"
+		if confCols["bank_reference_number"] {
+			bankReferenceNumberSQL = "COALESCE(NULLIF(BTRIM(c.bank_reference_number::text),''), c.bank_fd_ref_no,'')"
+		}
+
 		// ── Confirmation row ─────────────────────────────────────────────────
 		confRows, err := pgxPool.Query(ctx, fmt.Sprintf(`
 			SELECT
@@ -2341,6 +2362,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.actual_start_date,'YYYY-MM-DD'),'')                AS confirmed_value_date,
 				COALESCE(TO_CHAR(c.actual_maturity_date,'YYYY-MM-DD'),'')             AS confirmed_maturity_date,
 				COALESCE(c.bank_fd_ref_no,'')                                          AS bank_fd_reference,
+				%s                                                                     AS bank_reference_number,
 				COALESCE(TO_CHAR(c.confirmation_received_date,'YYYY-MM-DD'),'')       AS receipt_date,
 				COALESCE(c.tenor_type,'')                                              AS confirmed_tenor_type,
 				COALESCE(c.tenor_days,0)                                               AS confirmed_tenor_days,
@@ -2363,7 +2385,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')            AS record_created_at
 			FROM investment.fd_confirmation c
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
-			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false`, bookingAccountExpr, uploadKeyExpr),
+			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false`, bookingAccountExpr, bankReferenceNumberSQL, uploadKeyExpr),
 			confirmationID)
 		if err != nil {
 			msg, httpStatus := getUserFriendlyFDError(err, constants.ErrQueryFailed)
