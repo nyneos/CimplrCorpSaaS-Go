@@ -23,6 +23,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -486,6 +487,12 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
+		// Multipart requests put user_id on the form (see web nos client); merge into req if JSON omitted it.
+		if strings.TrimSpace(req.UserID) == "" {
+			if uid := strings.TrimSpace(r.FormValue("user_id")); uid != "" {
+				req.UserID = uid
+			}
+		}
 		if req.FDID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "fd_id is required")
 			return
@@ -751,7 +758,14 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			cleanupUpload()
 			api.LogError("[FDClosure] InitiateClosure insert error: %v", err)
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to create closure request")
+			msg := "Failed to create closure request"
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) {
+				msg = fmt.Sprintf("Failed to create closure request (SQLSTATE %s): %s", pgErr.Code, pgErr.Message)
+			} else {
+				msg = fmt.Sprintf("Failed to create closure request: %v", err)
+			}
+			api.RespondWithError(w, http.StatusInternalServerError, msg)
 			return
 		}
 
