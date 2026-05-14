@@ -1097,18 +1097,24 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			oldRecipientsJSON = []byte("[]")
 		}
 
-		// ── Step 4: marshal recipient_strategy for storage if provided ───────────
+		// ── Step 4: marshal recipient_strategy for storage ───────────────────────
+		// Always embed the strategy using a sentinel prefix so the approval handler
+		// can reliably extract and apply it even when a human change_note is present.
 		var strategyJSON []byte
 		if req.Strategy != nil {
 			if sj, err := json.Marshal(req.Strategy); err == nil {
 				strategyJSON = sj
 			}
 		}
-		// We store strategy in change_note as JSON prefix if no dedicated column;
-		// change_note field is used directly from req.ChangeNote.
+		const strategyPrefix = "__STRATEGY__:"
 		changeNote := req.ChangeNote
-		if len(strategyJSON) > 0 && changeNote == "" {
-			changeNote = string(strategyJSON)
+		if len(strategyJSON) > 0 {
+			// Sentinel prefix + strategy JSON, then optional human note separated by newline
+			if changeNote == "" {
+				changeNote = strategyPrefix + string(strategyJSON)
+			} else {
+				changeNote = strategyPrefix + string(strategyJSON) + "\n" + changeNote
+			}
 		}
 
 		// ── Step 5: insert new EDIT audit row with all old_* snapshots ───────────
@@ -1395,7 +1401,8 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		rows, err := tx.Query(ctx, `
-			SELECT audit_id::text, template_id, action_type, processing_status
+			SELECT audit_id::text, template_id, action_type, processing_status,
+			       COALESCE(change_note, '') AS change_note
 			FROM notification_svc.audit_template
 			WHERE audit_id = ANY($1::uuid[])
 			FOR UPDATE`,
@@ -1412,13 +1419,14 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			TemplateID string
 			ActionType string
 			Status     string
+			ChangeNote string
 		}
 
 		var targets []targetRow
 
 		for rows.Next() {
 			var t targetRow
-			if err := rows.Scan(&t.AuditID, &t.TemplateID, &t.ActionType, &t.Status); err != nil {
+			if err := rows.Scan(&t.AuditID, &t.TemplateID, &t.ActionType, &t.Status, &t.ChangeNote); err != nil {
 				api.RespondWithPayload(w, false, err.Error(), nil)
 				return
 			}
@@ -1442,6 +1450,8 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithPayload(w, false, "no eligible rows", nil)
 			return
 		}
+
+		const approvalStrategyPrefix = "__STRATEGY__:"
 
 		for _, t := range targets {
 
@@ -1492,6 +1502,34 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				api.RespondWithPayload(w, false, "template update failed: "+err.Error(), nil)
 				return
+			}
+
+			// ── Apply recipient_strategy on EDIT approval ────────────────────────
+			// The strategy was embedded in change_note with a sentinel prefix during
+			// EditTemplateSingle. Extract it here and sync template_recipient.
+			if t.ActionType == "EDIT" && strings.HasPrefix(t.ChangeNote, approvalStrategyPrefix) {
+				// Strip the sentinel prefix; human note (if any) follows after a newline
+				rawAfterPrefix := strings.TrimPrefix(t.ChangeNote, approvalStrategyPrefix)
+				strategyRaw := rawAfterPrefix
+				if idx := strings.Index(rawAfterPrefix, "\n"); idx >= 0 {
+					strategyRaw = rawAfterPrefix[:idx]
+				}
+				var strategy map[string]interface{}
+				if jerr := json.Unmarshal([]byte(strategyRaw), &strategy); jerr == nil && len(strategy) > 0 {
+					// Deactivate all current live recipients for this template
+					if _, derr := tx.Exec(ctx,
+						`UPDATE notification_svc.template_recipient SET is_active = false WHERE template_id = $1`,
+						t.TemplateID,
+					); derr != nil {
+						api.RespondWithPayload(w, false, "recipient deactivation failed: "+derr.Error(), nil)
+						return
+					}
+					// Insert new recipients per the stored strategy
+					if _, rerr := populateRecipientsOnTx(ctx, tx, pgxPool, t.TemplateID, strategy, userEmail); rerr != nil {
+						api.RespondWithPayload(w, false, "recipient apply failed: "+rerr.Error(), nil)
+						return
+					}
+				}
 			}
 		}
 
