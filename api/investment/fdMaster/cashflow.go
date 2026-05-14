@@ -2253,7 +2253,9 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 					tdsThisPeriod = applyRounding(cumulativeInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, true)
 				}
 			case "RECEIPT":
-				tdsThisPeriod = 0
+				if capInterest >= tdsCfg.ThresholdAmount {
+					tdsThisPeriod = applyRounding(capInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, false)
+				}
 			default: // ACCRUAL
 				if capInterest >= tdsCfg.ThresholdAmount {
 					tdsThisPeriod = applyRounding(capInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, false)
@@ -2461,16 +2463,8 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 						dueNotAccrued = 0
 					}
 
-					// RECEIPT-mode TDS: deduct at every INTEREST_RECEIPT when the payout
-					// crosses the threshold. Phase A deliberately deferred (tdsThisPeriod = 0)
-					// at CAPITALIZATION for RECEIPT mode — this is where it lands.
-					// ACCRUAL/ACCRUAL_ANNUAL/MATURITY-mode TDS is already handled in Phase A
-					// cap rows or at the final maturity emission, so this gate intentionally
-					// fires only for RECEIPT — guarantees no double-count.
+					// TDS is deducted at CAPITALIZATION rows (Phase A); INTEREST_RECEIPT carries no additional TDS.
 					intermediateTDS := 0.0
-					if hasTDS && tdsCfg != nil && normTiming == "RECEIPT" && payoutG >= tdsCfg.ThresholdAmount {
-						intermediateTDS = applyRounding(payoutG*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, false)
-					}
 
 					payoutVD := resolveValueDate("INTEREST_RECEIPT", payoutDate, cfg, calInfo)
 					seq++
