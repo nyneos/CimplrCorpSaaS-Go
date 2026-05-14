@@ -1050,7 +1050,12 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 			-- External email (no users row matched) — always include
 			u.id IS NULL
 			OR
-			-- User must be mapped to the event entity or any of its descendants
+			-- ROLE recipients are org-wide — bypass entity filter so all members
+			-- of the configured role receive notifications regardless of their
+			-- individual entity mapping (e.g. ADMIN / CIMPLR ADMIN are global).
+			tr.recipient_type = 'ROLE'
+			OR
+			-- USER recipients: must be mapped to the event entity or any descendant
 			EXISTS (
 				SELECT 1 FROM user_entity_mappings uem
 				JOIN entity_tree et ON et.eid = uem.entity_id OR et.entity_name = uem.entity_name
