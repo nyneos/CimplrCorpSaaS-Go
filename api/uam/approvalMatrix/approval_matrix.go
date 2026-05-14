@@ -356,6 +356,7 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Description     *string    `json:"description"`
 			ApprovalOrder   string     `json:"approval_order"`
 			SlaHours        *int       `json:"sla_hours"`
+			IsActive        *bool      `json:"is_active"`
 			Eyes            []EyeInput `json:"eyes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -366,7 +367,22 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "entity_code and transaction_type are required")
 			return
 		}
-		if err := validateMasterFields(req.ModuleCode, req.ApprovalOrder, req.MinAmount, req.MaxAmount, req.SlaHours); err != nil {
+		// Master SLA column is used by list/grid views; if omitted, mirror the highest per-eye SLA (when any).
+		effectiveSla := req.SlaHours
+		for i := range req.Eyes {
+			if req.Eyes[i].SlaHours == nil {
+				continue
+			}
+			if effectiveSla == nil || *req.Eyes[i].SlaHours > *effectiveSla {
+				v := *req.Eyes[i].SlaHours
+				effectiveSla = &v
+			}
+		}
+		isActive := true
+		if req.IsActive != nil {
+			isActive = *req.IsActive
+		}
+		if err := validateMasterFields(req.ModuleCode, req.ApprovalOrder, req.MinAmount, req.MaxAmount, effectiveSla); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -444,10 +460,10 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var matrixID string
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO uam.approval_matrix_master
-				(module_code,entity_code,transaction_type,min_amount,max_amount,description,approval_order,sla_hours)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING matrix_id`,
+				(module_code,entity_code,transaction_type,min_amount,max_amount,description,approval_order,sla_hours,is_active)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING matrix_id`,
 			req.ModuleCode, req.EntityCode, req.TransactionType,
-			req.MinAmount, req.MaxAmount, req.Description, req.ApprovalOrder, req.SlaHours,
+			req.MinAmount, req.MaxAmount, req.Description, req.ApprovalOrder, effectiveSla, isActive,
 		).Scan(&matrixID); err != nil {
 			msg, status := getUserFriendlyApprovalMatrixError(err, "Create master failed")
 			api.RespondWithError(w, status, msg)
@@ -1244,7 +1260,14 @@ func GetApprovalMatrixAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			COALESCE(me.entity_name,'')       AS entity_name,
 			m.transaction_type,
 			m.min_amount, m.max_amount, m.description, m.approval_order,
-			m.sla_hours, m.is_active,
+			COALESCE(m.sla_hours, (
+				SELECT MAX(e.sla_hours)::int
+				FROM uam.approval_matrix_eye e
+				WHERE e.matrix_id = m.matrix_id
+				  AND e.is_deleted = false
+				  AND e.sla_hours IS NOT NULL
+			)) AS sla_hours,
+			m.is_active,
 			COALESCE(l.processing_status,'')  AS processing_status,
 			COALESCE(l.action_type,'')        AS latest_action,
 			COALESCE(l.audit_id,'')           AS audit_id,
@@ -1909,7 +1932,14 @@ func GetApprovedActiveMatrices(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT m.matrix_id, m.module_code, m.entity_code,
 				COALESCE(me.entity_name,'') AS entity_name,
 				m.transaction_type,
-				m.min_amount, m.max_amount, m.approval_order, m.sla_hours, m.is_active,
+				m.min_amount, m.max_amount, m.approval_order,
+				COALESCE(m.sla_hours, (
+					SELECT MAX(e.sla_hours)::int
+					FROM uam.approval_matrix_eye e
+					WHERE e.matrix_id = m.matrix_id
+					  AND e.is_deleted = false
+					  AND e.sla_hours IS NOT NULL
+				)) AS sla_hours, m.is_active,
 				MAX(CASE WHEN a.action_type='CREATE' THEN a.requested_by END) AS created_by,
 				MAX(CASE WHEN a.action_type='CREATE' THEN TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
 				MAX(CASE WHEN a.action_type='EDIT'   THEN a.requested_by END) AS edited_by,
@@ -1943,7 +1973,7 @@ func GetApprovedActiveMatrices(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(whereParts) > 0 {
 			fullQ += " " + strings.Join(whereParts, " ")
 		}
-		fullQ += " GROUP BY m.matrix_id, m.module_code, m.entity_code, me.entity_name, m.transaction_type, m.min_amount, m.max_amount, m.approval_order, m.sla_hours, m.is_active"
+		fullQ += " GROUP BY m.matrix_id, m.module_code, m.entity_code, me.entity_name, m.transaction_type, m.min_amount, m.max_amount, m.approval_order, m.is_active, COALESCE(m.sla_hours, (SELECT MAX(e.sla_hours)::int FROM uam.approval_matrix_eye e WHERE e.matrix_id = m.matrix_id AND e.is_deleted = false AND e.sla_hours IS NOT NULL))"
 		fullQ += " ORDER BY m.entity_code, m.transaction_type, m.min_amount"
 
 		rows, err := pgxPool.Query(ctx, fullQ, args...)
