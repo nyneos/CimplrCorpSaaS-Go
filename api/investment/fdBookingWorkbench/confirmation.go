@@ -233,11 +233,21 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"system_comment": v.SystemComment,
 				})
 			}
-			api.RespondWithPayload(w, false, "Variance detected — confirmation not saved. Use /confirmation/variance-resolve to persist with variance or correct the values and re-capture.", map[string]interface{}{
-				"booking_id":     req.BookingID,
-				"has_variance":   true,
-				"run_id":         runID,
-				"variance_items": out,
+			// Use 422 so axios throws (enabling the catch block on the frontend)
+			// while avoiding misleading HTTP 500 / [ERROR] log noise for a normal
+			// business-logic condition.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			api.LogInfo("[FDBooking] CaptureConfirmation: variance detected booking=%s run=%s", req.BookingID, runID)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Variance detected — confirmation not saved. Resolve and Recapture.",
+				"rows": map[string]interface{}{
+					"booking_id":     req.BookingID,
+					"has_variance":   true,
+					"run_id":         runID,
+					"variance_items": out,
+				},
 			})
 			return
 		}
