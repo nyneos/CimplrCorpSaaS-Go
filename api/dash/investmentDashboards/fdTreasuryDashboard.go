@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -257,15 +258,16 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			defer rows.Close()
 
 			type matRow struct {
-				FDID                 string  `json:"fd_id"`
-				Entity               string  `json:"entity"`
-				Bank                 string  `json:"bank"`
-				Principal            float64 `json:"principal"`
-				Rate                 float64 `json:"rate"`
-				MaturityDate         string  `json:"maturity_date"`
-				MaturityInstructions string  `json:"maturity_instructions"`
-				Status               string  `json:"status"`
-				DaysToMaturity       int     `json:"days_to_maturity"`
+				FDID                   string  `json:"fd_id"`
+				Entity                 string  `json:"entity"`
+				Bank                   string  `json:"bank"`
+				Principal              float64 `json:"principal"`
+				Rate                   float64 `json:"rate"`
+				MaturityDate           string  `json:"maturity_date"`
+				MaturityInstructions   string  `json:"maturity_instructions"`
+				Status                 string  `json:"status"`
+				DaysToMaturity         int     `json:"days_to_maturity"`
+				NeedsRolloverDecision  bool    `json:"needs_rollover_decision"`
 			}
 			out := []matRow{}
 			totalAmt := 0.0
@@ -275,13 +277,15 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&mr.Rate, &mr.MaturityDate, &mr.MaturityInstructions,
 					&mr.Status, &mr.DaysToMaturity); err2 == nil {
 					mr.Principal = fdRound(mr.Principal, 2)
+					mi := strings.TrimSpace(strings.ToUpper(mr.MaturityInstructions))
+					mr.NeedsRolloverDecision = mi == "" || mi == "PENDING"
 					totalAmt += mr.Principal
 					out = append(out, mr)
 				}
 			}
 			rolloverPending := 0
 			for _, mr := range out {
-				if mr.MaturityInstructions == "" {
+				if mr.NeedsRolloverDecision {
 					rolloverPending++
 				}
 			}
@@ -487,9 +491,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				LEFT JOIN LATERAL (
 				  SELECT
-				    i.status                              AS instance_status,
-				    SUM(ie.approvals_received)::int       AS approvals_received,
-				    SUM(ie.approvals_required)::int       AS approvals_required,
+				    i.status AS instance_status,
+				    COALESCE(tot.approvals_received, 0) AS approvals_received,
+				    COALESCE(tot.approvals_required, 0) AS approvals_required,
 				    (SELECT ia.actor_email FROM uam.approval_instance_action ia
 				     JOIN uam.approval_instance_eye ie2 ON ie2.instance_eye_id = ia.instance_eye_id
 				     WHERE ie2.instance_id = i.instance_id ORDER BY ia.acted_at DESC NULLS LAST LIMIT 1) AS last_actor,
@@ -497,12 +501,17 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				     JOIN uam.approval_instance_eye ie2 ON ie2.instance_eye_id = ia.instance_eye_id
 				     WHERE ie2.instance_id = i.instance_id ORDER BY ia.acted_at DESC NULLS LAST LIMIT 1) AS last_action_at
 				  FROM uam.approval_instance i
-				  LEFT JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
+				  LEFT JOIN (
+				    SELECT instance_id,
+				           SUM(COALESCE(approvals_received,0))::int AS approvals_received,
+				           SUM(COALESCE(approvals_required,0))::int AS approvals_required
+				    FROM uam.approval_instance_eye
+				    GROUP BY instance_id
+				  ) tot ON tot.instance_id = i.instance_id
 				  WHERE i.is_deleted=false
 				    AND i.module_code = 'FIXED_DEPOSIT'
 				    AND i.record_id = b.booking_id
-				  GROUP BY i.instance_id, i.status
-				  ORDER BY MAX(i.submitted_at) DESC
+				  ORDER BY i.submitted_at DESC NULLS LAST
 				  LIMIT 1
 				) ai ON true
 				WHERE b.is_deleted=false
@@ -558,7 +567,22 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				cr.Amount = fdRound(cr.Amount, 2)
 				cr.ElapsedHours = fdRound(cr.ElapsedHours, 1)
-				cr.SLAHours = 24
+				// Stage-aware SLA targets (hours) so draft / bank-send rows are not all "overdue" at 24h.
+				switch cr.Status {
+				case "DRAFT":
+					cr.SLAHours = 120
+				case "APPROVAL_PENDING":
+					cr.SLAHours = 72
+				case "APPROVED":
+					cr.SLAHours = 72
+				case "SENT_TO_BANK":
+					cr.SLAHours = 336
+				default:
+					cr.SLAHours = 168
+				}
+				if cr.SLAHours < 1 {
+					cr.SLAHours = 1
+				}
 
 				// Derive a clear confirmation lifecycle state.
 				switch {
@@ -592,6 +616,8 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 				if cr.ApprovalsRequired > 0 {
 					cr.ApprovalProgress = fmtApprovalProgress(cr.ApprovalsReceived, cr.ApprovalsRequired)
+				} else if cr.Status == "APPROVAL_PENDING" || cr.Status == "DRAFT" {
+					cr.ApprovalProgress = "Not started"
 				}
 
 				ratio := cr.ElapsedHours / cr.SLAHours
@@ -731,6 +757,100 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return out, nil
 		})
 
+		// ── 10b. interest_trend (same logic as CFO / Operational FD dashboards)
+		run("interest_trend", func(ctx context.Context) (interface{}, error) {
+			accrualSQL := `
+				SELECT
+				  TO_CHAR(DATE_TRUNC('month', al.accrual_period_end),'Mon') AS month,
+				  TO_CHAR(DATE_TRUNC('month', al.accrual_period_end),'YYYY-MM') AS month_sort,
+				  COALESCE(SUM(
+				    CASE
+				      WHEN COALESCE(al.period_interest_accrued,0) <> 0 THEN al.period_interest_accrued
+				      ELSE COALESCE(al.req_period_interest,0)
+				    END
+				  ),0) AS accrued
+				FROM investment.fd_accrual_ledger al
+				LEFT JOIN investment.fd_master m ON m.fd_id = al.fd_id
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				WHERE COALESCE(al.is_deleted,false)=false
+				  AND al.accrual_period_end >= CURRENT_DATE - INTERVAL '12 months'
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				GROUP BY 1, 2
+				ORDER BY 2`
+			type trendRow struct {
+				Period   string  `json:"period"`
+				SortKey  string  `json:"month_sort"`
+				Accrued  float64 `json:"accrued"`
+				Realized float64 `json:"realized"`
+			}
+			out := []trendRow{}
+			accrRows, errAcc := pool.Query(ctx, accrualSQL, entityFilter)
+			if errAcc != nil {
+				api.LogError("[TreasuryDash] interest_trend accrual query error: %v", errAcc)
+			} else {
+				defer accrRows.Close()
+				for accrRows.Next() {
+					var tr trendRow
+					if scanErr := accrRows.Scan(&tr.Period, &tr.SortKey, &tr.Accrued); scanErr == nil {
+						tr.Accrued = fdRound(tr.Accrued, 2)
+						out = append(out, tr)
+					}
+				}
+			}
+			recSQL := `
+				SELECT
+				  TO_CHAR(DATE_TRUNC('month', ir.receipt_date),'Mon') AS month,
+				  TO_CHAR(DATE_TRUNC('month', ir.receipt_date),'YYYY-MM') AS month_sort,
+				  COALESCE(SUM(ir.gross_interest_received),0) AS received
+				FROM investment.fd_interest_receipt ir
+				WHERE ir.is_deleted=false
+				  AND ir.receipt_date >= CURRENT_DATE - INTERVAL '12 months'
+				  AND ($1::text='' OR ir.entity_id=$1)
+				GROUP BY 1, 2
+				ORDER BY 2`
+			recvMap := map[string]float64{}
+			recvOrder := []struct {
+				Month   string
+				SortKey string
+			}{}
+			recRows, rerr := pool.Query(ctx, recSQL, entityFilter)
+			if rerr != nil {
+				api.LogError("[TreasuryDash] interest_trend receipt query error: %v", rerr)
+			} else {
+				defer recRows.Close()
+				for recRows.Next() {
+					var mon, sortK string
+					var recv float64
+					if err2 := recRows.Scan(&mon, &sortK, &recv); err2 == nil {
+						recvMap[sortK] = fdRound(recv, 2)
+						recvOrder = append(recvOrder, struct {
+							Month   string
+							SortKey string
+						}{mon, sortK})
+					}
+				}
+			}
+			for i := range out {
+				out[i].Realized = recvMap[out[i].SortKey]
+			}
+			seen := map[string]bool{}
+			for _, r := range out {
+				seen[r.SortKey] = true
+			}
+			for _, r := range recvOrder {
+				if !seen[r.SortKey] {
+					out = append(out, trendRow{Period: r.Month, SortKey: r.SortKey, Realized: recvMap[r.SortKey]})
+					seen[r.SortKey] = true
+				}
+			}
+			for i := 1; i < len(out); i++ {
+				for j := i; j > 0 && out[j-1].SortKey > out[j].SortKey; j-- {
+					out[j-1], out[j] = out[j], out[j-1]
+				}
+			}
+			return out, nil
+		})
+
 		// ── 11. approval_workflow (TC-117) ────────────────────────────────────
 		// Concise per-instance approval status for FD bookings/confirmations
 		// so the Treasury dashboard can render the multi-step workflow
@@ -746,10 +866,58 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(TO_CHAR(i.submitted_at,'YYYY-MM-DD"T"HH24:MI:SS'),'')   AS submitted_at,
 				  COALESCE(i.resolved_by_email,'')                                 AS resolved_by,
 				  COALESCE(TO_CHAR(i.resolved_at,'YYYY-MM-DD"T"HH24:MI:SS'),'')    AS resolved_at,
-				  COALESCE(b.principal_amount, 0)                                  AS amount,
-				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id, '')     AS bank,
-				  COALESCE(b.entity_name, '')                                      AS entity,
-				  COALESCE(b.booking_status,'')                                    AS booking_status,
+				  COALESCE(
+				    (SELECT bx.principal_amount FROM investment.fd_booking_request bx
+				     WHERE bx.booking_id = i.record_id AND COALESCE(bx.is_deleted,false)=false LIMIT 1),
+				    (SELECT crx.principal_amount FROM investment.fd_closure_request crx
+				     WHERE crx.closure_request_id = i.record_id LIMIT 1),
+				    (SELECT b3.principal_amount FROM investment.fd_confirmation c3
+				     JOIN investment.fd_booking_request b3 ON b3.booking_id = c3.booking_id
+				     WHERE c3.confirmation_id = i.record_id AND COALESCE(c3.is_deleted,false)=false LIMIT 1),
+				    (SELECT m2.principal_amount FROM investment.fd_master m2
+				     WHERE m2.fd_id = i.record_id AND COALESCE(m2.is_deleted,false)=false LIMIT 1),
+				    0
+				  )                                                                  AS amount,
+				  COALESCE(
+				    NULLIF(TRIM(COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id, '')),''),
+				    (SELECT COALESCE(mx.bank_name, mx.bank_id,'')
+				     FROM investment.fd_closure_request crx
+				     JOIN investment.fd_master mx ON mx.fd_id = crx.fd_id AND COALESCE(mx.is_deleted,false)=false
+				     WHERE crx.closure_request_id = i.record_id LIMIT 1),
+				    (SELECT COALESCE(b3.bank_name, b3.bank_id,'')
+				     FROM investment.fd_confirmation c3
+				     JOIN investment.fd_booking_request b3 ON b3.booking_id = c3.booking_id
+				     WHERE c3.confirmation_id = i.record_id AND COALESCE(c3.is_deleted,false)=false LIMIT 1),
+				    (SELECT COALESCE(mx.bank_name, mx.bank_id,'')
+				     FROM investment.fd_master mx
+				     WHERE mx.fd_id = i.record_id AND COALESCE(mx.is_deleted,false)=false LIMIT 1),
+				    ''
+				  )                                                                  AS bank,
+				  COALESCE(
+				    NULLIF(TRIM(COALESCE(b.entity_name,'')),''),
+				    (SELECT COALESCE(mx.entity_name,'')
+				     FROM investment.fd_closure_request crx
+				     JOIN investment.fd_master mx ON mx.fd_id = crx.fd_id AND COALESCE(mx.is_deleted,false)=false
+				     WHERE crx.closure_request_id = i.record_id LIMIT 1),
+				    (SELECT COALESCE(b3.entity_name,'')
+				     FROM investment.fd_confirmation c3
+				     JOIN investment.fd_booking_request b3 ON b3.booking_id = c3.booking_id
+				     WHERE c3.confirmation_id = i.record_id AND COALESCE(c3.is_deleted,false)=false LIMIT 1),
+				    (SELECT COALESCE(mx.entity_name,'')
+				     FROM investment.fd_master mx
+				     WHERE mx.fd_id = i.record_id AND COALESCE(mx.is_deleted,false)=false LIMIT 1),
+				    ''
+				  )                                                                  AS entity,
+				  COALESCE(
+				    b.booking_status,
+				    (SELECT b2.booking_status FROM investment.fd_closure_request crx
+				     JOIN investment.fd_booking_request b2 ON b2.booking_id = crx.booking_id
+				     WHERE crx.closure_request_id = i.record_id LIMIT 1),
+				    (SELECT b3.booking_status FROM investment.fd_confirmation c3
+				     JOIN investment.fd_booking_request b3 ON b3.booking_id = c3.booking_id
+				     WHERE c3.confirmation_id = i.record_id AND COALESCE(c3.is_deleted,false)=false LIMIT 1),
+				    ''
+				  )                                                                  AS booking_status,
 				  COALESCE(SUM(ie.approvals_received)::int, 0)                     AS approvals_received,
 				  COALESCE(SUM(ie.approvals_required)::int, 0)                     AS approvals_required,
 				  COALESCE(MAX(ie.position), 1)                                    AS total_steps,
@@ -761,16 +929,14 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(MIN(ie.sla_deadline), NULL)                             AS sla_deadline
 				FROM uam.approval_instance i
 				LEFT JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = i.record_id
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = i.record_id AND COALESCE(b.is_deleted,false)=false
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE i.is_deleted = false
 				  AND i.module_code = 'FIXED_DEPOSIT'
 				  AND i.submitted_at >= $1::date
 				  AND ($2::text='' OR i.entity_code=$2 OR b.entity_id=$2)
 				GROUP BY i.instance_id, i.transaction_type, i.record_id, i.status,
-				         i.submitted_by_email, i.submitted_at, i.resolved_by_email, i.resolved_at,
-				         b.principal_amount, m.bank_name, m.bank_id, b.bank_name, b.bank_id,
-				         b.entity_name, b.booking_status
+				         i.submitted_by_email, i.submitted_at, i.resolved_by_email, i.resolved_at
 				ORDER BY i.submitted_at DESC
 				LIMIT 60`, startDateStr, entityFilter)
 			if err != nil {
@@ -985,11 +1151,12 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"negotiations":       get("negotiations"),
 			},
 			"charts": map[string]interface{}{
-				"maturity_ladder":    get("maturity_ladder_treasury"),
-				"deployment_by_bank": get("deployment_by_bank"),
-				"yield_by_bank":      get("yield_by_bank"),
-				"rate_by_bank":       get("rate_by_bank"),
-				"yield_curve":        get("yield_curve"),
+				"maturity_ladder":       get("maturity_ladder_treasury"),
+				"deployment_by_bank":  get("deployment_by_bank"),
+				"yield_by_bank":         get("yield_by_bank"),
+				"rate_by_bank":          get("rate_by_bank"),
+				"yield_curve":           get("yield_curve"),
+				"interest_income_trend": get("interest_trend"),
 			},
 			"tables": map[string]interface{}{
 				"near_maturity_fds":     get("near_maturity"),

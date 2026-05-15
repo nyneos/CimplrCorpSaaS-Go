@@ -551,7 +551,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY 2`
 			type trendRow struct {
 				Period   string  `json:"period"`
-				SortKey  string  `json:"-"`
+				SortKey  string  `json:"sort_key"`
 				Accrued  float64 `json:"accrued"`
 				Realized float64 `json:"realized"`
 			}
