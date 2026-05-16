@@ -27,3 +27,10 @@ api/investment/fdMaster/testdata/
 
 bin/
 setup_fd_notifications.py
+
+FD Cashflow Engine Rewrite.md
+FD_Scenarios_v7.xlsx
+FD_Simulation_Schedule_1778883993347.csv
+gen_fixtures.py
+output.txt
+~$FD_Scenarios_v7.xlsx

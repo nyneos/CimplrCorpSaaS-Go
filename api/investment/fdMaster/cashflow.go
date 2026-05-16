@@ -57,7 +57,7 @@ func (r *FDRecord) InterestType() string { return r.InterestTypeCode }
 
 // stampCumulativeFields fills snapshot fields (InterestRate, TDSRate, FinancialYear,
 // and running cumulative totals) on each CashflowRow after generation.
-func stampCumulativeFields(rows []CashflowRow, fd *FDRecord, tdsRate float64) []CashflowRow {
+func stampCumulativeFields(rows []CashflowRow, fd *FDRecord, tdsRate float64, isCompound bool) []CashflowRow {
 	fyInterest := 0.0
 	fyTDS := 0.0
 	totalInterest := 0.0
@@ -78,11 +78,10 @@ func stampCumulativeFields(rows []CashflowRow, fd *FDRecord, tdsRate float64) []
 			fyTDS = 0
 			currentFY = fy
 		}
-		// Interest is realized on INTEREST_RECEIPT, MATURITY, and CAPITALIZATION rows.
-		// ACCRUAL is pre-recognition bookkeeping — including it would double-count the receipt.
-		if rows[i].EventType == "INTEREST_RECEIPT" ||
-			rows[i].EventType == "MATURITY" ||
-			rows[i].EventType == "CAPITALIZATION" {
+		// For Simple Interest: Interest is realized on INTEREST_RECEIPT and MATURITY.
+		// For Compound Interest: Interest is realized on CAPITALIZATION (which includes maturity cap).
+		if (!isCompound && (rows[i].EventType == "INTEREST_RECEIPT" || rows[i].EventType == "MATURITY")) ||
+			(isCompound && rows[i].EventType == "CAPITALIZATION") {
 			fyInterest += rows[i].InterestAccrued
 			totalInterest += rows[i].InterestAccrued
 		}
@@ -1581,6 +1580,26 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 	}
 	hasTDS := tdsCfg != nil && tdsCfg.TDSRate > 0 // tdsDeductionTiming is left for downstream logic (compound handler).
 
+	// ── Engine dispatch ────────────────────────────────────────────────────
+	// The new spec-compliant engine (cashflow_engine.go) is the UNCONDITIONAL
+	// default for all FDs. It generates correct calendar month-end dates and
+	// matches the workbook for every standard Actual/365 scenario.
+	//
+	// The ONLY legacy fallback is when the caller supplies an explicit
+	// FirstCapitalizationDate override. That signals a non-standard broken-period
+	// start date (e.g. first cap is on a specific non-month-end date) that the
+	// legacy engine handles via its special first-period arithmetic.
+	//
+	// Everything else — CapitalizationScheduleType labels, BrokenPeriodMethod,
+	// holiday calendars, rounding config, TDS timing — is orthogonal to the
+	// boundary-date logic and does NOT affect which engine runs.
+	if fd.FirstCapitalizationDate.IsZero() {
+		if isCompound {
+			return engCOSchedule(p)
+		}
+		return engSISchedule(p)
+	}
+
 	// ── COMPOUND FDs: use capitalization dates ─────────────────────────────
 	if isCompound {
 		// payoutFreqOverride[0] is set when the simulator passes a separate payout frequency.
@@ -2688,7 +2707,9 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 	if tds != nil {
 		tdsRate = tds.TDSRate
 	}
-	rows = stampCumulativeFields(rows, fd, tdsRate)
+	calcMethod := firstNonEmpty(itInfo.CalculationMethod, strings.ToUpper(fd.InterestTypeCode), "SIMPLE")
+	isCompound := calcMethod == "COMPOUND"
+	rows = stampCumulativeFields(rows, fd, tdsRate, isCompound)
 	rows = applyFirstPayoutDateOverride(rows, fd)
 	return rows, fd, nil
 }

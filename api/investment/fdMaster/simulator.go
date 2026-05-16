@@ -29,6 +29,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -567,8 +568,10 @@ type SimulateCashflowRequest struct {
 	// and all subsequent value_dates of that event type are shifted by the same offset.
 	FirstPayoutDate         *string `json:"first_payout_date,omitempty"`
 	FirstCapitalizationDate *string `json:"first_capitalization_date,omitempty"`
-	// ResetType for COMPOUND FDs: "AT_EACH_PAYOUT" resets principal to original after each
-	// interest receipt; "AT_MATURITY" (default) compounds continuously.
+	// ResetType controls how the interest base principal resets after each payout.
+	// Applies to both SIMPLE and COMPOUND FDs.
+	// "AT_MATURITY" (default): accumulate / compound until maturity.
+	// "AT_EACH_PAYOUT": reset the accrual/compounding base after each payout.
 	ResetType *string `json:"reset_type,omitempty"`
 	// AccrualFrequencyCode sets the accrual granularity independently of payout/cap frequency.
 	// E.g. "M" for monthly, "Q" for quarterly, "H" for half-yearly, "Y" for yearly.
@@ -710,6 +713,12 @@ type SimulateSummary struct {
 	AccrualPeriodCount   int     `json:"accrual_period_count"`
 	CapitalizationCount  int     `json:"capitalization_count"`
 	InterestReceiptCount int     `json:"interest_receipt_count"`
+	// Workbook header cells (FD_Scenarios_v7.xlsx C17/C16) — compound formula totals.
+	// Differs from total_interest_accrued which is the sum of schedule CAP rows (ACT/365 path).
+	WorkbookTotalInterest float64 `json:"workbook_total_interest,omitempty"`
+	WorkbookTotalTDS      float64 `json:"workbook_total_tds,omitempty"`
+	// Maturity gross interest (CO MATURITY row G = closing J − original principal).
+	MaturityGrossInterest float64 `json:"maturity_gross_interest,omitempty"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -797,27 +806,6 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 	// Apply inline overrides on top of loaded config.
 	applyConfigOverrides(cfg, &req)
 
-	// ── Load frequency ────────────────────────────────────────────────────
-	// freqRef may be a frequency_id, frequency_code, or frequency_name.
-	// loadCompoundingFreq returns &CompoundingFreq{} (never nil) on miss.
-	freq, _ := loadCompoundingFreq(ctx, exec, freqRef)
-
-	// ── Load separate payout frequency (COMPOUND FDs only) ───────────────
-	// payout_frequency_id drives when interest cash is actually paid to the entity.
-	// Per architecture: frequency_id on the booking IS the interest payout frequency.
-	// If payout_frequency_id is also supplied, it overrides frequency_id for payout scheduling.
-	payoutFreqRef := strings.TrimSpace(req.PayoutFrequencyID)
-	if payoutFreqRef == "" {
-		// frequency_id is the payout frequency per the booking model
-		payoutFreqRef = freqRef
-	}
-	var payoutFreq *CompoundingFreq
-	if payoutFreqRef != "" && payoutFreqRef != freqRef {
-		payoutFreq, _ = loadCompoundingFreq(ctx, exec, payoutFreqRef)
-	} else {
-		payoutFreq = freq
-	}
-
 	// ── Load TDS config ───────────────────────────────────────────────────
 	tds, _ := loadTDSConfig(ctx, exec, req.TDSPlanID)
 
@@ -827,6 +815,23 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 
 	// ── Resolve interest type ─────────────────────────────────────────────
 	itInfo := loadInterestType(ctx, exec, req.InterestType)
+	isCompound := firstNonEmpty(itInfo.CalculationMethod, strings.ToUpper(req.InterestType), "SIMPLE") == "COMPOUND"
+
+	// ── Load cap + payout frequencies (engine / workbook mapping) ─────────
+	// COMPOUND: frequency_id = cap/compounding freq, payout_frequency_id = cash payout.
+	// SIMPLE:   frequency_id = payout freq (accrual via accrual_frequency_code).
+	capFreqRef, payoutFreqRef := resolveCapAndPayoutFreqRefs(isCompound, freqRef, req.PayoutFrequencyID)
+	capFreq, _ := loadCompoundingFreq(ctx, exec, capFreqRef)
+	var payoutFreq *CompoundingFreq
+	if payoutFreqRef != "" && !strings.EqualFold(payoutFreqRef, capFreqRef) {
+		payoutFreq, _ = loadCompoundingFreq(ctx, exec, payoutFreqRef)
+	} else {
+		payoutFreq = capFreq
+	}
+	payoutFreq = ensureAtMaturityPayoutFreq(payoutFreqRef, payoutFreq)
+	if !isCompound {
+		capFreq = payoutFreq
+	}
 
 	// ── Load holiday calendar ─────────────────────────────────────────────
 	calCode := strings.TrimSpace(cfg.HolidayCalendarCode)
@@ -885,7 +890,7 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 
 	// ── Run the engine ────────────────────────────────────────────────────
 	rawRows := generateCashflowSchedule(CashflowScheduleParams{
-		FD: fd, Cfg: cfg, Freq: freq, TDSCfg: tds,
+		FD: fd, Cfg: cfg, Freq: capFreq, TDSCfg: tds,
 		DCInfo: dcInfo, ITInfo: itInfo, CalInfo: calInfo,
 		PayoutFreqOverride: payoutFreq,
 		AccrualFreqMonths:  accrualFreqMonths,
@@ -899,7 +904,7 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 	if tds != nil {
 		simTDSRate = tds.TDSRate
 	}
-	rawRows = stampCumulativeFields(rawRows, fd, simTDSRate)
+	rawRows = stampCumulativeFields(rawRows, fd, simTDSRate, isCompound)
 
 	rawRows = applyFirstPayoutDateOverride(rawRows, fd)
 
@@ -930,7 +935,7 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 	}
 
 	// ── Build effective frequency fields for echo ─────────────────────────
-	payoutMonths := freqTypeToMonths(firstNonEmpty(freq.FrequencyType, freq.FrequencyCode))
+	payoutMonths := freqTypeToMonths(firstNonEmpty(payoutFreq.FrequencyType, payoutFreq.FrequencyCode))
 
 	// ── Extract payout and compounding date arrays from schedule ─────────
 	payoutDatesJSON := extractEventDates(simRows, "INTEREST_RECEIPT")
@@ -948,10 +953,10 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 			BankConfigID:        req.BankConfigID,
 			HolidayCalendarCode: calCode,
 			// Compounding / capitalization frequency
-			FrequencyID:   freq.FrequencyID,
-			FrequencyCode: freq.FrequencyCode,
-			FrequencyName: freq.FrequencyName,
-			FrequencyType: freq.FrequencyType,
+			FrequencyID:   capFreq.FrequencyID,
+			FrequencyCode: capFreq.FrequencyCode,
+			FrequencyName: capFreq.FrequencyName,
+			FrequencyType: capFreq.FrequencyType,
 			PayoutMonths:  payoutMonths,
 			// Cash-payout frequency (same as comp freq when payout_frequency_id not supplied)
 			PayoutFrequencyID:   payoutFreq.FrequencyID,
@@ -968,7 +973,17 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 		},
 		Schedule:         simRows,
 		RawRows:          rawRows,
-		Summary:          buildSimulateSummary(rawRows, fd),
+		Summary: func() SimulateSummary {
+			sum := buildSimulateSummary(rawRows, fd)
+			if isCompound {
+				tdsPct := 0.0
+				if tds != nil {
+					tdsPct = tds.TDSRate
+				}
+				enrichCompoundWorkbookSummary(&sum, fd, firstNonEmpty(capFreq.FrequencyType, capFreq.FrequencyCode), tdsPct)
+			}
+			return sum
+		}(),
 		Holidays:         holidays,
 		FD:               fd,
 		PayoutDates:      payoutDatesJSON,
@@ -1031,6 +1046,47 @@ func SimulateCashflowHandler(pool *pgxpool.Pool) http.HandlerFunc {
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+// resolveCapAndPayoutFreqRefs maps HTTP frequency fields to engine inputs.
+// COMPOUND: frequency_id = cap/compounding, payout_frequency_id = cash payout.
+// SIMPLE:   frequency_id = payout; payout_frequency_id is an optional override.
+func resolveCapAndPayoutFreqRefs(isCompound bool, freqRef, payoutFreqRef string) (capRef, payoutRef string) {
+	freqRef = strings.TrimSpace(freqRef)
+	payoutFreqRef = strings.TrimSpace(payoutFreqRef)
+	if isCompound {
+		capRef = freqRef
+		payoutRef = payoutFreqRef
+		if payoutRef == "" {
+			payoutRef = freqRef
+		}
+		return capRef, payoutRef
+	}
+	capRef = freqRef
+	payoutRef = payoutFreqRef
+	if payoutRef == "" {
+		payoutRef = freqRef
+	}
+	return capRef, payoutRef
+}
+
+// ensureAtMaturityPayoutFreq guarantees a non-empty FrequencyID for AT_MATURITY
+// payout refs so engCOSchedule honours payout-at-maturity (workbook CO-*-MAT-*).
+func ensureAtMaturityPayoutFreq(payoutFreqRef string, loaded *CompoundingFreq) *CompoundingFreq {
+	ref := strings.ToUpper(strings.TrimSpace(payoutFreqRef))
+	if ref != "AT_MATURITY" && ref != "MAT" && ref != "AT-MATURITY" {
+		if loaded == nil {
+			return &CompoundingFreq{}
+		}
+		return loaded
+	}
+	ft := firstNonEmpty(loaded.FrequencyType, "AT_MATURITY")
+	return &CompoundingFreq{
+		FrequencyID:   firstNonEmpty(loaded.FrequencyID, ref, "AT_MATURITY"),
+		FrequencyCode: firstNonEmpty(loaded.FrequencyCode, "AT_MATURITY"),
+		FrequencyName: loaded.FrequencyName,
+		FrequencyType: ft,
+	}
+}
 
 // applyConfigOverrides merges the request's inline override fields into a
 // loaded (or empty) BankConfig so callers can test what-if scenarios.
@@ -1211,6 +1267,34 @@ func extractEventDates(rows []SimulatedCashflowRow, eventType string) *json.RawM
 	return &raw
 }
 
+// capPeriodsPerYear returns compoundings per year for workbook C17 (Q→4, H→2, Y→1).
+func capPeriodsPerYear(freqType string) int {
+	switch strings.ToUpper(strings.TrimSpace(freqType)) {
+	case "QUARTERLY", "QUARTER", "QTR", "Q":
+		return 4
+	case "HALF_YEARLY", "HALF-YEARLY", "HALFYEARLY", "BI_ANNUAL", "BIANNUAL", "SEMI_ANNUAL", "SEMI-ANNUAL", "H":
+		return 2
+	case "ANNUAL", "YEARLY", "YEAR", "Y":
+		return 1
+	case "MONTHLY", "MONTH", "M":
+		return 12
+	default:
+		return 4
+	}
+}
+
+// compoundFormulaInterest implements workbook C17:
+// ROUND(P * ((1 + r/n)^(n * tenorDays/365) - 1), 0).
+func compoundFormulaInterest(principal, annualRatePct float64, capPeriodsPerYear, tenorDays int) float64 {
+	if principal <= 0 || annualRatePct <= 0 || tenorDays <= 0 || capPeriodsPerYear <= 0 {
+		return 0
+	}
+	r := annualRatePct / 100.0
+	n := float64(capPeriodsPerYear)
+	tenorYears := float64(tenorDays) / 365.0
+	return math.Round(principal * (math.Pow(1+r/n, n*tenorYears) - 1))
+}
+
 // buildSimulateSummary aggregates totals across the simulated schedule.
 //
 // Source-of-truth rules for TotalInterestAccrued:
@@ -1282,6 +1366,9 @@ func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 			s.TotalTDSDeducted += row.TDSAmount
 		case "MATURITY":
 			s.MaturityAmount = row.NetCashFlow
+			if isCompound && row.InterestAccrued > 0 {
+				s.MaturityGrossInterest = row.InterestAccrued
+			}
 			if !isCompound && row.InterestAccrued > 0 {
 				s.TotalInterestAccrued += row.InterestAccrued
 				s.InterestReceiptCount++
@@ -1296,10 +1383,26 @@ func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 
 	if fd.PrincipalAmount > 0 && fd.TenorDays > 0 {
 		netInterest := s.TotalInterestAccrued - s.TotalTDSDeducted
+		if isCompound && s.MaturityGrossInterest > 0 {
+			// Post-TDS economic yield uses maturity cash interest (G − I), not sum of cap rows.
+			netInterest = s.MaturityAmount
+		}
 		s.EffectiveYield = netInterest / fd.PrincipalAmount * (365.0 / float64(fd.TenorDays)) * 100
 		s.EffectiveYield = roundByMethod(s.EffectiveYield, 4, "ROUND")
 	}
 	return s
+}
+
+// enrichCompoundWorkbookSummary fills workbook C17-style header totals on a summary.
+func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, capFreqType string, tdsRatePct float64) {
+	if fd == nil || s == nil {
+		return
+	}
+	n := capPeriodsPerYear(capFreqType)
+	s.WorkbookTotalInterest = compoundFormulaInterest(fd.PrincipalAmount, fd.InterestRate, n, fd.TenorDays)
+	if tdsRatePct > 0 && s.WorkbookTotalInterest > 0 {
+		s.WorkbookTotalTDS = math.Round(s.WorkbookTotalInterest * tdsRatePct / 100.0)
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
