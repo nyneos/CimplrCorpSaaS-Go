@@ -40,20 +40,41 @@ func engAddMonths(d time.Time, months int) time.Time {
 	return time.Date(target.Year(), target.Month(), day, 0, 0, 0, 0, time.UTC)
 }
 
+// engEventDatesMaxIter caps the stepping loop (~100 years at monthly frequency).
+const engEventDatesMaxIter = 1200
+
 // engEventDates returns dates from start (exclusive) to maturity (inclusive)
 // stepping by monthsPerStep using calendar month-end roll-back.
 // The returned slice always ends exactly at maturity.
 func engEventDates(start, maturity time.Time, monthsPerStep int) []time.Time {
+	// monthsPerStep <= 0: AT_MATURITY — single boundary at maturity (never loop).
+	if monthsPerStep <= 0 {
+		return []time.Time{maturity}
+	}
 	var out []time.Time
-	for k := 1; ; k++ {
+	for k := 1; k <= engEventDatesMaxIter; k++ {
 		d := engAddMonths(start, monthsPerStep*k)
 		if !d.Before(maturity) {
 			out = append(out, maturity)
-			break
+			return out
 		}
 		out = append(out, d)
 	}
+	// Defense in depth: abnormal tenor/frequency combo — still terminate at maturity.
+	out = append(out, maturity)
 	return out
+}
+
+// engResolveAccrualMonths picks accrual step months: explicit param, then payout/cap, then monthly.
+func engResolveAccrualMonths(explicit, payoutOrCapMonths int) int {
+	m := explicit
+	if m <= 0 {
+		m = payoutOrCapMonths
+	}
+	if m <= 0 {
+		m = 1
+	}
+	return m
 }
 
 // engDaysDivisor returns the Actual/365 divisor (always 365 for the workbook
@@ -99,15 +120,17 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 	}
 
 	if strings.ToUpper(strings.TrimSpace(fd.ResetType)) == "AT_MATURITY" {
-		payoutMonths = 0
+		payoutMonths = 0 // single payout at maturity — do not pass 0 into engEventDates for payouts
 	}
 
-	accrualMonths := p.AccrualFreqMonths
-	if accrualMonths <= 0 {
-		accrualMonths = payoutMonths
-	}
+	accrualMonths := engResolveAccrualMonths(p.AccrualFreqMonths, payoutMonths)
 
-	payoutDates := engEventDates(fd.ValueDate, fd.MaturityDate, payoutMonths)
+	var payoutDates []time.Time
+	if payoutMonths > 0 {
+		payoutDates = engEventDates(fd.ValueDate, fd.MaturityDate, payoutMonths)
+	} else {
+		payoutDates = []time.Time{fd.MaturityDate}
+	}
 	accrualDates := engEventDates(fd.ValueDate, fd.MaturityDate, accrualMonths)
 
 	var rows []CashflowRow
@@ -295,15 +318,15 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 		payoutMonths = 0
 	}
 
-	accrualMonths := p.AccrualFreqMonths
-	if accrualMonths <= 0 {
-		accrualMonths = capMonths
+	if capMonths <= 0 {
+		capMonths = 3 // compound cap default when master freq is unknown
 	}
+	accrualMonths := engResolveAccrualMonths(p.AccrualFreqMonths, capMonths)
 
 	capDates := engEventDates(fd.ValueDate, fd.MaturityDate, capMonths)
 	accrualDates := engEventDates(fd.ValueDate, fd.MaturityDate, accrualMonths)
 
-	// Build payout-date set for quick lookup
+	// Payout dates: explicit AT_MATURITY (maturity only) vs stepped schedule.
 	var payoutDateSlice []time.Time
 	if payoutMonths > 0 {
 		payoutDateSlice = engEventDates(fd.ValueDate, fd.MaturityDate, payoutMonths)

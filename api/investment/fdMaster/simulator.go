@@ -975,12 +975,14 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 		RawRows:          rawRows,
 		Summary: func() SimulateSummary {
 			sum := buildSimulateSummary(rawRows, fd)
+			tdsPct := 0.0
+			if tds != nil {
+				tdsPct = tds.TDSRate
+			}
 			if isCompound {
-				tdsPct := 0.0
-				if tds != nil {
-					tdsPct = tds.TDSRate
-				}
 				enrichCompoundWorkbookSummary(&sum, fd, firstNonEmpty(capFreq.FrequencyType, capFreq.FrequencyCode), tdsPct)
+			} else {
+				enrichSimpleWorkbookSummary(&sum, fd, tdsPct)
 			}
 			return sum
 		}(),
@@ -1283,6 +1285,15 @@ func capPeriodsPerYear(freqType string) int {
 	}
 }
 
+// simpleFormulaInterest implements workbook C16 for SI:
+// ROUND(P * r * tenorDays / 365, 0).
+func simpleFormulaInterest(principal, annualRatePct float64, tenorDays int) float64 {
+	if principal <= 0 || annualRatePct <= 0 || tenorDays <= 0 {
+		return 0
+	}
+	return math.Round(principal * (annualRatePct / 100.0) * float64(tenorDays) / 365.0)
+}
+
 // compoundFormulaInterest implements workbook C17:
 // ROUND(P * ((1 + r/n)^(n * tenorDays/365) - 1), 0).
 func compoundFormulaInterest(principal, annualRatePct float64, capPeriodsPerYear, tenorDays int) float64 {
@@ -1391,6 +1402,18 @@ func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 		s.EffectiveYield = roundByMethod(s.EffectiveYield, 4, "ROUND")
 	}
 	return s
+}
+
+// enrichSimpleWorkbookSummary fills workbook C16-style header totals (ACT/365 simple interest).
+// Schedule total_interest_accrued is the sum of rounded per-period payout rows and may differ by a few rupees.
+func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, tdsRatePct float64) {
+	if fd == nil || s == nil {
+		return
+	}
+	s.WorkbookTotalInterest = simpleFormulaInterest(fd.PrincipalAmount, fd.InterestRate, fd.TenorDays)
+	if tdsRatePct > 0 && s.WorkbookTotalInterest > 0 {
+		s.WorkbookTotalTDS = math.Round(s.WorkbookTotalInterest * tdsRatePct / 100.0)
+	}
 }
 
 // enrichCompoundWorkbookSummary fills workbook C17-style header totals on a summary.
