@@ -153,6 +153,15 @@ type TDSConfig struct {
 	DeductionTiming string // ACCRUAL_ANNUAL | MATURITY | NONE
 }
 
+// renumberCashflowRows assigns contiguous sequence numbers (1..n).
+// The spec engine (engSISchedule / engCOSchedule) does not set PeriodNumber;
+// without this, every row would persist as sequence_number=0 and violate uniq_fd_cashflow_seq.
+func renumberCashflowRows(rows []CashflowRow) {
+	for i := range rows {
+		rows[i].PeriodNumber = i + 1
+	}
+}
+
 // CashflowRow maps 1:1 to the fd_cashflow_schedule table columns.
 type CashflowRow struct {
 	// identity / sequence
@@ -2711,6 +2720,7 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 	isCompound := calcMethod == "COMPOUND"
 	rows = stampCumulativeFields(rows, fd, tdsRate, isCompound)
 	rows = applyFirstPayoutDateOverride(rows, fd)
+	renumberCashflowRows(rows)
 	return rows, fd, nil
 }
 
@@ -2919,6 +2929,7 @@ func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
 			rows = append(rows, r)
 		}
 	}
+	renumberCashflowRows(rows)
 	masterEntityName := p.MasterEntityName
 	masterBankID := p.MasterBankID
 	masterBankName := p.MasterBankName
