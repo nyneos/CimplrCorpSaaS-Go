@@ -21,6 +21,13 @@ type fxAuditConfig struct {
 	Source            string
 }
 
+type fxAuditQueryAttempt struct {
+	query      string
+	args       []interface{}
+	hasJSON    bool
+	idAliasCol string
+}
+
 func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -41,7 +48,7 @@ func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 		}
 
 		payload := make([]map[string]interface{}, 0)
-		args := []interface{}{parentID}
+		parentWhere, args := buildFXAuditParentFilter(cfg.ActionParentCol, parentID)
 		extraWhere := ""
 		if cfg.ExtraFilterCol != "" {
 			extraValue := strings.TrimSpace(fmt.Sprint(req[cfg.ExtraFilterCol]))
@@ -50,60 +57,12 @@ func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 				extraWhere = fmt.Sprintf(" AND %s = $%d", cfg.ExtraFilterCol, len(args))
 			}
 		}
-		query := fmt.Sprintf(`
-			SELECT action_id,
-			       %s,
-			       actiontype,
-			       processing_status,
-			       requested_by,
-			       requested_at,
-			       checker_by,
-			       checker_at,
-			       checker_comment,
-			       reason,
-			       old_values,
-			       new_values,
-			       change_summary
-			FROM %s
-			WHERE %s = $1%s
-			ORDER BY requested_at ASC, action_id ASC
-		`, cfg.ActionParentCol, cfg.ActionTable, cfg.ActionParentCol, extraWhere)
-
-		rows, err := db.QueryContext(r.Context(), query, args...)
+		actionRows, err := queryFXActionAudit(r, db, cfg, parentWhere, args, extraWhere)
 		if err != nil {
-			query = fmt.Sprintf(`
-				SELECT action_id,
-				       %s,
-				       actiontype,
-				       processing_status,
-				       requested_by,
-				       requested_at,
-				       checker_by,
-				       checker_at,
-				       checker_comment,
-				       reason
-				FROM %s
-				WHERE %s = $1%s
-				ORDER BY requested_at ASC, action_id ASC
-			`, cfg.ActionParentCol, cfg.ActionTable, cfg.ActionParentCol, extraWhere)
-			rows, err = db.QueryContext(r.Context(), query, args...)
+			writeFXAuditError(w, http.StatusInternalServerError, "failed to read FX audit history")
+			return
 		}
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				entry, scanErr := scanFXAuditRow(rows)
-				if scanErr != nil {
-					writeFXAuditError(w, http.StatusInternalServerError, "failed to read FX audit history")
-					return
-				}
-				entry["source"] = cfg.Source
-				payload = append(payload, entry)
-			}
-			if rowsErr := rows.Err(); rowsErr != nil {
-				writeFXAuditError(w, http.StatusInternalServerError, "failed to read FX audit history")
-				return
-			}
-		}
+		payload = append(payload, actionRows...)
 
 		if strings.TrimSpace(cfg.DownloadTable) != "" {
 			downloadRows, downloadErr := queryFXDownloadAudit(r, db, cfg, parentID)
@@ -123,6 +82,138 @@ func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 			"audit_logs":           payload,
 		})
 	}
+}
+
+func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWhere string, args []interface{}, extraWhere string) ([]map[string]interface{}, error) {
+	attempts := []fxAuditQueryAttempt{
+		{
+			query: fmt.Sprintf(`
+				SELECT action_id AS audit_row_id,
+				       %s,
+				       actiontype,
+				       processing_status,
+				       requested_by,
+				       requested_at,
+				       checker_by,
+				       checker_at,
+				       checker_comment,
+				       reason,
+				       old_values,
+				       new_values,
+				       change_summary
+				FROM %s
+				WHERE %s%s
+				ORDER BY requested_at ASC, action_id ASC
+			`, cfg.ActionParentCol, cfg.ActionTable, parentWhere, extraWhere),
+			args:       args,
+			hasJSON:    true,
+			idAliasCol: "action_id",
+		},
+		{
+			query: fmt.Sprintf(`
+				SELECT action_id AS audit_row_id,
+				       %s,
+				       actiontype,
+				       processing_status,
+				       requested_by,
+				       requested_at,
+				       checker_by,
+				       checker_at,
+				       checker_comment,
+				       reason
+				FROM %s
+				WHERE %s%s
+				ORDER BY requested_at ASC, action_id ASC
+			`, cfg.ActionParentCol, cfg.ActionTable, parentWhere, extraWhere),
+			args:       args,
+			hasJSON:    false,
+			idAliasCol: "action_id",
+		},
+		{
+			query: fmt.Sprintf(`
+				SELECT audit_id AS audit_row_id,
+				       %s,
+				       actiontype,
+				       processing_status,
+				       requested_by,
+				       requested_at,
+				       checker_by,
+				       checker_at,
+				       checker_comment,
+				       reason,
+				       old_values,
+				       new_values,
+				       change_summary
+				FROM %s
+				WHERE %s%s
+				ORDER BY requested_at ASC, audit_id ASC
+			`, cfg.ActionParentCol, cfg.ActionTable, parentWhere, extraWhere),
+			args:       args,
+			hasJSON:    true,
+			idAliasCol: "audit_id",
+		},
+		{
+			query: fmt.Sprintf(`
+				SELECT audit_id AS audit_row_id,
+				       %s,
+				       actiontype,
+				       processing_status,
+				       requested_by,
+				       requested_at,
+				       checker_by,
+				       checker_at,
+				       checker_comment,
+				       reason
+				FROM %s
+				WHERE %s%s
+				ORDER BY requested_at ASC, audit_id ASC
+			`, cfg.ActionParentCol, cfg.ActionTable, parentWhere, extraWhere),
+			args:       args,
+			hasJSON:    false,
+			idAliasCol: "audit_id",
+		},
+	}
+
+	var lastErr error
+	for _, attempt := range attempts {
+		rows, err := db.QueryContext(r.Context(), attempt.query, attempt.args...)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		payload := make([]map[string]interface{}, 0)
+		for rows.Next() {
+			entry, scanErr := scanFXAuditRow(rows, attempt.hasJSON)
+			if scanErr != nil {
+				rows.Close()
+				return nil, scanErr
+			}
+			entry["source"] = cfg.Source
+			entry["id_column"] = attempt.idAliasCol
+			payload = append(payload, entry)
+		}
+		rowsErr := rows.Err()
+		rows.Close()
+		if rowsErr != nil {
+			return nil, rowsErr
+		}
+		return payload, nil
+	}
+
+	return nil, lastErr
+}
+
+func buildFXAuditParentFilter(columnName, parentID string) (string, []interface{}) {
+	parentID = strings.TrimSpace(parentID)
+	legacyByteString := strings.TrimSpace(fmt.Sprint([]byte(parentID)))
+	if parentID == "" {
+		return fmt.Sprintf("%s = $1", columnName), []interface{}{parentID}
+	}
+	if legacyByteString == "" || legacyByteString == parentID {
+		return fmt.Sprintf("%s = $1", columnName), []interface{}{parentID}
+	}
+	return fmt.Sprintf("(%s = $1 OR %s = $2)", columnName, columnName), []interface{}{parentID, legacyByteString}
 }
 
 func queryFXAdditionalFileAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentID string) ([]map[string]interface{}, error) {
@@ -203,9 +294,9 @@ func fxAdditionalFileModules(source string) []string {
 	}
 }
 
-func scanFXAuditRow(rows *sql.Rows) (map[string]interface{}, error) {
+func scanFXAuditRow(rows *sql.Rows, hasJSON bool) (map[string]interface{}, error) {
 	var (
-		actionID       int64
+		actionID       interface{}
 		entityID       string
 		action         sql.NullString
 		status         sql.NullString
@@ -219,20 +310,17 @@ func scanFXAuditRow(rows *sql.Rows) (map[string]interface{}, error) {
 		newValues      sql.NullString
 		changeSummary  sql.NullString
 	)
-	cols, err := rows.Columns()
-	if err != nil {
-		return nil, err
-	}
-	if len(cols) > 10 {
+	if hasJSON {
 		if err := rows.Scan(&actionID, &entityID, &action, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &oldValues, &newValues, &changeSummary); err != nil {
 			return nil, err
 		}
 	} else if err := rows.Scan(&actionID, &entityID, &action, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
 		return nil, err
 	}
+	auditID := normalizeFXAuditID(actionID)
 	entry := map[string]interface{}{
-		"audit_id":          actionID,
-		"action_id":         actionID,
+		"audit_id":          auditID,
+		"action_id":         auditID,
 		"entity_id":         entityID,
 		"action_type":       nullString(action),
 		"processing_status": nullString(status),
@@ -253,6 +341,25 @@ func scanFXAuditRow(rows *sql.Rows) (map[string]interface{}, error) {
 		entry["new_values"] = value
 	}
 	return entry, nil
+}
+
+func normalizeFXAuditID(value interface{}) interface{} {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case []byte:
+		text := strings.TrimSpace(string(v))
+		if text == "" {
+			return nil
+		}
+		return text
+	default:
+		text := strings.TrimSpace(fmt.Sprint(v))
+		if text == "" || text == "<nil>" {
+			return nil
+		}
+		return text
+	}
 }
 
 func queryFXDownloadAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentID string) ([]map[string]interface{}, error) {

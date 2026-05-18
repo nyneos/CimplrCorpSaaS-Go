@@ -19,6 +19,21 @@ func isForwardPendingDeleteStatus(status string) bool {
 	return normalized == "PENDING_DELETE_APPROVAL" || normalized == "DELETE-APPROVAL"
 }
 
+func normalizeForwardSystemTransactionID(value interface{}) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		text := strings.TrimSpace(fmt.Sprint(v))
+		if text == "<nil>" {
+			return ""
+		}
+		return text
+	}
+}
+
 func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Accept system_transaction_id and fields in the JSON body
@@ -266,7 +281,9 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			}
 			for _, row := range updatedRows {
 				if id, ok := row["system_transaction_id"]; ok {
-					auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", fmt.Sprint(id), decisionStatus, auditutil.Actor(req.UserID), decisionComment)
+					if normalizedID := normalizeForwardSystemTransactionID(id); normalizedID != "" {
+						auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", normalizedID, decisionStatus, auditutil.Actor(req.UserID), decisionComment)
+					}
 				}
 			}
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -355,7 +372,9 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 				}
 				updated = append(updated, rowMap)
 				if id, ok := rowMap["system_transaction_id"]; ok {
-					auditutil.RecordAction(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", fmt.Sprint(id), "DELETE", "PENDING_DELETE_APPROVAL", "", auditutil.Actor(req.UserID), nil, nil)
+					if normalizedID := normalizeForwardSystemTransactionID(id); normalizedID != "" {
+						auditutil.RecordAction(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", normalizedID, "DELETE", "PENDING_DELETE_APPROVAL", "", auditutil.Actor(req.UserID), nil, nil)
+					}
 				}
 			}
 		}
