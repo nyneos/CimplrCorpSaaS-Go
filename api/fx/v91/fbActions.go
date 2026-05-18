@@ -11,6 +11,7 @@ import (
 
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/fx/auditutil"
 
 	"CimplrCorpSaas/api/constants"
 
@@ -86,6 +87,7 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			updated = append(updated, id)
+			auditutil.RecordActionPGX(ctx, pool, auditutil.TableExposure, "exposure_header_id", id, "EDIT", "PENDING_EDIT_APPROVAL", "", requester, nil, map[string]interface{}{"new_value_date": p.NewValueDate})
 		}
 		api.RespondWithPayload(w, true, "value_date updated successfully", updated)
 	}
@@ -206,7 +208,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			var status *string
 			_ = rows.Scan(&id, &status)
-		if status != nil && (strings.EqualFold(*status, constants.StatusCodeDeleteApproval) || strings.EqualFold(*status, "PENDING_DELETE_APPROVAL")) {
+			if status != nil && (strings.EqualFold(*status, constants.StatusCodeDeleteApproval) || strings.EqualFold(*status, "PENDING_DELETE_APPROVAL")) {
 				toDelete = append(toDelete, id)
 			} else {
 				toApprove = append(toApprove, id)
@@ -229,6 +231,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				var id string
 				if err := r2.Scan(&id); err == nil {
 					approvedIDs = append(approvedIDs, id)
+					auditutil.RecordDecisionPGX(ctx, pool, auditutil.TableExposure, "exposure_header_id", id, "APPROVED", approver, req.Comment)
 				}
 			}
 		}
@@ -254,6 +257,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				var id string
 				if err := drows.Scan(&id); err == nil {
 					deletedIDs = append(deletedIDs, id)
+					auditutil.RecordDecisionPGX(ctx, pool, auditutil.TableExposure, "exposure_header_id", id, "APPROVED", approver, req.Comment)
 				}
 			}
 			drows.Close()
@@ -301,6 +305,7 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			if err := rows.Scan(&id); err == nil {
 				updated = append(updated, id)
+				auditutil.RecordDecisionPGX(ctx, pool, auditutil.TableExposure, "exposure_header_id", id, "REJECTED", rejector, req.Comment)
 			}
 		}
 		api.RespondWithPayload(w, true, "", updated)
@@ -352,6 +357,7 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			if err := rows.Scan(&id); err == nil {
 				deleted = append(deleted, id)
+				auditutil.RecordActionPGX(ctx, pool, auditutil.TableExposure, "exposure_header_id", id, "DELETE", "PENDING_DELETE_APPROVAL", req.Comment, deleter, nil, nil)
 			}
 		}
 		api.RespondWithPayload(w, true, "", deleted)

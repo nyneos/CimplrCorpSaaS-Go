@@ -692,7 +692,7 @@ func uploadOneFile(ctx context.Context, pool *pgxpool.Pool, cfg Config, parentID
 		}
 
 		if cfg.RecordMainUploadAudit != nil {
-			err := cfg.RecordMainUploadAudit(ctx, tx, parentID, MainUploadAuditPayload{
+			err := recordMainUploadAuditSafely(ctx, tx, cfg, parentID, MainUploadAuditPayload{
 				FileID:     strings.TrimSpace(fileID),
 				FileName:   strings.TrimSpace(header.Filename),
 				UploadedBy: input.UploadedBy,
@@ -873,6 +873,27 @@ func deleteImmediate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool,
 	}
 
 	api.RespondWithResult(w, true, "")
+}
+
+func recordMainUploadAuditSafely(ctx context.Context, tx pgx.Tx, cfg Config, parentID string, payload MainUploadAuditPayload) error {
+	if cfg.RecordMainUploadAudit == nil {
+		return nil
+	}
+
+	savepoint, err := tx.Begin(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := cfg.RecordMainUploadAudit(ctx, savepoint, parentID, payload); err != nil {
+		_ = savepoint.Rollback(ctx)
+		if isUndefinedTableError(err) || isCheckViolationError(err) {
+			return nil
+		}
+		return err
+	}
+
+	return savepoint.Commit(ctx)
 }
 
 func auditEnabled(cfg Config) bool {
@@ -1273,6 +1294,11 @@ func nullIfBlank(value string) interface{} {
 func isUndefinedTableError(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
+}
+
+func isCheckViolationError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23514"
 }
 
 func writeAuditSuccess(w http.ResponseWriter, rows []fileAuditEvent) {

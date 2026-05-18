@@ -5,6 +5,7 @@ package exposures
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/fx/auditutil"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -240,6 +241,13 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "No records updated")
 			return
 		}
+		actor := auditutil.Actor(req.UserID)
+		if len(req.BucketingFields) > 0 {
+			auditutil.RecordAction(r.Context(), db, auditutil.TableExposureBucketing, "exposure_header_id", req.ExposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", actor, nil, req.BucketingFields)
+		}
+		if len(req.HedgingFields) > 0 {
+			auditutil.RecordAction(r.Context(), db, auditutil.TableHedgeProposal, "exposure_header_id", req.ExposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", actor, nil, req.HedgingFields)
+		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -427,6 +435,9 @@ func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
 				rowMap[col] = parseDBValue(col, vals[i])
 			}
 			approved = append(approved, rowMap)
+			if id, ok := rowMap["exposure_header_id"]; ok {
+				auditutil.RecordDecision(r.Context(), db, auditutil.TableExposureBucketing, "exposure_header_id", fmt.Sprint(id), "APPROVED", updatedBy, req.Comments)
+			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -488,6 +499,9 @@ func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
 				rowMap[col] = parseDBValue(col, vals[i])
 			}
 			rejected = append(rejected, rowMap)
+			if id, ok := rowMap["exposure_header_id"]; ok {
+				auditutil.RecordDecision(r.Context(), db, auditutil.TableExposureBucketing, "exposure_header_id", fmt.Sprint(id), "REJECTED", updatedBy, req.Comments)
+			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{

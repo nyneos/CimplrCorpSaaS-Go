@@ -15,7 +15,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 type ExposureResponse struct {
 	ExposureHeaderID    string     `json:"exposure_header_id"`
@@ -671,7 +672,7 @@ func GetExposureUploadBatchesMinimal(pool *pgxpool.Pool) http.HandlerFunc {
 
 			err := rows.Scan(&nbatch, &nfileHash, &nfileName, &ningestion)
 			if err != nil {
-				logger.LogError("[SCAN ERROR]", err)
+				logger.LogError("[SCAN ERROR] %v", err)
 				continue
 			}
 

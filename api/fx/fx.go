@@ -14,7 +14,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 func StartFXService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
@@ -167,6 +168,7 @@ func StartFXService(db *sql.DB, port string) {
 		mux.Handle("/fx/exposures/get-file/v91", middlewares.PreValidationMiddleware(pgxPool)(v91BatchesMinimal))
 		mux.Handle("/fx/exposures/download/v91", middlewares.PreValidationMiddleware(pgxPool)(v91Download))
 		mux.Handle("/fx/exposures/download-bulk/v91", middlewares.PreValidationMiddleware(pgxPool)(v91BulkDownload))
+		mux.Handle("/fx/exposures/audit", middlewares.PreValidationMiddleware(pgxPool)(NewFXAuditHandler(db, fxExposureAuditConfig())))
 		mux.Handle("/fx/exposures/batch-upload-staging", middlewares.PreValidationMiddleware(pgxPool)(exposures.BatchUploadStagingData(db)))
 		// For batch-staging uploads (exposure_headers)
 		mux.Handle("/fx/exposures/download", middlewares.PreValidationMiddleware(pgxPool)(exposures.GetExposureDownloadURL(db)))
@@ -188,6 +190,7 @@ func StartFXService(db *sql.DB, port string) {
 		mux.Handle("/fx/exposures/get-bucketing", middlewares.PreValidationMiddleware(pgxPool)(exposures.GetExposureHeadersLineItemsBucketing(db)))
 		mux.Handle("/fx/exposures/approve-bucketing-status", middlewares.PreValidationMiddleware(pgxPool)(exposures.ApproveBucketingStatus(db)))
 		mux.Handle("/fx/exposures/reject-bucketing-status", middlewares.PreValidationMiddleware(pgxPool)(exposures.RejectBucketingStatus(db)))
+		mux.Handle("/fx/exposures/bucketing/audit", middlewares.PreValidationMiddleware(pgxPool)(NewFXAuditHandler(db, fxBucketingAuditConfig())))
 		mux.Handle("/fx/exposures/bucketing/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(exposures.ListExposureBucketingAdditionalFilesHandler(pgxPool)))
 		mux.Handle("/fx/exposures/bucketing/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(exposures.UploadExposureBucketingAdditionalFilesHandler(pgxPool)))
 		mux.Handle("/fx/exposures/bucketing/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(exposures.DownloadExposureBucketingAdditionalFileHandler(pgxPool)))
@@ -200,11 +203,13 @@ func StartFXService(db *sql.DB, port string) {
 		mux.Handle("/fx/exposures/pending-bucketing/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(exposures.DeletePendingExposureBucketingAdditionalFileHandler(pgxPool)))
 		/*hedging-proposals */
 		mux.Handle("/fx/exposures/get-hedging-proposals", middlewares.PreValidationMiddleware(pgxPool)(exposures.GetHedgingProposalsAggregated(db)))
+		mux.Handle("/fx/exposures/hedge-proposal/audit", middlewares.PreValidationMiddleware(pgxPool)(NewFXAuditHandler(db, fxHedgeProposalAuditConfig())))
 		/*linkage */
 		mux.Handle("/fx/exposures/hedge-links-details", middlewares.PreValidationMiddleware(pgxPool)(exposures.HedgeLinksDetails(db)))
 		mux.Handle("/fx/exposures/expfwd-linking-bookings", middlewares.PreValidationMiddleware(pgxPool)(exposures.ExpFwdLinkingBookings(db)))
 		mux.Handle("/fx/exposures/expfwd-linking", middlewares.PreValidationMiddleware(pgxPool)(exposures.ExpFwdLinking(db)))
 		mux.Handle("/fx/exposures/link-exposure-hedge", middlewares.PreValidationMiddleware(pgxPool)(exposures.LinkExposureHedge(db)))
+		mux.Handle("/fx/exposures/hedge-link/audit", middlewares.PreValidationMiddleware(pgxPool)(NewFXAuditHandler(db, fxHedgeLinkAuditConfig())))
 
 		// Settlement endpoints
 		mux.Handle("/fx/exposures/filter-forward-bookings-for-settlement", middlewares.PreValidationMiddleware(pgxPool)(exposures.FilterForwardBookingsForSettlement(db)))
@@ -216,6 +221,7 @@ func StartFXService(db *sql.DB, port string) {
 		mux.Handle("/fx/forwards/get-mtm", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetMTMData(db)))
 		mux.Handle("/fx/forwards/download-mtm", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetMTMDownloadURL(db)))
 		mux.Handle("/fx/forwards/download-mtm-bulk", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetMTMBulkDownloadURL(db)))
+		mux.Handle("/fx/forwards/mtm/audit", middlewares.PreValidationMiddleware(pgxPool)(NewFXAuditHandler(db, fxMTMAuditConfig())))
 		mux.Handle("/fx/forwards/mtm/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(forwards.ListMTMAdditionalFilesHandler(pgxPool)))
 		mux.Handle("/fx/forwards/mtm/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadMTMAdditionalFilesHandler(pgxPool)))
 		mux.Handle("/fx/forwards/mtm/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(forwards.DownloadMTMAdditionalFileHandler(pgxPool)))
@@ -232,6 +238,8 @@ func StartFXService(db *sql.DB, port string) {
 		// Checker (approval) routes
 		mux.Handle("/fx/forwards/cancellation-status-request", middlewares.PreValidationMiddleware(pgxPool)(forwards.CancellationStatusRequest(db)))
 		mux.Handle("/fx/forwards/rollover-status-request", middlewares.PreValidationMiddleware(pgxPool)(forwards.RolloverStatusRequest(db)))
+		mux.Handle("/fx/forwards/cancellation/audit", middlewares.PreValidationMiddleware(pgxPool)(NewFXAuditHandler(db, fxCancellationAuditConfig())))
+		mux.Handle("/fx/forwards/rollover/audit", middlewares.PreValidationMiddleware(pgxPool)(NewFXAuditHandler(db, fxRolloverAuditConfig())))
 
 		// New Forward Booking & Confirmation routes
 		mux.Handle("/fx/forwards/manual-entry", middlewares.PreValidationMiddleware(pgxPool)(forwards.AddForwardBookingManualEntry(db)))
@@ -246,6 +254,7 @@ func StartFXService(db *sql.DB, port string) {
 		mux.Handle("/fx/forwards/upload-bank-multi", middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadBankForwardBookingsMulti(db)))
 		mux.Handle("/fx/forwards/download", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetForwardDownloadURL(db)))
 		mux.Handle("/fx/forwards/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetForwardBulkDownloadURL(db)))
+		mux.Handle("/fx/forwards/audit", middlewares.PreValidationMiddleware(pgxPool)(NewFXAuditHandler(db, fxForwardAuditConfig())))
 		mux.Handle("/fx/forwards/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(forwards.ListAdditionalFilesHandler(pgxPool)))
 		mux.Handle("/fx/forwards/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadAdditionalFilesHandler(pgxPool)))
 		mux.Handle("/fx/forwards/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(forwards.DownloadAdditionalFileHandler(pgxPool)))

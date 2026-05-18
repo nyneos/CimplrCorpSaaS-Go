@@ -3,6 +3,7 @@ package exposures
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/fx/auditutil"
 	"CimplrCorpSaas/api/utils"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
@@ -27,7 +28,8 @@ import (
 
 	"github.com/lib/pq"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 var ErrExposureFileAlreadyUploaded = errors.New("exposure file already uploaded")
 
@@ -106,7 +108,7 @@ func UploadExposure(w http.ResponseWriter, r *http.Request) {
 
 // Helper: send JSON error response and log
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	logger.LogError("", errMsg)
+	logger.LogError("%s", errMsg)
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -447,6 +449,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			constants.ValueSuccess: true,
 			"data":                 results,
 		})
+		auditutil.RecordAction(r.Context(), db, auditutil.TableExposure, "exposure_header_id", exposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", auditutil.Actor(req.UserID), nil, req.Fields)
 	}
 }
 
@@ -862,6 +865,9 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 			constants.ValueSuccess: true,
 			"message":              fmt.Sprintf("%d exposure_header(s) marked for delete approval", count),
 		})
+		for _, id := range req.ExposureHeaderIds {
+			auditutil.RecordAction(r.Context(), db, auditutil.TableExposure, "exposure_header_id", id, "DELETE", "PENDING_DELETE_APPROVAL", deleteComment, requestedBy, nil, nil)
+		}
 	}
 }
 
@@ -926,6 +932,9 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 				rowMap[col] = parseDBValue(col, vals[i])
 			}
 			rejected = append(rejected, rowMap)
+			if id, ok := rowMap["exposure_header_id"]; ok {
+				auditutil.RecordDecision(r.Context(), db, auditutil.TableExposure, "exposure_header_id", fmt.Sprint(id), "REJECTED", rejectedBy, req.RejectionComment)
+			}
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -1209,6 +1218,12 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		for _, id := range toApprove {
+			auditutil.RecordDecision(r.Context(), db, auditutil.TableExposure, "exposure_header_id", id, "APPROVED", approvedBy, req.ApprovalComment)
+		}
+		for _, id := range toDelete {
+			auditutil.RecordDecision(r.Context(), db, auditutil.TableExposure, "exposure_header_id", id, "APPROVED", approvedBy, req.ApprovalComment)
 		}
 
 		json.NewEncoder(w).Encode(map[string]interface{}{

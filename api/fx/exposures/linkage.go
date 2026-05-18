@@ -3,6 +3,8 @@ package exposures
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/fx/auditutil"
+	"CimplrCorpSaas/internal/logger"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -495,6 +497,13 @@ func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 		// Log to forward_booking_ledger
 		ledgerQuery := `INSERT INTO forward_booking_ledger (booking_id, action_type, action_id, action_date, amount_changed, running_open_amount, user_id) VALUES ($1, 'UTILIZATION', $2, CURRENT_DATE, $3, $4, $5)`
 		_, _ = db.Exec(ledgerQuery, req.BookingID, req.ExposureHeaderID, req.HedgedAmount, newOpenAmount, req.UserID)
+		if _, auditErr := db.ExecContext(r.Context(), `
+			INSERT INTO public.auditactionhedgelink
+				(exposure_header_id, booking_id, actiontype, processing_status, requested_by, requested_at, new_values, change_summary)
+			VALUES ($1, $2, 'LINK', 'COMPLETED', $3, now(), $4, $4)
+		`, req.ExposureHeaderID, req.BookingID, auditutil.Actor(req.UserID), auditutil.JSONValue(linkMap)); auditErr != nil {
+			logger.LogError("fx hedge link audit failed exposure=%s booking=%s: %v", req.ExposureHeaderID, req.BookingID, auditErr)
+		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "link": linkMap})
 	}

@@ -64,7 +64,22 @@ func bankBalanceAdditionalFilesConfig() additionalfiles.Config {
 }
 
 func recordBankBalanceMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
-	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionbankbalances", "balance_id", "actiontype", parentID, payload)
+	reason, err := additionalfiles.MainUploadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO public.auditactionbankbalances (
+			balance_id,
+			actiontype,
+			processing_status,
+			reason,
+			requested_by,
+			requested_at
+		) VALUES ($1, 'UPLOAD_FILE', 'APPROVED', $2, $3, $4)
+	`, parentID, reason, payload.UploadedBy, payload.UploadedAt)
+	return err
 }
 
 func listBankBalanceAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

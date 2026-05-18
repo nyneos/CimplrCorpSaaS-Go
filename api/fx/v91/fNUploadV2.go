@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/fx/auditutil"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"database/sql"
@@ -35,7 +36,8 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/xuri/excelize/v2"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 const duplicateExposureUploadMessage = "This exposure file was already uploaded earlier. Please upload a different file."
 
@@ -1248,6 +1250,13 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		cleanupUploadedObject = false
 
 		logger.LogInfo("[FBUP] committed batch %s for file %s", batchID.String(), fh.Filename)
+		for _, exposureID := range docToID {
+			auditutil.RecordActionPGX(ctx, pool, auditutil.TableExposure, "exposure_header_id", exposureID, "CREATE", "PENDING_APPROVAL", "Imported via uploader", userName, nil, map[string]interface{}{
+				"batch_id":      batchID.String(),
+				"file_name":     fh.Filename,
+				"upload_s3_key": s3Key,
+			})
+		}
 
 		// Authoritative preview: use DB-driven preview builder instead of in-memory approximation.
 		// The old in-memory preview (based on canonicals) is intentionally removed to ensure
@@ -1867,6 +1876,7 @@ func GetExposureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 			httpError(w, http.StatusInternalServerError, "failed to generate download url")
 			return
 		}
+		recordExposureBatchDownloadAuditPGX(r.Context(), pool, batchUUID, auditutil.ActorFromContext(r.Context()), uploadS3Key)
 
 		writeJSON(w, map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -1892,6 +1902,35 @@ func normalizeBulkIDs(ids []string) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+func recordExposureBatchDownloadAuditPGX(ctx context.Context, pool *pgxpool.Pool, batchID uuid.UUID, requestedBy, uploadS3Key string) {
+	if requestedBy == "" || uploadS3Key == "" {
+		return
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT exposure_header_id::text
+		FROM public.exposure_headers
+		WHERE batch_id = $1
+	`, batchID)
+	if err != nil {
+		logger.LogError("fx exposure download audit lookup failed batch=%s: %v", batchID.String(), err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var exposureHeaderID string
+		if err := rows.Scan(&exposureHeaderID); err != nil {
+			logger.LogError("fx exposure download audit scan failed batch=%s: %v", batchID.String(), err)
+			continue
+		}
+		auditutil.RecordDownloadPGX(ctx, pool, auditutil.TableExposureDownloads, "exposure_header_id", exposureHeaderID, requestedBy, uploadS3Key, nil)
+	}
+	if err := rows.Err(); err != nil {
+		logger.LogError("fx exposure download audit rows failed batch=%s: %v", batchID.String(), err)
+	}
 }
 
 func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
@@ -1972,6 +2011,7 @@ func GetExposureBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 				"batch_id":     batchID,
 				"download_url": downloadURL,
 			})
+			recordExposureBatchDownloadAuditPGX(ctx, pool, batchUUID, auditutil.ActorFromContext(ctx), uploadS3Key)
 		}
 
 		writeBulkDownloadResponse(w, files, failedIDs)

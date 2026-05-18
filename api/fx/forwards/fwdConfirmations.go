@@ -2,6 +2,7 @@ package forwards
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/fx/auditutil"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -110,6 +111,7 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 		for i, col := range allCols {
 			result[col] = vals[i]
 		}
+		auditutil.RecordAction(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", req.SystemTransactionID, "EDIT", "PENDING_EDIT_APPROVAL", "", auditutil.ActorFromContext(r.Context()), nil, req.Fields)
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": result})
@@ -248,6 +250,15 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if len(updatedRows) > 0 || len(deletedIds) > 0 {
+			decisionStatus := strings.ToUpper(req.ProcessingStatus)
+			for _, id := range deletedIds {
+				auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", id, decisionStatus, auditutil.Actor(req.UserID), "")
+			}
+			for _, row := range updatedRows {
+				if id, ok := row["system_transaction_id"]; ok {
+					auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", fmt.Sprint(id), decisionStatus, auditutil.Actor(req.UserID), "")
+				}
+			}
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updatedRows, "deleted": deletedIds})
@@ -333,6 +344,9 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 					rowMap[col] = vals[i]
 				}
 				updated = append(updated, rowMap)
+				if id, ok := rowMap["system_transaction_id"]; ok {
+					auditutil.RecordAction(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", fmt.Sprint(id), "DELETE", "PENDING_DELETE_APPROVAL", "", auditutil.Actor(req.UserID), nil, nil)
+				}
 			}
 		}
 		resultRows.Close()
@@ -417,6 +431,11 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 		result := make(map[string]interface{})
 		for i, col := range cols {
 			result[col] = vals[i]
+		}
+		var systemTransactionID string
+		_ = db.QueryRowContext(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 AND entity_level_0 = $2 LIMIT 1`, req.InternalReferenceID, req.EntityLevel0).Scan(&systemTransactionID)
+		if strings.TrimSpace(systemTransactionID) != "" {
+			auditutil.RecordAction(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", systemTransactionID, "CONFIRM", "PENDING_EDIT_APPROVAL", "", auditutil.Actor(req.UserID), nil, result)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)

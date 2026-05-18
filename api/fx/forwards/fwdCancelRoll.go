@@ -2,6 +2,7 @@ package forwards
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/fx/auditutil"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -68,6 +69,7 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 			}
 			// Update cancellation record to Approved
 			_, err = db.Exec(`UPDATE forward_cancellations SET status = 'Approved' WHERE booking_id = $1 AND cancellation_date = $2`, bid, req.CancellationDate)
+			auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardCancellation, "booking_id", bid, "APPROVED", auditutil.Actor(req.UserID), req.CancellationReason)
 			// If fully cancelled, update booking status to Cancelled and processing_status to Approved
 			if newOpenAmount == 0 {
 				_, err = db.Exec(`UPDATE forward_bookings SET status = 'Cancelled' WHERE system_transaction_id = $1`, bid)
@@ -240,6 +242,7 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 				respondWithError(w, http.StatusInternalServerError, "Failed to update booking status for rollover")
 				return
 			}
+			auditutil.RecordAction(r.Context(), db, auditutil.TableForwardRollover, "booking_id", bid, "CREATE", "PENDING_APPROVAL", "", auditutil.Actor(req.UserID), nil, map[string]interface{}{"amount_rolled_over": amtCancelled, "rollover_date": req.CancellationDate, "new_forward": req.NewForward})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -530,6 +533,7 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 				respondWithError(w, http.StatusInternalServerError, "Failed to update booking status to pending cancellation")
 				return
 			}
+			auditutil.RecordAction(r.Context(), db, auditutil.TableForwardCancellation, "booking_id", bid, "CREATE", "PENDING_APPROVAL", req.CancellationReason, auditutil.Actor(req.UserID), nil, map[string]interface{}{"amount_cancelled": amtCancelled, "cancellation_date": req.CancellationDate, "cancellation_rate": req.CancellationRate, "realized_gain_loss": req.RealizedGainLoss})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -591,6 +595,7 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 			}
 			// Update rollover record to Approved
 			_, err = db.Exec(`UPDATE forward_rollovers SET status = 'Approved' WHERE booking_id = $1 AND rollover_date = $2`, bid, cancellationDate)
+			auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardRollover, "booking_id", bid, "APPROVED", auditutil.Actor(req.UserID), "")
 			// If fully rolled over, update booking status to Rolled Over and processing_status to Approved
 			if newOpenAmount == 0 {
 				_, _ = db.Exec(`UPDATE forward_bookings SET status = 'Rolled Over' WHERE system_transaction_id = $1`, bid)
