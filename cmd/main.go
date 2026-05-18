@@ -123,6 +123,7 @@ func main() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	<-sigs
+	//Kanav
 
 	// Stop all services
 	if err := manager.StopAll(); err != nil {

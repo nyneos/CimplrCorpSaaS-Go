@@ -136,9 +136,8 @@ var (
 		ParentColumn:  "fd_id",
 		ParentTable:   "investment.fd_master",
 		ParentFilter: `AND COALESCE(p.is_deleted, FALSE) = FALSE
-		  AND (
-		    EXISTS (SELECT 1 FROM investment.fd_cashflow_schedule c WHERE c.fd_id = p.fd_id)
-		    OR EXISTS (SELECT 1 FROM investment.fd_master_cashflow_schedule c WHERE c.fd_id = p.fd_id)
+		  AND EXISTS (
+		    SELECT 1 FROM investment.fd_cashflow_schedule c WHERE c.fd_id = p.fd_id
 		  )`,
 	}
 	fdInterestReceiptFilesDefinition = investmentFileDefinition{

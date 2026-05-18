@@ -23,6 +23,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -74,6 +75,14 @@ func firstNonEmpty(vals ...string) string {
 	}
 	return ""
 }
+
+// sqlApprovalStatus projects uam.approval_instance.status with a closure_status fallback
+// when no approval instance exists (engine disabled or matrix not configured).
+const sqlApprovalStatus = `COALESCE(
+	NULLIF(ai.status, ''),
+	CASE WHEN cr.closure_status = 'PENDING_APPROVAL' THEN 'PENDING' ELSE cr.closure_status END,
+	''
+)`
 
 // Handler 1 — GetFDsNearMaturity
 
@@ -185,7 +194,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(cr.closure_type,'') AS closure_type,
 			  COALESCE(cr.closure_status,'') AS closure_status,
 			  COALESCE(cr.closure_is_deleted, false) AS closure_is_deleted,
-			  COALESCE(ai.status,'') AS approval_status,
+			  ` + sqlApprovalStatus + ` AS approval_status,
 			  COALESCE((SELECT aud.processing_status FROM investment.fd_audit_closure_request aud WHERE aud.closure_request_id = cr.closure_request_id ORDER BY aud.created_at DESC LIMIT 1),'') AS latest_processing_status,
 			  COALESCE(cf.total_periods,0) AS total_cashflow_periods,
 			  COALESCE(cf.last_event_date::text,'') AS last_cashflow_event,
@@ -288,7 +297,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(cr.closure_type,'') AS closure_type,
 			  COALESCE(cr.closure_status,'') AS closure_status,
 			  COALESCE(cr.closure_is_deleted, false) AS closure_is_deleted,
-			  COALESCE(ai.status,'') AS approval_status,
+			  ` + sqlApprovalStatus + ` AS approval_status,
 			  COALESCE((SELECT aud.processing_status FROM investment.fd_audit_closure_request aud WHERE aud.closure_request_id = cr.closure_request_id ORDER BY aud.created_at DESC LIMIT 1),'') AS latest_processing_status,
 			  COALESCE(cf.total_periods,0) AS total_cashflow_periods,
 			  COALESCE(cf.last_event_date::text,'') AS last_cashflow_event,
@@ -482,6 +491,12 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 				return
+			}
+		}
+		// Multipart requests put user_id on the form (see web nos client); merge into req if JSON omitted it.
+		if strings.TrimSpace(req.UserID) == "" {
+			if uid := strings.TrimSpace(r.FormValue("user_id")); uid != "" {
+				req.UserID = uid
 			}
 		}
 		if req.FDID == "" {
@@ -749,7 +764,14 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			cleanupUpload()
 			api.LogError("[FDClosure] InitiateClosure insert error: %v", err)
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to create closure request")
+			msg := "Failed to create closure request"
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) {
+				msg = fmt.Sprintf("Failed to create closure request (SQLSTATE %s): %s", pgErr.Code, pgErr.Message)
+			} else {
+				msg = fmt.Sprintf("Failed to create closure request: %v", err)
+			}
+			api.RespondWithError(w, http.StatusInternalServerError, msg)
 			return
 		}
 
@@ -788,10 +810,17 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			SubmittedBy: req.UserID, SubmittedByEmail: userEmail,
 		})
 		if instErr != nil {
+			cleanupUpload()
 			api.LogError("[FDClosure] InitiateClosure approval engine: %v", instErr)
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to start approval workflow: "+instErr.Error())
+			return
 		}
 		if instID != "" {
-			_, _ = tx.Exec(ctx, `UPDATE investment.fd_closure_request SET approval_instance_id=$1 WHERE closure_request_id=$2`, instID, closureRequestID)
+			if _, err = tx.Exec(ctx, `UPDATE investment.fd_closure_request SET approval_instance_id=$1 WHERE closure_request_id=$2`, instID, closureRequestID); err != nil {
+				cleanupUpload()
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to link approval instance: "+err.Error())
+				return
+			}
 		}
 
 		switch req.ClosureType {
@@ -1321,7 +1350,7 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		snapshotJSON, _ := json.Marshal(oldRow)
 		// Pass all old values to audit as individual columns.
 		// Use PENDING_EDIT_APPROVAL so the audit trail shows this was an edit on a pending record.
-		_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: req.ClosureRequestID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "UPDATE", ProcessingStatus: "PENDING_EDIT_APPROVAL", Reason: req.UpdateReason, Snapshot: snapshotJSON, OldValues: oldRow})
+		_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: req.ClosureRequestID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "EDIT", ProcessingStatus: "PENDING_EDIT_APPROVAL", Reason: req.UpdateReason, Snapshot: snapshotJSON, OldValues: oldRow})
 
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
@@ -1420,7 +1449,7 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(m.interest_rate,0) AS interest_rate,
 			  COALESCE(m.tenure_days,0) AS tenure_days,
 			  COALESCE(m.fd_status,'') AS fd_status,
-			  COALESCE(ai.status,'') AS approval_status,
+			  ` + sqlApprovalStatus + ` AS approval_status,
 			  COALESCE((
 			    SELECT aud.processing_status
 			    FROM investment.fd_audit_closure_request aud
@@ -1574,7 +1603,7 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(c.bank_fd_ref_no,''),
 			  COALESCE(c.confirmation_status,''),
 			  -- enriched: approval engine
-			  COALESCE(ai.status,''),
+			  ` + sqlApprovalStatus + `,
 			  COALESCE(ai.submitted_at::text,'')
 			FROM investment.fd_closure_request cr
 			LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
@@ -2119,7 +2148,7 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				_, _ = tx.Exec(ctx, `UPDATE investment.fd_master SET closure_request_id=NULL,updated_at=NOW() WHERE closure_request_id=$1`, crID)
 
 				snapshotJSON, _ := json.Marshal(map[string]interface{}{"closure_status": "PENDING_APPROVAL", "rejected_by": userEmail, "rejection_reason": req.Comment})
-				_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: crID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "REJECT", ProcessingStatus: "REJECTED", Reason: req.Comment, Snapshot: snapshotJSON, OldValues: map[string]interface{}{"closure_status": "PENDING_APPROVAL"}})
+				_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: crID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "EDIT", ProcessingStatus: "REJECTED", Reason: req.Comment, Snapshot: snapshotJSON, OldValues: map[string]interface{}{"closure_status": "PENDING_APPROVAL"}})
 
 				if cerr := tx.Commit(ctx); cerr != nil {
 					_ = tx.Rollback(ctx)
@@ -2594,18 +2623,22 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 	//
 	// DR = netPayout + tds + penalty = principal + interest
 	// CR = principal + interest  ✓  BALANCED
-	netInterest := roundToFour(accruedInterest - tdsAmt - penaltyAmt)
-	if netInterest < 0 {
-		netInterest = 0
-	}
-	totalDebitAmt := roundToFour(netPayout + tdsAmt + penaltyAmt) // = principal + accruedInterest
+	totalDebitAmt := roundToFour(netPayout + tdsAmt + penaltyAmt)
 	totalCreditAmt := roundToFour(principalAmt + accruedInterest)
+	// ROLLOVER principal-only (and similar) can set net_payout < principal + interest; keep header balanced.
+	if totalDebitAmt != totalCreditAmt {
+		totalCreditAmt = totalDebitAmt
+	}
+	interestCredit := roundToFour(totalCreditAmt - principalAmt)
+	if interestCredit < 0 {
+		interestCredit = 0
+	}
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO investment.accounting_journal_entry (
 		  activity_id,entity_id,entity_name,entry_date,accounting_period,entry_type,description,
 		  total_debit,total_credit,status,fd_id,closure_request_id,is_reversal,created_by
-		) VALUES ($1,$2,$3,CURRENT_DATE,$4,'CLOSURE',$5,$6,$7,'APPROVED',$8,$9,false,$10)
+		) VALUES ($1,$2,$3,CURRENT_DATE,$4,'CLOSURE',$5,$6,$7,'POSTED',$8,$9,false,$10)
 		RETURNING entry_id`,
 		activityID, nullStrOrNil(entityID), nullStrOrNil(entityName),
 		accountingPeriod, description, totalDebitAmt, totalCreditAmt, fdID, closureRequestID, approvedByEmail,
@@ -2646,9 +2679,9 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 	lines = append(lines, jLine{lineNum, "FD-INVEST-" + fdID, "FD Investment — " + fdID, "ASSET",
 		0, roundToFour(principalAmt), "Close FD investment asset — " + closureType})
 	lineNum++
-	if accruedInterest > 0 {
+	if interestCredit > 0 {
 		lines = append(lines, jLine{lineNum, "FD-INT-INC-" + fdID, "Interest Income — FD", "INCOME",
-			0, roundToFour(accruedInterest), "Gross interest income recognised on closure"})
+			0, interestCredit, "Gross interest income recognised on closure"})
 		lineNum++ //nolint:ineffassign
 	}
 
@@ -2668,7 +2701,8 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		newFDStatus = "ROLLED_OVER"
 	}
 
-	_, err = tx.Exec(ctx, `UPDATE investment.fd_master SET fd_status=$1,closed_at=NOW(),closed_by=$2,accounting_posted=true,closure_request_id=$3,updated_by=$4,updated_at=NOW() WHERE fd_id=$5`, newFDStatus, approvedByEmail, closureRequestID, approvedByEmail, fdID)
+	closedBy := firstNonEmpty(approvedBy, approvedByEmail)
+	_, err = tx.Exec(ctx, `UPDATE investment.fd_master SET fd_status=$1,closed_at=NOW(),closed_by=$2,accounting_posted=true,closure_request_id=$3,updated_by=$4,updated_at=NOW() WHERE fd_id=$5`, newFDStatus, closedBy, closureRequestID, closedBy, fdID)
 	if err != nil {
 		return fmt.Errorf("postClosureJournals update fd_master: %w", err)
 	}
@@ -2735,10 +2769,18 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		// 2. Read the confirmed rollover amounts persisted on fd_closure_rollover.
 		var rolloverAmt, rolloverInterestRate float64
 		var newTenorDays int
-		_ = tx.QueryRow(ctx, `
-			SELECT COALESCE(rollover_amount,0), COALESCE(new_tenor_days,0), COALESCE(rollover_interest_rate,0)
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(rollover_amount,0), COALESCE(new_tenor_days,0), COALESCE(new_interest_rate,0)
 			FROM investment.fd_closure_rollover WHERE closure_request_id=$1 LIMIT 1`, closureRequestID,
-		).Scan(&rolloverAmt, &newTenorDays, &rolloverInterestRate)
+		).Scan(&rolloverAmt, &newTenorDays, &rolloverInterestRate); err != nil {
+			return fmt.Errorf("postClosureJournals load rollover detail: %w", err)
+		}
+		if rolloverInterestRate <= 0 {
+			_ = tx.QueryRow(ctx, `
+				SELECT COALESCE(rollover_interest_rate,0)
+				FROM investment.fd_closure_request WHERE closure_request_id=$1`, closureRequestID,
+			).Scan(&rolloverInterestRate)
+		}
 		if rolloverAmt <= 0 {
 			rolloverAmt = roundToFour(principalAmt + accruedInterest - tdsAmt)
 		}
@@ -2748,6 +2790,63 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		if rolloverInterestRate <= 0 {
 			rolloverInterestRate = srcInterestRate
 		}
+		if rolloverInterestRate <= 0 {
+			return fmt.Errorf("postClosureJournals create rollover booking: interest_rate is required")
+		}
+		if rolloverAmt <= 0 {
+			return fmt.Errorf("postClosureJournals create rollover booking: rollover amount must be positive")
+		}
+		if newTenorDays <= 0 {
+			return fmt.Errorf("postClosureJournals create rollover booking: tenure_days is required")
+		}
+
+		var effectiveClosureDate time.Time
+		var settlementAccountID string
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(effective_closure_date, CURRENT_DATE),
+			       COALESCE(NULLIF(settlement_account_id,''), '')
+			FROM investment.fd_closure_request
+			WHERE closure_request_id=$1`, closureRequestID,
+		).Scan(&effectiveClosureDate, &settlementAccountID); err != nil {
+			return fmt.Errorf("postClosureJournals load closure dates: %w", err)
+		}
+		if effectiveClosureDate.IsZero() {
+			effectiveClosureDate = time.Now()
+		}
+		expectedMaturityDate := effectiveClosureDate.AddDate(0, 0, newTenorDays)
+		var rolloverMaturity sql.NullTime
+		_ = tx.QueryRow(ctx, `
+			SELECT new_maturity_date FROM investment.fd_closure_rollover
+			WHERE closure_request_id=$1`, closureRequestID,
+		).Scan(&rolloverMaturity)
+		if rolloverMaturity.Valid && !rolloverMaturity.Time.IsZero() {
+			expectedMaturityDate = rolloverMaturity.Time
+		}
+		if !expectedMaturityDate.After(effectiveClosureDate) {
+			expectedMaturityDate = effectiveClosureDate.AddDate(0, 0, newTenorDays)
+		}
+
+		sourceAccountID := firstNonEmpty(settlementAccountID, srcSourceAccountID)
+		if sourceAccountID == "" {
+			return fmt.Errorf("postClosureJournals create rollover booking: settlement/source account is required")
+		}
+		if srcEntityID == "" || srcEntityName == "" || srcBankID == "" || srcBankName == "" {
+			return fmt.Errorf("postClosureJournals create rollover booking: entity and bank details are required")
+		}
+
+		interestTypeCode := strings.ToUpper(strings.TrimSpace(srcInterestTypeCode))
+		switch interestTypeCode {
+		case "SIMPLE", "COMPOUND", "STEPPED":
+		default:
+			interestTypeCode = "SIMPLE"
+		}
+
+		var sourceAccountNumber string
+		_ = tx.QueryRow(ctx, `
+			SELECT COALESCE(account_number,'')
+			FROM public.masterbankaccount
+			WHERE account_id=$1 LIMIT 1`, sourceAccountID,
+		).Scan(&sourceAccountNumber)
 
 		// 3. INSERT fd_booking_request with status SENT_TO_BANK.
 		//    The bank already has the instruction; we just need ops to
@@ -2757,29 +2856,33 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 			INSERT INTO investment.fd_booking_request (
 			  entity_id, entity_name,
 			  bank_id, bank_name,
-			  bank_config_id, source_account_id,
+			  bank_config_id, source_account_id, source_account_number,
 			  principal_amount, interest_rate, tenure_days,
 			  interest_type_code, frequency_id, day_count_code, tds_plan_id,
-			  booking_status, booking_remarks, created_by
+			  expected_start_date, expected_maturity_date, value_date,
+			  booking_status, booking_remarks, source_closure_request_id, created_by
 			) VALUES (
 			  $1,$2,$3,$4,
-			  NULLIF($5,''), NULLIF($6,''),
-			  $7,$8,$9,
-			  NULLIF($10,''), NULLIF($11,''), NULLIF($12,''), NULLIF($13,''),
+			  NULLIF($5,''), $6, NULLIF($7,''),
+			  $8,$9,$10,
+			  $11, NULLIF($12,''), NULLIF($13,''), NULLIF($14,''),
+			  $15::date, $16::date, $17::date,
 			  'SENT_TO_BANK',
-			  $14, $15
+			  $18, $19, $20
 			) RETURNING booking_id`,
 			srcEntityID, srcEntityName,
 			srcBankID, srcBankName,
-			srcBankConfigID, srcSourceAccountID,
-			rolloverAmt, rolloverInterestRate, newTenorDays,
-			srcInterestTypeCode, srcFrequencyID, srcDayCountCode, srcTDSPlanID,
+			srcBankConfigID, sourceAccountID, sourceAccountNumber,
+			roundToFour(rolloverAmt), rolloverInterestRate, newTenorDays,
+			interestTypeCode, srcFrequencyID, srcDayCountCode, srcTDSPlanID,
+			effectiveClosureDate.Format(constants.DateFormat),
+			expectedMaturityDate.Format(constants.DateFormat),
+			effectiveClosureDate.Format(constants.DateFormat),
 			fmt.Sprintf("Rollover booking — source closure %s source FD %s", closureRequestID, fdID),
-			approvedByEmail,
+			closureRequestID, approvedByEmail,
 		).Scan(&newBookingID)
 		if bookingErr != nil {
-			// Non-fatal: journals are posted; log and let the reconcile worker retry.
-			api.LogError("[FDClosure] ROLLOVER: failed to create booking for closure %s: %v", closureRequestID, bookingErr)
+			return fmt.Errorf("postClosureJournals create rollover booking: %w", bookingErr)
 		}
 
 		// 4. Link new booking back onto fd_closure_rollover so the
@@ -2801,7 +2904,9 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		"accounting_period": accountingPeriod, "total_debit": totalDebitAmt, "total_credit": totalCreditAmt, "approved_by_email": approvedByEmail,
 	}
 	snapshotJSON, _ := json.Marshal(postSnap)
-	_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: closureRequestID, PerformedBy: approvedBy, PerformedByEmail: approvedByEmail, ActionType: "POST_ACCOUNTING", ProcessingStatus: "POSTED", Reason: "Journals posted on approval", Snapshot: snapshotJSON, OldValues: postSnap})
+	if auditErr := insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: closureRequestID, PerformedBy: approvedBy, PerformedByEmail: approvedByEmail, ActionType: "EDIT", ProcessingStatus: "APPROVED", Reason: "Journals posted on approval", Snapshot: snapshotJSON, OldValues: postSnap}); auditErr != nil {
+		return fmt.Errorf("postClosureJournals audit: %w", auditErr)
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("postClosureJournals commit: %w", err)

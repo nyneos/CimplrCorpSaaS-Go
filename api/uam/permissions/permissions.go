@@ -575,13 +575,26 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 
 		// If Approved: apply new_value to role_permissions
 		if action == "Approved" {
-			rIDs := make([]string, len(targets))
-			pIDs := make([]int, len(targets))
-			nVals := make([]bool, len(targets))
-			for i, t := range targets {
-				rIDs[i] = t.RoleID
-				pIDs[i] = t.PermID
-				nVals[i] = t.NewValue
+			// Multiple pending requests can exist for the same (role_id, permission_id).
+			// PostgreSQL rejects ON CONFLICT DO UPDATE when the same conflict key appears twice in one INSERT.
+			type rolePermKey struct {
+				roleID string
+				permID int
+			}
+			applyTargets := make(map[rolePermKey]targetRow, len(targets))
+			for _, t := range targets {
+				k := rolePermKey{t.RoleID, t.PermID}
+				if prev, ok := applyTargets[k]; !ok || t.ID > prev.ID {
+					applyTargets[k] = t
+				}
+			}
+			rIDs := make([]string, 0, len(applyTargets))
+			pIDs := make([]int, 0, len(applyTargets))
+			nVals := make([]bool, 0, len(applyTargets))
+			for _, t := range applyTargets {
+				rIDs = append(rIDs, t.RoleID)
+				pIDs = append(pIDs, t.PermID)
+				nVals = append(nVals, t.NewValue)
 			}
 			_, err = tx.Exec(`
 				INSERT INTO public.role_permissions

@@ -4281,3 +4281,76 @@ func strSliceToCSV(sl []string) string {
 }
 
 var _ = strSliceToCSV // suppress unused warning
+
+// ─── Period Lock Status (TC-21) ───────────────────────────────────────────────
+
+// CheckPeriodLockStatus reports whether a financial period (YYYY-MM) is locked
+// for FINAL accrual runs. A period is considered locked when any FINAL run for
+// the same entity + period has already been APPROVED/POSTED — i.e. once the
+// books are closed, you cannot create another FINAL run for that period.
+//
+// Request:
+//
+//	{ "financial_period": "2026-04", "entity_id": "ENT-001" }
+//
+// Response:
+//
+//	{ "success": true, "rows": { "is_locked": true|false, "reason": "..." } }
+func CheckPeriodLockStatus(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID          string `json:"user_id"`
+			FinancialPeriod string `json:"financial_period"`
+			EntityID        string `json:"entity_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		fp := strings.TrimSpace(req.FinancialPeriod)
+		if fp == "" {
+			api.RespondWithPayload(w, true, "", map[string]interface{}{
+				"is_locked": false,
+				"reason":    "no financial_period supplied",
+			})
+			return
+		}
+
+		ctx := r.Context()
+		var posted int
+		var lastStatus, lastRunID string
+		query := `
+			SELECT
+				COUNT(*) FILTER (WHERE run_status IN ('APPROVED','POSTED','POSTED_TO_GL','LOCKED')) AS posted_runs,
+				COALESCE(MAX(run_status),'') AS last_status,
+				COALESCE(MAX(run_id),'')     AS last_run_id
+			FROM investment.fd_accrual_run
+			WHERE financial_period = $1
+			  AND ($2 = '' OR entity_id = $2)
+			  AND COALESCE(run_mode,'FINAL') = 'FINAL'`
+		if err := pgxPool.QueryRow(ctx, query, fp, req.EntityID).Scan(&posted, &lastStatus, &lastRunID); err != nil {
+			api.LogError("[FDAccrual] CheckPeriodLockStatus query error: %v", err)
+			api.RespondWithPayload(w, true, "", map[string]interface{}{
+				"is_locked": false,
+				"reason":    "lock-status query failed; defaulting to unlocked",
+			})
+			return
+		}
+
+		isLocked := posted > 0
+		reason := ""
+		if isLocked {
+			reason = fmt.Sprintf("Financial period %s is locked: a FINAL run is already %s (run_id=%s)", fp, lastStatus, lastRunID)
+		} else {
+			reason = fmt.Sprintf("Financial period %s is open for FINAL runs", fp)
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"is_locked":        isLocked,
+			"financial_period": fp,
+			"entity_id":        req.EntityID,
+			"reason":           reason,
+			"last_run_id":      lastRunID,
+			"last_status":      lastStatus,
+		})
+	}
+}

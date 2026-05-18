@@ -2,6 +2,7 @@ package fdAccrual
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -32,6 +33,9 @@ type AccrualInput struct {
 	DayCountCode     string  // ACT_365 / ACT_360 / 30_360
 	FdStartDate      time.Time
 	FdMaturityDate   time.Time
+	// FD lifecycle state — used to clamp accrual at premature/maturity closure
+	FdStatus           string    // ACTIVE / MATURED / PREMATURELY_CLOSED / ROLLED_OVER
+	EffectiveCloseDate time.Time // closure date (premature) — interest stops here
 	// Bank config fields for holiday-aware accrual day counting
 	BankConfigID        string
 	HolidayCalendarCode string
@@ -273,10 +277,34 @@ func buildAccrualPeriod(t time.Time) string {
 // ─── Scope query ──────────────────────────────────────────────────────────────
 
 // getFDsInScope queries investment.fd_master using exact column names.
+//
+// Scope rules (TC-27/28/29/30/31/32):
+//   - ACTIVE FDs whose [start_date, maturity_date] overlaps the run period.
+//   - MATURED FDs whose maturity falls inside the run period (interest till
+//     maturity only — TC-31/32). Already excluded if the run period starts
+//     after the maturity date.
+//   - PREMATURELY_CLOSED FDs whose effective_closure_date falls inside the run
+//     period (TC-29/30 — interest stops at closure, no accrual after closure).
+//
+// FDs that were closed/matured before the run period start are filtered out
+// because they have no overlap window.
 func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunParams) ([]AccrualInput, error) {
-	fdStatus := params.FDStatusFilter
+	fdStatus := strings.ToUpper(strings.TrimSpace(params.FDStatusFilter))
 	if fdStatus == "" {
 		fdStatus = "ACTIVE"
+	}
+
+	// Build the fd_status IN (...) filter. We always include closed/matured FDs
+	// so the engine can produce partial-period accruals up to the closure or
+	// maturity date — without ever accruing beyond it.
+	var statusValues []string
+	switch fdStatus {
+	case "ACTIVE", "ACTIVE_MATURED":
+		statusValues = []string{"ACTIVE", "MATURED", "PREMATURELY_CLOSED"}
+	case "ALL":
+		statusValues = []string{"ACTIVE", "MATURED", "PREMATURELY_CLOSED", "ROLLED_OVER"}
+	default:
+		statusValues = []string{fdStatus, "MATURED", "PREMATURELY_CLOSED"}
 	}
 
 	query := `
@@ -293,6 +321,9 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 			COALESCE(f.day_count_code, 'ACT_365')                 AS day_count_code,
 			f.start_date,
 			f.maturity_date,
+			COALESCE(f.fd_status, 'ACTIVE')                       AS fd_status,
+			-- Effective closure date (premature) — bounds the accrual end
+			COALESCE(cr.effective_closure_date, f.closed_at::date) AS effective_close_date,
 			COALESCE(f.bank_config_id, '')                        AS bank_config_id,
 			COALESCE(bc.holiday_calendar_code, '')                AS holiday_calendar_code,
 			COALESCE(bc.weekend_accrual, true)                    AS weekend_accrual,
@@ -305,7 +336,6 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 			COALESCE(bc.interest_rounding_decimals, 2)            AS bank_rounding_decimals,
 			COALESCE(bc.capitalization_date_adjustment, 'NO_ADJUST') AS cap_date_adjustment,
 			COALESCE(bc.broken_period_method,     'SIMPLE')       AS broken_period_method,
-			-- compounding frequency from fd_master
 			COALESCE(f.frequency_id, '')                          AS frequency_id,
 			COALESCE(f.frequency_id, '')                          AS compounding_frequency
 		FROM investment.fd_master f
@@ -313,15 +343,18 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 				AND COALESCE(bc.is_deleted, false) = false
 			LEFT JOIN investment.mastercalendar mc ON mc.calendar_code = bc.holiday_calendar_code
 				AND COALESCE(mc.is_deleted, false) = false
+			LEFT JOIN investment.fd_closure_request cr ON cr.closure_request_id = f.closure_request_id
+				AND cr.closure_status = 'POSTED'
 		WHERE f.entity_id = $1
-		  AND f.fd_status = $2
+		  AND f.fd_status = ANY($2)
 		  AND f.cashflow_generated = true
 		  AND f.is_deleted = false
 		  AND f.is_active = true
 		  AND f.start_date <= $3
-		  AND f.maturity_date >= $4`
+		  AND f.maturity_date >= $4
+		  AND (cr.effective_closure_date IS NULL OR cr.effective_closure_date >= $4)`
 
-	args := []interface{}{params.EntityID, fdStatus, params.PeriodEnd, params.PeriodStart}
+	args := []interface{}{params.EntityID, statusValues, params.PeriodEnd, params.PeriodStart}
 	argIdx := 5
 
 	if params.BankIDFilter != "" {
@@ -345,11 +378,13 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 	var results []AccrualInput
 	for rows.Next() {
 		var fd AccrualInput
+		var effectiveCloseDate sql.NullTime
 		if err := rows.Scan(
 			&fd.FDID, &fd.FdRefNo, &fd.BankID, &fd.BankName,
 			&fd.EntityID, &fd.EntityName, &fd.InterestTypeCode,
 			&fd.PrincipalAmount, &fd.InterestRate, &fd.DayCountCode,
 			&fd.FdStartDate, &fd.FdMaturityDate,
+			&fd.FdStatus, &effectiveCloseDate,
 			&fd.BankConfigID, &fd.HolidayCalendarCode,
 			&fd.WeekendAccrual, &fd.HolidayAccrual, &fd.WeekendPattern,
 			&fd.AccrualStartConvention, &fd.AccrualEndConvention,
@@ -359,6 +394,9 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 			&fd.FrequencyID, &fd.CompoundingFrequency,
 		); err != nil {
 			return nil, fmt.Errorf("getFDsInScope scan: %w", err)
+		}
+		if effectiveCloseDate.Valid {
+			fd.EffectiveCloseDate = effectiveCloseDate.Time
 		}
 		results = append(results, fd)
 	}
@@ -691,6 +729,60 @@ func validateFDsForAccrual(fds []AccrualInput, params AccrualRunParams) []Valida
 				SuggestedAction: "Exclude this FD or adjust the accrual period",
 			})
 		}
+		// TC-27/28: Partial-period notice when FD starts mid-period — informational
+		// so the user understands days_in_period < period_length.
+		if !fd.FdStartDate.IsZero() && fd.FdStartDate.After(params.PeriodStart) && !fd.FdStartDate.After(params.PeriodEnd) {
+			findings = append(findings, ValidationFinding{
+				FDID: fd.FDID, FdRefNo: fd.FdRefNo, BankName: fd.BankName,
+				IssueType: "FD_OPENED_WITHIN_PERIOD",
+				Severity:  "WARNING",
+				Description: fmt.Sprintf("FD started %s — accrual will run from %s to period end (partial accrual)",
+					fd.FdStartDate.Format(constants.DateFormat), fd.FdStartDate.Format(constants.DateFormat)),
+				SuggestedAction: "No action needed — engine accrues only valid days from FD start.",
+			})
+		}
+		// TC-29/30: FD closed pre-maturely within the period — interest stops at closure.
+		if !fd.EffectiveCloseDate.IsZero() && !fd.EffectiveCloseDate.Before(params.PeriodStart) && fd.EffectiveCloseDate.Before(params.PeriodEnd) {
+			findings = append(findings, ValidationFinding{
+				FDID: fd.FDID, FdRefNo: fd.FdRefNo, BankName: fd.BankName,
+				IssueType: "FD_CLOSED_WITHIN_PERIOD",
+				Severity:  "WARNING",
+				Description: fmt.Sprintf("FD closed pre-maturely on %s — accrual will stop at closure (no interest after closure)",
+					fd.EffectiveCloseDate.Format(constants.DateFormat)),
+				SuggestedAction: "No action needed — engine clamps accrual at the closure date.",
+			})
+		}
+		// TC-31/32: FD matures within the period — interest till maturity only.
+		if !fd.FdMaturityDate.IsZero() && !fd.FdMaturityDate.Before(params.PeriodStart) && fd.FdMaturityDate.Before(params.PeriodEnd) {
+			findings = append(findings, ValidationFinding{
+				FDID: fd.FDID, FdRefNo: fd.FdRefNo, BankName: fd.BankName,
+				IssueType: "FD_MATURES_WITHIN_PERIOD",
+				Severity:  "WARNING",
+				Description: fmt.Sprintf("FD matures on %s — accrual will stop at maturity (no interest after maturity)",
+					fd.FdMaturityDate.Format(constants.DateFormat)),
+				SuggestedAction: "No action needed — engine clamps accrual at the maturity date.",
+			})
+		}
+		// TC-38: FD eligibility — closed/matured before this period should never reach
+		// the engine, but if the FD master and closure tables are inconsistent (race),
+		// flag it loudly.
+		closedStatuses := map[string]bool{"PREMATURELY_CLOSED": true, "MATURED": true, "ROLLED_OVER": true}
+		if closedStatuses[strings.ToUpper(fd.FdStatus)] {
+			closeOrMaturity := fd.FdMaturityDate
+			if !fd.EffectiveCloseDate.IsZero() && fd.EffectiveCloseDate.Before(closeOrMaturity) {
+				closeOrMaturity = fd.EffectiveCloseDate
+			}
+			if !closeOrMaturity.IsZero() && closeOrMaturity.Before(params.PeriodStart) {
+				findings = append(findings, ValidationFinding{
+					FDID: fd.FDID, FdRefNo: fd.FdRefNo, BankName: fd.BankName,
+					IssueType: "FD_NOT_ELIGIBLE",
+					Severity:  "BLOCKER",
+					Description: fmt.Sprintf("FD is %s and effectively ended on %s — not eligible for accrual in this period",
+						fd.FdStatus, closeOrMaturity.Format(constants.DateFormat)),
+					SuggestedAction: "Exclude this FD from the run; closed FDs are not eligible.",
+				})
+			}
+		}
 	}
 	return findings
 }
@@ -880,13 +972,37 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 		LedgerRowStatus: "EXCLUDED",
 	}
 
+	// TC-27/28: FD Opened Within Period — start partial accrual from the later
+	// of the FD start date and the run period start.
 	effectiveStart := fd.FdStartDate
 	if params.PeriodStart.After(effectiveStart) {
 		effectiveStart = params.PeriodStart
 	}
+
+	// TC-31/32: FD Matured / TC-29/30: FD Pre-maturely Closed —
+	// stop accrual at the earliest of (period end, maturity date, closure date).
+	// effective_close_date is set for PREMATURELY_CLOSED FDs (and falls back to
+	// closed_at::date for matured/rolled-over FDs that lack a closure request).
 	effectiveEnd := fd.FdMaturityDate
 	if params.PeriodEnd.Before(effectiveEnd) {
 		effectiveEnd = params.PeriodEnd
+	}
+	if !fd.EffectiveCloseDate.IsZero() && fd.EffectiveCloseDate.Before(effectiveEnd) {
+		effectiveEnd = fd.EffectiveCloseDate
+	}
+	// If the FD is closed/matured, never extend accrual past those dates even
+	// if no explicit closure record was found.
+	switch strings.ToUpper(fd.FdStatus) {
+	case "MATURED", "ROLLED_OVER":
+		if !fd.FdMaturityDate.IsZero() && fd.FdMaturityDate.Before(effectiveEnd) {
+			effectiveEnd = fd.FdMaturityDate
+		}
+	case "PREMATURELY_CLOSED":
+		// effective_close_date already applied above; if missing, fall back to
+		// maturity to be safe and never accrue beyond it.
+		if fd.EffectiveCloseDate.IsZero() && !fd.FdMaturityDate.IsZero() && fd.FdMaturityDate.Before(effectiveEnd) {
+			effectiveEnd = fd.FdMaturityDate
+		}
 	}
 
 	// Apply accrual start convention (STEP 3C)
