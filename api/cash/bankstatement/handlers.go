@@ -161,12 +161,16 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				t.balance,
 				c.category_name,
 				t.category_id,
-				COALESCE(t.misclassified_flag, false)           AS misclassified_flag,
-				COALESCE(t.narration_clean, t.description, '')  AS narration_clean,
-				COALESCE(t.narration_ref, '')                   AS narration_ref,
-				COALESCE(t.payment_channel, '')                 AS payment_channel,
+				COALESCE(t.misclassified_flag, false)            AS misclassified_flag,
+				COALESCE(t.narration_clean, t.description, '')   AS narration_clean,
+				COALESCE(t.narration_ref, '')                    AS narration_ref,
+				COALESCE(t.payment_channel, '')                  AS payment_channel,
 				t.confidence_score,
-				COALESCE(t.classification_step, '')             AS classification_step
+				COALESCE(t.classification_step, '')              AS classification_step,
+				-- Review queue fields
+				COALESCE(q.status, '')                           AS review_status,
+				COALESCE(q.suggested_cat::text, '')              AS suggested_cat_id,
+				COALESCE(sq.category_name, '')                   AS suggested_cat_name
 			FROM cimplrcorpsaas.bank_statement_transactions t
 			JOIN cimplrcorpsaas.bank_statements s
 				ON t.bank_statement_id = s.bank_statement_id
@@ -174,6 +178,10 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				ON s.entity_id = e.entity_id
 			LEFT JOIN public.mastercashflowcategory c
 				ON t.category_id = c.category_id
+			LEFT JOIN cimplrcorpsaas.categorization_review_queue q
+				ON q.transaction_id = t.transaction_id
+			LEFT JOIN public.mastercashflowcategory sq
+				ON sq.category_id::text = q.suggested_cat::text
 			WHERE t.bank_statement_id = $1
 			  AND s.entity_id = ANY($2)
 			ORDER BY t.value_date
@@ -206,6 +214,9 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				paymentChannel     string
 				confidenceScore    sql.NullFloat64
 				classificationStep string
+				reviewStatus       string
+				suggestedCatID     string
+				suggestedCatName   string
 			)
 
 			if err := rows.Scan(
@@ -226,6 +237,9 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				&paymentChannel,
 				&confidenceScore,
 				&classificationStep,
+				&reviewStatus,
+				&suggestedCatID,
+				&suggestedCatName,
 			); err != nil {
 				continue
 			}
@@ -239,6 +253,22 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 			if confidenceScore.Valid {
 				confScore = &confidenceScore.Float64
 			}
+
+			// Derive a single deterministic status for the UI.
+			// Priority: manual override → auto-confirmed → pending analyst review → uncategorized
+			var categorizationStatus string
+			switch {
+			case classificationStep == "CORRECTION" || classificationStep == "CONFIRMATION":
+				categorizationStatus = "manual"
+			case categoryID.Valid && categoryID.String != "":
+				categorizationStatus = "auto"
+			case reviewStatus == "PENDING":
+				categorizationStatus = "pending_review"
+			default:
+				categorizationStatus = "uncategorized"
+			}
+
+			reviewSuggested := reviewStatus == "PENDING"
 
 			resp = append(resp, map[string]interface{}{
 				"transaction_id":     tid,
@@ -254,11 +284,16 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				"category_id":        categoryID.String,
 				"misclassified_flag": misclassified,
 				// Smart categorization fields
-				"narration_clean":     narrationClean,
-				"narration_ref":       narrationRef,
-				"payment_channel":     paymentChannel,
-				"confidence_score":    confScore,
-				"classification_step": classificationStep,
+				"narration_clean":      narrationClean,
+				"narration_ref":        narrationRef,
+				"payment_channel":      paymentChannel,
+				"confidence_score":     confScore,
+				"classification_step":  classificationStep,
+				// Review / status fields
+				"categorization_status": categorizationStatus,
+				"review_suggested":      reviewSuggested,
+				"suggested_cat_id":      suggestedCatID,
+				"suggested_cat_name":    suggestedCatName,
 			})
 		}
 
