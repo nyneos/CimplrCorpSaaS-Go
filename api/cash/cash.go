@@ -119,9 +119,9 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/upload-payrec", api.BusinessUnitMiddleware(db)(payablerecievable.UploadPayRec(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/transactions/misclassify", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.MarkBankStatementTransactionsMisclassifiedHandler(db)))
 	// mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetBankStatements(pgxPool)))
-	mux.Handle("/cash/bank-statements/bulk-approve", bankstatement.BulkApproveBankStatements(pgxPool))
-	mux.Handle("/cash/bank-statements/bulk-reject", bankstatement.BulkRejectBankStatements(pgxPool))
-	mux.Handle("/cash/bank-statements/bulk-delete", bankstatement.BulkDeleteBankStatements(pgxPool))
+	mux.Handle("/cash/bank-statements/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.BulkApproveBankStatements(pgxPool)))
+	mux.Handle("/cash/bank-statements/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.BulkRejectBankStatements(pgxPool)))
+	mux.Handle("/cash/bank-statements/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.BulkDeleteBankStatements(pgxPool)))
 	mux.Handle("/cash/bank-statements/create", api.BusinessUnitMiddleware(db)(bankstatement.CreateBankStatements(pgxPool)))
 	mux.Handle("/cash/bank-statements/update", api.BusinessUnitMiddleware(db)(bankstatement.UpdateBankStatement(pgxPool)))
 	mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetAllBankStatements(pgxPool)))
@@ -284,9 +284,9 @@ func StartCashService(db *sql.DB, port string) {
 	limit.RegisterLimitRoutes(mux, pgxPool)
 
 	// Travel package endpoints
-	mux.Handle("/cash/package/create", (travel.CreatePackageHandler(db)))
-	mux.Handle("/cash/package", (travel.GetPackageHandler(db)))
-	mux.Handle("/cash/package/delete", (travel.DeletePackageHandler(db)))
+	mux.Handle("/cash/package/create", api.BusinessUnitMiddleware(db)(travel.CreatePackageHandler(db)))
+	mux.Handle("/cash/package", api.BusinessUnitMiddleware(db)(travel.GetPackageHandler(db)))
+	mux.Handle("/cash/package/delete", api.BusinessUnitMiddleware(db)(travel.DeletePackageHandler(db)))
 
 	mux.HandleFunc("/cash/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Cash Service is active"))

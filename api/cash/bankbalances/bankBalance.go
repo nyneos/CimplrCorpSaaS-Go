@@ -59,7 +59,7 @@ func requestedByFromCtx(ctx context.Context, userID string) string {
 }
 
 func ctxApprovedAccountNumbers(ctx context.Context) []string {
-	v := ctx.Value("ApprovedBankAccounts")
+	v := ctx.Value(api.ApprovedBankAccountsKey)
 	if v == nil {
 		return nil
 	}
@@ -147,9 +147,7 @@ func ctxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
 	if accountNumber == "" {
 		return false
 	}
-	v := ctx.Value("ApprovedBankAccounts")
-	fmt.Printf("CHECK ACCOUNT: %q\n", accountNumber)
-	fmt.Printf("CTX ApprovedBankAccounts: %v\n", v)
+	v := ctx.Value(api.ApprovedBankAccountsKey)
 	if v == nil {
 		return true
 	}
@@ -335,7 +333,7 @@ func ensureBalanceIDsAccessible(ctx context.Context, pgxPool *pgxpool.Pool, bala
 	if len(balanceIDs) == 0 {
 		return 0, ""
 	}
-	if ctx.Value("ApprovedBankAccounts") == nil {
+	if ctx.Value(api.ApprovedBankAccountsKey) == nil {
 		return 0, ""
 	}
 	rows, err := pgxPool.Query(ctx, `SELECT balance_id, account_no FROM bank_balances_manual WHERE balance_id = ANY($1)`, balanceIDs)
@@ -552,9 +550,16 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, constants.ErrTxBeginFailed+pgUserFriendlyMessage(err))
+			return
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
 		// Update audit actions to APPROVED
 		upd := `UPDATE auditactionbankbalances SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
-		_, err = pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs)
+		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to approve actions: "+pgUserFriendlyMessage(err))
 			return
@@ -564,20 +569,31 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		deleted := []string{}
 		if len(deleteIDs) > 0 {
 			delQ := `DELETE FROM bank_balances_manual WHERE balance_id = ANY($1) RETURNING balance_id`
-			drows, derr := pgxPool.Query(ctx, delQ, deleteIDs)
-			if derr == nil {
-				defer drows.Close()
-				for drows.Next() {
-					var id string
-					drows.Scan(&id)
-					deleted = append(deleted, id)
-				}
+			drows, derr := tx.Query(ctx, delQ, deleteIDs)
+			if derr != nil {
+				api.RespondWithResult(w, false, "failed to delete balances: "+pgUserFriendlyMessage(derr))
+				return
 			}
+			for drows.Next() {
+				var id string
+				drows.Scan(&id) //nolint:errcheck
+				deleted = append(deleted, id)
+			}
+			drows.Close()
+			if drows.Err() != nil {
+				api.RespondWithResult(w, false, "failed to read deleted IDs: "+pgUserFriendlyMessage(drows.Err()))
+				return
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to commit: "+pgUserFriendlyMessage(err))
+			return
 		}
 
 		// return structured JSON
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(actionIDs), "deleted": deleted})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(actionIDs), "deleted": deleted}) //nolint:errcheck
 	}
 }
 

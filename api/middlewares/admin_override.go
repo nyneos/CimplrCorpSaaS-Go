@@ -215,7 +215,7 @@ func LoadEverythingIntoContext(ctx context.Context, db *pgxpool.Pool) (map[strin
         errs = append(errs, "loadApprovedBankAccounts: "+err.Error())
         bankAccounts = []map[string]string{}
     }
-    result["ApprovedBankAccounts"] = bankAccounts
+    result[approvedBankAccountsKey] = bankAccounts // key defined in prevalidation.go
 
     folios, err := loadApprovedFolios(ctx, db)
     if err != nil {

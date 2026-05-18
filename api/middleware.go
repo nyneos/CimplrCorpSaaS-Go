@@ -17,8 +17,9 @@ import (
 type contextKey string
 
 const (
-	BusinessUnitsKey contextKey = "businessUnits"
-	EntityIDsKey     contextKey = "entityIDs"
+	BusinessUnitsKey        contextKey = "businessUnits"
+	EntityIDsKey            contextKey = "entityIDs"
+	ApprovedBankAccountsKey            = "ApprovedBankAccounts"
 )
 
 // Helper functions for context retrieval (used by middlewares in subdirectory)

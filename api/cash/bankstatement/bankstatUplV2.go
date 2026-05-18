@@ -621,7 +621,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		}
 	}
-	if ctx.Value("ApprovedBankAccounts") != nil {
+	if ctx.Value(apictx.ApprovedBankAccountsKey) != nil {
 		if !ctxHasApprovedBankAccount(ctx, accountNumber) {
 			return nil, errors.New("bank account not approved")
 		}

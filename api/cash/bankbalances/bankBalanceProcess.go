@@ -75,8 +75,6 @@ func UploadBankBalancesProcess(
 	entityIDs []string,
 ) (string, error) {
 
-	fmt.Printf("[DEBUG] Process function ctx.Value(\"ApprovedBankAccounts\"): %v\n", ctx.Value("ApprovedBankAccounts"))
-
 	// 1. Open file
 	file, err := fileHeader.Open()
 	if err != nil {

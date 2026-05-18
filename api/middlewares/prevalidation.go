@@ -18,6 +18,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const approvedBankAccountsKey = api.ApprovedBankAccountsKey
+
 func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +223,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				ctx = context.WithValue(ctx, "ApprovedAMCs", amcs)
 				ctx = context.WithValue(ctx, "ApprovedSchemes", schemes)
 				ctx = context.WithValue(ctx, "ApprovedDPs", dps)
-				ctx = context.WithValue(ctx, "ApprovedBankAccounts", bankAccounts)
+				ctx = context.WithValue(ctx, approvedBankAccountsKey, bankAccounts)
 				ctx = context.WithValue(ctx, "ApprovedFolios", folios)
 				ctx = context.WithValue(ctx, "ApprovedDemats", demats)
 			}
@@ -290,7 +292,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			currCodesDump := api.GetCurrencyCodesFromCtx(ctx)
 			// approved accounts stored as []map[string]string under "ApprovedBankAccounts"
 			acctNums := make([]string, 0)
-			if v := ctx.Value("ApprovedBankAccounts"); v != nil {
+			if v := ctx.Value(approvedBankAccountsKey); v != nil {
 				if bankAccounts, ok := v.([]map[string]string); ok {
 					for _, a := range bankAccounts {
 						if s, has := a["account_number"]; has && strings.TrimSpace(s) != "" {

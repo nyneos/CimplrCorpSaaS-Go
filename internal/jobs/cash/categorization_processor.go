@@ -110,23 +110,8 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
 	defer cancel()
 
-	startTime := time.Now()
 	logger.GlobalLogger.LogAudit("Recategorization: Starting to count transactions")
 
-	pgDB := db.Config().ConnConfig.Database
-	pgUser := db.Config().ConnConfig.User
-	pgPass := db.Config().ConnConfig.Password
-	pgHost := db.Config().ConnConfig.Host
-	pgPort := db.Config().ConnConfig.Port
-
-	sslMode := os.Getenv("DB_SSLMODE")
-	if sslMode == "" {
-		sslMode = "disable"
-	}
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s", pgUser, pgPass, pgHost, pgPort, pgDB, sslMode)
-	sqlDB, err := sql.Open("postgres", connStr)
-	if err != nil {
-		return fmt.Errorf("failed to open sql.DB connection: %w", err)
 	if batchSize <= 0 {
 		batchSize = 1000
 	}
