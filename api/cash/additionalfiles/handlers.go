@@ -239,15 +239,30 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
+		var record *FileRecord
 		if strings.TrimSpace(req.FileID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "file_id required")
-			return
-		}
-
-		record, err := cfg.GetOne(r.Context(), pool, parentID, req.FileID)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
+			if cfg.List == nil {
+				api.RespondWithError(w, http.StatusBadRequest, "file_id required")
+				return
+			}
+			records, err := cfg.List(r.Context(), pool, parentID)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			for i := range records {
+				if strings.TrimSpace(records[i].UploadS3Key) != "" {
+					record = &records[i]
+					break
+				}
+			}
+		} else {
+			var err error
+			record, err = cfg.GetOne(r.Context(), pool, parentID, req.FileID)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 		}
 		if record == nil || strings.TrimSpace(record.UploadS3Key) == "" {
 			api.RespondWithError(w, http.StatusNotFound, "file not found")

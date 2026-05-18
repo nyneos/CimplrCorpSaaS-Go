@@ -9,16 +9,20 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // counterpartyHubFilesHandlers groups the 5 HTTP handlers for counterparty hub DMS.
 type counterpartyHubFilesHandlers struct {
-	List         http.HandlerFunc
-	Upload       http.HandlerFunc
-	Download     http.HandlerFunc
-	DownloadBulk http.HandlerFunc
-	Delete       http.HandlerFunc
+	List          http.HandlerFunc
+	Upload        http.HandlerFunc
+	Download      http.HandlerFunc
+	DownloadBulk  http.HandlerFunc
+	Delete        http.HandlerFunc
+	Audit         http.HandlerFunc
+	ApproveDelete http.HandlerFunc
+	RejectDelete  http.HandlerFunc
 }
 
 // CounterpartyHubFilesHandlers builds all five additional-files handlers for
@@ -33,6 +37,7 @@ func CounterpartyHubFilesHandlers(pool *pgxpool.Pool) counterpartyHubFilesHandle
 	)
 
 	cfg := additionalfiles.Config{
+		AuditSource:   "MASTER_COUNTERPARTY_HUB",
 		Module:        moduleKey,
 		ParentIDField: parentField,
 		List: func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
@@ -43,17 +48,17 @@ func CounterpartyHubFilesHandlers(pool *pgxpool.Pool) counterpartyHubFilesHandle
 			return additionalfiles.QueryFiles(ctx, pool, q, parentID)
 		},
 		Create: func(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
-			parentScope := fmt.Sprintf(
-				`SELECT %s AS parent_id FROM %s WHERE %s = $8`,
-				parentCol, parentTable, parentCol,
-			)
-			return additionalfiles.InsertAdditionalFileRow(ctx, tx, filesTable, parentCol, input, parentScope, input.ParentID)
+			_, err := createCounterpartyHubAdditionalFile(ctx, tx, input, parentTable, parentCol, filesTable)
+			return err
+		},
+		CreateReturning: func(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
+			return createCounterpartyHubAdditionalFile(ctx, tx, input, parentTable, parentCol, filesTable)
 		},
 		GetOne: func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
-			q := `SELECT file_id, stored_file_name, content_type, file_size, upload_s3_key, uploaded_by, uploaded_at
-			      FROM ` + filesTable + `
-			      WHERE ` + parentCol + ` = $1 AND file_id = $2 AND COALESCE(is_deleted, FALSE) = FALSE`
-			return additionalfiles.FirstFile(ctx, pool, q, parentID, fileID)
+			return getCounterpartyHubAdditionalFile(ctx, pool, parentID, fileID, parentCol, filesTable, false)
+		},
+		GetAnyFile: func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+			return getCounterpartyHubAdditionalFile(ctx, pool, parentID, fileID, parentCol, filesTable, true)
 		},
 		GetMany: func(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]additionalfiles.FileRecord, []string, error) {
 			trimmed := trimCounterpartyHubFileIDs(fileIDs)
@@ -68,24 +73,57 @@ func CounterpartyHubFilesHandlers(pool *pgxpool.Pool) counterpartyHubFilesHandle
 			return files, missingCounterpartyHubFileIDs(trimmed, files), nil
 		},
 		SoftDelete: func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
-			q := `UPDATE ` + filesTable + `
-			      SET is_deleted = TRUE, deleted_by = $3, deleted_at = $4
-			      WHERE ` + parentCol + ` = $1 AND file_id = $2 AND COALESCE(is_deleted, FALSE) = FALSE`
-			result, err := pool.Exec(ctx, q, parentID, fileID, deletedBy, deletedAt)
-			if err != nil {
-				return false, err
-			}
-			return result.RowsAffected() > 0, nil
+			return deleteCounterpartyHubAdditionalFile(ctx, pool, parentID, fileID, deletedBy, deletedAt, parentCol, filesTable)
+		},
+		SoftDeleteTx: func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+			return deleteCounterpartyHubAdditionalFile(ctx, tx, parentID, fileID, deletedBy, deletedAt, parentCol, filesTable)
 		},
 	}
 
 	return counterpartyHubFilesHandlers{
-		List:         additionalfiles.NewListHandler(pool, cfg),
-		Upload:       additionalfiles.NewUploadHandler(pool, cfg),
-		Download:     additionalfiles.NewDownloadHandler(pool, cfg),
-		DownloadBulk: additionalfiles.NewDownloadSelectedHandler(pool, cfg),
-		Delete:       additionalfiles.NewDeleteHandler(pool, cfg),
+		List:          additionalfiles.NewListHandler(pool, cfg),
+		Upload:        additionalfiles.NewUploadHandler(pool, cfg),
+		Download:      additionalfiles.NewDownloadHandler(pool, cfg),
+		DownloadBulk:  additionalfiles.NewDownloadSelectedHandler(pool, cfg),
+		Delete:        additionalfiles.NewDeleteHandler(pool, cfg),
+		Audit:         additionalfiles.NewAuditHandler(pool, cfg),
+		ApproveDelete: additionalfiles.NewApproveDeleteHandler(pool, cfg),
+		RejectDelete:  additionalfiles.NewRejectDeleteHandler(pool, cfg),
 	}
+}
+
+func createCounterpartyHubAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput, parentTable, parentCol, filesTable string) (string, error) {
+	parentScope := fmt.Sprintf(
+		`SELECT %s AS parent_id FROM %s WHERE %s = $8`,
+		parentCol, parentTable, parentCol,
+	)
+	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, filesTable, parentCol, input, parentScope, input.ParentID)
+}
+
+func getCounterpartyHubAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, parentCol, filesTable string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
+	deletedClause := "AND COALESCE(is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
+	}
+	q := `SELECT file_id, stored_file_name, content_type, file_size, upload_s3_key, uploaded_by, uploaded_at
+	      FROM ` + filesTable + `
+	      WHERE ` + parentCol + ` = $1 AND file_id = $2 ` + deletedClause
+	return additionalfiles.FirstFile(ctx, pool, q, parentID, fileID)
+}
+
+type counterpartyHubFileExec interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+}
+
+func deleteCounterpartyHubAdditionalFile(ctx context.Context, exec counterpartyHubFileExec, parentID, fileID, deletedBy string, deletedAt time.Time, parentCol, filesTable string) (bool, error) {
+	q := `UPDATE ` + filesTable + `
+	      SET is_deleted = TRUE, deleted_by = $3, deleted_at = $4
+	      WHERE ` + parentCol + ` = $1 AND file_id = $2 AND COALESCE(is_deleted, FALSE) = FALSE`
+	result, err := exec.Exec(ctx, q, parentID, fileID, deletedBy, deletedAt)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() > 0, nil
 }
 
 func trimCounterpartyHubFileIDs(fileIDs []string) []string {
