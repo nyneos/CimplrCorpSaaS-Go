@@ -48,6 +48,13 @@ func RegisterFDAccrualRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 		"/investment/fd/accrual/run/bulk-generate",
 		mid(http.HandlerFunc(BulkGenerateMonthlyAccruals(pool))),
 	)
+	// TC-21 Period Lock Check — used by the manual run setup form to disable
+	// the "Run" button when a FINAL run for the chosen financial period has
+	// already been approved/posted.
+	mux.Handle(
+		"/investment/fd/accrual/period/lock-status",
+		mid(http.HandlerFunc(CheckPeriodLockStatus(pool))),
+	)
 
 	// ── Accrual data / detail ────────────────────────────────────────────────
 	mux.Handle(

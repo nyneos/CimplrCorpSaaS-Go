@@ -32,8 +32,7 @@ type UserSession struct {
 	Name            string
 	Email           string
 	Role            string
-	RoleCode        string   // primary role code (first assigned, kept for backward compat)
-	RoleCodes     []string // all assigned role codes
+	RoleCode        string
 	LastLoginTime   string
 	ClientIP        string
 	IsLoggedIn      bool
@@ -92,63 +91,75 @@ func (a *AuthService) Stop() error {
 }
 
 // Login authenticates a user by email and password, returning the session and
-// an mfaPending flag. Passwords are verified strictly using bcrypt.
+// an mfaPending flag. Passwords are compared using bcrypt; if the stored hash
+// is a legacy plaintext value that matches, it is automatically upgraded to bcrypt.
 func (a *AuthService) Login(username, password string, clientIP string) (*UserSession, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	log.Printf("[AUTH DEBUG] login start username=%q ip=%s", strings.TrimSpace(username), clientIP)
 
 	var dbUserID, dbName, dbEmail string
 	var dbPassword sql.NullString
 	var dbStatus sql.NullString
 
+	log.Printf("[AUTH DEBUG] querying users row by email username=%q", strings.TrimSpace(username))
 	err := a.db.QueryRow(
 		`SELECT id, employee_name, email, password, status FROM users WHERE email = $1`, username,
 	).Scan(&dbUserID, &dbName, &dbEmail, &dbPassword, &dbStatus)
 	if err != nil {
 		if err == sql.ErrNoRows {
+			log.Printf("[AUTH DEBUG] user not found username=%q", strings.TrimSpace(username))
 			LogSecurityEvent(a.db, "", "login_failed", "unknown user: "+username, clientIP)
 			return nil, false, errors.New("Invalid Username or Password")
 		}
+		log.Printf("[AUTH DEBUG] users lookup failed username=%q err=%v", strings.TrimSpace(username), err)
 		return nil, false, errors.New("internal error")
 	}
-
-	status := strings.TrimSpace(dbStatus.String)
-	if !strings.EqualFold(status, "approved") {
-		LogSecurityEvent(a.db, dbUserID, "login_blocked", "account status: "+status, clientIP)
-		return nil, false, errors.New("Account is not approved for login")
-	}
+	log.Printf("[AUTH DEBUG] users row loaded user_id=%s email=%q status_valid=%v status=%q pass_present=%v", dbUserID, dbEmail, dbStatus.Valid, dbStatus.String, dbPassword.Valid && dbPassword.String != "")
 
 	// Account lock check
 	if a.MaxLoginAttempts > 0 {
 		if fa, ok := a.failedAttempts[dbUserID]; ok {
 			if fa.isLocked && time.Now().Before(fa.unlockAt) {
+				log.Printf("[AUTH DEBUG] login blocked: account locked user_id=%s unlock_at=%s", dbUserID, fa.unlockAt.Format(time.RFC3339))
 				LogSecurityEvent(a.db, dbUserID, "login_blocked", "account locked", clientIP)
 				return nil, false, errors.New("Account has been locked due to multiple failed login attempts")
 			}
 			if fa.isLocked && time.Now().After(fa.unlockAt) {
+				log.Printf("[AUTH DEBUG] lock expired; resetting failed attempts user_id=%s", dbUserID)
 				fa.isLocked = false
 				fa.count = 0
 			}
 		}
 	}
 
-	// Password verification: bcrypt preferred; migrate legacy plaintext on first successful login.
+	// Password verification: bcrypt first, then plaintext fallback with auto-upgrade
 	passwordValid := false
 	if dbPassword.Valid && dbPassword.String != "" {
-		if isBcryptHash(dbPassword.String) {
-			passwordValid = bcrypt.CompareHashAndPassword([]byte(dbPassword.String), []byte(password)) == nil
-		} else {
-			// Legacy plaintext password — compare directly and rehash in the background.
-			if dbPassword.String == password {
-				passwordValid = true
-				if hashed, herr := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost); herr == nil {
-					go a.db.Exec(`UPDATE users SET password = $1 WHERE id = $2`, string(hashed), dbUserID)
+		if bcrypt.CompareHashAndPassword([]byte(dbPassword.String), []byte(password)) == nil {
+			passwordValid = true
+			log.Printf("[AUTH DEBUG] password check passed via bcrypt user_id=%s", dbUserID)
+		} else if dbPassword.String == password {
+			// Legacy plaintext match — upgrade to bcrypt
+			passwordValid = true
+			log.Printf("[AUTH DEBUG] password matched legacy plaintext user_id=%s; attempting hash upgrade", dbUserID)
+			if hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost); err == nil {
+				if _, uerr := a.db.Exec(`UPDATE users SET password = $1 WHERE id = $2`, string(hashed), dbUserID); uerr != nil {
+					log.Printf("[AUTH DEBUG] password hash upgrade failed user_id=%s err=%v", dbUserID, uerr)
+				} else {
+					log.Printf("[AUTH DEBUG] password hash upgraded user_id=%s", dbUserID)
 				}
+				LogSecurityEvent(a.db, dbUserID, "password_upgraded", "plaintext→bcrypt", clientIP)
+			} else {
+				log.Printf("[AUTH DEBUG] password hash generation failed user_id=%s err=%v", dbUserID, err)
 			}
 		}
+	} else {
+		log.Printf("[AUTH DEBUG] stored password missing/empty user_id=%s", dbUserID)
 	}
 
 	if !passwordValid {
+		log.Printf("[AUTH DEBUG] password validation failed user_id=%s", dbUserID)
 		LogSecurityEvent(a.db, dbUserID, "login_failed", "wrong password", clientIP)
 		if a.MaxLoginAttempts > 0 {
 			fa, ok := a.failedAttempts[dbUserID]
@@ -158,6 +169,7 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 			}
 			fa.count++
 			fa.lastTry = time.Now()
+			log.Printf("[AUTH DEBUG] failed attempt incremented user_id=%s count=%d/%d", dbUserID, fa.count, a.MaxLoginAttempts)
 			if fa.count >= a.MaxLoginAttempts {
 				fa.isLocked = true
 				if a.AccountLockDuration > 0 {
@@ -165,6 +177,7 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 				} else {
 					fa.unlockAt = time.Now().Add(100 * 365 * 24 * time.Hour)
 				}
+				log.Printf("[AUTH DEBUG] account locked user_id=%s unlock_at=%s", dbUserID, fa.unlockAt.Format(time.RFC3339))
 				LogSecurityEvent(a.db, dbUserID, "account_locked", "", clientIP)
 				return nil, false, errors.New("Account has been locked due to multiple failed login attempts")
 			}
@@ -178,34 +191,20 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	}
 
 	// Force-logout existing sessions
+	log.Printf("[AUTH DEBUG] forcing old sessions logout user_id=%s", dbUserID)
 	a.forceLogoutUser(dbUserID)
 
 	if a.maxUsers > 0 && len(a.users) >= a.maxUsers {
+		log.Printf("[AUTH DEBUG] max concurrent users reached current=%d max=%d", len(a.users), a.maxUsers)
 		return nil, false, errors.New("maximum concurrent users reached")
 	}
 
-	var primaryRole, primaryRoleCode string
-	var allRoleCodes []string
-	if roleRows, err := a.db.Query(
-		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 ORDER BY ur.id ASC`,
+	var roleName, roleCode sql.NullString
+	_ = a.db.QueryRow(
+		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 LIMIT 1`,
 		dbUserID,
-	); err == nil {
-		defer roleRows.Close()
-		first := true
-		for roleRows.Next() {
-			var rn, rc sql.NullString
-			if roleRows.Scan(&rn, &rc) == nil {
-				if first {
-					primaryRole = rn.String
-					primaryRoleCode = rc.String
-					first = false
-				}
-				if rc.String != "" {
-					allRoleCodes = append(allRoleCodes, rc.String)
-				}
-			}
-		}
-	}
+	).Scan(&roleName, &roleCode)
+	log.Printf("[AUTH DEBUG] role lookup user_id=%s role=%q role_code=%q", dbUserID, roleName.String, roleCode.String)
 
 	sessionID := generateSessionID()
 	session := &UserSession{
@@ -213,9 +212,8 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		UserID:          dbUserID,
 		Name:            dbName,
 		Email:           dbEmail,
-		Role:            primaryRole,
-		RoleCode:        primaryRoleCode,
-		RoleCodes:     allRoleCodes,
+		Role:            roleName.String,
+		RoleCode:        roleCode.String,
 		LastLoginTime:   time.Now().Format(time.RFC3339),
 		ClientIP:        clientIP,
 		IsLoggedIn:      true,
@@ -226,10 +224,12 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	var mfaEnabled sql.NullBool
 	var mfaSecret sql.NullString
 	_ = a.db.QueryRow(`SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, dbUserID).Scan(&mfaEnabled, &mfaSecret)
+	log.Printf("[AUTH DEBUG] mfa state user_id=%s enabled=%v secret_present=%v", dbUserID, mfaEnabled.Valid && mfaEnabled.Bool, mfaSecret.Valid && strings.TrimSpace(mfaSecret.String) != "")
 	if mfaEnabled.Valid && mfaEnabled.Bool && mfaSecret.Valid && mfaSecret.String != "" {
 		session.IsLoggedIn = false
 		a.users[sessionID] = session
 		a.userPointers[dbUserID] = session
+		log.Printf("[AUTH DEBUG] login requires MFA user_id=%s session_id=%s", dbUserID, sessionID)
 		LogSecurityEvent(a.db, dbUserID, "login_mfa_pending", username, clientIP)
 		return session, true, nil
 	}
@@ -241,6 +241,7 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		delete(a.failedAttempts, dbUserID)
 	}
 
+	log.Printf("[AUTH DEBUG] login success user_id=%s session_id=%s", dbUserID, sessionID)
 	LogSecurityEvent(a.db, dbUserID, "login_success", username, clientIP)
 	return session, false, nil
 }
@@ -438,11 +439,6 @@ func (a *AuthService) scanSessionEntities(rows *sql.Rows) []SessionEntity {
 	}
 
 	return entities
-}
-
-// isBcryptHash reports whether s looks like a bcrypt digest.
-func isBcryptHash(s string) bool {
-	return strings.HasPrefix(s, "$2a$") || strings.HasPrefix(s, "$2b$") || strings.HasPrefix(s, "$2y$")
 }
 
 // HashPassword hashes a plaintext password with bcrypt.

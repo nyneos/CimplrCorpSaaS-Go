@@ -234,7 +234,7 @@ func getFDMasterError(err error, contextMessage string) (string, int) {
 		return "FD number / certificate number is required.", http.StatusOK
 	}
 	if strings.Contains(errStr, "duplicate key") || strings.Contains(errStr, "unique constraint") {
-		return "Duplicate entry detected. Please check for existing records.", http.StatusOK
+		return "Duplicate entry detected. Please check for existing records.", http.StatusConflict
 	}
 	if strings.Contains(errStr, "invalid") || strings.Contains(errStr, "required") {
 		return err.Error(), http.StatusBadRequest
@@ -609,17 +609,44 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		receiptDate := parseDateOrDefault(req.ReceiptDate, rec.ReceiptDate)
 
-		// Double-submit guard: reject if FD already activated for this confirmation.
-		var existingFDID string
-		_ = tx.QueryRow(ctx,
-			`SELECT COALESCE(fd_id,'') FROM investment.fd_master
-			 WHERE confirmation_id = $1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
+		// Guard 1: Double-submit — reject if this confirmation was already activated.
+		// Also reject if the EXISTS query itself fails (pooler error) — we cannot
+		// safely determine uniqueness, so block rather than risk a duplicate.
+		var alreadyExists bool
+		guardErr := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM investment.fd_master WHERE confirmation_id = $1)`,
 			req.ConfirmationID,
-		).Scan(&existingFDID)
-		if existingFDID != "" {
+		).Scan(&alreadyExists)
+		if alreadyExists {
 			api.RespondWithError(w, http.StatusConflict,
-				fmt.Sprintf("FD already activated for this confirmation: %s", existingFDID))
+				fmt.Sprintf("FD already activated for confirmation: %s", req.ConfirmationID))
 			return
+		}
+		if guardErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError,
+				fmt.Sprintf("Could not verify activation status for %s: %v", req.ConfirmationID, guardErr))
+			return
+		}
+
+		// Guard 2: Bank-reference uniqueness — check (entity_id, bank_fd_ref_no) before INSERT.
+		// The unique constraint uniq_fd_bank_ref_entity fires when two confirmations share
+		// the same bank reference number for the same entity. Catch it here with a clear message.
+		bankRef := firstNonEmpty(req.FDNumber, rec.BankFDReference)
+		if bankRef != "" && rec.EntityID != "" {
+			var refExists bool
+			if refErr := tx.QueryRow(ctx,
+				`SELECT EXISTS(
+					SELECT 1 FROM investment.fd_master
+					WHERE entity_id = $1
+					  AND bank_fd_ref_no = $2
+					  AND COALESCE(is_deleted,false) = false
+				)`,
+				rec.EntityID, bankRef,
+			).Scan(&refExists); refErr == nil && refExists {
+				api.RespondWithError(w, http.StatusConflict,
+					fmt.Sprintf("Bank reference number %q already exists for this entity. Please use a unique reference.", bankRef))
+				return
+			}
 		}
 
 		fdID, _, err := insertFDMaster(ctx, tx, rec, req.FDNumber, receiptDate, req.Notes, userEmail)

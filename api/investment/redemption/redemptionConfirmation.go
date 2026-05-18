@@ -5,11 +5,15 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +49,179 @@ type UpdateRedemptionConfirmationRequest struct {
 	Reason              string                 `json:"reason"`
 }
 
+const redemptionConfirmationUploadModule = "investment/redemption/confirmation"
+
+func redemptionConfirmationRequestFromForm(r *http.Request) CreateRedemptionConfirmationRequest {
+	return CreateRedemptionConfirmationRequest{
+		UserID:                       strings.TrimSpace(r.FormValue("user_id")),
+		RedemptionID:                 strings.TrimSpace(r.FormValue("redemption_id")),
+		ActualNAV:                    formFloat64(r, "actual_nav"),
+		ActualUnits:                  formFloat64(r, "actual_units"),
+		GrossProceeds:                formFloat64(r, "gross_proceeds"),
+		ExitLoad:                     formFloat64(r, "exit_load"),
+		TDS:                          formFloat64(r, "tds"),
+		NetCredited:                  formFloat64(r, "net_credited"),
+		STTCharges:                   formFloat64(r, "stt_charges"),
+		ResolutionVariance:           strings.TrimSpace(r.FormValue("resolution_variance")),
+		ResolutionComment:            strings.TrimSpace(r.FormValue("resolution_comment")),
+		VarianceProceeds:             formFloat64(r, "variance_proceeds"),
+		FinalRealisedCapitalGainLoss: formFloat64(r, "final_realised_capital_gain_loss"),
+		Status:                       strings.TrimSpace(r.FormValue("status")),
+	}
+}
+
+func formFloat64(r *http.Request, key string) float64 {
+	raw := strings.TrimSpace(r.FormValue(key))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
+func firstRedemptionConfirmationFile(r *http.Request, key string) *multipart.FileHeader {
+	if r.MultipartForm == nil || r.MultipartForm.File == nil {
+		return nil
+	}
+	files := r.MultipartForm.File[key]
+	if len(files) == 0 {
+		return nil
+	}
+	return files[0]
+}
+
+func uploadRedemptionConfirmationStatement(ctx context.Context, header *multipart.FileHeader, uploadedBy string) (string, error) {
+	file, err := header.Open()
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	body, err := io.ReadAll(file)
+	if err != nil {
+		return "", err
+	}
+
+	storedFileName := s3storage.BuildUploadedFilename(header.Filename, uploadedBy, time.Now().UTC())
+	s3Key := s3storage.BuildNamedS3Key(redemptionConfirmationUploadModule, "", storedFileName)
+	if err := s3storage.PutObjectToS3(ctx, s3Key, body, s3storage.DetectContentType(body)); err != nil {
+		return "", err
+	}
+	return s3Key, nil
+}
+
+func GetRedemptionConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID              string `json:"user_id"`
+			RedemptionConfirmID string `json:"redemption_confirm_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		if strings.TrimSpace(req.RedemptionConfirmID) == "" {
+			api.RespondWithResult(w, false, "redemption_confirm_id required")
+			return
+		}
+
+		var uploadS3Key sql.NullString
+		if err := pgxPool.QueryRow(r.Context(), `
+			SELECT upload_s3_key
+			FROM investment.redemption_confirmation
+			WHERE redemption_confirm_id = $1
+		`, req.RedemptionConfirmID).Scan(&uploadS3Key); err != nil {
+			api.RespondWithResult(w, false, "file not found")
+			return
+		}
+
+		key := strings.TrimSpace(uploadS3Key.String)
+		if !uploadS3Key.Valid || key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"redemption_confirm_id": req.RedemptionConfirmID,
+				"download_url":          downloadURL,
+			},
+		})
+	}
+}
+
+func GetRedemptionConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID               string   `json:"user_id"`
+			RedemptionConfirmIDs []string `json:"redemption_confirm_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		if len(req.RedemptionConfirmIDs) == 0 {
+			api.RespondWithResult(w, false, "redemption_confirm_ids required")
+			return
+		}
+
+		files := make([]map[string]string, 0, len(req.RedemptionConfirmIDs))
+		failedIDs := make([]string, 0)
+		for _, rawID := range req.RedemptionConfirmIDs {
+			confirmID := strings.TrimSpace(rawID)
+			if confirmID == "" {
+				continue
+			}
+
+			var uploadS3Key sql.NullString
+			if err := pgxPool.QueryRow(r.Context(), `
+				SELECT upload_s3_key
+				FROM investment.redemption_confirmation
+				WHERE redemption_confirm_id = $1
+			`, confirmID).Scan(&uploadS3Key); err != nil {
+				failedIDs = append(failedIDs, confirmID)
+				continue
+			}
+
+			key := strings.TrimSpace(uploadS3Key.String)
+			if !uploadS3Key.Valid || key == "" {
+				failedIDs = append(failedIDs, confirmID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, confirmID)
+				continue
+			}
+			files = append(files, map[string]string{
+				"redemption_confirm_id": confirmID,
+				"download_url":          downloadURL,
+			})
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: len(files) > 0,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
+	}
+}
+
 // ---------------------------
 // CreateRedemptionConfirmationSingle
 // ---------------------------
@@ -52,9 +229,19 @@ type UpdateRedemptionConfirmationRequest struct {
 func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateRedemptionConfirmationRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
-			return
+		var statementHeader *multipart.FileHeader
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "multipart/form-data") {
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort+": "+err.Error())
+				return
+			}
+			req = redemptionConfirmationRequestFromForm(r)
+			statementHeader = firstRedemptionConfirmationFile(r, "amc_statement")
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+				return
+			}
 		}
 
 		// Validate required fields
@@ -88,8 +275,25 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 
 		ctx := r.Context()
+		var uploadS3Key string
+		if statementHeader != nil {
+			key, err := uploadRedemptionConfirmationStatement(ctx, statementHeader, userEmail)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to store AMC statement: "+err.Error())
+				return
+			}
+			uploadS3Key = key
+		}
+		cleanupUploadedObject := uploadS3Key != ""
+		cleanupUpload := func() {
+			if cleanupUploadedObject {
+				_ = s3storage.DeleteFromS3(ctx, uploadS3Key)
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
+			cleanupUpload()
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
@@ -108,11 +312,13 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			WHERE ri.redemption_id = $1
 			GROUP BY ri.redemption_id, ri.by_units
 		`, req.RedemptionID).Scan(&initiationUnits, &existingConfirmedUnits); err != nil {
+			cleanupUpload()
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to validate redemption: "+err.Error())
 			return
 		}
 
 		if existingConfirmedUnits+req.ActualUnits > initiationUnits {
+			cleanupUpload()
 			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot confirm %.2f units. Initiation has %.2f units, already confirmed %.2f units. Only %.2f units available.",
 				req.ActualUnits, initiationUnits, existingConfirmedUnits, initiationUnits-existingConfirmedUnits))
 			return
@@ -127,8 +333,8 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			INSERT INTO investment.redemption_confirmation (
 				redemption_id, actual_nav, actual_units, gross_proceeds,
 				exit_load, tds, net_credited, stt_charges, resolution_variance, resolution_comment,
-				variance_proceeds, final_realised_capital_gain_loss, status
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+				variance_proceeds, final_realised_capital_gain_loss, status, upload_s3_key
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 			RETURNING redemption_confirm_id
 		`
 		var confirmID string
@@ -146,7 +352,9 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			nullIfZeroFloat(req.VarianceProceeds),
 			nullIfZeroFloat(req.FinalRealisedCapitalGainLoss),
 			status,
+			nullIfEmptyString(uploadS3Key),
 		).Scan(&confirmID); err != nil {
+			cleanupUpload()
 			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
 			return
 		}
@@ -156,14 +364,17 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 		`, confirmID, userEmail); err != nil {
+			cleanupUpload()
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
+			cleanupUpload()
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
+		cleanupUploadedObject = false
 
 		go func() {
 			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, []string{confirmID}, "CREATE", userEmail)
@@ -1156,6 +1367,7 @@ func fetchRedemptionConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool,
 			m.old_final_realised_capital_gain_loss,
 			m.status,
 			m.old_status,
+			COALESCE(m.upload_s3_key, '') AS upload_s3_key,
 			m.confirmed_by,
 			TO_CHAR(m.confirmed_at, 'YYYY-MM-DD HH24:MI:SS') AS confirmed_at,
 			m.is_deleted,

@@ -1,0 +1,152 @@
+package forwards
+
+import (
+	"CimplrCorpSaas/api/cash/additionalfiles"
+	"context"
+	"encoding/base64"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+func ListMTMAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewListHandler(pool, mtmAdditionalFilesConfig())
+}
+
+func UploadMTMAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewUploadHandler(pool, mtmAdditionalFilesConfig())
+}
+
+func DownloadMTMAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewDownloadHandler(pool, mtmAdditionalFilesConfig())
+}
+
+func DownloadSelectedMTMAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewDownloadSelectedHandler(pool, mtmAdditionalFilesConfig())
+}
+
+func DeleteMTMAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewDeleteHandler(pool, mtmAdditionalFilesConfig())
+}
+
+func mtmAdditionalFilesConfig() additionalfiles.Config {
+	return additionalfiles.Config{
+		Module:        "fx-mtm",
+		ParentIDField: "mtm_id",
+		List:          listMTMAdditionalFiles,
+		Create:        createMTMAdditionalFile,
+		GetOne:        getMTMAdditionalFile,
+		GetMany:       getMTMAdditionalFiles,
+		SoftDelete:    deleteMTMAdditionalFile,
+	}
+}
+
+func listMTMAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
+	names, err := forwardEntityNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	parentID = normalizeMTMID(parentID)
+	return additionalfiles.QueryFiles(ctx, pool, mtmFileQuery(`
+		WHERE f.mtm_id = $1
+		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  AND LOWER(TRIM(m.entity)) = ANY($2)
+		ORDER BY f.uploaded_at DESC
+	`), parentID, names)
+}
+
+func createMTMAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
+	names, err := forwardEntityNames(ctx)
+	if err != nil {
+		return err
+	}
+	input.ParentID = normalizeMTMID(input.ParentID)
+	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "public.forward_mtm_files", "mtm_id", input, `
+		SELECT m.mtm_id AS parent_id
+		FROM public.forward_mtm m
+		WHERE m.mtm_id = $8
+		  AND LOWER(TRIM(m.entity)) = ANY($9)
+	`, input.ParentID, names)
+}
+
+func getMTMAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	names, err := forwardEntityNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	parentID = normalizeMTMID(parentID)
+	return additionalfiles.FirstFile(ctx, pool, mtmFileQuery(`
+		WHERE f.mtm_id = $1
+		  AND f.file_id::text = $2
+		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  AND LOWER(TRIM(m.entity)) = ANY($3)
+	`), parentID, fileID, names)
+}
+
+func getMTMAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]additionalfiles.FileRecord, []string, error) {
+	names, err := forwardEntityNames(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	parentID = normalizeMTMID(parentID)
+	trimmedIDs := trimForwardAdditionalFileIDs(fileIDs)
+	files, queryErr := additionalfiles.QueryFiles(ctx, pool, mtmFileQuery(`
+		WHERE f.mtm_id = $1
+		  AND f.file_id::text = ANY($2)
+		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  AND LOWER(TRIM(m.entity)) = ANY($3)
+		ORDER BY f.uploaded_at DESC
+	`), parentID, trimmedIDs, names)
+	if queryErr != nil {
+		return nil, nil, queryErr
+	}
+	return files, missingForwardAdditionalFileIDs(trimmedIDs, files), nil
+}
+
+func deleteMTMAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	names, err := forwardEntityNames(ctx)
+	if err != nil {
+		return false, err
+	}
+	parentID = normalizeMTMID(parentID)
+	result, execErr := pool.Exec(ctx, `
+		UPDATE public.forward_mtm_files f
+		SET is_deleted = TRUE,
+		    deleted_by = $3,
+		    deleted_at = $4
+		FROM public.forward_mtm m
+		WHERE f.mtm_id = $1
+		  AND f.file_id::text = $2
+		  AND m.mtm_id = f.mtm_id
+		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  AND LOWER(TRIM(m.entity)) = ANY($5)
+	`, parentID, fileID, deletedBy, deletedAt, names)
+	if execErr != nil {
+		return false, execErr
+	}
+	return result.RowsAffected() > 0, nil
+}
+
+func mtmFileQuery(whereClause string) string {
+	return `
+		SELECT f.file_id, f.stored_file_name, f.content_type, f.file_size, f.upload_s3_key, f.uploaded_by, f.uploaded_at
+		FROM public.forward_mtm_files f
+		JOIN public.forward_mtm m ON m.mtm_id = f.mtm_id
+	` + whereClause
+}
+
+func normalizeMTMID(mtmID string) string {
+	mtmID = strings.TrimSpace(mtmID)
+	if mtmID == "" {
+		return ""
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(mtmID); err == nil {
+		if decodedID := strings.TrimSpace(string(decoded)); decodedID != "" {
+			return decodedID
+		}
+	}
+	return mtmID
+}

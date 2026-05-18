@@ -6,10 +6,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -49,6 +49,8 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 		}
 		defer file.Close()
 
+		extEarly := strings.ToLower(filepath.Ext(header.Filename))
+
 		// Check for custom mappings (same as upload handler)
 		useMapping := r.FormValue("useMapping") == "true"
 		var mappings *ColumnMappings
@@ -66,14 +68,42 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 		// Check for multi-account CSV flag
 		isMultiAccount := r.FormValue("multi") == "true"
 
-		// Read file into memory
-		fileBytes, err := io.ReadAll(file)
-		if err != nil {
-			http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
-			return
+		forceOverride := r.FormValue("force_override") == "true"
+		accountNums := parseAccountNumbers(r.MultipartForm.Value)
+		var accountOverride string
+		if forceOverride {
+			if len(accountNums) == 0 {
+				http.Error(w, "force_override=true requires at least one account number in account_numbers", http.StatusBadRequest)
+				return
+			}
+			if len(accountNums) != 1 {
+				http.Error(w, "force_override=true with a single file requires exactly 1 account number", http.StatusBadRequest)
+				return
+			}
+			accountOverride = accountNums[0]
 		}
 
-		ext := strings.ToLower(filepath.Ext(header.Filename))
+		// Read file into memory (zip uploads capped at MaxBankStatementZipBytes)
+		var fileBytes []byte
+		if extEarly == ".zip" {
+			fileBytes, err = readBankStatementZipBytes(file, header)
+			if err != nil {
+				if strings.Contains(err.Error(), "exceeds the maximum size") {
+					http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+					return
+				}
+				http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else {
+			fileBytes, err = io.ReadAll(file)
+			if err != nil {
+				http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		ext := extEarly
 
 		var allTransactions []map[string]interface{}
 
@@ -101,7 +131,7 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 			}
 		} else {
 			// Single file processing (XLSX, XLS, CSV)
-			transactions, err := processSingleFilePreviewFlat(ctx, db, fileBytes, header.Filename, useMapping, mappings)
+			transactions, err := processSingleFilePreviewFlat(ctx, db, fileBytes, header.Filename, useMapping, mappings, accountOverride)
 			if err != nil {
 				http.Error(w, "File processing failed: "+err.Error(), http.StatusInternalServerError)
 				return
@@ -155,7 +185,7 @@ func processZipPreviewFlat(ctx context.Context, db *sql.DB, zipBytes []byte, use
 			continue
 		}
 
-		transactions, err := processSingleFilePreviewFlat(ctx, db, fileBytes, f.Name, useMapping, mappings)
+		transactions, err := processSingleFilePreviewFlat(ctx, db, fileBytes, f.Name, useMapping, mappings, "")
 		if err != nil {
 			// Skip files with errors, continue processing others
 			continue
@@ -167,9 +197,94 @@ func processZipPreviewFlat(ctx context.Context, db *sql.DB, zipBytes []byte, use
 	return allTransactions, nil
 }
 
+// resolveMasterBankAccountForPreview mirrors upload V2 candidate expansion: dash/space strip,
+// leading-zero strip, and filename digit runs — so preview matches master rows stored as
+// "505002795" when the statement shows "000505002795".
+func resolveMasterBankAccountForPreview(ctx context.Context, db *sql.DB, primary string, uploadFileName string, rows [][]string) (matchedAccount string, entityID string, bankName string, currency string, err error) {
+	primary = strings.TrimSpace(primary)
+	if primary == "" {
+		return "", "", "", "", fmt.Errorf("account number not found in file header")
+	}
+
+	candidates := []string{}
+	seen := map[string]bool{}
+
+	addCand := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		if !seen[s] {
+			seen[s] = true
+			candidates = append(candidates, s)
+		}
+		stripped := strings.ReplaceAll(strings.ReplaceAll(s, " ", ""), "-", "")
+		if stripped != s && stripped != "" && !seen[stripped] {
+			seen[stripped] = true
+			candidates = append(candidates, stripped)
+		}
+		noLeadZero := strings.TrimLeft(stripped, "0")
+		if noLeadZero != stripped && noLeadZero != "" && !seen[noLeadZero] {
+			seen[noLeadZero] = true
+			candidates = append(candidates, noLeadZero)
+		}
+	}
+
+	addCand(primary)
+
+	// Filename digit runs (same idea as bankstatUplV2)
+	filenameDigitRe := regexp.MustCompile(`\d{7,}`)
+	baseName := filepath.Base(uploadFileName)
+	dashAcctSegRe := regexp.MustCompile(`^\d[\d\-]{5,}\d$`)
+	for _, part := range regexp.MustCompile(`[_\s\.]+`).Split(baseName, -1) {
+		part = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(part, ".xls"), ".xlsx"))
+		if filenameDigitRe.MatchString(part) || (len(part) >= 7 && dashAcctSegRe.MatchString(part)) {
+			addCand(part)
+		}
+	}
+	for _, part := range regexp.MustCompile(`[_\-\s\.]+`).Split(baseName, -1) {
+		part = strings.TrimSpace(part)
+		if filenameDigitRe.MatchString(part) {
+			addCand(part)
+		}
+	}
+	for _, m := range filenameDigitRe.FindAllString(baseName, -1) {
+		addCand(m)
+	}
+
+	// Header-area digit runs (first 20 rows)
+	acctNumberRe := regexp.MustCompile(`\d{7,}`)
+	for i := 0; i < 20 && i < len(rows); i++ {
+		for _, cell := range rows[i] {
+			v := normalizeCell(cell)
+			for _, m := range acctNumberRe.FindAllString(v, -1) {
+				addCand(strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", ""))
+			}
+		}
+	}
+
+	for _, cand := range candidates {
+		qErr := db.QueryRowContext(ctx, `
+			SELECT mba.account_number, mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
+			FROM public.masterbankaccount mba
+			LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+			WHERE mba.account_number = $1 AND COALESCE(mba.is_deleted, false) = false
+		`, cand).Scan(&matchedAccount, &entityID, &bankName, &currency)
+		if qErr == nil {
+			return matchedAccount, entityID, bankName, currency, nil
+		}
+		if qErr != sql.ErrNoRows {
+			return "", "", "", "", fmt.Errorf("database lookup failed: %w", qErr)
+		}
+	}
+
+	return "", "", "", "", fmt.Errorf("account %s not found in master data", primary)
+}
+
 // processSingleFilePreviewFlat parses file and categorizes WITHOUT any DB writes
-// Uses EXACT same parsing logic as UploadBankStatementV2WithCategorization but ONLY reads DB for account lookup and rules
-func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings) ([]map[string]interface{}, error) {
+// Uses EXACT same parsing logic as UploadBankStatementV2WithCategorization but ONLY reads DB for account lookup and rules.
+// When accountOverride is non-empty (force_override + single account from the client), it is used for master lookup instead of relying only on the file header.
+func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings, accountOverride string) ([]map[string]interface{}, error) {
 
 	ext := strings.ToLower(filepath.Ext(filename))
 	var rows [][]string
@@ -226,8 +341,49 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		if isCSV {
 			for i := 0; i < 20 && i < len(rows); i++ {
 				for j, cell := range rows[i] {
-					if (cell == acNoHeader || strings.EqualFold(cell, "Account Number") || strings.EqualFold(cell, "Account No.")) && j+1 < len(rows[i]) {
-						accountNumber = rows[i][j+1]
+					nc := normalizeCell(cell)
+					isAcctLabel := cell == acNoHeader ||
+						strings.EqualFold(nc, "Account Number") ||
+						strings.EqualFold(nc, "Account No.") ||
+						strings.EqualFold(nc, "Account No") ||
+						strings.EqualFold(nc, "Acc No") ||
+						strings.EqualFold(nc, "Acc No.") ||
+						strings.EqualFold(nc, "A/C Number") ||
+						strings.EqualFold(nc, "A/C No") ||
+						strings.EqualFold(nc, "A/C No.") ||
+						strings.EqualFold(nc, "Account:") ||
+						strings.EqualFold(nc, "Account #") ||
+						strings.EqualFold(nc, "Acct Number") ||
+						strings.EqualFold(nc, "Acct No") ||
+						strings.EqualFold(nc, "Acct No.")
+					if isAcctLabel {
+						if j+1 < len(rows[i]) {
+							if v := extractAccountFromCell(rows[i][j+1]); v != "" {
+								accountNumber = v
+							}
+						}
+						if accountNumber == "" && i+1 < len(rows) && j < len(rows[i+1]) {
+							if v := extractAccountFromCell(rows[i+1][j]); v != "" {
+								accountNumber = v
+							}
+						}
+					}
+				}
+			}
+			// ICICI-style PDF→CSV: summary row has "Account Number" next to another column header
+			// ("Balance (INR )") — only accept digit-derived account numbers from that path.
+			if accountNumber == "" {
+				stmtAcctRe := regexp.MustCompile(`(?i)account\s*number\s*[:#]?\s*([0-9]{6,})`)
+				for i := 0; i < 30 && i < len(rows); i++ {
+					for _, cell := range rows[i] {
+						v := normalizeCell(cell)
+						if m := stmtAcctRe.FindStringSubmatch(v); len(m) > 1 {
+							accountNumber = strings.ReplaceAll(strings.ReplaceAll(m[1], " ", ""), "-", "")
+							break
+						}
+					}
+					if accountNumber != "" {
+						break
 					}
 				}
 			}
@@ -316,59 +472,21 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		}
 	}
 
+	accountOverride = strings.TrimSpace(accountOverride)
+	if accountOverride != "" {
+		accountNumber = strings.ReplaceAll(strings.ReplaceAll(accountOverride, " ", ""), "-", "")
+	}
+
 	if accountNumber == "" {
 		return nil, fmt.Errorf("account number not found in file header")
 	}
 
-	// DB READ ONLY: Lookup account metadata
-	var entityID, bankName, currency string
-	err := db.QueryRowContext(ctx, `
-		SELECT mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
-		FROM public.masterbankaccount mba
-		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-		WHERE mba.account_number = $1 AND COALESCE(mba.is_deleted, false) = false
-	`, accountNumber).Scan(&entityID, &bankName, &currency)
-
+	// DB READ ONLY: Lookup account metadata (same candidate expansion as upload V2)
+	matchedAcct, entityID, bankName, currency, err := resolveMasterBankAccountForPreview(ctx, db, accountNumber, filename, rows)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			// Try candidate verification like upload does
-			candidates := []string{}
-			seen := map[string]bool{}
-			acctNumberRe := regexp.MustCompile(`\d{7,}`)
-			for i := 0; i < 20 && i < len(rows); i++ {
-				for _, cell := range rows[i] {
-					v := normalizeCell(cell)
-					for _, m := range acctNumberRe.FindAllString(v, -1) {
-						cand := strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
-						if cand != "" && !seen[cand] {
-							seen[cand] = true
-							candidates = append(candidates, cand)
-						}
-					}
-				}
-			}
-
-			matched := false
-			for _, cand := range candidates {
-				qErr := db.QueryRowContext(ctx, `
-					SELECT mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
-					FROM public.masterbankaccount mba
-					LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-					WHERE mba.account_number = $1 AND COALESCE(mba.is_deleted, false) = false
-				`, cand).Scan(&entityID, &bankName, &currency)
-				if qErr == nil {
-					accountNumber = cand
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				return nil, fmt.Errorf("account %s not found in master data", accountNumber)
-			}
-		} else {
-			return nil, fmt.Errorf("database lookup failed: %w", err)
-		}
+		return nil, err
 	}
+	accountNumber = matchedAcct
 
 	// DB READ ONLY: Load category rules
 	rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID, currency)
@@ -432,6 +550,60 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			if hasDate && hasAmount {
 				txnHeaderIdx = i
 				break
+			}
+		}
+	}
+
+	// Fallback for headless PDF-to-CSV exports (e.g. SBI)
+	if txnHeaderIdx == -1 {
+		for i, row := range rows {
+			if len(row) >= 14 && len(row[0]) >= 8 && len(row[2]) >= 8 {
+				if strings.ContainsAny(row[0], "/-.\u2013\u2014\u2212") && strings.ContainsAny(row[2], "/-.\u2013\u2014\u2212") {
+					// Likely a headless transaction row
+					syntheticHeader := make([]string, len(row))
+					syntheticHeader[0] = "Date"
+					syntheticHeader[2] = "Value Date"
+					syntheticHeader[4] = "Description"
+					syntheticHeader[9] = "Withdrawal"
+					syntheticHeader[12] = "Deposit"
+					syntheticHeader[13] = "Balance"
+
+					newRows := make([][]string, 0, len(rows)+1)
+					newRows = append(newRows, rows[:i]...)
+					newRows = append(newRows, syntheticHeader)
+					newRows = append(newRows, rows[i:]...)
+					rows = newRows
+					txnHeaderIdx = i
+					
+					// Fix shifted columns in the data rows for this headless table
+					for r := txnHeaderIdx + 1; r < len(rows); r++ {
+						if len(rows[r]) >= 14 {
+							val12 := strings.TrimSpace(rows[r][12])
+							if val12 == "" || val12 == "-" {
+								val11 := strings.TrimSpace(rows[r][11])
+								if val11 != "" && val11 != "-" {
+									rows[r][12] = rows[r][11]
+									rows[r][11] = ""
+								}
+							}
+							val9 := strings.TrimSpace(rows[r][9])
+							if val9 == "" || val9 == "-" {
+								val8 := strings.TrimSpace(rows[r][8])
+								if val8 != "" && val8 != "-" {
+									rows[r][9] = rows[r][8]
+									rows[r][8] = ""
+								} else {
+									val10 := strings.TrimSpace(rows[r][10])
+									if val10 != "" && val10 != "-" {
+										rows[r][9] = rows[r][10]
+										rows[r][10] = ""
+									}
+								}
+							}
+						}
+					}
+					break
+				}
 			}
 		}
 	}
@@ -503,7 +675,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 
 	// Auto-detect common columns
 	findColContaining := func(keywords ...string) int {
-		for colName, idx := range colIdx {
+		for idx, colName := range headerRow {
 			lcName := strings.ToLower(colName)
 			for _, kw := range keywords {
 				if strings.Contains(lcName, strings.ToLower(kw)) {
@@ -514,8 +686,18 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		return -1
 	}
 
+	// Use broad alias lists for auto-detection (same coverage as the upload handler)
+	findColByAliases := func(aliases []string) int {
+		for idx, colName := range headerRow {
+			if headerContainsAny(strings.ToLower(colName), aliases) {
+				return idx
+			}
+		}
+		return -1
+	}
+
 	if _, ok := colIdx[constants.TransactionDateAlt]; !ok {
-		if idx := findColContaining("transaction date", "txn date", "posted date"); idx >= 0 {
+		if idx := findColByAliases(bankStmtDateHeaderAliases); idx >= 0 {
 			colIdx[constants.TransactionDateAlt] = idx
 		}
 	}
@@ -525,32 +707,32 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		}
 	}
 	if _, ok := colIdx["Description"]; !ok {
-		if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
+		if idx := findColByAliases(bankStmtDescriptionHeaderAliases); idx >= 0 {
 			colIdx["Description"] = idx
 		}
 	}
 	if _, ok := colIdx[constants.TransactionRemarks]; !ok {
-		if idx := findColContaining("transaction remarks", "description", "remarks"); idx >= 0 {
+		if idx := findColByAliases(bankStmtDescriptionHeaderAliases); idx >= 0 {
 			colIdx[constants.TransactionRemarks] = idx
 		}
 	}
 	if _, ok := colIdx[constants.WithdrawalAmountINR]; !ok {
-		if idx := findColContaining("withdrawal", "debit"); idx >= 0 {
+		if idx := findColByAliases(bankStmtDebitHeaderAliases); idx >= 0 {
 			colIdx[constants.WithdrawalAmountINR] = idx
 		}
 	}
 	if _, ok := colIdx[constants.DepositAmountINR]; !ok {
-		if idx := findColContaining("deposit", "credit"); idx >= 0 {
+		if idx := findColByAliases(bankStmtCreditHeaderAliases); idx >= 0 {
 			colIdx[constants.DepositAmountINR] = idx
 		}
 	}
 	if _, ok := colIdx[constants.BalanceINR]; !ok {
-		if idx := findColContaining("balance"); idx >= 0 {
+		if idx := findColByAliases(bankStmtBalanceHeaderAliases); idx >= 0 {
 			colIdx[constants.BalanceINR] = idx
 		}
 	}
 	if _, ok := colIdx[constants.TranID]; !ok {
-		if idx := findColContaining("tran id", "transaction id", "txn id"); idx >= 0 {
+		if idx := findColByAliases(bankStmtReferenceHeaderAliases); idx >= 0 {
 			colIdx[constants.TranID] = idx
 		}
 	}
@@ -560,12 +742,61 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 	// Unique 6-char prefix shared across all synthetic tran_ids in this preview batch
 	previewBatchID := generateBatchID()
 
-	for i := txnHeaderIdx + 1; i < len(rows); i++ {
-		row := rows[i]
+	// Determine column indices for merging multi-line descriptions
+	mergeDateIdx := -1
+	if idx, ok := colIdx["Date"]; ok {
+		mergeDateIdx = idx
+	} else if idx, ok := colIdx[constants.TransactionDateAlt]; ok {
+		mergeDateIdx = idx
+	} else if idx, ok := colIdx[constants.ValueDateAlt]; ok {
+		mergeDateIdx = idx
+	}
+
+	mergeDescIdx := -1
+	if idx, ok := colIdx[constants.TransactionRemarks]; ok {
+		mergeDescIdx = idx
+	} else if idx, ok := colIdx["Description"]; ok {
+		mergeDescIdx = idx
+	}
+
+	dataRows := rows[txnHeaderIdx+1:]
+	dataRows = MergeMultiLineDescriptions(dataRows, mergeDateIdx, mergeDescIdx)
+
+	var prevStmtBalance float64
+	var prevStmtBalanceOK bool
+
+	for _, row := range dataRows {
 		previewRowNum++
 
 		if isEmptyRow(row) {
 			continue
+		}
+
+		// Defensive: fix collapsed CSV columns where empty cells were omitted (common in PDF-to-CSV)
+		if len(row) < len(headerRow) && len(row) > 3 {
+			lastCell := strings.TrimSpace(row[len(row)-1])
+			lcLast := strings.ToLower(lastCell)
+			if strings.HasSuffix(lcLast, "cr") || strings.HasSuffix(lcLast, "dr") || strings.HasSuffix(lcLast, "cr.") || strings.HasSuffix(lcLast, "dr.") {
+				balIdx := -1
+				if idx, ok := colIdx[constants.BalanceINR]; ok {
+					balIdx = idx
+				} else if idx, ok := colIdx["Balance"]; ok {
+					balIdx = idx
+				}
+				if balIdx == len(headerRow)-1 {
+					oldLen := len(row)
+					// Pad the row
+					for len(row) < len(headerRow) {
+						row = append(row, "")
+					}
+					// Shift last cell to balance column
+					row[balIdx] = lastCell
+					// Empty the old position
+					if oldLen-1 != balIdx {
+						row[oldLen-1] = ""
+					}
+				}
+			}
 		}
 
 		// Pad row before any column access
@@ -573,38 +804,26 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			row = append(row, "")
 		}
 
-		// Skip non-transaction rows — check first cell AND the description column.
-		// "balance brought forward", "balance carried forward", "b/f", "balance b/f", "balance c/f"
-		// are real transactions and must NOT be skipped — they establish the period opening balance.
-		nonTxnKeywords := []string{
-			"call 1800", "write to us", "closing balance", "opening balance",
-			"toll free",
-			"new balance", "new val",
-			"avl", "avil", constants.QuerryAvailableBalance,
-			"page total", "statement total", "grand total",
-			"total debit", "total credit", "total withdrawals", "total deposits",
+		// Skip separator lines (UBI: "----...----")
+		if IsSeparatorRow(row) {
+			continue
 		}
-		skipRow := false
-		// Build candidate cells: always include row[0]; also include description column if mapped
-		candidateCells := []string{strings.ToLower(strings.TrimSpace(row[0]))}
+		if IsPageBreakRow(row) {
+			continue
+		}
+
+		// Skip non-transaction rows — check first cell AND the description column.
+		// Opening carry lines (B/F, balance brought forward, etc.) establish opening balance only;
+		// they are skipped from the preview list (same as V2 ingestion).
+		candidateCells := []string{strings.TrimSpace(row[0])}
 		if descIdx, ok := colIdx["Description"]; ok && descIdx < len(row) {
-			candidateCells = append(candidateCells, strings.ToLower(strings.TrimSpace(row[descIdx])))
+			candidateCells = append(candidateCells, strings.TrimSpace(row[descIdx]))
 		}
 		if descIdx, ok := colIdx[constants.TransactionRemarks]; ok && descIdx < len(row) {
-			candidateCells = append(candidateCells, strings.ToLower(strings.TrimSpace(row[descIdx])))
+			candidateCells = append(candidateCells, strings.TrimSpace(row[descIdx]))
 		}
-		for _, cell := range candidateCells {
-			for _, kw := range nonTxnKeywords {
-				if strings.Contains(cell, kw) {
-					skipRow = true
-					break
-				}
-			}
-			if skipRow {
-				break
-			}
-		}
-		if skipRow {
+		candidateCells = append(candidateCells, strings.TrimSpace(strings.Join(row, " ")))
+		if IsNonTransactionRow(candidateCells...) {
 			continue
 		}
 
@@ -666,6 +885,9 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			description = sanitizeForPostgres(normalizeCell(row[idx]))
 		}
 		txn["description"] = description
+		if IsStatementOpeningCarryRow(description) {
+			continue
+		}
 
 		// Resolve tran_id: file column → cheque/ref → date+timestamp+seq synthetic ID
 		if tranIDStr == "" {
@@ -709,9 +931,26 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			txn["deposit_amount"] = 0
 		}
 
+		var curBal float64
+		var curBalOK bool
 		if idx, ok := colIdx[constants.BalanceINR]; ok && idx < len(row) {
 			if val, err := parseAmount(row[idx]); err == nil {
 				txn["balance"] = val
+				curBal = val
+				curBalOK = true
+			}
+		}
+
+		// Match V2: merged footer can break amount parsing on last sweep row; infer debit from prior balance.
+		if prevStmtBalanceOK && curBalOK {
+			const sweepEps = 0.01
+			lowDesc := strings.ToLower(strings.TrimSpace(description))
+			wAmt, _ := txn["withdrawal_amount"].(float64)
+			dAmt, _ := txn["deposit_amount"].(float64)
+			if wAmt < sweepEps && dAmt < sweepEps && math.Abs(curBal) < sweepEps && prevStmtBalance > sweepEps &&
+				(strings.Contains(lowDesc, "transfer to") || strings.Contains(lowDesc, "transfer-out")) {
+				txn["withdrawal_amount"] = prevStmtBalance
+				withdrawal = sql.NullFloat64{Valid: true, Float64: prevStmtBalance}
 			}
 		}
 
@@ -730,6 +969,10 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		}
 
 		transactions = append(transactions, txn)
+		if curBalOK {
+			prevStmtBalance = curBal
+			prevStmtBalanceOK = true
+		}
 	}
 
 	return transactions, nil
@@ -841,13 +1084,9 @@ func parseXLSFile(data []byte) ([][]string, error) {
 	return rows, nil
 }
 
-// parseCSVFile parses CSV file (EXACT same logic as upload)
+// parseCSVFile parses CSV or TSV (same path as upload via parseDelimitedTextRows).
 func parseCSVFile(data []byte) ([][]string, error) {
-	r := csv.NewReader(bytes.NewReader(data))
-	r.FieldsPerRecord = -1
-	r.LazyQuotes = true
-	r.TrimLeadingSpace = true
-	rows, err := r.ReadAll()
+	rows, err := parseDelimitedTextRows(data)
 	if err != nil {
 		return nil, err
 	}
@@ -896,12 +1135,7 @@ func isEmptyRow(row []string) bool {
 // processMultiAccountCSVPreviewFlat processes CSV with multiple account numbers (multi=true)
 // Each row can have different account number in the account column
 func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte) ([]map[string]interface{}, error) {
-	// Parse CSV
-	rdr := csv.NewReader(bytes.NewReader(fileBytes))
-	rdr.FieldsPerRecord = -1
-	rdr.LazyQuotes = true
-	rdr.TrimLeadingSpace = true
-	rows, err := rdr.ReadAll()
+	rows, err := parseDelimitedTextRows(fileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse CSV: %w", err)
 	}

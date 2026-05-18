@@ -2,6 +2,8 @@ package bankstatement
 
 // Types used by streaming and recalculate/commit handlers
 
+import "github.com/jackc/pgx/v5/pgxpool"
+
 type CompleteResponse struct {
 	Status string    `json:"status"`
 	Clean  CleanData `json:"clean"`
@@ -38,10 +40,27 @@ type Transaction struct {
 	ReferenceNumber *string  `json:"reference_number,omitempty"`
 }
 
+// UploadOpts groups optional parameters for UploadBankStatementV2WithCategorization.
+type UploadOpts struct {
+	UseMapping            bool
+	Mappings              *ColumnMappings
+	AccountNumberOverride string
+	UploadFileName        string
+	UploadedBy            string
+	Password              string
+	// PgxPool is optional; when provided the smart categorization engine runs
+	// after the upload commit so that new transactions are classified via the
+	// full 10-step waterfall rather than the legacy engine.
+	PgxPool *pgxpool.Pool
+}
+
 // RecalculateInput matches the user's bank statement format
 type RecalculateInput struct {
-	UserID string               `json:"user_id"`
-	Clean  RecalculateCleanData `json:"clean"`
+	UserID string `json:"user_id"`
+	// StagingID is the pdf_staging_statement.staging_id. When set, recalculate runs in staging mode:
+	// account number and opening balance are not required (user may edit metadata before commit).
+	StagingID string               `json:"staging_id,omitempty"`
+	Clean     RecalculateCleanData `json:"clean"`
 }
 
 type RecalculateCleanData struct {
@@ -51,6 +70,7 @@ type RecalculateCleanData struct {
 }
 
 type RecalculateTransaction struct {
+	TranID     *string  `json:"tran_id,omitempty"`
 	TranDate   *string  `json:"tran_date"`
 	ValueDate  *string  `json:"value_date"`
 	Narration  *string  `json:"narration"`
@@ -82,6 +102,7 @@ type RecalculateCleanDataOutput struct {
 }
 
 type RecalculateTransactionOutput struct {
+	TranID         *string  `json:"tran_id,omitempty"`
 	TranDate       *string  `json:"tran_date"`
 	ValueDate      *string  `json:"value_date"`
 	Narration      string   `json:"narration"`

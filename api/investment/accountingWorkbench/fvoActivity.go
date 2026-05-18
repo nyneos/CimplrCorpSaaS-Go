@@ -4,10 +4,14 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -34,6 +38,115 @@ type CreateFVORequest struct {
 	EvidenceFileID      string  `json:"evidence_file_id,omitempty"`
 }
 
+func GetFVODownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+			FVOID  string `json:"fvo_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		if strings.TrimSpace(req.FVOID) == "" {
+			api.RespondWithResult(w, false, "fvo_id required")
+			return
+		}
+
+		var uploadS3Key sql.NullString
+		if err := pgxPool.QueryRow(r.Context(), `
+			SELECT upload_s3_key
+			FROM investment.accounting_fvo
+			WHERE fvo_id = $1
+		`, req.FVOID).Scan(&uploadS3Key); err != nil {
+			api.RespondWithResult(w, false, "file not found")
+			return
+		}
+
+		key := strings.TrimSpace(uploadS3Key.String)
+		if !uploadS3Key.Valid || key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"fvo_id":       req.FVOID,
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+func GetFVOBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string   `json:"user_id"`
+			FVOIDs []string `json:"fvo_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		if len(req.FVOIDs) == 0 {
+			api.RespondWithResult(w, false, "fvo_ids required")
+			return
+		}
+
+		files := make([]map[string]string, 0, len(req.FVOIDs))
+		failedIDs := make([]string, 0)
+		for _, rawID := range req.FVOIDs {
+			fvoID := strings.TrimSpace(rawID)
+			if fvoID == "" {
+				continue
+			}
+
+			var uploadS3Key sql.NullString
+			if err := pgxPool.QueryRow(r.Context(), `
+				SELECT upload_s3_key
+				FROM investment.accounting_fvo
+				WHERE fvo_id = $1
+			`, fvoID).Scan(&uploadS3Key); err != nil {
+				failedIDs = append(failedIDs, fvoID)
+				continue
+			}
+
+			key := strings.TrimSpace(uploadS3Key.String)
+			if !uploadS3Key.Valid || key == "" {
+				failedIDs = append(failedIDs, fvoID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, fvoID)
+				continue
+			}
+			files = append(files, map[string]string{
+				"fvo_id":       fvoID,
+				"download_url": downloadURL,
+			})
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: len(files) > 0,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
+	}
+}
+
 type UpdateFVORequest struct {
 	UserID string                 `json:"user_id"`
 	FVOID  string                 `json:"fvo_id"`
@@ -47,8 +160,8 @@ type UpdateFVORequest struct {
 
 func CreateFVOSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req CreateFVORequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		req, isMultipart, err := decodeCreateFVORequest(r)
+		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
@@ -88,6 +201,16 @@ func CreateFVOSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		uploadS3Key := ""
+		if isMultipart {
+			var uploadErr error
+			uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, "investment-fvo", userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "file", "files", "attachment"))
+			if uploadErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "upload file failed: "+uploadErr.Error())
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -123,13 +246,13 @@ func CreateFVOSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.accounting_fvo (
 				activity_id, scheme_id, valuation_date, market_nav, override_nav,
 				variance, variance_pct, units_affected, valuation_adjustment,
-				justification, evidence_file_id
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+				justification, evidence_file_id, upload_s3_key
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''))
 			RETURNING fvo_id
 		`, activityID, req.SchemeID, req.ValuationDate, nullIfZeroFloat(req.MarketNAV),
 			req.OverrideNAV, nullIfZeroFloat(req.Variance), nullIfZeroFloat(req.VariancePct),
 			nullIfZeroFloat(req.UnitsAffected), nullIfZeroFloat(req.ValuationAdjustment),
-			req.Justification, nullIfEmptyString(req.EvidenceFileID)).Scan(&fvoID); err != nil {
+			req.Justification, nullIfEmptyString(req.EvidenceFileID), uploadS3Key).Scan(&fvoID); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "FVO insert failed: "+err.Error())
 			return
 		}
@@ -154,6 +277,41 @@ func CreateFVOSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"requested":   userEmail,
 		})
 	}
+}
+
+func decodeCreateFVORequest(r *http.Request) (CreateFVORequest, bool, error) {
+	var req CreateFVORequest
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			return req, true, err
+		}
+		req.UserID = strings.TrimSpace(r.FormValue("user_id"))
+		req.ActivityType = strings.TrimSpace(r.FormValue("activity_type"))
+		req.EffectiveDate = strings.TrimSpace(r.FormValue("effective_date"))
+		req.AccountingPeriod = strings.TrimSpace(r.FormValue("accounting_period"))
+		req.DataSource = strings.TrimSpace(r.FormValue("data_source"))
+		req.SchemeID = strings.TrimSpace(r.FormValue("scheme_id"))
+		req.ValuationDate = strings.TrimSpace(r.FormValue("valuation_date"))
+		req.MarketNAV = fvoFormFloat(r, "market_nav")
+		req.OverrideNAV = fvoFormFloat(r, "override_nav")
+		req.Variance = fvoFormFloat(r, "variance")
+		req.VariancePct = fvoFormFloat(r, "variance_pct")
+		req.UnitsAffected = fvoFormFloat(r, "units_affected")
+		req.ValuationAdjustment = fvoFormFloat(r, "valuation_adjustment")
+		req.Justification = strings.TrimSpace(r.FormValue("justification"))
+		req.EvidenceFileID = strings.TrimSpace(r.FormValue("evidence_file_id"))
+		return req, true, nil
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return req, false, err
+	}
+	return req, false, nil
+}
+
+func fvoFormFloat(r *http.Request, key string) float64 {
+	value, _ := strconv.ParseFloat(strings.TrimSpace(r.FormValue(key)), 64)
+	return value
 }
 
 // ---------------------------

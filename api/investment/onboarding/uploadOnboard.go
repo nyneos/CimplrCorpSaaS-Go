@@ -20,6 +20,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 	_ "CimplrCorpSaas/api/notification/catalog"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -256,6 +257,12 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		log.Printf("[bulk] using batch %s", batchID)
+		uploadS3Key, uploadErr := s3storage.UploadFirstMultipartFile(ctx, "investment-onboarding", userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "files", "transactions"))
+		if uploadErr != nil {
+			log.Printf("[bulk] upload original file to s3 failed: %v", uploadErr)
+			api.RespondWithError(w, http.StatusInternalServerError, "upload file failed: "+uploadErr.Error())
+			return
+		}
 		var amcs []AMCInput
 		var schemes []SchemeInput
 		var dps []DPInput
@@ -1105,7 +1112,7 @@ WHERE ts.total_units > 0;
 		}
 
 		// finalize batch update totals & status
-		if _, err := tx.Exec(ctx, `UPDATE investment.onboard_batch SET total_records = (SELECT COUNT(*) FROM investment.onboard_transaction WHERE batch_id=$1), status='COMPLETED', completed_at=now() WHERE batch_id=$1`, batchID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE investment.onboard_batch SET total_records = (SELECT COUNT(*) FROM investment.onboard_transaction WHERE batch_id=$1), status='COMPLETED', completed_at=now(), upload_s3_key = COALESCE(NULLIF($2, ''), upload_s3_key) WHERE batch_id=$1`, batchID, uploadS3Key); err != nil {
 			log.Printf("[bulk] finalize batch failed: %v", err)
 			api.RespondWithError(w, 500, "finalize batch failed: "+err.Error())
 			return
@@ -1132,6 +1139,115 @@ WHERE ts.total_units > 0;
 		res := UploadResponse{Success: true, BatchID: batchID, Counts: counts, EnrichedCounts: enrichedCounts, Message: "bulk onboard completed"}
 		log.Printf("[bulk] sending response: %+v", res)
 		api.RespondWithPayload(w, true, "", res)
+	}
+}
+
+func GetOnboardDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID  string `json:"user_id"`
+			BatchID string `json:"batch_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		if strings.TrimSpace(req.BatchID) == "" {
+			api.RespondWithResult(w, false, "batch_id required")
+			return
+		}
+
+		var uploadS3Key sql.NullString
+		if err := pgxPool.QueryRow(r.Context(), `
+			SELECT upload_s3_key
+			FROM investment.onboard_batch
+			WHERE batch_id = $1
+		`, req.BatchID).Scan(&uploadS3Key); err != nil {
+			api.RespondWithResult(w, false, "file not found")
+			return
+		}
+
+		key := strings.TrimSpace(uploadS3Key.String)
+		if !uploadS3Key.Valid || key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"batch_id":     req.BatchID,
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+func GetOnboardBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string   `json:"user_id"`
+			BatchIDs []string `json:"batch_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		if len(req.BatchIDs) == 0 {
+			api.RespondWithResult(w, false, "batch_ids required")
+			return
+		}
+
+		files := make([]map[string]string, 0, len(req.BatchIDs))
+		failedIDs := make([]string, 0)
+		for _, rawID := range req.BatchIDs {
+			batchID := strings.TrimSpace(rawID)
+			if batchID == "" {
+				continue
+			}
+
+			var uploadS3Key sql.NullString
+			if err := pgxPool.QueryRow(r.Context(), `
+				SELECT upload_s3_key
+				FROM investment.onboard_batch
+				WHERE batch_id = $1
+			`, batchID).Scan(&uploadS3Key); err != nil {
+				failedIDs = append(failedIDs, batchID)
+				continue
+			}
+
+			key := strings.TrimSpace(uploadS3Key.String)
+			if !uploadS3Key.Valid || key == "" {
+				failedIDs = append(failedIDs, batchID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, batchID)
+				continue
+			}
+			files = append(files, map[string]string{
+				"batch_id":     batchID,
+				"download_url": downloadURL,
+			})
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: len(files) > 0,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
 	}
 }
 

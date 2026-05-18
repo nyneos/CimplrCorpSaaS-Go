@@ -10,7 +10,30 @@ SSO_MFA_INTEGRATION_CONTEXT.md
 # Salesforce DX generated files
 .sfdx/
 *.bak
-
+__pycache__/
 *.exe
+# Excel scenarios
+FD_Scenarios_v1.3 (1).xlsx
 
-graphify-out/*
+# Temp/debug docs
+api/fix.MD
+context.MD
+
+# Golden parity tests
+api/investment/fdMaster/cashflow_golden_test.go
+
+# Golden test data
+api/investment/fdMaster/testdata/
+
+bin/
+setup_fd_notifications.py
+
+FD Cashflow Engine Rewrite.md
+FD_Scenarios_v7.xlsx
+FD_Simulation_Schedule_1778883993347.csv
+gen_fixtures.py
+output.txt
+~$FD_Scenarios_v7.xlsx
+api/investment/fdMaster/cashflow_engine_at_maturity_test.go
+api/investment/fdMaster/si_mm_interest_test.go
+api/investment/fdMaster/renumber_test.go

@@ -4,14 +4,16 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/utils/s3storage"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
-
-	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -234,7 +236,13 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Failed to get file: "+err.Error())
 			return
 		}
-		defer file.Close()
+		fileBytes, err := io.ReadAll(file)
+		file.Close()
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
+			return
+		}
+		contentType := s3storage.DetectContentType(fileBytes)
 
 		ext := strings.ToLower(filepath.Ext(handler.Filename))
 		if ext != ".csv" && ext != ".xlsx" {
@@ -256,9 +264,9 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var data [][]string
 		if ext == ".csv" {
-			data, err = parseCSVFile(file)
+			data, err = parseCSVFile(newBytesMultipartFile(fileBytes))
 		} else {
-			data, err = parseXLSXFile(file)
+			data, err = parseXLSXFile(newBytesMultipartFile(fileBytes))
 		}
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+err.Error())
@@ -439,13 +447,35 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		s3Key := ""
+		if s3storage.IsS3UploadEnabled() {
+			folder := s3storage.GetStoragePrefix("master-bank-rate-card")
+			storedFileName := s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
+			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				return
+			}
+		}
+
 		// Transactional per-row insertion to avoid multi-row RETURNING issues
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
+			if s3Key != "" {
+				_ = s3storage.DeleteFromS3(ctx, s3Key)
+			}
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		defer tx.Rollback(ctx)
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+				if s3Key != "" {
+					_ = s3storage.DeleteFromS3(ctx, s3Key)
+				}
+			}
+		}()
 
 		var insertedIDs []string
 		var insertedRecords []map[string]interface{}
@@ -491,11 +521,18 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		if s3Key != "" && len(insertedIDs) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE investment.fd_bank_rate_card_master SET upload_s3_key = $1 WHERE rate_card_id = ANY($2)`, s3Key, insertedIDs); err != nil {
+				api.LogError("Failed to store upload_s3_key: %v", err)
+			}
+		}
+
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyRateCardError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		committed = true
 
 		api.RespondWithPayload(w, len(insertedRecords) > 0, "", insertedRecords)
 		api.LogInfo("RateCard upload: %d inserted from %s", len(insertedRecords), handler.Filename)

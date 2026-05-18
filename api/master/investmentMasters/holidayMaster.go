@@ -4,10 +4,12 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -521,12 +523,30 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 400, "open file failed")
 				return
 			}
-			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+			fileBytes, err := io.ReadAll(f)
 			f.Close()
+			if err != nil {
+				api.RespondWithError(w, 500, "read file: "+err.Error())
+				return
+			}
+			contentType := s3storage.DetectContentType(fileBytes)
+			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, 400, "invalid csv")
 				return
 			}
+
+			s3Key := ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-calendar")
+				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, 500, "Failed to store file: "+err.Error())
+					return
+				}
+			}
+			_ = contentType
 
 			headers := normalizeHeader(records[0])
 			dataRows := records[1:]
@@ -579,10 +599,21 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// ---- DB TX ----
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
+				if s3Key != "" {
+					_ = s3storage.DeleteFromS3(ctx, s3Key)
+				}
 				api.RespondWithError(w, 500, constants.ErrTxBegin+err.Error())
 				return
 			}
-			defer tx.Rollback(ctx)
+			committed := false
+			defer func() {
+				if !committed {
+					tx.Rollback(ctx)
+					if s3Key != "" {
+						_ = s3storage.DeleteFromS3(ctx, s3Key)
+					}
+				}
+			}()
 
 			_, _ = tx.Exec(ctx, `
 				CREATE TEMP TABLE tmp_calendar_upload(
@@ -718,12 +749,30 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 400, "open file failed")
 				return
 			}
-			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+			fileBytes, err := io.ReadAll(f)
 			f.Close()
+			if err != nil {
+				api.RespondWithError(w, 500, "read file: "+err.Error())
+				return
+			}
+			contentType := s3storage.DetectContentType(fileBytes)
+			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, 400, "invalid csv")
 				return
 			}
+
+			s3Key := ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-holiday")
+				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, 500, "Failed to store file: "+err.Error())
+					return
+				}
+			}
+			_ = contentType
 
 			// headers
 			headers := normalizeHeader(records[0])

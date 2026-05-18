@@ -2,6 +2,7 @@ package bankstatement
 
 import (
 	"CimplrCorpSaas/api/constants"
+	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -12,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ProcessBankStatementFromJSON reads bank.json and processes it like Excel upload.
@@ -71,12 +74,14 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 	}
 	hash := sha256.Sum256(jsonBytes)
 	fileHash := fmt.Sprintf("%x", hash[:])
-	return ProcessBankStatementFromStructuredInput(ctx, db, structured, fileHash)
+	return ProcessBankStatementFromStructuredInput(ctx, db, structured, fileHash, nil)
 }
 
 // ProcessBankStatementFromStructuredInput performs ingestion, categorization,
 // dedup and KPI computation for structured input (no file I/O or header detection).
-func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, input StructuredBankStatement, fileHash string) (map[string]interface{}, error) {
+// pgxPool is optional: when non-nil, the smart categorization engine is triggered
+// asynchronously after the commit so that uploads use the full 10-step waterfall.
+func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, input StructuredBankStatement, fileHash string, pgxPool *pgxpool.Pool) (map[string]interface{}, error) {
 	var entityID, accountName, bankName string
 	err := db.QueryRowContext(ctx, `
 		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
@@ -129,6 +134,9 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 		valDate, err := time.Parse(constants.DateFormat, txn.ValueDate)
 		if err != nil {
 			log.Printf("[STRUCTURED_PROCESSOR] Warning: failed to parse value_date %s, skipping", txn.ValueDate)
+			continue
+		}
+		if IsStatementOpeningCarryRow(txn.Description) {
 			continue
 		}
 
@@ -298,6 +306,17 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// M7: After persisting new transactions, trigger the smart categorization
+	// engine so the upload path uses the full 10-step waterfall instead of the
+	// legacy matchCategoryForTransaction engine.
+	if pgxPool != nil && len(newTxns) > 0 {
+		go func(bsID string) {
+			if err := cashjobs.ProcessUncategorizedTransactions(pgxPool, 500); err != nil {
+				log.Printf("[SMART-CAT] post-upload categorization error (bs_id=%s): %v", bsID, err)
+			}
+		}(bankStatementID)
 	}
 
 	kpiCats := []map[string]interface{}{}

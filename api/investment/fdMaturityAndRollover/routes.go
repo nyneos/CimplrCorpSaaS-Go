@@ -18,6 +18,10 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 		mid(http.HandlerFunc(ValidateClosure(pool))))
 	mux.Handle("/investment/fd/closure/initiate",
 		mid(http.HandlerFunc(InitiateClosure(pool))))
+	mux.Handle("/investment/fd/closure/download",
+		mid(http.HandlerFunc(GetFDClosureDownloadURL(pool))))
+	mux.Handle("/investment/fd/closure/download-bulk",
+		mid(http.HandlerFunc(GetFDClosureBulkDownloadURL(pool))))
 	mux.Handle("/investment/fd/closure/update",
 		mid(http.HandlerFunc(UpdateClosure(pool))))
 	mux.Handle("/investment/fd/closure/all",

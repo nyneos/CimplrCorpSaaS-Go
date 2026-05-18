@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"strings"
 
-	// "time"
+	
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -1428,7 +1428,8 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							'units_affected', COALESCE(fv.units_affected, 0),
 							'valuation_adjustment', COALESCE(fv.valuation_adjustment, 0),
 							'justification', fv.justification,
-							'evidence_file_id', COALESCE(fv.evidence_file_id::text, '')
+							'evidence_file_id', COALESCE(fv.evidence_file_id::text, ''),
+							'upload_s3_key', COALESCE(fv.upload_s3_key, '')
 						)
 					) AS fvo_records
 				FROM investment.accounting_fvo fv

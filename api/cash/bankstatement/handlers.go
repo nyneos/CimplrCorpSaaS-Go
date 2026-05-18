@@ -160,7 +160,13 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				t.deposit_amount,
 				t.balance,
 				c.category_name,
-				COALESCE(t.misclassified_flag, false) AS misclassified_flag
+				t.category_id,
+				COALESCE(t.misclassified_flag, false)           AS misclassified_flag,
+				COALESCE(t.narration_clean, t.description, '')  AS narration_clean,
+				COALESCE(t.narration_ref, '')                   AS narration_ref,
+				COALESCE(t.payment_channel, '')                 AS payment_channel,
+				t.confidence_score,
+				COALESCE(t.classification_step, '')             AS classification_step
 			FROM cimplrcorpsaas.bank_statement_transactions t
 			JOIN cimplrcorpsaas.bank_statements s
 				ON t.bank_statement_id = s.bank_statement_id
@@ -183,17 +189,23 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 
 		for rows.Next() {
 			var (
-				tid           int64
-				entityName    string
-				tranID        sql.NullString
-				desc          string
-				category      sql.NullString
-				vdate         time.Time
-				tdate         time.Time
-				withdrawal    sql.NullFloat64
-				deposit       sql.NullFloat64
-				balance       sql.NullFloat64
-				misclassified bool
+				tid                int64
+				entityName         string
+				tranID             sql.NullString
+				desc               string
+				category           sql.NullString
+				categoryID         sql.NullString
+				vdate              time.Time
+				tdate              time.Time
+				withdrawal         sql.NullFloat64
+				deposit            sql.NullFloat64
+				balance            sql.NullFloat64
+				misclassified      bool
+				narrationClean     string
+				narrationRef       string
+				paymentChannel     string
+				confidenceScore    sql.NullFloat64
+				classificationStep string
 			)
 
 			if err := rows.Scan(
@@ -207,7 +219,13 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				&deposit,
 				&balance,
 				&category,
+				&categoryID,
 				&misclassified,
+				&narrationClean,
+				&narrationRef,
+				&paymentChannel,
+				&confidenceScore,
+				&classificationStep,
 			); err != nil {
 				continue
 			}
@@ -215,6 +233,11 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 			categoryName := category.String
 			if !category.Valid || categoryName == "" {
 				categoryName = "Uncategorized"
+			}
+
+			var confScore *float64
+			if confidenceScore.Valid {
+				confScore = &confidenceScore.Float64
 			}
 
 			resp = append(resp, map[string]interface{}{
@@ -228,7 +251,14 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				"deposit_amount":     deposit.Float64,
 				"balance":            balance.Float64,
 				"category_name":      categoryName,
+				"category_id":        categoryID.String,
 				"misclassified_flag": misclassified,
+				// Smart categorization fields
+				"narration_clean":     narrationClean,
+				"narration_ref":       narrationRef,
+				"payment_channel":     paymentChannel,
+				"confidence_score":    confScore,
+				"classification_step": classificationStep,
 			})
 		}
 
@@ -699,6 +729,25 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					})
 					continue
 				}
+				// Cleanup corresponding PDF upload metadata by checksum.
+				// bank_statements.file_hash stores the uploaded file hash; stream upload table
+				// stores it as bank_pdf_uploads.checksum_sha256.
+				_, err = tx.Exec(`
+					DELETE FROM cimplrcorpsaas.bank_pdf_uploads
+					WHERE checksum_sha256 IN (
+						SELECT file_hash
+						FROM cimplrcorpsaas.bank_statements
+						WHERE bank_statement_id = $1
+					)
+				`, bsid)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
 				_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid)
 				if err != nil {
 					results = append(results, map[string]interface{}{
@@ -1133,7 +1182,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		multiFlag := r.FormValue("multi") == "true"
 		if multiFlag {
 			// explicit multi=true: only try multi approach, surface error if it fails
-			UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(w, r)
+			UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
 			return
 		}
 		// No explicit multi flag: run normal single-account V2 first.
@@ -1237,6 +1286,16 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			})
 			return
 		}
+
+		// Auto-detect multi-account statements even when multi=true is not provided.
+		// This keeps preview/upload behavior aligned with user expectation for mixed-account CSVs.
+		if !multiFlag {
+			if isLikelyMultiAccountStatement(uploadFileName, fileBytes) {
+				log.Printf("[BANK-UPLOAD-DEBUG] Auto-detected multi-account statement for %s; routing to multi handler", uploadFileName)
+				UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
+				return
+			}
+		}
 		hash := sha256.Sum256(fileBytes)
 		fileHash := fmt.Sprintf("%x", hash[:])
 
@@ -1301,13 +1360,15 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 				AccountNumberOverride: accountOverride,
 				UploadFileName:        uploadFileName,
 				UploadedBy:            requestedByFromCtx(r.Context(), r.FormValue("user_id")),
+				Password:              r.FormValue("password"),
+				PgxPool:               pgxPool,
 			},
 		)
 		if err != nil {
 			// V2 failed — try multi as a last-resort fallback (e.g. multi-account sheet)
 			log.Printf("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
 			multiRec := httptest.NewRecorder()
-			UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(multiRec, r)
+			UploadMultiAccountBankStatementHandler(db).ServeHTTP(multiRec, r)
 			// Multi handler returns outer "success":true even when ALL individual accounts fail.
 			// We must check that at least one account in data{} actually succeeded.
 			var multiResp struct {
@@ -1431,13 +1492,60 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 	})
 }
 
+func isLikelyMultiAccountStatement(filename string, fileBytes []byte) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext != ".csv" && ext != ".xlsx" && ext != ".xls" {
+		return false
+	}
+	rows, err := parseFileToRows(fileBytes)
+	if err != nil || len(rows) < 2 {
+		return false
+	}
+
+	header := rows[0]
+	findIdx := func(keywords ...string) int {
+		for i, h := range header {
+			lc := strings.ToLower(strings.TrimSpace(h))
+			for _, kw := range keywords {
+				if strings.Contains(lc, strings.ToLower(kw)) {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+
+	accIdx := findIdx("account number", "account_no", "account no", "acct_no", "acct no")
+	if accIdx == -1 {
+		return false
+	}
+
+	uniq := map[string]struct{}{}
+	for i := 1; i < len(rows); i++ {
+		row := rows[i]
+		if accIdx >= len(row) {
+			continue
+		}
+		acc := strings.TrimSpace(row[accIdx])
+		if acc == "" {
+			continue
+		}
+		uniq[acc] = struct{}{}
+		if len(uniq) > 1 {
+			return true
+		}
+	}
+	return false
+}
+
 // UploadZippedBankStatementsHandler accepts a zip file containing multiple bank statement files,
 // unzips them, processes each file one by one, and returns aggregated results.
 func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		if err := r.ParseMultipartForm(100 << 20); err != nil {
+		// Cap whole request slightly above max zip (5 MiB) so metadata fields still fit.
+		if err := r.ParseMultipartForm(8 << 20); err != nil {
 			http.Error(w, fmt.Sprintf("Failed to parse multipart form: %v", err), http.StatusBadRequest)
 			return
 		}
@@ -1480,8 +1588,12 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 		forceOverride := r.FormValue("force_override") == "true"
 		log.Printf("[ZIP-UPLOAD] Received %d account number(s) from form-data, force_override=%v", len(accountNumbers), forceOverride)
 
-		zipData, err := io.ReadAll(zipFile)
+		zipData, err := readBankStatementZipBytes(zipFile, zipHeader)
 		if err != nil {
+			if strings.Contains(err.Error(), "exceeds the maximum size") {
+				http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, fmt.Sprintf("Failed to read zip file: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -1690,6 +1802,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 					AccountNumberOverride: accountOverride,
 					UploadFileName:        ze.name,
 					UploadedBy:            requestedByFromCtx(ctx, r.FormValue("user_id")),
+					PgxPool:               pool,
 				},
 			)
 			if err != nil {

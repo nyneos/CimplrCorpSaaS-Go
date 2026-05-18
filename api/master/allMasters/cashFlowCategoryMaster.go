@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/utils/s3storage"
 
 	// "bufio"
 	"context"
@@ -9,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -1804,9 +1806,15 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file: "+fileHeader.Filename)
 				return
 			}
-			ext := getFileExt(fileHeader.Filename)
-			records, err := parseCashFlowCategoryFile(file, ext)
+			fileBytes, err := io.ReadAll(file)
 			file.Close()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fileHeader.Filename)
+				return
+			}
+			contentType := s3storage.DetectContentType(fileBytes)
+			ext := getFileExt(fileHeader.Filename)
+			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), ext)
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fileHeader.Filename)
 				return
@@ -1836,6 +1844,17 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			columns := append([]string{"upload_batch_id"}, headerRow...)
 
+			s3Key := ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-cashflow-category")
+				storedFileName := s3storage.BuildUploadedFilename(fileHeader.Filename, userName, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					return
+				}
+			}
+
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to start transaction for upload")
@@ -1851,6 +1870,9 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer func() {
 				if !committed {
 					tx.Rollback(ctx)
+					if s3Key != "" {
+						_ = s3storage.DeleteFromS3(ctx, s3Key)
+					}
 				}
 			}()
 
@@ -2015,13 +2037,17 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			insertSQL := fmt.Sprintf(`
-				INSERT INTO mastercashflowcategory (%s)
-				SELECT %s
+				INSERT INTO mastercashflowcategory (%s, upload_s3_key)
+				SELECT %s, $2
 				FROM input_cashflow_category s
 				WHERE s.upload_batch_id = $1
 				RETURNING category_id
 			`, tgtColsStr, srcColsStr)
-			rows, err := tx.Query(ctx, insertSQL, batchID)
+			var s3KeyPtr *string
+			if s3Key != "" {
+				s3KeyPtr = &s3Key
+			}
+			rows, err := tx.Query(ctx, insertSQL, batchID, s3KeyPtr)
 			if err != nil {
 				// Make error message user-friendly
 				errorMsg := err.Error()
@@ -2121,9 +2147,15 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		defer file.Close()
+		fileBytes, err := io.ReadAll(file)
+		file.Close()
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+			return
+		}
+		contentType := s3storage.DetectContentType(fileBytes)
 
-		records, err := parseCashFlowCategoryFile(file, getFileExt(fh.Filename))
+		records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "File parsing failed: "+err.Error())
 			return
@@ -2183,6 +2215,17 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		timings = append(timings, map[string]interface{}{"phase": "read_csv", "rows": rowCount, "ms": readDur.Milliseconds()})
 		log.Printf("[UploadCashFlowCategorySimple] read rows=%d elapsed=%v file=%s", rowCount, readDur, fh.Filename)
 
+		s3Key := ""
+		if s3storage.IsS3UploadEnabled() {
+			folder := s3storage.GetStoragePrefix("master-cashflow-category")
+			storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
@@ -2191,6 +2234,9 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer func() {
 			if tx != nil {
 				_ = tx.Rollback(ctx)
+				if s3Key != "" {
+					_ = s3storage.DeleteFromS3(ctx, s3Key)
+				}
 			}
 		}()
 
@@ -2316,6 +2362,11 @@ WHERE m.category_name IS NULL;
 			}
 			api.RespondWithError(w, 500, "Insert failed: "+errorMsg)
 			return
+		}
+		if s3Key != "" {
+			if _, err := tx.Exec(ctx, `UPDATE mastercashflowcategory SET upload_s3_key = $1 WHERE category_name IN (SELECT category_name FROM tmp_mcc) AND upload_s3_key IS NULL`, s3Key); err != nil {
+				log.Printf("[UploadCashFlowCategorySimple] warn: failed to set upload_s3_key: %v", err)
+			}
 		}
 		insertDur := time.Since(insertStart)
 		timings = append(timings, map[string]interface{}{"phase": "insert", "ms": insertDur.Milliseconds()})

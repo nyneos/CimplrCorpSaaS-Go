@@ -73,7 +73,7 @@ func StartOutboxWorker(ctx context.Context, pool *pgxpool.Pool) {
 	pollInterval := time.Duration(owGetenvInt("OUTBOX_WORKER_POLL_SECS", 10)) * time.Second
 	batchSize := owGetenvInt("OUTBOX_WORKER_BATCH_SIZE", 50)
 
-	log.Printf("[outbox-worker] started (poll=%s batch=%d route=%s)", pollInterval, batchSize, target)
+	log.Printf("[outbox-worker] started (poll=%s batch=%d route=****)", pollInterval, batchSize)
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -304,7 +304,7 @@ func owCallEndpoint(ctx context.Context, endpointURL string, payloads []owSendPa
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[outbox-worker] POST %s failed: %v", endpointURL, err)
+		log.Printf("[outbox-worker] POST **** failed: %v", err)
 		return resultMap
 	}
 	defer resp.Body.Close()

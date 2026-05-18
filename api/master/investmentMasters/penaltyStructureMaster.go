@@ -4,15 +4,16 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
-
-	// "time"
+	"time"
 	"path/filepath"
 
 	"github.com/jackc/pgconn"
@@ -1868,11 +1869,29 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		fileBytes, err := io.ReadAll(file)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read file: "+err.Error())
+			return
+		}
+		contentType := s3storage.DetectContentType(fileBytes)
+
+		s3Key := ""
+		if s3storage.IsS3UploadEnabled() {
+			folder := s3storage.GetStoragePrefix("master-penalty-structure")
+			storedFileName := s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
+			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				return
+			}
+		}
+
 		var rowsData [][]string
 		if ext == ".csv" {
-			rowsData, err = parseCSVFile(file)
+			rowsData, err = parseCSVFile(newBytesMultipartFile(fileBytes))
 		} else {
-			rowsData, err = parseXLSXFile(file)
+			rowsData, err = parseXLSXFile(newBytesMultipartFile(fileBytes))
 		}
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "failed to parse file: "+err.Error())

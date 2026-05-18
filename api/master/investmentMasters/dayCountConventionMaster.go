@@ -4,13 +4,17 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/utils/s3storage"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -21,15 +25,15 @@ func getUserFriendlyDayCountError(err error, context string) (string, int) {
 		return "", http.StatusOK
 	}
 	errStr := strings.ToLower(err.Error())
+	dupKeySubstr := strings.ToLower(constants.ErrDuplicateKeyC)
 
-	if strings.Contains(errStr, constants.ErrTxBeginFailed) ||
-		strings.Contains(errStr, constants.ErrAuditInsertFailed) {
+	if strings.Contains(errStr, strings.ToLower(constants.ErrTxBeginFailed)) ||
+		strings.Contains(errStr, strings.ToLower(constants.ErrAuditInsertFailed)) {
 		return err.Error(), http.StatusOK
 	}
 
-	if strings.Contains(errStr, "uniq_day_count_name_active") ||
-		(strings.Contains(errStr, constants.ErrDuplicateKeyC) && strings.Contains(errStr, "day_count_name")) {
-		return "Day count convention name already exists and is active.", http.StatusOK
+	if strings.Contains(errStr, "uniq_day_count_name_active") {
+		return "Duplicate day_count_name: that display name is already used by an active (non-deleted) convention. Change the name or amend the existing one.", http.StatusOK
 	}
 
 	if strings.Contains(errStr, "inv_day_count_convention_type_chk") ||
@@ -37,8 +41,24 @@ func getUserFriendlyDayCountError(err error, context string) (string, int) {
 		return "Invalid convention_type. Must be one of: ACT_365, ACT_360, ACT_ACT, 30_360.", http.StatusBadRequest
 	}
 
-	if strings.Contains(errStr, constants.ErrDuplicateKeyC) {
-		return "Duplicate entry detected. This record already exists.", http.StatusOK
+	if strings.Contains(errStr, "23502") && strings.Contains(errStr, "day_count_code") {
+		return "day_count_code is required for each row; include a non-empty code matching DC-[A-Z0-9-]+ in the upload file.", http.StatusBadRequest
+	}
+
+	if strings.Contains(errStr, dupKeySubstr) {
+		// PostgreSQL includes constraint name and often "Key (column)=(value) already exists" in the detail.
+		switch {
+		case strings.Contains(errStr, "fd_day_count_convention_master_pkey") ||
+			strings.Contains(errStr, "(day_count_code)="):
+			return "Duplicate day_count_code: this code is already the primary key of another row. Use a different day_count_code or edit the existing convention.", http.StatusOK
+		case strings.Contains(errStr, "uniq_day_count_name_active") ||
+			strings.Contains(errStr, "(day_count_name)="):
+			return "Duplicate day_count_name: that display name is already used by an active (non-deleted) convention. Change the name or reuse after the other record is removed.", http.StatusOK
+		case strings.Contains(errStr, "uniq_day_count_id") || strings.Contains(errStr, "(day_count_id)="):
+			return "Duplicate day_count_id: generated ID collision (very rare). Retry the request; if it persists, contact support.", http.StatusOK
+		default:
+			return "Duplicate key: this row conflicts with a unique constraint on the day count master table. Check day_count_code and day_count_name against existing records.", http.StatusOK
+		}
 	}
 
 	if strings.Contains(errStr, "foreign key constraint") || strings.Contains(errStr, "violates foreign key") {
@@ -49,6 +69,14 @@ func getUserFriendlyDayCountError(err error, context string) (string, int) {
 		return "Database connection issue", http.StatusServiceUnavailable
 	}
 
+	// Commit / tx end failures: surface driver message so uploads aren't opaque "Commit failed".
+	if strings.Contains(strings.ToLower(context), "commit") {
+		log.Printf("[DAYCOUNT-DB] commit_error context=%q err=%v", context, err)
+		return context + ": " + err.Error(), http.StatusInternalServerError
+	}
+
+	// Unmapped DB/driver error: log full detail for debugging (client still gets safe message).
+	log.Printf("[DAYCOUNT-DB] unmapped_error context=%q err=%v", context, err)
 	return "Internal server error: " + context, http.StatusInternalServerError
 }
 
@@ -87,6 +115,23 @@ var validConventionTypes = map[string]bool{
 	"30_360":  true,
 }
 
+var dayCountCodePattern = regexp.MustCompile(`^DC-[A-Z0-9-]+$`)
+
+// normalizeDayCountCode uppercases and validates day_count_code (create + CSV upload).
+func normalizeDayCountCode(raw string) (string, error) {
+	code := strings.ToUpper(strings.TrimSpace(raw))
+	if code == "" {
+		return "", errors.New(constants.ErrDayCountCodeRequired)
+	}
+	if len(code) > 50 {
+		return "", errors.New("day_count_code too long")
+	}
+	if !dayCountCodePattern.MatchString(code) {
+		return "", errors.New("day_count_code must match pattern DC-[A-Z0-9-]+")
+	}
+	return code, nil
+}
+
 func validateDayCountFields(input DayCountConventionInput) error {
 	if strings.TrimSpace(input.DayCountName) == "" {
 		return errors.New("day_count_name is required")
@@ -122,7 +167,13 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Failed to get file: "+err.Error())
 			return
 		}
-		defer file.Close()
+		fileBytes, err := io.ReadAll(file)
+		file.Close()
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
+			return
+		}
+		contentType := s3storage.DetectContentType(fileBytes)
 
 		ext := strings.ToLower(filepath.Ext(handler.Filename))
 		if ext != ".csv" && ext != ".xlsx" {
@@ -144,9 +195,9 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var data [][]string
 		if ext == ".csv" {
-			data, err = parseCSVFile(file)
+			data, err = parseCSVFile(newBytesMultipartFile(fileBytes))
 		} else {
-			data, err = parseXLSXFile(file)
+			data, err = parseXLSXFile(newBytesMultipartFile(fileBytes))
 		}
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+err.Error())
@@ -172,7 +223,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			colMap[normalize(col)] = i
 		}
 
-		requiredCols := []string{"day_count_name", "convention_type"}
+		requiredCols := []string{"day_count_code", "day_count_name", "convention_type"}
 		for _, col := range requiredCols {
 			if _, ok := colMap[normalize(col)]; !ok {
 				api.RespondWithError(w, http.StatusBadRequest, "Missing required column: "+col)
@@ -185,6 +236,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Pre-validate rows (fail-fast on first error)
 		var validInputs []DayCountConventionInput
 		var validSourceRows []int
+		seenCodesInFile := make(map[string]int) // code -> first data row number (1-based sheet row)
 
 		// helper to fetch by normalized name
 		get := func(row []string, col string) string { return getColumnValue(row, colMap, normalize(col)) }
@@ -199,7 +251,20 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if len(row) == 0 {
 				continue
 			}
+			sheetRow := i + 2
+			normCode, codeErr := normalizeDayCountCode(get(row, "day_count_code"))
+			if codeErr != nil {
+				sendFail(sheetRow, codeErr.Error())
+				return
+			}
+			if prevRow, dup := seenCodesInFile[normCode]; dup {
+				sendFail(sheetRow, fmt.Sprintf("Duplicate day_count_code in file (same as row %d).", prevRow))
+				return
+			}
+			seenCodesInFile[normCode] = sheetRow
+
 			input := DayCountConventionInput{
+				DayCountCode:   normCode,
 				DayCountName:   get(row, "day_count_name"),
 				ConventionType: strings.ToUpper(get(row, "convention_type")),
 			}
@@ -220,11 +285,11 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := validateDayCountFields(input); err != nil {
-				sendFail(i+2, err.Error())
+				sendFail(sheetRow, err.Error())
 				return
 			}
 			validInputs = append(validInputs, input)
-			validSourceRows = append(validSourceRows, i+2)
+			validSourceRows = append(validSourceRows, sheetRow)
 		}
 
 		if len(validInputs) == 0 {
@@ -232,12 +297,34 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		s3Key := ""
+		if s3storage.IsS3UploadEnabled() {
+			folder := s3storage.GetStoragePrefix("master-day-count-convention")
+			storedFileName := s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
+			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
+			if s3Key != "" {
+				_ = s3storage.DeleteFromS3(ctx, s3Key)
+			}
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		defer tx.Rollback(ctx)
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+				if s3Key != "" {
+					_ = s3storage.DeleteFromS3(ctx, s3Key)
+				}
+			}
+		}()
 
 		// Batch duplicate check by name
 		names := make([]string, len(validInputs))
@@ -265,65 +352,83 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			existingNames[nm] = true
 		}
 
-		// Fail-fast on first duplicate name
+		codes := make([]string, len(validInputs))
+		for i, input := range validInputs {
+			codes[i] = input.DayCountCode
+		}
+		dupCodeRows, err := tx.Query(ctx, `
+			SELECT day_count_code FROM investment.fd_day_count_convention_master
+			WHERE day_count_code = ANY($1::text[]) AND COALESCE(is_deleted,false) = false
+		`, codes)
+		if err != nil {
+			msg, status := getUserFriendlyDayCountError(err, "Duplicate code check failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		defer dupCodeRows.Close()
+
+		existingCodes := make(map[string]bool)
+		for dupCodeRows.Next() {
+			var c string
+			if err := dupCodeRows.Scan(&c); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Duplicate code scan failed")
+				return
+			}
+			existingCodes[c] = true
+		}
+
+		// Fail-fast on first duplicate name or duplicate code in DB
 		var finalValid []DayCountConventionInput
 		for i, input := range validInputs {
+			src := 0
+			if i < len(validSourceRows) {
+				src = validSourceRows[i]
+			}
 			if existingNames[input.DayCountName] {
-				src := 0
-				if i < len(validSourceRows) {
-					src = validSourceRows[i]
-				}
-				// report concise duplicate error
 				api.RespondWithPayload(w, false, fmt.Sprintf("Day count upload aborted: row %d failed validation: Day count convention name already exists and is active.", src), nil)
+				return
+			}
+			if existingCodes[input.DayCountCode] {
+				api.RespondWithPayload(w, false, fmt.Sprintf("Day count upload aborted: row %d failed validation: day_count_code already exists.", src), nil)
 				return
 			}
 			finalValid = append(finalValid, input)
 		}
 
-		// Batch insert
+		// Batch insert (day_count_code is NOT NULL in DB; must match single-create INSERT shape)
 		valueStrings := make([]string, len(finalValid))
-		valueArgs := make([]interface{}, 0, len(finalValid)*5)
+		valueArgs := make([]interface{}, 0, len(finalValid)*6)
 
 		for i, input := range finalValid {
 			isActive := true
 			if input.IsActive != nil {
 				isActive = *input.IsActive
 			}
-			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d)", i*5+1, i*5+2, i*5+3, i*5+4, i*5+5)
-			valueArgs = append(valueArgs, input.DayCountName, input.ConventionType, input.Description, input.FormulaExample, isActive)
+			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d)", i*6+1, i*6+2, i*6+3, i*6+4, i*6+5, i*6+6)
+			valueArgs = append(valueArgs, input.DayCountCode, input.DayCountName, input.ConventionType, input.Description, input.FormulaExample, isActive)
 		}
 
 		batchInsertQuery := fmt.Sprintf(`
 			INSERT INTO investment.fd_day_count_convention_master
-				(day_count_name, convention_type, description, formula_example, is_active)
+				(day_count_code, day_count_name, convention_type, description, formula_example, is_active)
 			VALUES %s
-			RETURNING day_count_code
 		`, strings.Join(valueStrings, ","))
 
-		insertRows, err := tx.Query(ctx, batchInsertQuery, valueArgs...)
-		if err != nil {
+		if _, err := tx.Exec(ctx, batchInsertQuery, valueArgs...); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Batch insert failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
-		defer insertRows.Close()
 
-		var insertedCodes []string
+		insertedCodes := make([]string, len(finalValid))
 		var insertedRecords []map[string]interface{}
-
-		for insertRows.Next() {
-			var code string
-			if err := insertRows.Scan(&code); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Insert scan failed: "+err.Error())
-				return
-			}
-			insertedCodes = append(insertedCodes, code)
+		for i, input := range finalValid {
+			insertedCodes[i] = input.DayCountCode
 			insertedRecords = append(insertedRecords, map[string]interface{}{
 				constants.ValueSuccess: true,
-				"day_count_code":       code,
+				"day_count_code":       input.DayCountCode,
 			})
 		}
-		insertRows.Close()
 
 		// Batch audit insert
 		if len(insertedCodes) > 0 {
@@ -345,11 +450,19 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		if s3Key != "" && len(insertedCodes) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE investment.fd_day_count_convention_master SET upload_s3_key = $1 WHERE day_count_code = ANY($2)`, s3Key, insertedCodes); err != nil {
+				log.Printf("[DAYCOUNT-UPLOAD] failed to store upload_s3_key: %v", err)
+			}
+		}
+
 		if err := tx.Commit(ctx); err != nil {
+			log.Printf("[DAYCOUNT-UPLOAD] COMMIT failed file=%q rows_inserted=%d err=%v", handler.Filename, len(insertedCodes), err)
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		committed = true
 
 		if len(insertedRecords) > 0 {
 			msg := fmt.Sprintf("%d day count conventions created successfully", len(insertedRecords))
@@ -371,23 +484,14 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		req.DayCountCode = strings.ToUpper(strings.TrimSpace(req.DayCountCode))
 		req.ConventionType = strings.ToUpper(strings.TrimSpace(req.ConventionType))
 
-		// validate code
-		if req.DayCountCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
+		normCode, err := normalizeDayCountCode(req.DayCountCode)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if len(req.DayCountCode) > 50 {
-			api.RespondWithError(w, http.StatusBadRequest, "day_count_code too long")
-			return
-		}
-		codeRe := regexp.MustCompile(`^DC-[A-Z0-9-]+$`)
-		if !codeRe.MatchString(req.DayCountCode) {
-			api.RespondWithError(w, http.StatusBadRequest, "day_count_code must match pattern DC-[A-Z0-9-]+")
-			return
-		}
+		req.DayCountCode = normCode
 
 		if err := validateDayCountFields(req.DayCountConventionInput); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, err.Error())
@@ -429,6 +533,9 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RETURNING day_count_code, day_count_id
 		`, req.DayCountCode, req.DayCountName, req.ConventionType, req.Description, req.FormulaExample, req.IsActive).Scan(&dayCountCode, &dayCountID)
 		if err != nil {
+			log.Printf("[DAYCOUNT-CREATE] master INSERT failed user_id=%q code=%q name=%q convention_type=%q is_active=%v desc_nil=%v formula_nil=%v err=%v",
+				req.UserID, req.DayCountCode, req.DayCountName, req.ConventionType, req.IsActive,
+				req.Description == nil, req.FormulaExample == nil, err)
 			msg, status := getUserFriendlyDayCountError(err, "Insert failed")
 			api.RespondWithError(w, status, msg)
 			return
@@ -442,12 +549,14 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				(day_count_code, action_type, processing_status, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 		`, dayCountCode, userEmail); err != nil {
+			log.Printf("[DAYCOUNT-CREATE] audit INSERT failed day_count_code=%q requested_by=%q err=%v", dayCountCode, userEmail, err)
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
+			log.Printf("[DAYCOUNT-CREATE] COMMIT failed day_count_code=%q err=%v", dayCountCode, err)
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrCommitFailedCapitalized)
 			api.RespondWithError(w, status, msg)
 			return

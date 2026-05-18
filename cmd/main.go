@@ -65,7 +65,8 @@ func main() {
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	// DB_SSLMODE controls TLS: set to "require" in production, "disable" for local/RDS direct.
+	// Use sslmode=disable when connecting directly to RDS (no SSL terminator).
+	// Switch to sslmode=require only when routing through a Supabase/pgBouncer pooler.
 	// connect_timeout and statement_timeout guard against hung connections.
 	sslMode := os.Getenv("DB_SSLMODE")
 	if sslMode == "" {
@@ -126,6 +127,7 @@ func main() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	<-sigs
+	//Kanav
 
 	// Stop all services
 	if err := manager.StopAll(); err != nil {
