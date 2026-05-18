@@ -70,6 +70,24 @@ func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 		`, cfg.ActionParentCol, cfg.ActionTable, cfg.ActionParentCol, extraWhere)
 
 		rows, err := db.QueryContext(r.Context(), query, args...)
+		if err != nil {
+			query = fmt.Sprintf(`
+				SELECT action_id,
+				       %s,
+				       actiontype,
+				       processing_status,
+				       requested_by,
+				       requested_at,
+				       checker_by,
+				       checker_at,
+				       checker_comment,
+				       reason
+				FROM %s
+				WHERE %s = $1%s
+				ORDER BY requested_at ASC, action_id ASC
+			`, cfg.ActionParentCol, cfg.ActionTable, cfg.ActionParentCol, extraWhere)
+			rows, err = db.QueryContext(r.Context(), query, args...)
+		}
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -94,11 +112,94 @@ func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 			}
 		}
 
+		fileAuditRows, fileAuditErr := queryFXAdditionalFileAudit(r, db, cfg, parentID)
+		if fileAuditErr == nil {
+			payload = append(payload, fileAuditRows...)
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
 			"audit_logs":           payload,
 		})
+	}
+}
+
+func queryFXAdditionalFileAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentID string) ([]map[string]interface{}, error) {
+	moduleKeys := fxAdditionalFileModules(cfg.Source)
+	if len(moduleKeys) == 0 {
+		return nil, nil
+	}
+
+	placeholders := make([]string, 0, len(moduleKeys))
+	args := []interface{}{parentID}
+	for _, moduleKey := range moduleKeys {
+		args = append(args, moduleKey)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+	}
+
+	query := fmt.Sprintf(`
+		SELECT parent_record_id,
+		       file_id,
+		       module_key,
+		       action_type,
+		       processing_status,
+		       requested_by,
+		       requested_at,
+		       checker_by,
+		       checker_at,
+		       checker_comment,
+		       reason
+		FROM cimplrcorpsaas.fx_additional_file_audit
+		WHERE parent_record_id = $1
+		  AND module_key IN (%s)
+		ORDER BY requested_at ASC, audit_id ASC
+	`, strings.Join(placeholders, ", "))
+
+	rows, err := db.QueryContext(r.Context(), query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	payload := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var parentRecordID, fileID, moduleKey string
+		var actionType, status, requestedBy, checkerBy, checkerComment, reason sql.NullString
+		var requestedAt, checkerAt sql.NullTime
+		if err := rows.Scan(&parentRecordID, &fileID, &moduleKey, &actionType, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+			return nil, err
+		}
+		payload = append(payload, map[string]interface{}{
+			"entity_id":         parentRecordID,
+			"file_id":           strings.TrimSpace(fileID),
+			"module_key":        strings.TrimSpace(moduleKey),
+			"action_type":       nullString(actionType),
+			"processing_status": nullString(status),
+			"requested_by":      nullString(requestedBy),
+			"requested_at":      nullTime(requestedAt),
+			"checker_by":        nullString(checkerBy),
+			"checker_at":        nullTime(checkerAt),
+			"checker_comment":   nullString(checkerComment),
+			"reason":            nullString(reason),
+			"source":            cfg.Source,
+		})
+	}
+	return payload, rows.Err()
+}
+
+func fxAdditionalFileModules(source string) []string {
+	switch source {
+	case "FX_EXPOSURE":
+		return []string{"fx-exposure"}
+	case "FX_EXPOSURE_BUCKETING":
+		return []string{"fx-exposure-bucketing", "fx-pending-exposure-bucketing"}
+	case "FX_FORWARD":
+		return []string{"fx-forward"}
+	case "FX_FORWARD_MTM":
+		return []string{"fx-mtm"}
+	default:
+		return nil
 	}
 }
 
@@ -118,7 +219,15 @@ func scanFXAuditRow(rows *sql.Rows) (map[string]interface{}, error) {
 		newValues      sql.NullString
 		changeSummary  sql.NullString
 	)
-	if err := rows.Scan(&actionID, &entityID, &action, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &oldValues, &newValues, &changeSummary); err != nil {
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	if len(cols) > 10 {
+		if err := rows.Scan(&actionID, &entityID, &action, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &oldValues, &newValues, &changeSummary); err != nil {
+			return nil, err
+		}
+	} else if err := rows.Scan(&actionID, &entityID, &action, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
 		return nil, err
 	}
 	entry := map[string]interface{}{

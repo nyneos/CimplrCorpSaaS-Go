@@ -1320,6 +1320,7 @@ func GetExposureDownloadURL(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			RecordID string `json:"record_id"`
+			UserID   string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
@@ -1349,6 +1350,7 @@ func GetExposureDownloadURL(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "failed to generate download url")
 			return
 		}
+		recordExposureDownloadAudit(r.Context(), db, recordID, exposureDownloadActor(r.Context(), req.UserID), s3Key)
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -1374,6 +1376,21 @@ func normalizeBulkIDs(ids []string) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+func exposureDownloadActor(ctx context.Context, userID string) string {
+	requestedBy := strings.TrimSpace(api.RequestedByFromCtx(ctx, userID))
+	if requestedBy == "" {
+		requestedBy = strings.TrimSpace(auditutil.ActorFromContext(ctx))
+	}
+	if requestedBy == "" {
+		requestedBy = strings.TrimSpace(userID)
+	}
+	return requestedBy
+}
+
+func recordExposureDownloadAudit(ctx context.Context, db *sql.DB, exposureHeaderID, requestedBy, uploadS3Key string) {
+	auditutil.RecordDownload(ctx, db, auditutil.TableExposureDownloads, "exposure_header_id", exposureHeaderID, requestedBy, uploadS3Key, nil)
 }
 
 func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
@@ -1404,6 +1421,7 @@ func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UploadBatchIDs []string `json:"upload_batch_ids"`
 			RecordIDs      []string `json:"record_ids"`
+			UserID         string   `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
@@ -1419,6 +1437,7 @@ func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 		ctx := r.Context()
 		files := make([]map[string]string, 0, len(recordIDs))
 		failedIDs := make([]string, 0)
+		requestedBy := exposureDownloadActor(ctx, req.UserID)
 
 		for _, recordID := range recordIDs {
 			uploadS3Key, err := lookupExposureUploadS3Key(ctx, db, recordID)
@@ -1443,6 +1462,7 @@ func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 				"record_id":    recordID,
 				"download_url": downloadURL,
 			})
+			recordExposureDownloadAudit(ctx, db, recordID, requestedBy, s3Key)
 		}
 
 		writeBulkDownloadResponse(w, files, failedIDs)
