@@ -17,7 +17,8 @@ import (
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/appmanager"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // InitDB loads DB config from env vars
 func InitDB() (*sql.DB, error) {
@@ -91,7 +92,7 @@ func main() {
 	manager := appmanager.NewAppManager()
 
 	// Load service configs from YAML
-	servicesCfg, err := appmanager.LoadServiceSequence("./services.yaml")
+	servicesCfg, err := appmanager.LoadServiceSequence("../services.yaml")
 	if err != nil {
 		logger.LogError("failed to load service sequence:", err)
 	}
