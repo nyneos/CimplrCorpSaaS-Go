@@ -293,7 +293,16 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// q := `UPDATE public.exposure_headers SET approval_status='Rejected', rejection_comment=$1, rejected_by=$2, rejected_at=now(), updated_at=now() WHERE exposure_header_id = ANY($3) RETURNING exposure_header_id`
 		// rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), rejector, req.ExposureIDs)
-		q := `UPDATE public.exposure_headers SET exposure_creation_status='Rejected', updated_at=now() WHERE exposure_header_id = ANY($1) RETURNING exposure_header_id`
+		q := `
+			UPDATE public.exposure_headers
+			SET exposure_creation_status = CASE
+					WHEN exposure_creation_status = 'PENDING_DELETE_APPROVAL' THEN 'Approved'
+					ELSE 'Rejected'
+				END,
+			    updated_at = now()
+			WHERE exposure_header_id = ANY($1)
+			RETURNING exposure_header_id
+		`
 		rows, err := pool.Query(ctx, q, req.ExposureIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())

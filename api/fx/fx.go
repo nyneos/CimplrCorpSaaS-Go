@@ -191,6 +191,7 @@ func StartFXService(db *sql.DB, port string) {
 		/*bucketing */
 		mux.Handle("/fx/exposures/update-bucketing", middlewares.PreValidationMiddleware(pgxPool)(exposures.UpdateExposureHeadersLineItemsBucketing(db)))
 		mux.Handle("/fx/exposures/get-bucketing", middlewares.PreValidationMiddleware(pgxPool)(exposures.GetExposureHeadersLineItemsBucketing(db)))
+		mux.Handle("/fx/exposures/bucketing/delete-multiple-headers", middlewares.PreValidationMiddleware(pgxPool)(exposures.DeleteBucketingStatus(db)))
 		mux.Handle("/fx/exposures/approve-bucketing-status", middlewares.PreValidationMiddleware(pgxPool)(exposures.ApproveBucketingStatus(db)))
 		mux.Handle("/fx/exposures/reject-bucketing-status", middlewares.PreValidationMiddleware(pgxPool)(exposures.RejectBucketingStatus(db)))
 		mux.Handle("/fx/exposures/bucketing/audit", middlewares.PreValidationMiddleware(pgxPool)(NewFXAuditHandler(db, fxBucketingAuditConfig())))
