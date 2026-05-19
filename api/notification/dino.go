@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 
@@ -13,7 +12,8 @@ import (
 	push "CimplrCorpSaas/api/notification/push"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux := http.NewServeMux()
@@ -33,7 +33,7 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 			var err error
 			pool, err = pgxpool.New(context.Background(), dsn)
 			if err != nil {
-				log.Fatalf("failed to connect to pgxpool DB: %v", err)
+				logger.LogError("failed to connect to pgxpool DB: %v", err)
 			}
 		}
 	}
@@ -87,8 +87,8 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	// Register browser push subscription routes (VAPID public key, register, unregister)
 	push.RegisterSubscriptionRoutes(mux, pool)
 
-	log.Printf("Notification Service started on :%s", port)
+	logger.LogInfo("Notification Service started on :%s", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		log.Fatalf("Notification Service failed: %v", err)
+		logger.LogError("Notification Service failed: %v", err)
 	}
 }

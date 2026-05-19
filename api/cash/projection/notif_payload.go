@@ -111,7 +111,10 @@ func BuildProjectionNotifPayload(ctx context.Context, pool *pgxpool.Pool, propos
 			p.old_proposal_name,
 			p.old_base_currency_code,
 			p.old_effective_date,
-			a.processing_status
+			CASE
+				WHEN COALESCE(p.is_deleted, false) = true THEN 'DELETED'
+				ELSE a.processing_status
+			END AS processing_status
 		FROM cimplrcorpsaas.cashflow_proposal p
 		LEFT JOIN LATERAL (
 			SELECT processing_status

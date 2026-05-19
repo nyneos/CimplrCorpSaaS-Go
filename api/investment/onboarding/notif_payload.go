@@ -3,19 +3,19 @@ package investment
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"CimplrCorpSaas/api/notification/catalog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // BuildOnboardUploadNotifPayload constructs and fires a notification after a bulk upload.
 // It calls fetchBatchInfo to get the full entity breakdown for the batch.
 func BuildOnboardUploadNotifPayload(ctx context.Context, pool *pgxpool.Pool, batchID, userEmail string) {
 	info, err := fetchBatchInfo(ctx, pool, batchID)
 	if err != nil {
-		log.Printf("[notif][onboard-upload] fetchBatchInfo(%s) failed: %v", batchID, err)
+		logger.LogInfo("[notif][onboard-upload] fetchBatchInfo(%s) failed: %v", batchID, err)
 		return
 	}
 
@@ -53,7 +53,7 @@ func BuildOnboardUploadNotifPayload(ctx context.Context, pool *pgxpool.Pool, bat
 func BuildOnboardApprovalNotifPayload(ctx context.Context, pool *pgxpool.Pool, batchID, action, userEmail string) {
 	info, err := fetchBatchInfo(ctx, pool, batchID)
 	if err != nil {
-		log.Printf("[notif][onboard-approval] fetchBatchInfo(%s) failed: %v", batchID, err)
+		logger.LogInfo("[notif][onboard-approval] fetchBatchInfo(%s) failed: %v", batchID, err)
 		return
 	}
 

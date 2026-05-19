@@ -60,7 +60,7 @@ func GetExceptionDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "exception_id is required")
 			return
 		}
-		if resolveUserEmail(req.UserID) == "" {
+		if resolveUserEmail(r.Context()) == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}

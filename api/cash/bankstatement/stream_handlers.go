@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 type BankPDFUpload struct {
@@ -144,7 +146,7 @@ func deleteFromSupabase(ctx context.Context, objectPath string) error {
 // respondWithError logs the internal error and returns a standardized JSON error
 func respondWithError(w http.ResponseWriter, err error, userMsg string, code int) {
 	if err != nil {
-		log.Printf("[bankstatement] internal error: %v", err)
+		logger.LogError("[bankstatement] internal error: %v", err)
 	}
 	if userMsg == "" && err != nil {
 		userMsg = userFriendlyUploadError(err)
@@ -420,7 +422,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 	// Resolve account routing params once
 	accountNumbers := parseAccountNumbers(baseFormValues)
 	forceOverride := r.FormValue("force_override") == "true"
-	log.Printf("[ZIP-PREVIEW] force_override=%v account_numbers=%v", forceOverride, accountNumbers)
+	logger.LogError("[ZIP-PREVIEW] force_override=%v account_numbers=%v", forceOverride, accountNumbers)
 
 	// --- Collect processable entries first so we can validate 1:1 counts ---
 	type previewEntry struct {
@@ -536,11 +538,11 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 			// 1:1 positional mapping
 			perFileFormValues["account_numbers"] = []string{accountNumbers[fileIdx]}
 			perFileFormValues["force_override"] = []string{"true"}
-			log.Printf("[ZIP-PREVIEW] force+N: file[%d] %s → account %s", fileIdx, filename, accountNumbers[fileIdx])
+			logger.LogInfo("[ZIP-PREVIEW] force+N: file[%d] %s → account %s", fileIdx, filename, accountNumbers[fileIdx])
 
 		case forceOverride && len(accountNumbers) == 1:
 			// All files → single account (already in baseFormValues, keep force_override=true)
-			log.Printf("[ZIP-PREVIEW] force+1: file %s → account %s", filename, accountNumbers[0])
+			logger.LogInfo("[ZIP-PREVIEW] force+1: file %s → account %s", filename, accountNumbers[0])
 
 		case forceOverride && len(accountNumbers) == 0:
 			// force + no accounts = error already caught above for N>1, but also guard 0-account case
@@ -603,7 +605,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 		}
 		bID, batchErr := insertStagingBatch(ctx, db, userID, header.Filename, len(pdfEntries))
 		if batchErr != nil {
-			log.Printf("[ZIP-PDF] failed to create staging batch: %v", batchErr)
+			logger.LogError("[ZIP-PDF] failed to create staging batch: %v", batchErr)
 			for _, pe := range pdfEntries {
 				results = append(results, map[string]interface{}{"file": pe.filename, "status": "failed", "error": "failed to create staging batch"})
 				failedCount++
@@ -620,7 +622,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 				for _, f := range files {
 					stagingIDs, err := processPDFViaPDFCo(bgCtx, db, f.data, f.filename, bgBatchID, "")
 					if err != nil {
-						log.Printf("[ZIP-PDF-BG] failed %s: %v", f.filename, err)
+						logger.LogError("[ZIP-PDF-BG] failed %s: %v", f.filename, err)
 						_, _ = insertStagingStatement(bgCtx, db, insertStagingStatementParams{
 							BatchID: bgBatchID, Filename: f.filename, CSVURL: "", RawStatement: nil, Status: "failed", ErrMsg: err.Error(),
 						})
@@ -722,7 +724,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		log.Printf("[BANK-PREVIEW] /cash/preview start: remote=%s method=%s", r.RemoteAddr, r.Method)
+		logger.LogInfo("[BANK-PREVIEW] /cash/preview start: remote=%s method=%s", r.RemoteAddr, r.Method)
 
 		// parse multipart form (support file field named "file")
 		if err := r.ParseMultipartForm(50 << 20); err != nil {
@@ -738,18 +740,15 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// Detect file type by extension and route to appropriate handler
 		fh := r.MultipartForm.File["file"][0]
 		ext := strings.ToLower(filepath.Ext(fh.Filename))
-		log.Printf("[BANK-PREVIEW] uploaded filename=%s ext=%s", fh.Filename, ext)
-		uploadUserID := apipreval.GetUserIDFromContext(ctx)
-		if uploadUserID == "" && r.MultipartForm != nil && r.MultipartForm.Value != nil {
-			if vals := r.MultipartForm.Value["user_id"]; len(vals) > 0 {
-				uploadUserID = vals[0]
-			}
-		}
-		if uploadUserID != "" {
-			log.Printf("[BANK-PREVIEW] user_id=%s", uploadUserID)
+		logger.LogInfo("[BANK-PREVIEW] uploaded filename=%s ext=%s", fh.Filename, ext)
+		// try to log user_id field if present
+		uploadUserID := ""
+		if vals := r.MultipartForm.Value["user_id"]; len(vals) > 0 {
+			uploadUserID = vals[0]
+			logger.LogInfo("[BANK-PREVIEW] user_id=%s", vals[0])
 		}
 		if ext == ".zip" {
-			log.Printf("[BANK-PREVIEW] zip upload detected filename=%s", fh.Filename)
+			logger.LogInfo("[BANK-PREVIEW] zip upload detected filename=%s", fh.Filename)
 			handleZipBankStatementUpload(db, pool, w, r)
 			return
 		}
@@ -757,7 +756,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// Accept PDF and DOCX for streaming to external AI parser; others go to V2
 		if ext != ".pdf" && ext != ".docx" {
 			// delegate to existing V2 handler for Excel/CSV
-			log.Printf("[BANK-PREVIEW] delegating to V2 handler for extension=%s", ext)
+			logger.LogInfo("[BANK-PREVIEW] delegating to V2 handler for extension=%s", ext)
 			h := UploadBankStatementV2Handler(db, pool)
 			h.ServeHTTP(w, r)
 			return
@@ -808,7 +807,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			// already exists — rollback the open transaction but continue parsing
 			// so the caller receives the full preview data instead of a bare {exists} stub
 			if rerr := tx.Rollback(); rerr != nil {
-				log.Printf("failed to rollback tx after existing-check: %v", rerr)
+				logger.LogError("failed to rollback tx after existing-check: %v", rerr)
 			}
 			tx = nil
 			// fall through: parse and return full preview using the existing record ID
@@ -879,6 +878,65 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 				if rerr := tx.Rollback(); rerr != nil {
 					log.Printf("failed to rollback tx after conversion error: %v", rerr)
 				}
+			}
+		}
+		// v := z4()
+		// v := q9()
+		v := q8()
+		v = attachStreamKey(v)
+		// if v[0] != 'h' {
+		// 	v = z4()
+		// }
+
+		logger.LogInfo("[BANK-PREVIEW] proxying PDF/DOCX to parsing service =****")
+		// Build multipart/form-data body with field name `pdf` (file)
+		var b bytes.Buffer
+		mw := multipart.NewWriter(&b)
+		fw, err := mw.CreateFormFile("pdf", header.Filename)
+		if err != nil {
+			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
+			return
+		}
+		if _, err := fw.Write(fileBytes); err != nil {
+			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
+			return
+		}
+		if err := mw.Close(); err != nil {
+			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
+			return
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "POST", v, &b)
+		if err != nil {
+			respondWithError(w, err, "Failed to create parsing request", http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
+
+		client := &http.Client{Timeout: 0}
+		resp, err := client.Do(req)
+		if err != nil {
+			respondWithError(w, err, "Failed to connect to parsing service", http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		// Read the complete AI response
+		aiResponseBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			respondWithError(w, err, "Failed to read parsing response", http.StatusInternalServerError)
+			return
+		}
+
+		// Parse the AI response to merge with our upload data
+		var aiResponse map[string]interface{}
+		if err := json.Unmarshal(aiResponseBytes, &aiResponse); err != nil {
+			logger.LogError("AI response parsing error: %v, raw: %s", err, string(aiResponseBytes))
+			// rollback the transaction because parsing failed
+			if tx != nil {
+				if rerr := tx.Rollback(); rerr != nil {
+					logger.LogError("failed to rollback tx after parse error: %v", rerr)
+				}
 				tx = nil
 			}
 			respondWithError(w, convErr, "Failed to convert document", http.StatusBadGateway)
@@ -910,7 +968,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			respondWithError(w, fmt.Errorf("no preview data"), "No transactions found in document", http.StatusUnprocessableEntity)
 			return
 		}
-		aiResponse := previews[0]
+		aiResponse = previews[0]
 
 		// After successful parsing, upload to storage (if enabled) and
 		// insert the metadata row inside the transaction. If any of these
@@ -922,29 +980,24 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 				// rollback transaction
 				if tx != nil {
 					if rerr := tx.Rollback(); rerr != nil {
-						log.Printf("failed to rollback tx after supabase upload failure: %v", rerr)
+						logger.LogError("failed to rollback tx after supabase upload failure: %v", rerr)
 					}
 					tx = nil
 				}
-				log.Printf("supabase upload failed: %v", upErr)
+				logger.LogError("supabase upload failed: %v", upErr)
 				respondWithError(w, upErr, "Failed to upload file to storage", http.StatusInternalServerError)
 				return
 			}
 		}
 
 		// Insert metadata row now that parsing (and optional storage upload)
-		// have succeeded. If the same checksum already existed, reuse that ID.
-		var id string
-		if existingID.Valid {
-			id = existingID.String
-		} else {
-			id, err = insertUploadRowTx(ctx, tx, header.Filename, objectPath, checksum)
-			if err != nil {
-				// attempt to delete uploaded object if we uploaded earlier
-				if uploadEnabled {
-					if derr := deleteFromSupabase(ctx, objectPath); derr != nil {
-						log.Printf("failed to delete uploaded object after insert failure: %v", derr)
-					}
+		// have succeeded.
+		id, err := insertUploadRowTx(ctx, tx, header.Filename, objectPath, checksum)
+		if err != nil {
+			// attempt to delete uploaded object if we uploaded earlier
+			if uploadEnabled {
+				if derr := deleteFromSupabase(ctx, objectPath); derr != nil {
+					logger.LogError("failed to delete uploaded object after insert failure: %v", derr)
 				}
 				respondWithError(w, err, "Failed to persist upload metadata", http.StatusInternalServerError)
 				return
@@ -971,7 +1024,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// Commit the metadata insert now that parsing succeeded.
 		if tx != nil {
 			if cerr := tx.Commit(); cerr != nil {
-				log.Printf("failed to commit upload metadata: %v", cerr)
+				logger.LogError("failed to commit upload metadata: %v", cerr)
 				respondWithError(w, cerr, "Failed to persist upload metadata", http.StatusInternalServerError)
 				return
 			}
@@ -982,7 +1035,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(combinedResponse); err != nil {
-			log.Printf("failed to write response: %v", err)
+			logger.LogError("failed to write response: %v", err)
 		}
 
 		// Fire notification asynchronously — does not block the HTTP response.
@@ -1191,7 +1244,7 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 					   SET raw_statement = $1, status = 'parsed', updated_at = now()
 					 WHERE staging_id = $2 AND status != 'committed'
 				`, raw, sidPersist); uerr != nil {
-					log.Printf("[RECALCULATE] failed to persist staging statement %s: %v", sidPersist, uerr)
+					logger.LogError("[RECALCULATE] failed to persist staging statement %s: %v", sidPersist, uerr)
 				}
 			}
 		}
@@ -1976,6 +2029,16 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 			respondWithError(w, err, "Database error", http.StatusInternalServerError)
 			return
 		}
+
+		var bankStatementID sql.NullString
+		if storagePath.Valid && strings.TrimSpace(storagePath.String) != "" {
+			_ = db.QueryRowContext(r.Context(), `
+				SELECT bank_statement_id
+				FROM cimplrcorpsaas.bank_statements
+				WHERE upload_s3_key = $1
+				LIMIT 1
+			`, storagePath.String).Scan(&bankStatementID)
+		}
 		// entity validation: if DB row has entity_name, ensure requester is allowed
 		// try to get entity from request header `X-Entity-Name` or context
 		requesterEntity := r.Header.Get("X-Entity-Name")
@@ -2034,7 +2097,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			body, _ := io.ReadAll(resp.Body)
-			log.Printf("download failed: %d %s", resp.StatusCode, string(body))
+			logger.LogError("download failed: %d %s", resp.StatusCode, string(body))
 			respondWithError(w, fmt.Errorf("download failed: %d", resp.StatusCode), "Failed to download file from storage", http.StatusInternalServerError)
 			return
 		}
@@ -2060,8 +2123,8 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 		ip := r.RemoteAddr
 		go func() {
 			// best-effort; log on error
-			if err := insertDownloadAudit(r.Context(), db, id, userID, ip, entityName); err != nil {
-				log.Printf("failed to insert download audit: %v", err)
+			if err := insertDownloadAudit(r.Context(), db, sql.NullString{String: strings.TrimSpace(id), Valid: strings.TrimSpace(id) != ""}, sql.NullString{}, userID, ip, entityName); err != nil {
+				logger.LogError("failed to insert download audit: %v", err)
 			}
 		}()
 
@@ -2105,10 +2168,15 @@ func processPDFViaPDFCo(ctx context.Context, db *sql.DB, pdfBytes []byte, filena
 	return stagingIDs, nil
 }
 
-// insertDownloadAudit records who downloaded a file
-func insertDownloadAudit(ctx context.Context, db *sql.DB, fileID, userID, ip string, entityName sql.NullString) error {
-	q := `INSERT INTO cimplrcorpsaas.bank_pdf_download_audits (file_id, user_id, ip, entity_name) VALUES ($1,$2,$3,$4)`
-	_, err := db.ExecContext(ctx, q, fileID, userID, ip, entityName)
+// insertDownloadAudit records who downloaded a file.
+// Some bank statements are stored directly in bank_statements without a linked
+// bank_pdf_uploads row, so file_id falls back to a generated UUID when absent.
+func insertDownloadAudit(ctx context.Context, db *sql.DB, fileID sql.NullString, bankStatementID sql.NullString, userID, ip string, entityName sql.NullString) error {
+	q := `
+		INSERT INTO cimplrcorpsaas.bank_pdf_download_audits (file_id, bankstatementid, user_id, ip, entity_name)
+		VALUES (COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5)
+	`
+	_, err := db.ExecContext(ctx, q, fileID, bankStatementID, userID, ip, entityName)
 	return err
 }
 func z4() string {

@@ -74,7 +74,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -85,7 +85,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		// ── Resolve fd_ref_no, bank_id, entity_name, bank_name from fd_master ──
 		var fdRefNo, bankID, entityName, bankName string
@@ -207,13 +207,13 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		// Simple query with basic joins + audit history
 		sql := `
@@ -224,7 +224,8 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 			    a.checker_by, a.checker_at, a.checker_comment
 			  FROM investment.fd_tds_receipt_audit a
 			  ORDER BY a.tds_id,
-			    GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz),COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+			    GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz),COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC,
+			    a.audit_id DESC
 			),
 			history AS (
 			  SELECT
@@ -367,13 +368,13 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -485,13 +486,13 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		// If tds_id provided, resolve receipt_id (may be NULL) and fd_id fallback
 		if req.TDSID != "" && req.ReceiptID == "" {

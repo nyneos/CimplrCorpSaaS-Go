@@ -2,9 +2,7 @@ package allMaster
 
 import (
 	api "CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/utils/s3storage"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -120,18 +118,14 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 	return
 		// }
 		// createdBy := session.Name
-		// Get created_by from session
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				createdBy = s.Name
-				break
-			}
-		}
-		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		createdBy := session.Email
+		if createdBy == "" {
+			createdBy = session.Name
 		}
 
 		// Validate required fields
@@ -229,18 +223,14 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		// Get created_by from session
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				createdBy = s.Name
-				break
-			}
-		}
-		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		createdBy := session.Email
+		if createdBy == "" {
+			createdBy = session.Name
 		}
 
 		ctx := r.Context()
@@ -622,7 +612,7 @@ func GetBankNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // UploadBank handles multipart uploads for banks and stages them using pgxpool (no database/sql usage)
 func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.Background()
+		ctx := r.Context()
 		userID := ""
 		if r.Header.Get(constants.ContentTypeText) == constants.ContentTypeJSON {
 			var req struct {
@@ -649,17 +639,14 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// }
 		// userName := session.Name
 
-		userName := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
-		if userName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		userName := session.Email
+		if userName == "" {
+			userName = session.Name
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -875,17 +862,14 @@ func UpdateBankMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 	return
 		// }
 		// updatedBy := session.Name
-		updatedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				updatedBy = s.Name
-				break
-			}
-		}
-		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		updatedBy := session.Email
+		if updatedBy == "" {
+			updatedBy = session.Name
 		}
 		var results []map[string]interface{}
 		ctx := r.Context()
@@ -1114,18 +1098,14 @@ func BulkDeleteBankAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 		// 	return
 		// }
-		requestedBy := ""
-
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
-		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		requestedBy := session.Email
+		if requestedBy == "" {
+			requestedBy = session.Name
 		}
 		// requestedBy := session.Name
 		var results []string
@@ -1166,18 +1146,14 @@ func BulkRejectBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 		// 	return
 		// }
-		checkerBy := ""
-
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		checkerBy := session.Email
+		if checkerBy == "" {
+			checkerBy = session.Name
 		}
 		// checkerBy := session.Name
 		query := `UPDATE auditactionbank SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE bank_id = ANY($3) RETURNING action_id,bank_id`
@@ -1216,29 +1192,24 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get pre-validated context values
-		// log.Printf("Approving bank audit actions for user: %s, bank_ids: %v", session.Name, req.BankIDs)
+		// logger.LogInfo("Approving bank audit actions for user: %s, bank_ids: %v", session.Name, req.BankIDs)
 		// if session == nil {
 		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
-		// 	log.Printf("Unauthorized access to approve bank audit actions: %v", req)
+		// 	logger.LogInfo("Unauthorized access to approve bank audit actions: %v", req)
 		// 	return
 		// }
-		checkerBy := ""
-
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
-		// checkerBy := session.Name
-		// First, delete records with processing_status = 'PENDING_DELETE_APPROVAL' for the given bank_ids
-		delQuery := `DELETE FROM auditactionbank WHERE bank_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, bank_id`
-		delRows, delErr := pgxPool.Query(r.Context(), delQuery, pq.Array(req.BankIDs))
+		checkerBy := session.Email
+		if checkerBy == "" {
+			checkerBy = session.Name
+		}
+		// First, handle records with processing_status = 'PENDING_DELETE_APPROVAL' (Soft Delete)
+		delQuery := `UPDATE auditactionbank SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2 WHERE bank_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, bank_id`
+		delRows, delErr := pgxPool.Query(r.Context(), delQuery, checkerBy, req.Comment, pq.Array(req.BankIDs))
 		var deleted []string
 		var bankIDsToDelete []string
 		if delErr == nil {

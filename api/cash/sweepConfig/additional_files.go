@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,6 +34,18 @@ func DeleteSweepPlanningAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFu
 	return additionalfiles.NewDeleteHandler(pool, sweepPlanningAdditionalFilesConfig())
 }
 
+func AuditSweepPlanningAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, sweepPlanningAdditionalFilesConfig())
+}
+
+func ApproveSweepPlanningAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, sweepPlanningAdditionalFilesConfig())
+}
+
+func RejectSweepPlanningAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, sweepPlanningAdditionalFilesConfig())
+}
+
 func ListSweepInitiationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewListHandler(pool, sweepInitiationAdditionalFilesConfig())
 }
@@ -53,30 +66,58 @@ func DeleteSweepInitiationAdditionalFileHandler(pool *pgxpool.Pool) http.Handler
 	return additionalfiles.NewDeleteHandler(pool, sweepInitiationAdditionalFilesConfig())
 }
 
+func AuditSweepInitiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, sweepInitiationAdditionalFilesConfig())
+}
+
+func ApproveSweepInitiationAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, sweepInitiationAdditionalFilesConfig())
+}
+
+func RejectSweepInitiationAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, sweepInitiationAdditionalFilesConfig())
+}
+
 func sweepPlanningAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:        "sweep-planning",
-		ParentIDField: "sweep_id",
-		FolderName:    additionalfiles.AdditionalFilesFolder(),
-		List:          listSweepPlanningAdditionalFiles,
-		Create:        createSweepPlanningAdditionalFile,
-		GetOne:        getSweepPlanningAdditionalFile,
-		GetMany:       getSweepPlanningAdditionalFiles,
-		SoftDelete:    deleteSweepPlanningAdditionalFile,
+		Module:                "sweep-planning",
+		AuditSource:           "SWEEP_PLANNING",
+		ParentIDField:         "sweep_id",
+		FolderName:            additionalfiles.AdditionalFilesFolder(),
+		List:                  listSweepPlanningAdditionalFiles,
+		CreateReturning:       createSweepPlanningAdditionalFile,
+		GetOne:                getSweepPlanningAdditionalFile,
+		GetAnyFile:            getAnySweepPlanningAdditionalFile,
+		GetMany:               getSweepPlanningAdditionalFiles,
+		SoftDelete:            deleteSweepPlanningAdditionalFile,
+		SoftDeleteTx:          deleteSweepPlanningAdditionalFileTx,
+		RecordMainUploadAudit: recordSweepPlanningMainUploadAudit,
 	}
 }
 
 func sweepInitiationAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:        "sweep-initiation",
-		ParentIDField: "initiation_id",
-		FolderName:    additionalfiles.AdditionalFilesFolder(),
-		List:          listSweepInitiationAdditionalFiles,
-		Create:        createSweepInitiationAdditionalFile,
-		GetOne:        getSweepInitiationAdditionalFile,
-		GetMany:       getSweepInitiationAdditionalFiles,
-		SoftDelete:    deleteSweepInitiationAdditionalFile,
+		Module:                "sweep-initiation",
+		AuditSource:           "SWEEP_INITIATION",
+		ParentIDField:         "initiation_id",
+		FolderName:            additionalfiles.AdditionalFilesFolder(),
+		List:                  listSweepInitiationAdditionalFiles,
+		CreateReturning:       createSweepInitiationAdditionalFile,
+		GetOne:                getSweepInitiationAdditionalFile,
+		GetAnyFile:            getAnySweepInitiationAdditionalFile,
+		GetMany:               getSweepInitiationAdditionalFiles,
+		SoftDelete:            deleteSweepInitiationAdditionalFile,
+		SoftDeleteTx:          deleteSweepInitiationAdditionalFileTx,
+		RecordMainUploadAudit: recordSweepInitiationMainUploadAudit,
 	}
+}
+
+func recordSweepPlanningMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainUploadAudit(ctx, tx, "cimplrcorpsaas.auditactionsweepconfiguration", "sweep_id", "actiontype", parentID, payload)
+}
+
+func recordSweepInitiationMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainUploadAudit(ctx, tx, "cimplrcorpsaas.auditactionsweepinitiation", "initiation_id", "actiontype", parentID, payload)
 }
 
 func listSweepPlanningAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
@@ -89,10 +130,10 @@ func listSweepPlanningAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, p
 	return additionalfiles.QueryFiles(ctx, pool, query, args...)
 }
 
-func createSweepPlanningAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
+func createSweepPlanningAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
 	entityClause, entityArgs := sweepEntityScope(ctx, "sc", 9)
 	args := append([]interface{}{input.ParentID}, entityArgs...)
-	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "cimplrcorpsaas.sweep_configuration_files", "sweep_id", input, `
+	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "cimplrcorpsaas.sweep_configuration_files", "sweep_id", input, `
 		SELECT sc.sweep_id AS parent_id
 		FROM cimplrcorpsaas.sweepconfiguration sc
 		WHERE sc.sweep_id = $8
@@ -101,10 +142,22 @@ func createSweepPlanningAdditionalFile(ctx context.Context, tx pgx.Tx, input add
 }
 
 func getSweepPlanningAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getSweepPlanningAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnySweepPlanningAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getSweepPlanningAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getSweepPlanningAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
+	}
 	query, args := sweepPlanningFilesQuery(ctx, `
 		WHERE f.sweep_id = $1
 		  AND f.file_id = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  `+deletedClause+`
 		  AND COALESCE(sc.is_deleted, FALSE) = FALSE
 	`, parentID, fileID)
 	return additionalfiles.FirstFile(ctx, pool, query, args...)
@@ -128,6 +181,18 @@ func getSweepPlanningAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, pa
 }
 
 func deleteSweepPlanningAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteSweepPlanningAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteSweepPlanningAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteSweepPlanningAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+type sweepFileExec interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+}
+
+func deleteSweepPlanningAdditionalFileExec(ctx context.Context, exec sweepFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	entityClause, entityArgs := sweepEntityScope(ctx, "sc", 5)
 	query := `
 		UPDATE cimplrcorpsaas.sweep_configuration_files f
@@ -144,7 +209,7 @@ func deleteSweepPlanningAdditionalFile(ctx context.Context, pool *pgxpool.Pool, 
 
 	args := []interface{}{parentID, fileID, deletedBy, deletedAt}
 	args = append(args, entityArgs...)
-	result, err := pool.Exec(ctx, query, args...)
+	result, err := exec.Exec(ctx, query, args...)
 	if err != nil {
 		return false, err
 	}
@@ -161,10 +226,10 @@ func listSweepInitiationAdditionalFiles(ctx context.Context, pool *pgxpool.Pool,
 	return additionalfiles.QueryFiles(ctx, pool, query, args...)
 }
 
-func createSweepInitiationAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
+func createSweepInitiationAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
 	entityClause, entityArgs := sweepEntityScope(ctx, "sc", 9)
 	args := append([]interface{}{input.ParentID}, entityArgs...)
-	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "cimplrcorpsaas.sweep_initiation_files", "initiation_id", input, `
+	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "cimplrcorpsaas.sweep_initiation_files", "initiation_id", input, `
 		SELECT si.initiation_id AS parent_id
 		FROM cimplrcorpsaas.sweep_initiation si
 		JOIN cimplrcorpsaas.sweepconfiguration sc ON sc.sweep_id = si.sweep_id
@@ -174,10 +239,22 @@ func createSweepInitiationAdditionalFile(ctx context.Context, tx pgx.Tx, input a
 }
 
 func getSweepInitiationAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getSweepInitiationAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnySweepInitiationAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getSweepInitiationAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getSweepInitiationAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
+	}
 	query, args := sweepInitiationFilesQuery(ctx, `
 		WHERE f.initiation_id = $1
 		  AND f.file_id = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  `+deletedClause+`
 		  AND COALESCE(sc.is_deleted, FALSE) = FALSE
 	`, parentID, fileID)
 	return additionalfiles.FirstFile(ctx, pool, query, args...)
@@ -201,6 +278,14 @@ func getSweepInitiationAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, 
 }
 
 func deleteSweepInitiationAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteSweepInitiationAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteSweepInitiationAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteSweepInitiationAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteSweepInitiationAdditionalFileExec(ctx context.Context, exec sweepFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	entityClause, entityArgs := sweepEntityScope(ctx, "sc", 5)
 	query := `
 		UPDATE cimplrcorpsaas.sweep_initiation_files f
@@ -218,7 +303,7 @@ func deleteSweepInitiationAdditionalFile(ctx context.Context, pool *pgxpool.Pool
 
 	args := []interface{}{parentID, fileID, deletedBy, deletedAt}
 	args = append(args, entityArgs...)
-	result, err := pool.Exec(ctx, query, args...)
+	result, err := exec.Exec(ctx, query, args...)
 	if err != nil {
 		return false, err
 	}

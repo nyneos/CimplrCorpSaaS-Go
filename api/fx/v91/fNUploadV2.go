@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/fx/auditutil"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"database/sql"
@@ -15,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -35,6 +35,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 	"github.com/xuri/excelize/v2"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 const duplicateExposureUploadMessage = "This exposure file was already uploaded earlier. Please upload a different file."
@@ -213,7 +215,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 	currencyAliases := map[string]string{}
 	if strings.TrimSpace(currencyAliasesJSON) != "" {
 		if err := json.Unmarshal([]byte(currencyAliasesJSON), &currencyAliases); err != nil {
-			log.Printf("[WARN] invalid currency_aliases JSON: %v", err)
+			logger.LogError("[WARN] invalid currency_aliases JSON: %v", err)
 		} else {
 			// normalize keys and values to uppercase to make lookups case-insensitive
 			norm := make(map[string]string, len(currencyAliases))
@@ -269,7 +271,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		if len(allowedIDs) > 0 {
 			// restrict masterentitycash load to approved entity ids from prevalidation middleware
 			rows, err = pool.Query(ctx, baseSQL+" AND me.entity_id = ANY($1)", allowedIDs)
-			log.Printf("[FBUP-ENT] restricting entityMap load to %d approved entity IDs", len(allowedIDs))
+			logger.LogInfo("[FBUP-ENT] restricting entityMap load to %d approved entity IDs", len(allowedIDs))
 		} else {
 			rows, err = pool.Query(ctx, baseSQL)
 		}
@@ -293,7 +295,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			}
 			rows.Close()
 		} else {
-			log.Printf("[FUBG]: error querying masterentitycash: %v", err)
+			logger.LogError("[FUBG]: error querying masterentitycash: %v", err)
 		}
 	}
 
@@ -323,12 +325,12 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 	// Debug: inspect entityMap contents and SQL-derived keys
 	{
-		log.Printf("[FBUP-ENT] entityMap built, count=%d", len(entityMap))
+		logger.LogInfo("[FBUP-ENT] entityMap built, count=%d", len(entityMap))
 		// presence check for common company codes seen in test files (e.g. '3700')
 		if v, ok := entityMap["3700"]; ok {
-			log.Printf("[FBUP-ENT] entityMap contains key '3700' -> %s", v)
+			logger.LogInfo("[FBUP-ENT] entityMap contains key '3700' -> %s", v)
 		} else {
-			log.Printf("[FBUP-ENT] entityMap does NOT contain key '3700' (this is likely why many rows are non-qualified)")
+			logger.LogInfo("[FBUP-ENT] entityMap does NOT contain key '3700' (this is likely why many rows are non-qualified)")
 		}
 		// print up to 12 sample entries to inspect format
 		sample := 0
@@ -336,7 +338,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			if sample >= 12 {
 				break
 			}
-			log.Printf("[FBUP-ENT] sample[%d] key='%s' -> entity='%s'", sample, k, v)
+			logger.LogInfo("[FBUP-ENT] sample[%d] key='%s' -> entity='%s'", sample, k, v)
 			sample++
 		}
 	}
@@ -453,7 +455,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		if err != nil {
 			if uploadedNewObject {
 				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
-					log.Printf("[FBUP-S3] cleanup after acquire failure failed for key=%s: %v", s3Key, cleanupErr)
+					logger.LogError("[FBUP-S3] cleanup after acquire failure failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
 			return nil, 0, http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrDBAcquire, err.Error())
@@ -463,7 +465,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			conn.Release()
 			if uploadedNewObject {
 				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
-					log.Printf("[FBUP-S3] cleanup after tx begin failure failed for key=%s: %v", s3Key, cleanupErr)
+					logger.LogError("[FBUP-S3] cleanup after tx begin failure failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
 			return nil, 0, http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrTxBegin, err.Error())
@@ -477,7 +479,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			conn.Release()
 			if cleanupUploadedObject && s3Key != "" {
 				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
-					log.Printf("[FBUP-S3] cleanup failed for key=%s: %v", s3Key, cleanupErr)
+					logger.LogError("[FBUP-S3] cleanup failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
 		}()
@@ -610,10 +612,10 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			return nil, 0, http.StatusInternalServerError, fmt.Errorf("update batch total_records: %w", err)
 		}
 
-		log.Printf("[DEBUG] After parsing: canonicals=%d, batch=%s file=%s", len(canonicals), batchID.String(), fh.Filename)
+		logger.LogInfo("[DEBUG] After parsing: canonicals=%d, batch=%s file=%s", len(canonicals), batchID.String(), fh.Filename)
 		if len(canonicals) > 0 {
 			sample := canonicals[0]
-			log.Printf("[DEBUG] Sample canonical[0]: CompanyCode='%s', Party='%s', Currency='%s', Amount=%s, AmountFloat=%f, NetDueDate='%s'",
+			logger.LogInfo("[DEBUG] Sample canonical[0]: CompanyCode='%s', Party='%s', Currency='%s', Amount=%s, AmountFloat=%f, NetDueDate='%s'",
 				sample.CompanyCode, sample.Party, sample.DocumentCurrency, sample.AmountDoc.String(), sample.AmountFloat, sample.NetDueDate)
 		}
 
@@ -636,10 +638,10 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					"Remaining open amounts, if any, were inserted as exposures.",
 				autoKnockCount, selfKnockCount)
 			fileInfo = append(fileInfo, msg)
-			log.Printf("[INFO] %s", msg)
+			logger.LogInfo("%s", msg)
 		}
 
-		log.Printf("[DEBUG] After allocation: exposuresFloat=%d, knocksFloat=%d, batch=%s", len(exposuresFloat), len(knocksFloat), batchID.String())
+		logger.LogInfo("[DEBUG] After allocation: exposuresFloat=%d, knocksFloat=%d, batch=%s", len(exposuresFloat), len(knocksFloat), batchID.String())
 
 		// net-exposure non-qualified pass
 		netMap := make(map[string]float64)
@@ -677,7 +679,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				}
 			}
 		}
-		log.Printf("[DEBUG] After net-exposure pass: flagged=%d out of %d exposuresFloat, batch=%s", flaggedCount, len(exposuresFloat), batchID.String())
+		logger.LogInfo("[DEBUG] After net-exposure pass: flagged=%d out of %d exposuresFloat, batch=%s", flaggedCount, len(exposuresFloat), batchID.String())
 
 		// build canonical exposures slice (decimal amounts) - ONLY documents with remaining > 0
 		exposures := make([]CanonicalRow, 0, len(exposuresFloat))
@@ -739,7 +741,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			if entityMiss > 0 || currencyMiss > 0 {
 				msg2 := fmt.Sprintf("%d row(s) marked as non-qualified due to unmapped entity codes and %d row(s) due to invalid or unrecognized currency codes.", entityMiss, currencyMiss)
 				fileWarnings = append(fileWarnings, msg2)
-				log.Printf(constants.LogWarn, msg2)
+				logger.LogInfo(constants.LogWarn, msg2)
 			}
 		}
 
@@ -759,10 +761,10 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		// validation: separate qualified and nonQualified (struct NonQualified)
 		qualified, nonQualified := validateExposures(exposures)
 
-		log.Printf("[DEBUG] After validation: qualified=%d, nonQualified=%d, batch=%s", len(qualified), len(nonQualified), batchID.String())
+		logger.LogInfo("[DEBUG] After validation: qualified=%d, nonQualified=%d, batch=%s", len(qualified), len(nonQualified), batchID.String())
 		if len(nonQualified) > 0 && len(nonQualified) <= 5 {
 			for i, nq := range nonQualified {
-				log.Printf("[DEBUG] nonQualified[%d]: doc=%s, issues=%v", i, nq.Row.DocumentNumber, nq.Issues)
+				logger.LogInfo("[DEBUG] nonQualified[%d]: doc=%s, issues=%v", i, nq.Row.DocumentNumber, nq.Issues)
 			}
 		}
 
@@ -770,11 +772,11 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			if len(knocksFloat) > 0 {
 				msg := fmt.Sprintf("No exposures were written: allocation fully matched all rows (knock events=%d). This commonly occurs when incoming debit/credit rows for the same Source|CompanyCode|Party fully net to zero, or because of receivable/payable logic settings (receivable_logic=%s, payable_logic=%s). If you expected inserts, check mapping, amount signs, and NetDueDate values; or run a small unbalanced test file to verify behavior.", len(knocksFloat), receivableLogic, payableLogic)
 				fileWarnings = append(fileWarnings, msg)
-				log.Printf(constants.LogWarn, msg)
+				logger.LogInfo(constants.LogWarn, msg)
 			} else {
 				msg := "No exposures were written: allocation produced no base or knock items. Likely causes: amounts all share the same sign (no debits or no credits), amounts parsed as zero, or mapping produced empty AmountDoc values. Check mapping, amount signs (+/-), and NetDueDate; try 'receivable_logic'/'payable_logic' = reverse to flip allocation direction or upload a small unbalanced test file."
 				fileWarnings = append(fileWarnings, msg)
-				log.Printf(constants.LogWarn, msg)
+				logger.LogInfo(constants.LogWarn, msg)
 			}
 		}
 
@@ -862,7 +864,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				if v, ok := q._raw["Category"]; ok {
 					rawCat = fmt.Sprintf("%v", v)
 				}
-				log.Printf("[FBUP] header-row[%d] doc=%s rawCategory='%s' source='%s' exposureType='%s' exposureCategory='%s' company='%s' amount=%s",
+				logger.LogInfo("[FBUP] header-row[%d] doc=%s rawCategory='%s' source='%s' exposureType='%s' exposureCategory='%s' company='%s' amount=%s",
 					i, q.DocumentNumber, rawCat, q.Source, exposureType, exposureCategory, q.CompanyCode, q.AmountDoc.String())
 			}
 
@@ -913,11 +915,11 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			}, nil
 		})
 
-		log.Printf("[FBUP] about to COPY %d exposure_headers for batch %s file=%s", len(qualified), batchID.String(), fh.Filename)
+		logger.LogInfo("[FBUP] about to COPY %d exposure_headers for batch %s file=%s", len(qualified), batchID.String(), fh.Filename)
 		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"public", "exposure_headers"}, headerCols, headerSrc); err != nil {
 			return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy headers: %w", err)
 		}
-		log.Printf("[FBUP] finished COPY exposure_headers for batch %s file=%s", batchID.String(), fh.Filename)
+		logger.LogInfo("[FBUP] finished COPY exposure_headers for batch %s file=%s", batchID.String(), fh.Filename)
 
 		// Build line items (unchanged) - we'll keep insertion code in Part 3
 		lineItemCols := []string{
@@ -978,19 +980,19 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			}
 		}
 
-		log.Printf("[FBUP] about to COPY %d exposure_line_items for batch %s", len(liRows), batchID.String())
+		logger.LogInfo("[FBUP] about to COPY %d exposure_line_items for batch %s", len(liRows), batchID.String())
 		if len(liRows) > 0 {
 			if _, err := tx.CopyFrom(ctx,
 				pgx.Identifier{"public", "exposure_line_items"},
 				lineItemCols,
 				pgx.CopyFromRows(liRows)); err != nil {
 				fileErrors = append(fileErrors, "copy line items: "+err.Error())
-				log.Printf("[ERROR] copy line items: %v", err)
+				logger.LogError("copy line items: %v", err)
 				tx.Rollback(ctx)
 				return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy line items failed: %w", err)
 			}
 		}
-		log.Printf("[FBUP] finished COPY exposure_line_items for batch %s", batchID.String())
+		logger.LogInfo("[FBUP] finished COPY exposure_line_items for batch %s", batchID.String())
 
 		// ------------------ Build and COPY exposure_allocations ------------------
 		docCompany := make(map[string]string, len(canonicals))
@@ -1117,7 +1119,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				allocCols,
 				pgx.CopyFromRows(allocRows)); err != nil {
 				fileErrors = append(fileErrors, "copy allocations: "+err.Error())
-				log.Printf("[ERROR] copy allocations: %v", err)
+				logger.LogError("copy allocations: %v", err)
 				tx.Rollback(ctx)
 				return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy allocations failed: %w", err)
 			}
@@ -1171,7 +1173,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				unallocCols,
 				pgx.CopyFromRows(unallocRows)); err != nil {
 				fileErrors = append(fileErrors, "copy unallocated: "+err.Error())
-				log.Printf("[ERROR] copy unallocated: %v", err)
+				logger.LogError("copy unallocated: %v", err)
 				tx.Rollback(ctx)
 				return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy unallocated failed: %w", err)
 			}
@@ -1216,7 +1218,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				unqualCols,
 				pgx.CopyFromRows(unqualRows)); err != nil {
 				fileErrors = append(fileErrors, "copy unqualified: "+err.Error())
-				log.Printf("[ERROR] copy unqualified: %v", err)
+				logger.LogError("copy unqualified: %v", err)
 				tx.Rollback(ctx)
 				return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy unqualified failed: %w", err)
 			}
@@ -1247,7 +1249,14 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		committed = true
 		cleanupUploadedObject = false
 
-		log.Printf("[FBUP] committed batch %s for file %s", batchID.String(), fh.Filename)
+		logger.LogInfo("[FBUP] committed batch %s for file %s", batchID.String(), fh.Filename)
+		for _, exposureID := range docToID {
+			auditutil.RecordActionPGX(ctx, pool, auditutil.TableExposure, "exposure_header_id", exposureID, "CREATE", "PENDING_APPROVAL", "Imported via uploader", userName, nil, map[string]interface{}{
+				"batch_id":      batchID.String(),
+				"file_name":     fh.Filename,
+				"upload_s3_key": s3Key,
+			})
+		}
 
 		// Authoritative preview: use DB-driven preview builder instead of in-memory approximation.
 		// The old in-memory preview (based on canonicals) is intentionally removed to ensure
@@ -1279,7 +1288,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 	} // end per-file loop
 
 	elapsed := time.Since(start)
-	log.Printf("[FBUP] total upload completed in %s, files=%d", elapsed.String(), len(results))
+	logger.LogInfo("[FBUP] total upload completed in %s, files=%d", elapsed.String(), len(results))
 	return results, elapsed, 0, nil
 }
 
@@ -1350,7 +1359,7 @@ func allocateFIFOFloat(rows []CanonicalRow, receivableLogic, payableLogic string
 
 		// Optional: debug info
 		if len(exps) > 0 {
-			log.Printf("[FIFO] Group %s → exposures=%d, knockoffs=%d", key, len(exps), len(knocks))
+			logger.LogInfo("[FIFO] Group %s → exposures=%d, knockoffs=%d", key, len(exps), len(knocks))
 		}
 	}
 
@@ -1867,6 +1876,7 @@ func GetExposureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 			httpError(w, http.StatusInternalServerError, "failed to generate download url")
 			return
 		}
+		recordExposureBatchDownloadAuditPGX(r.Context(), pool, batchUUID, auditutil.ActorFromContext(r.Context()), uploadS3Key)
 
 		writeJSON(w, map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -1892,6 +1902,35 @@ func normalizeBulkIDs(ids []string) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+func recordExposureBatchDownloadAuditPGX(ctx context.Context, pool *pgxpool.Pool, batchID uuid.UUID, requestedBy, uploadS3Key string) {
+	if requestedBy == "" || uploadS3Key == "" {
+		return
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT exposure_header_id::text
+		FROM public.exposure_headers
+		WHERE batch_id = $1
+	`, batchID)
+	if err != nil {
+		logger.LogError("fx exposure download audit lookup failed batch=%s: %v", batchID.String(), err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var exposureHeaderID string
+		if err := rows.Scan(&exposureHeaderID); err != nil {
+			logger.LogError("fx exposure download audit scan failed batch=%s: %v", batchID.String(), err)
+			continue
+		}
+		auditutil.RecordDownloadPGX(ctx, pool, auditutil.TableExposureDownloads, "exposure_header_id", exposureHeaderID, requestedBy, uploadS3Key, nil)
+	}
+	if err := rows.Err(); err != nil {
+		logger.LogError("fx exposure download audit rows failed batch=%s: %v", batchID.String(), err)
+	}
 }
 
 func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
@@ -1972,6 +2011,7 @@ func GetExposureBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 				"batch_id":     batchID,
 				"download_url": downloadURL,
 			})
+			recordExposureBatchDownloadAuditPGX(ctx, pool, batchUUID, auditutil.ActorFromContext(ctx), uploadS3Key)
 		}
 
 		writeBulkDownloadResponse(w, files, failedIDs)

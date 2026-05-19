@@ -561,6 +561,7 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) a ON true
 			WHERE COALESCE(c.is_deleted, false) = false
+			  AND COALESCE(i.is_deleted, false) = false
 		`
 
 		args := []interface{}{}
@@ -1029,6 +1030,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID         string   `json:"user_id"`
 			InitiationIDs  []string `json:"initiation_ids"`
 			CheckerComment string   `json:"checker_comment,omitempty"`
+			Comment        string   `json:"comment,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1054,30 +1056,84 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Update audit entries to APPROVED
+		comment := req.CheckerComment
+		if strings.TrimSpace(comment) == "" {
+			comment = req.Comment
+		}
+
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
+		rows, err := tx.Query(ctx, `
+			SELECT DISTINCT ON (initiation_id)
+				action_id, initiation_id, actiontype, processing_status
+			FROM cimplrcorpsaas.auditactionsweepinitiation
+			WHERE initiation_id = ANY($1)
+			ORDER BY initiation_id, requested_at DESC, action_id DESC
+		`, req.InitiationIDs)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to fetch latest initiation audits: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		actionIDs := make([]string, 0, len(req.InitiationIDs))
+		deleteIDs := make([]string, 0)
+		approvedIDs := make([]string, 0, len(req.InitiationIDs))
+		found := map[string]bool{}
+		for rows.Next() {
+			var actionID, id, actionType, status string
+			if err := rows.Scan(&actionID, &id, &actionType, &status); err != nil {
+				api.RespondWithResult(w, false, "failed to read latest initiation audits: "+err.Error())
+				return
+			}
+			found[id] = true
+			if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+				api.RespondWithResult(w, false, "cannot approve non-pending initiation: "+id)
+				return
+			}
+			actionIDs = append(actionIDs, actionID)
+			approvedIDs = append(approvedIDs, id)
+			if actionType == "DELETE" {
+				deleteIDs = append(deleteIDs, id)
+			}
+		}
+		for _, id := range req.InitiationIDs {
+			if !found[id] {
+				api.RespondWithResult(w, false, "missing latest audit for initiation: "+id)
+				return
+			}
+		}
 		upd := `UPDATE cimplrcorpsaas.auditactionsweepinitiation 
 				SET processing_status = 'APPROVED', 
 					checker_by = $1, 
 					checker_at = now(), 
 					checker_comment = $2
-				WHERE initiation_id = ANY($3) 
-				AND processing_status = 'PENDING_APPROVAL'
-				RETURNING initiation_id`
-
-		rows, err := pgxPool.Query(ctx, upd, checkerName, nullifyEmpty(req.CheckerComment), req.InitiationIDs)
-		if err != nil {
+				WHERE action_id = ANY($3)`
+		if _, err := tx.Exec(ctx, upd, checkerName, nullifyEmpty(comment), actionIDs); err != nil {
 			api.RespondWithResult(w, false, "failed to approve initiations: "+err.Error())
 			return
 		}
-		defer rows.Close()
-
-		approvedIDs := make([]string, 0)
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err == nil {
-				approvedIDs = append(approvedIDs, id)
+		if len(deleteIDs) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE cimplrcorpsaas.sweep_initiation SET is_deleted = TRUE WHERE initiation_id = ANY($1)`, deleteIDs); err != nil {
+				api.RespondWithResult(w, false, "failed to soft delete initiations: "+err.Error())
+				return
 			}
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to commit approve: "+err.Error())
+			return
+		}
+		committed = true
 
 		api.RespondWithPayload(w, true, "Initiations approved successfully", map[string]interface{}{
 			"approved_initiation_ids": approvedIDs,
@@ -1086,12 +1142,13 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Notify with FULL initiation data for rich templates
 		capturedIDs := approvedIDs
 		capturedUser := req.UserID
-		capturedComment := req.CheckerComment
-		payload := BuildSweepInitiationNotifPayload(context.Background(), pgxPool, capturedIDs, "APPROVE", capturedUser)
+		capturedComment := comment
+		notifyCtx := context.WithoutCancel(ctx)
+		payload := BuildSweepInitiationNotifPayload(notifyCtx, pgxPool, capturedIDs, "APPROVE", capturedUser)
 		payloadMap := payload.ToMap()
 		payloadMap["CheckerComment"] = capturedComment
 		go catalog.TriggerNotification(
-			context.Background(), pgxPool,
+			notifyCtx, pgxPool,
 			"/cash/sweep-initiation/bulk-approve",
 			fmt.Sprintf("SWEEPINIT_APPROVE/%s/%d", capturedUser, time.Now().UnixMilli()),
 			payloadMap,
@@ -1107,6 +1164,7 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID         string   `json:"user_id"`
 			InitiationIDs  []string `json:"initiation_ids"`
 			CheckerComment string   `json:"checker_comment,omitempty"`
+			Comment        string   `json:"comment,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1132,30 +1190,74 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Update audit entries to REJECTED
-		upd := `UPDATE cimplrcorpsaas.auditactionsweepinitiation 
-				SET processing_status = 'REJECTED', 
-					checker_by = $1, 
-					checker_at = now(), 
-					checker_comment = $2
-				WHERE initiation_id = ANY($3) 
-				AND processing_status = 'PENDING_APPROVAL'
-				RETURNING initiation_id`
+		comment := req.CheckerComment
+		if strings.TrimSpace(comment) == "" {
+			comment = req.Comment
+		}
 
-		rows, err := pgxPool.Query(ctx, upd, checkerName, nullifyEmpty(req.CheckerComment), req.InitiationIDs)
+		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to reject initiations: "+err.Error())
+			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
+		rows, err := tx.Query(ctx, `
+			SELECT DISTINCT ON (initiation_id)
+				action_id, initiation_id, processing_status
+			FROM cimplrcorpsaas.auditactionsweepinitiation
+			WHERE initiation_id = ANY($1)
+			ORDER BY initiation_id, requested_at DESC, action_id DESC
+		`, req.InitiationIDs)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to fetch latest initiation audits: "+err.Error())
 			return
 		}
 		defer rows.Close()
 
-		rejectedIDs := make([]string, 0)
+		actionIDs := make([]string, 0, len(req.InitiationIDs))
+		rejectedIDs := make([]string, 0, len(req.InitiationIDs))
+		found := map[string]bool{}
 		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err == nil {
-				rejectedIDs = append(rejectedIDs, id)
+			var actionID, id, status string
+			if err := rows.Scan(&actionID, &id, &status); err != nil {
+				api.RespondWithResult(w, false, "failed to read latest initiation audits: "+err.Error())
+				return
+			}
+			found[id] = true
+			if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+				api.RespondWithResult(w, false, "cannot reject non-pending initiation: "+id)
+				return
+			}
+			actionIDs = append(actionIDs, actionID)
+			rejectedIDs = append(rejectedIDs, id)
+		}
+		for _, id := range req.InitiationIDs {
+			if !found[id] {
+				api.RespondWithResult(w, false, "missing latest audit for initiation: "+id)
+				return
 			}
 		}
+		upd := `UPDATE cimplrcorpsaas.auditactionsweepinitiation
+				SET processing_status = 'REJECTED',
+					checker_by = $1,
+					checker_at = now(),
+					checker_comment = $2
+				WHERE action_id = ANY($3)`
+		if _, err := tx.Exec(ctx, upd, checkerName, nullifyEmpty(comment), actionIDs); err != nil {
+			api.RespondWithResult(w, false, "failed to reject initiations: "+err.Error())
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to commit reject: "+err.Error())
+			return
+		}
+		committed = true
 
 		api.RespondWithPayload(w, true, "Initiations rejected successfully", map[string]interface{}{
 			"rejected_initiation_ids": rejectedIDs,
@@ -1164,12 +1266,13 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Notify with FULL initiation data for rich templates
 		capturedIDs := rejectedIDs
 		capturedUser := req.UserID
-		capturedComment := req.CheckerComment
-		payload := BuildSweepInitiationNotifPayload(context.Background(), pgxPool, capturedIDs, "REJECT", capturedUser)
+		capturedComment := comment
+		notifyCtx := context.WithoutCancel(ctx)
+		payload := BuildSweepInitiationNotifPayload(notifyCtx, pgxPool, capturedIDs, "REJECT", capturedUser)
 		payloadMap := payload.ToMap()
 		payloadMap["CheckerComment"] = capturedComment
 		go catalog.TriggerNotification(
-			context.Background(), pgxPool,
+			notifyCtx, pgxPool,
 			"/cash/sweep-initiation/bulk-reject",
 			fmt.Sprintf("SWEEPINIT_REJECT/%s/%d", capturedUser, time.Now().UnixMilli()),
 			payloadMap,
@@ -1177,13 +1280,14 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// BulkDeleteSweepInitiations deletes sweep initiations (hard delete from both tables)
+// BulkDeleteSweepInitiations creates delete requests for sweep initiations.
 func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
 			UserID        string   `json:"user_id"`
 			InitiationIDs []string `json:"initiation_ids"`
+			Reason        string   `json:"reason,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1197,42 +1301,73 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Validate session
-		valid := false
+		requestedBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				valid = true
+				requestedBy = s.Name
 				break
 			}
 		}
-		if !valid {
+		if requestedBy == "" {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
-		// Delete from audit table first (FK constraint)
-		_, err := pgxPool.Exec(ctx, `DELETE FROM cimplrcorpsaas.auditactionsweepinitiation WHERE initiation_id = ANY($1)`, req.InitiationIDs)
+		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to delete audit entries: "+err.Error())
+			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
 			return
 		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
 
-		// Delete from sweep_initiation
-		_, err = pgxPool.Exec(ctx, `DELETE FROM cimplrcorpsaas.sweep_initiation WHERE initiation_id = ANY($1)`, req.InitiationIDs)
-		if err != nil {
-			api.RespondWithResult(w, false, "failed to delete initiations: "+err.Error())
+		for _, id := range req.InitiationIDs {
+			var latestActionType, latestStatus string
+			latestErr := tx.QueryRow(ctx, `
+				SELECT actiontype, processing_status
+				FROM cimplrcorpsaas.auditactionsweepinitiation
+				WHERE initiation_id = $1
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, id).Scan(&latestActionType, &latestStatus)
+			if latestErr != nil {
+				api.RespondWithResult(w, false, "missing latest audit for initiation: "+id)
+				return
+			}
+			if latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+				api.RespondWithResult(w, false, "delete request already pending for initiation: "+id)
+				return
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO cimplrcorpsaas.auditactionsweepinitiation
+					(initiation_id, actiontype, processing_status, reason, requested_by, requested_at)
+				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())
+			`, id, nullifyEmpty(req.Reason), requestedBy); err != nil {
+				api.RespondWithResult(w, false, "failed to create delete request: "+err.Error())
+				return
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to commit delete request: "+err.Error())
 			return
 		}
+		committed = true
 
-		api.RespondWithPayload(w, true, "Initiations deleted successfully", map[string]interface{}{
+		api.RespondWithPayload(w, true, "Deletion submitted for approval", map[string]interface{}{
 			"deleted_initiation_ids": req.InitiationIDs,
 			"total_deleted":          len(req.InitiationIDs),
 		})
 		// Notify with FULL initiation data for rich templates
 		capturedIDs := req.InitiationIDs
 		capturedUser := req.UserID
-		payload := BuildSweepInitiationNotifPayload(context.Background(), pgxPool, capturedIDs, "DELETE", capturedUser)
+		notifyCtx := context.WithoutCancel(ctx)
+		payload := BuildSweepInitiationNotifPayload(notifyCtx, pgxPool, capturedIDs, "DELETE", capturedUser)
 		go catalog.TriggerNotification(
-			context.Background(), pgxPool,
+			notifyCtx, pgxPool,
 			"/cash/sweep-initiation/bulk-delete",
 			fmt.Sprintf("SWEEPINIT_DELETE/%s/%d", capturedUser, time.Now().UnixMilli()),
 			payload.ToMap(),
@@ -1607,9 +1742,10 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(createdInitiationIDs) > 0 {
-			payload := BuildSweepInitiationNotifPayload(context.Background(), pgxPool, createdInitiationIDs, "CREATE", capturedUser)
+			notifyCtx := context.WithoutCancel(ctx)
+			payload := BuildSweepInitiationNotifPayload(notifyCtx, pgxPool, createdInitiationIDs, "CREATE", capturedUser)
 			go catalog.TriggerNotification(
-				context.Background(), pgxPool,
+				notifyCtx, pgxPool,
 				"/cash/sweep-initiation/bulk-create",
 				fmt.Sprintf("SWEEPINIT_CREATE/%s/%d", capturedUser, time.Now().UnixMilli()),
 				payload.ToMap(),
@@ -1705,14 +1841,14 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT actiontype, processing_status, requested_by, checker_by, checker_comment
 				FROM cimplrcorpsaas.auditactionsweepinitiation
 				WHERE initiation_id = i.initiation_id
-				ORDER BY requested_at DESC
+				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) a ON true
 			LEFT JOIN LATERAL (
 				SELECT processing_status, requested_by, checker_by, requested_at, checker_at
 				FROM cimplrcorpsaas.auditactionsweepconfiguration
 				WHERE sweep_id = c.sweep_id
-				ORDER BY requested_at DESC
+				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) sca ON true
 			WHERE COALESCE(c.is_deleted, false) = false
@@ -1865,9 +2001,13 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			initiations = append(initiations, initiation)
 		}
 
-		api.RespondWithPayload(w, true, "Initiations with joined data retrieved successfully", map[string]interface{}{
-			"initiations": initiations,
-			"total":       len(initiations),
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"initiations": initiations,
+				"total":       len(initiations),
+			},
 		})
 	}
 }
@@ -2405,11 +2545,12 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		capturedInitID := req.InitiationID
 		capturedUser := req.UserID
 		capturedReason := req.Reason
-		payload := BuildSweepInitiationNotifPayload(context.Background(), pgxPool, []string{capturedInitID}, "UPDATE", capturedUser)
+		notifyCtx := context.WithoutCancel(ctx)
+		payload := BuildSweepInitiationNotifPayload(notifyCtx, pgxPool, []string{capturedInitID}, "UPDATE", capturedUser)
 		payloadMap := payload.ToMap()
 		payloadMap["Reason"] = capturedReason
 		go catalog.TriggerNotification(
-			context.Background(), pgxPool,
+			notifyCtx, pgxPool,
 			"/cash/sweep-initiation/update",
 			fmt.Sprintf("SWEEPINIT_UPDATE/%s/%d", capturedInitID, time.Now().UnixMilli()),
 			payloadMap,

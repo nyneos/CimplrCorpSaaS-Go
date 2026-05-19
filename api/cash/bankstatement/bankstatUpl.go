@@ -4,7 +4,6 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/notification/catalog"
-	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -415,7 +414,7 @@ func GetBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				b.bank_name
 			FROM bank_statement s
 			LEFT JOIN LATERAL (
-				SELECT reason FROM auditactionbankstatement ab WHERE ab.bankstatementid = s.bankstatementid ORDER BY requested_at DESC LIMIT 1
+				SELECT reason FROM auditactionbankstatement ab WHERE ab.bankstatementid = s.bankstatementid ORDER BY requested_at DESC, action_id DESC LIMIT 1
 			) la ON TRUE
 			JOIN masterbankaccount mba ON s.account_number = mba.account_number
 			JOIN masterentity e ON mba.entity_id = e.entity_id
@@ -756,7 +755,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 			}
 		}()
-		sel := `SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, actiontype, processing_status FROM auditactionbankstatement WHERE bankstatementid = ANY($1) ORDER BY bankstatementid, requested_at DESC`
+		sel := `SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, actiontype, processing_status FROM auditactionbankstatement WHERE bankstatementid = ANY($1) ORDER BY bankstatementid, requested_at DESC, action_id DESC`
 		rows, err := tx.Query(ctx, sel, req.BankStatementIDs)
 		if err != nil {
 			api.RespondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
@@ -776,7 +775,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			found[bid] = true
 			actionIDs = append(actionIDs, aid)
 			actionTypeBy[bid] = atype
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(pstatus)) == "APPROVED" || strings.ToUpper(strings.TrimSpace(pstatus)) == "REJECTED" {
 				cannotApprove = append(cannotApprove, bid)
 			}
 		}
@@ -805,13 +804,13 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer urows.Close()
 		updated := []map[string]interface{}{}
-		deleteIDs := make([]string, 0)
+		deleteActionIDs := make([]string, 0)
 		for urows.Next() {
 			var aid, bid, atype string
 			if err := urows.Scan(&aid, &bid, &atype); err == nil {
 				updated = append(updated, map[string]interface{}{"action_id": aid, "bankstatementid": bid, "action_type": atype})
 				if strings.ToUpper(strings.TrimSpace(atype)) == "DELETE" {
-					deleteIDs = append(deleteIDs, bid)
+					deleteActionIDs = append(deleteActionIDs, aid)
 				}
 			}
 		}
@@ -819,9 +818,18 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithPayload(w, false, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)), nil)
 			return
 		}
-		if len(deleteIDs) > 0 {
-			sd := `UPDATE bank_statement SET is_deleted = true WHERE bankstatementid = ANY($1)`
-			if _, err := tx.Exec(ctx, sd, deleteIDs); err != nil {
+		if len(deleteActionIDs) > 0 {
+			sd := `
+				UPDATE bank_statement bs
+				SET is_deleted = true,
+					deleted_at = now(),
+					deleted_by = aa.requested_by
+				FROM auditactionbankstatement aa
+				WHERE aa.action_id = ANY($1)
+				  AND aa.actiontype = 'DELETE'
+				  AND aa.bankstatementid = bs.bankstatementid
+			`
+			if _, err := tx.Exec(ctx, sd, deleteActionIDs); err != nil {
 				api.RespondWithPayload(w, false, "failed to soft-delete bank_statement rows: "+err.Error(), nil)
 				return
 			}
@@ -840,7 +848,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if pool == nil {
 				return
 			}
-			nctx := context.Background()
+			nctx := r.Context()
 			for _, row := range notifRows {
 				bid, _ := row["bankstatementid"].(string)
 				atype, _ := row["action_type"].(string)
@@ -899,7 +907,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 			}
 		}()
-		sel := `SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, processing_status FROM auditactionbankstatement WHERE bankstatementid = ANY($1) ORDER BY bankstatementid, requested_at DESC`
+		sel := `SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, processing_status FROM auditactionbankstatement WHERE bankstatementid = ANY($1) ORDER BY bankstatementid, requested_at DESC, action_id DESC`
 		rows, err := tx.Query(ctx, sel, req.IDs)
 		if err != nil {
 			api.RespondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
@@ -917,7 +925,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			found[bid] = true
 			actionIDs = append(actionIDs, aid)
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(pstatus)) == "APPROVED" || strings.ToUpper(strings.TrimSpace(pstatus)) == "REJECTED" {
 				cannotReject = append(cannotReject, bid)
 			}
 		}
@@ -973,7 +981,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if pool == nil || len(rejectedIDs) == 0 {
 				return
 			}
-			nctx := context.Background()
+			nctx := r.Context()
 			payload := BuildBankStatementNotifPayload(nctx, pool, rejectedIDs, "REJECT", uID)
 			payload["Comment"] = comment
 			catalog.TriggerNotification(nctx, pool, "/cash/bank-statements/v2/reject",
@@ -987,9 +995,10 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string   `json:"user_id"`
-			IDs    []string `json:"bankstatement_ids"`
-			Reason string   `json:"reason"`
+			UserID  string   `json:"user_id"`
+			IDs     []string `json:"bankstatement_ids"`
+			Reason  string   `json:"reason"`
+			Comment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
@@ -1030,7 +1039,25 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithPayload(w, false, "empty bankstatement id provided", nil)
 				return
 			}
-			if _, err := tx.Exec(ctx, q, id, req.Reason, requestedBy); err != nil {
+			var latestActionType, latestStatus string
+			latestErr := tx.QueryRow(ctx, `
+				SELECT actiontype, processing_status
+				FROM auditactionbankstatement
+				WHERE bankstatementid = $1
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, id).Scan(&latestActionType, &latestStatus)
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+				tx.Rollback(ctx)
+				api.RespondWithPayload(w, false, "delete request already pending for bankstatement_id: "+id, nil)
+				return
+			}
+			deleteReason := req.Reason
+			if strings.TrimSpace(deleteReason) == "" {
+				deleteReason = req.Comment
+			}
+			if _, err := tx.Exec(ctx, q, id, deleteReason, requestedBy); err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithPayload(w, false, err.Error(), nil)
 				return
@@ -1103,10 +1130,11 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status, requested_by, requested_at, checker_by, checker_at ,reason
 				FROM auditactionbankstatement ab
 				WHERE ab.bankstatementid = s.bankstatementid
-				ORDER BY requested_at DESC
+				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) a ON TRUE
-			
+			WHERE COALESCE(s.is_deleted, false) = false
+			  AND COALESCE(bs.is_deleted, false) = false
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -1443,7 +1471,13 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"bank_statements": out,
+			},
+		})
 	}
 }
 

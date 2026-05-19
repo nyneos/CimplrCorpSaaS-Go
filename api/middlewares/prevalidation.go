@@ -10,13 +10,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 
 	"net/http"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -156,53 +156,53 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				folios, _ := loadApprovedFolios(ctx, db)
 				demats, _ := loadApprovedDemats(ctx, db)
 
-				// log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
-				// log.Printf("User ID: %s\n", userID)
-				// log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
-				// log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
+				// logger.LogInfo("\n========== PREVALIDATION DEBUG ==========\n")
+				// logger.LogInfo("User ID: %s\n", userID)
+				// logger.LogInfo("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
+				// logger.LogInfo("\nEntity Hierarchy (%d entities):\n", len(entityNames))
 				// for i, name := range entityNames {
-				// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
+				// 	logger.LogInfo("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
 				// }
-				// log.Printf("\nApproved AMCs (%d):\n", len(amcs))
+				// logger.LogInfo("\nApproved AMCs (%d):\n", len(amcs))
 				// for i, amc := range amcs {
 				// 	if i < 5 || i >= len(amcs)-2 {
-				// 		log.Printf("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
+				// 		logger.LogInfo("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
 				// 	} else if i == 5 {
-				// 		log.Printf(constants.FormatLogMore, len(amcs)-7)
+				// 		logger.LogInfo(constants.FormatLogMore, len(amcs)-7)
 				// 	}
 				// }
-				// log.Printf("\nApproved Schemes (%d):\n", len(schemes))
+				// logger.LogInfo("\nApproved Schemes (%d):\n", len(schemes))
 				// if len(schemes) > 0 {
-				// 	log.Printf("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
+				// 	logger.LogInfo("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
 				// 	if len(schemes) > 1 {
-				// 		log.Printf(constants.FormatLogMore, len(schemes)-1)
+				// 		logger.LogInfo(constants.FormatLogMore, len(schemes)-1)
 				// 	}
 				// }
-				// log.Printf("\nApproved DPs (%d):\n", len(dps))
+				// logger.LogInfo("\nApproved DPs (%d):\n", len(dps))
 				// for i, dp := range dps {
-				// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
+				// 	logger.LogInfo("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
 				// }
-				// log.Printf("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
+				// logger.LogInfo("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
 				// for i, acc := range bankAccounts {
-				// 	log.Printf("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
+				// 	logger.LogInfo("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
 				// 		i+1, acc["account_id"], acc["account_number"], acc["account_name"], acc["bank_name"], acc["entity_name"])
 				// }
-				// log.Printf("\nApproved Folios (%d):\n", len(folios))
+				// logger.LogInfo("\nApproved Folios (%d):\n", len(folios))
 				// for i, f := range folios {
 				// 	if i < 5 || i >= len(folios)-2 {
-				// 		log.Printf("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
+				// 		logger.LogInfo("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
 				// 	} else if i == 5 {
-				// 		log.Printf(constants.FormatLogMore, len(folios)-7)
+				// 		logger.LogInfo(constants.FormatLogMore, len(folios)-7)
 				// 	}
 				// }
-				// log.Printf("\nApproved Demats (%d):\n", len(demats))
+				// logger.LogInfo("\nApproved Demats (%d):\n", len(demats))
 				// for i, d := range demats {
-				// 	log.Printf("  [%d] %s (ID: %s, DP: %s)\n", i+1, d["demat_account_number"], d["demat_id"], d["dp_id"])
+				// 	logger.LogInfo("  [%d] %s (ID: %s, DP: %s)\n", i+1, d["demat_account_number"], d["demat_id"], d["dp_id"])
 				// 	if i >= 20 {
 				// 		break
 				// 	}
 				// }
-				// log.Printf("=========================================\n\n")
+				// logger.LogInfo("=========================================\n\n")
 
 				ctx = context.WithValue(ctx, "BankInfo", banks)
 				ctx = context.WithValue(ctx, "ActiveCurrencies", currencies)
@@ -214,53 +214,53 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				ctx = context.WithValue(ctx, "ApprovedFolios", folios)
 				ctx = context.WithValue(ctx, "ApprovedDemats", demats)
 			}
-			// log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
-			// log.Printf("User ID: %s\n", userID)
-			// log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
-			// log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
+			// logger.LogInfo("\n========== PREVALIDATION DEBUG ==========\n")
+			// logger.LogInfo("User ID: %s\n", userID)
+			// logger.LogInfo("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
+			// logger.LogInfo("\nEntity Hierarchy (%d entities):\n", len(entityNames))
 			// for i, name := range entityNames {
-			// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
+			// 	logger.LogInfo("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
 			// }
-			// log.Printf("\nApproved AMCs (%d):\n", len(amcs))
+			// logger.LogInfo("\nApproved AMCs (%d):\n", len(amcs))
 			// for i, amc := range amcs {
 			// 	if i < 5 || i >= len(amcs)-2 {
-			// 		log.Printf("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
+			// 		logger.LogInfo("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
 			// 	} else if i == 5 {
-			// 		log.Printf(constants.FormatLogMore, len(amcs)-7)
+			// 		logger.LogInfo(constants.FormatLogMore, len(amcs)-7)
 			// 	}
 			// }
-			// log.Printf("\nApproved Schemes (%d):\n", len(schemes))
+			// logger.LogInfo("\nApproved Schemes (%d):\n", len(schemes))
 			// if len(schemes) > 0 {
-			// 	log.Printf("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
+			// 	logger.LogInfo("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
 			// 	if len(schemes) > 1 {
-			// 		log.Printf(constants.FormatLogMore, len(schemes)-1)
+			// 		logger.LogInfo(constants.FormatLogMore, len(schemes)-1)
 			// 	}
 			// }
-			// log.Printf("\nApproved DPs (%d):\n", len(dps))
+			// logger.LogInfo("\nApproved DPs (%d):\n", len(dps))
 			// for i, dp := range dps {
-			// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
+			// 	logger.LogInfo("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
 			// }
-			// log.Printf("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
+			// logger.LogInfo("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
 			// for i, acc := range bankAccounts {
-			// 	log.Printf("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
+			// 	logger.LogInfo("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
 			// 		i+1, acc["account_id"], acc["account_number"], acc["account_name"], acc["bank_name"], acc["entity_name"])
 			// }
-			// log.Printf("\nApproved Folios (%d):\n", len(folios))
+			// logger.LogInfo("\nApproved Folios (%d):\n", len(folios))
 			// for i, f := range folios {
 			// 	if i < 5 || i >= len(folios)-2 {
-			// 		log.Printf("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
+			// 		logger.LogInfo("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
 			// 	} else if i == 5 {
-			// 		log.Printf(constants.FormatLogMore, len(folios)-7)
+			// 		logger.LogInfo(constants.FormatLogMore, len(folios)-7)
 			// 	}
 			// }
-			// log.Printf("\nApproved Demats (%d):\n", len(demats))
+			// logger.LogInfo("\nApproved Demats (%d):\n", len(demats))
 			// for i, d := range demats {
-			// 	log.Printf("  [%d] %s (ID: %s, DP: %s)\n", i+1, d["demat_account_number"], d["demat_id"], d["dp_id"])
+			// 	logger.LogInfo("  [%d] %s (ID: %s, DP: %s)\n", i+1, d["demat_account_number"], d["demat_id"], d["dp_id"])
 			// 	if i >= 20 {
 			// 		break
 			// 	}
 			// }
-			// log.Printf("=========================================\n\n")
+			// logger.LogInfo("=========================================\n\n")
 
 			ctx = context.WithValue(ctx, "user_id", userID)
 			ctx = context.WithValue(ctx, "session", session)
@@ -288,7 +288,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 					}
 				}
 			}
-			log.Printf("[PREVALIDATION CONTEXT] user=%s entities=%v banks=%v accounts_count=%d currencies=%v is_admin_override=%v admin_override_by=%v\n",
+			logger.LogError("[PREVALIDATION CONTEXT] user=%s entities=%v banks=%v accounts_count=%d currencies=%v is_admin_override=%v admin_override_by=%v\n",
 				userID,
 				entityIDsDump,
 				bankNamesDump,

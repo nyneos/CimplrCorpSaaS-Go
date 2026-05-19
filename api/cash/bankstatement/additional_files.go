@@ -11,6 +11,7 @@ import (
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -34,16 +35,36 @@ func DeleteAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, bankStatementAdditionalFilesConfig())
 }
 
+func AuditAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, bankStatementAdditionalFilesConfig())
+}
+
+func ApproveAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, bankStatementAdditionalFilesConfig())
+}
+
+func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, bankStatementAdditionalFilesConfig())
+}
+
 func bankStatementAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:        "bankstatement",
-		ParentIDField: "bank_statement_id",
-		List:          listBankStatementAdditionalFiles,
-		Create:        createBankStatementAdditionalFile,
-		GetOne:        getBankStatementAdditionalFile,
-		GetMany:       getBankStatementAdditionalFiles,
-		SoftDelete:    deleteBankStatementAdditionalFile,
+		Module:                "bankstatement",
+		AuditSource:           "BANK_STATEMENT",
+		ParentIDField:         "bank_statement_id",
+		List:                  listBankStatementAdditionalFiles,
+		CreateReturning:       createBankStatementAdditionalFile,
+		GetOne:                getBankStatementAdditionalFile,
+		GetAnyFile:            getAnyBankStatementAdditionalFile,
+		GetMany:               getBankStatementAdditionalFiles,
+		SoftDelete:            deleteBankStatementAdditionalFile,
+		SoftDeleteTx:          deleteBankStatementAdditionalFileTx,
+		RecordMainUploadAudit: recordBankStatementMainUploadAudit,
 	}
+}
+
+func recordBankStatementMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainUploadAudit(ctx, tx, "cimplrcorpsaas.auditactionbankstatement", "bankstatementid", "actiontype", parentID, payload)
 }
 
 func listBankStatementAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
@@ -63,13 +84,13 @@ func listBankStatementAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, p
 	`, parentID, entityIDs)
 }
 
-func createBankStatementAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
+func createBankStatementAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
 	entityIDs := api.GetEntityIDsFromCtx(ctx)
 	if len(entityIDs) == 0 {
-		return errors.New("no accessible business units found")
+		return "", errors.New("no accessible business units found")
 	}
 
-	return additionalfiles.InsertAdditionalFileRow(
+	return additionalfiles.InsertAdditionalFileRowReturningID(
 		ctx,
 		tx,
 		"cimplrcorpsaas.bank_statement_files",
@@ -85,9 +106,22 @@ func createBankStatementAdditionalFile(ctx context.Context, tx pgx.Tx, input add
 }
 
 func getBankStatementAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getBankStatementAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnyBankStatementAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getBankStatementAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getBankStatementAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
 	entityIDs := api.GetEntityIDsFromCtx(ctx)
 	if len(entityIDs) == 0 {
 		return nil, errors.New("no accessible business units found")
+	}
+
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
 	}
 
 	return additionalfiles.FirstFile(ctx, pool, `
@@ -96,7 +130,7 @@ func getBankStatementAdditionalFile(ctx context.Context, pool *pgxpool.Pool, par
 		JOIN cimplrcorpsaas.bank_statements s ON s.bank_statement_id = f.bank_statement_id
 		WHERE f.bank_statement_id = $1
 		  AND f.file_id = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  `+deletedClause+`
 		  AND s.entity_id = ANY($3)
 	`, parentID, fileID, entityIDs)
 }
@@ -126,12 +160,24 @@ func getBankStatementAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, pa
 }
 
 func deleteBankStatementAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteBankStatementAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteBankStatementAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteBankStatementAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+type bankStatementFileExec interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+}
+
+func deleteBankStatementAdditionalFileExec(ctx context.Context, exec bankStatementFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	entityIDs := api.GetEntityIDsFromCtx(ctx)
 	if len(entityIDs) == 0 {
 		return false, errors.New("no accessible business units found")
 	}
 
-	result, err := pool.Exec(ctx, `
+	result, err := exec.Exec(ctx, `
 		UPDATE cimplrcorpsaas.bank_statement_files f
 		SET is_deleted = TRUE,
 		    deleted_by = $3,

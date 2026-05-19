@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -104,10 +103,10 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 	currentMinute := now.Minute()
 	today := now.Format(constants.DateFormat)
 
-	log.Printf(constants.LogSweepWorker)
-	log.Printf("[SWEEP V2] Starting scheduled sweep processing at %s", now.Format(constants.DateTimeFormat))
-	log.Printf("[SWEEP V2] Current time: %02d:%02d | Batch size: %d", currentHour, currentMinute, batchSize)
-	log.Printf(constants.LogSweepWorker)
+	logger.LogInfo(constants.LogSweepWorker)
+	logger.LogInfo("[SWEEP V2] Starting scheduled sweep processing at %s", now.Format(constants.DateTimeFormat))
+	logger.LogInfo("[SWEEP V2] Current time: %02d:%02d | Batch size: %d", currentHour, currentMinute, batchSize)
+	logger.LogInfo(constants.LogSweepWorker)
 
 	// Step 1: Find approved sweeps that are due for execution
 	query := `
@@ -143,7 +142,7 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 		AND EXTRACT(MINUTE FROM sc.execution_time) BETWEEN $3 AND $4
 	`
 
-	log.Printf("[SWEEP V2]  Querying for sweeps at %02d:%02d (today=%s)", currentHour, currentMinute, today)
+	logger.LogInfo("[SWEEP V2]  Querying for sweeps at %02d:%02d (today=%s)", currentHour, currentMinute, today)
 	rows, err := db.Query(ctx, query, today, currentHour, currentMinute, currentMinute+1)
 	if err != nil {
 		return fmt.Errorf("unable to fetch approved V2 sweeps: %v", err)
@@ -161,7 +160,7 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 			&s.requiresInitiation, &s.requestedAt, &s.sourceBalance, &s.targetBalance,
 		)
 		if err != nil {
-			log.Printf("[SWEEP V2] Error scanning sweep row: %v", err)
+			logger.LogError("[SWEEP V2] Error scanning sweep row: %v", err)
 			continue
 		}
 
@@ -176,14 +175,14 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 	}
 
 	if len(sweeps) == 0 {
-		log.Printf("[SWEEP V2]  No approved sweeps found for execution at %s", now.Format("15:04:05"))
-		log.Printf("[SWEEP V2] Query parameters: hour=%d, minute=%d-%d", currentHour, currentMinute, currentMinute+1)
+		logger.LogInfo("[SWEEP V2]  No approved sweeps found for execution at %s", now.Format("15:04:05"))
+		logger.LogInfo("[SWEEP V2] Query parameters: hour=%d, minute=%d-%d", currentHour, currentMinute, currentMinute+1)
 		return nil
 	}
 
-	log.Printf("[SWEEP V2]  Found %d sweeps ready for processing", len(sweeps))
+	logger.LogInfo("[SWEEP V2]  Found %d sweeps ready for processing", len(sweeps))
 	for i, s := range sweeps {
-		log.Printf("[SWEEP V2]   [%d] ID=%s Type=%s Freq=%s Source=%s Target=%s RequiresInitiation=%v",
+		logger.LogInfo("[SWEEP V2]   [%d] ID=%s Type=%s Freq=%s Source=%s Target=%s RequiresInitiation=%v",
 			i+1, s.sweepID, s.sweepType, s.frequency, s.sourceAccount, s.targetAccount, s.requiresInitiation)
 	}
 
@@ -206,7 +205,7 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 			// Frequency validation (DAILY, MONTHLY, SPECIFIC_DATE)
 			shouldExecute, err := shouldExecuteSweepV2ByFrequency(sweep.frequency, sweep.effectiveDate, sweep.requestedAt, now)
 			if err != nil {
-				log.Printf("[SWEEP V2] %s - Error checking frequency: %v", sweep.sweepID, err)
+				logger.LogError("[SWEEP V2] %s - Error checking frequency: %v", sweep.sweepID, err)
 				mu.Lock()
 				failCount++
 				mu.Unlock()
@@ -214,7 +213,7 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 			}
 
 			if !shouldExecute {
-				log.Printf("[SWEEP V2] %s - Skipped: Frequency check failed (%s)", sweep.sweepID, sweep.frequency)
+				logger.LogError("[SWEEP V2] %s - Skipped: Frequency check failed (%s)", sweep.sweepID, sweep.frequency)
 				return
 			}
 
@@ -222,7 +221,7 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 			// Create initiation with auto-approval for scheduled sweeps
 			err = createScheduledInitiation(ctx, db, sweep.sweepID)
 			if err != nil {
-				log.Printf("[SWEEP V2] %s - Failed to create scheduled initiation: %v", sweep.sweepID, err)
+				logger.LogError("[SWEEP V2] %s - Failed to create scheduled initiation: %v", sweep.sweepID, err)
 				mu.Lock()
 				failCount++
 				mu.Unlock()
@@ -231,7 +230,7 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 			mu.Lock()
 			initiationCreatedCount++
 			mu.Unlock()
-			log.Printf("[SWEEP V2] %s - Scheduled initiation created and auto-approved", sweep.sweepID)
+			logger.LogInfo("[SWEEP V2] %s - Scheduled initiation created and auto-approved", sweep.sweepID)
 			// Sweep will be executed by ProcessPendingInitiations when initiation status becomes INITIATED
 		}(s)
 	}
@@ -241,14 +240,14 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 	// Step 3: Process pending initiations (status='INITIATED')
 	initiationsProcessed, initiationsFailed := ProcessPendingInitiations(ctx, db, batchSize)
 
-	log.Printf(constants.LogSweepWorker)
-	log.Printf("[SWEEP V2]  PROCESSING SUMMARY:")
-	log.Printf("[SWEEP V2]    Direct Executions: %d", successCount)
-	log.Printf("[SWEEP V2]    Failed: %d", failCount)
-	log.Printf("[SWEEP V2]    Initiations Created: %d", initiationCreatedCount)
-	log.Printf("[SWEEP V2]    Initiations Processed: %d", initiationsProcessed)
-	log.Printf("[SWEEP V2]    Initiations Failed: %d", initiationsFailed)
-	log.Printf(constants.LogSweepWorker)
+	logger.LogInfo(constants.LogSweepWorker)
+	logger.LogInfo("[SWEEP V2]  PROCESSING SUMMARY:")
+	logger.LogInfo("[SWEEP V2]    Direct Executions: %d", successCount)
+	logger.LogError("[SWEEP V2]    Failed: %d", failCount)
+	logger.LogInfo("[SWEEP V2]    Initiations Created: %d", initiationCreatedCount)
+	logger.LogInfo("[SWEEP V2]    Initiations Processed: %d", initiationsProcessed)
+	logger.LogError("[SWEEP V2]    Initiations Failed: %d", initiationsFailed)
+	logger.LogInfo(constants.LogSweepWorker)
 
 	return nil
 }
@@ -391,10 +390,10 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 		ORDER BY i.initiation_time ASC
 	`
 
-	log.Printf("[SWEEP V2]  Checking for approved initiations (processing_status=APPROVED)...")
+	logger.LogInfo("[SWEEP V2]  Checking for approved initiations (processing_status=APPROVED)...")
 	rows, err := db.Query(ctx, query)
 	if err != nil {
-		log.Printf("[SWEEP V2] Failed to fetch approved initiations: %v", err)
+		logger.LogError("[SWEEP V2] Failed to fetch approved initiations: %v", err)
 		return 0, 0
 	}
 	defer rows.Close()
@@ -413,11 +412,11 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 			&overriddenSourceAccount, &overriddenTargetAccount,
 			&configSourceAccount, &configTargetAccount, &sweepType, &bufferAmount, &sweepAmount)
 		if err != nil {
-			log.Printf("[SWEEP V2] Failed to scan initiation row: %v", err)
+			logger.LogError("[SWEEP V2] Failed to scan initiation row: %v", err)
 			continue
 		}
 
-		log.Printf("[SWEEP V2] 📝 Processing initiation [%d]: %s (sweep: %s)", initiationCount, initiationID, sweepID)
+		logger.LogInfo("[SWEEP V2] 📝 Processing initiation [%d]: %s (sweep: %s)", initiationCount, initiationID, sweepID)
 
 		// Determine final source and target accounts
 		finalSourceAccount := configSourceAccount
@@ -444,7 +443,7 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 		err = executeSweepWithInitiation(ctx, db, params)
 
 		if err != nil {
-			log.Printf("[SWEEP V2] %s (initiation: %s) - Execution failed: %v", sweepID, initiationID, err)
+			logger.LogInfo("[SWEEP V2] %s (initiation: %s) - Execution failed: %v", sweepID, initiationID, err)
 
 			// Ensure failure is persisted to sweep_execution_log. Some error paths
 			// inside executeSweepWithInitiation may return without calling
@@ -465,13 +464,13 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 
 			failCount++
 		} else {
-			log.Printf("[SWEEP V2] %s (initiation: %s) - Execution successful", sweepID, initiationID)
+			logger.LogInfo("[SWEEP V2] %s (initiation: %s) - Execution successful", sweepID, initiationID)
 			successCount++
 		}
 	}
 
 	if initiationCount > 0 {
-		log.Printf("[SWEEP V2] Processed %d initiations: %d succeeded, %d failed", initiationCount, successCount, failCount)
+		logger.LogError("[SWEEP V2] Processed %d initiations: %d succeeded, %d failed", initiationCount, successCount, failCount)
 	}
 
 	return successCount, failCount
@@ -719,7 +718,7 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 		return errors.New(errMsg)
 	}
 
-	log.Printf("[SWEEP V2] %s  SUCCESS | Type: %s | Amount: %.2f | From: %s (%.2f → %.2f) | To: %s (%.2f → %.2f) | Buffer: %.2f",
+	logger.LogInfo("[SWEEP V2] %s  SUCCESS | Type: %s | Amount: %.2f | From: %s (%.2f → %.2f) | To: %s (%.2f → %.2f) | Buffer: %.2f",
 		sweep.sweepID, sweep.sweepType, sweepAmountFinal, sweep.sourceAccount, currentBalance, newBalance,
 		sweep.targetAccount, sweep.targetBalance, targetNewBalance, buffer)
 
@@ -743,9 +742,9 @@ func logSweepFailure(ctx context.Context, db *pgxpool.Pool, info SweepFailureInf
 		info.Reason,
 	)
 	if err != nil {
-		log.Printf("[SWEEP V2] Failed to log sweep failure: %v", err)
+		logger.LogError("[SWEEP V2] Failed to log sweep failure: %v", err)
 	}
-	log.Printf("[SWEEP V2] %s  FAILED | Reason: %s", info.Params.SweepID, info.Reason)
+	logger.LogError("[SWEEP V2] %s  FAILED | Reason: %s", info.Params.SweepID, info.Reason)
 }
 
 // executeSweepWithInitiation executes a sweep with initiation context (similar to executeSweepV2WithInitiation in sweepExecutorV2.go)
@@ -1081,7 +1080,7 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params Sw
 		return errors.New(errMsg)
 	}
 
-	log.Printf("[SWEEP V2] %s SUCCESS (Initiation: %s) | Type: %s | Amount: %.2f | Buffer: %.2f",
+	logger.LogInfo("[SWEEP V2] %s SUCCESS (Initiation: %s) | Type: %s | Amount: %.2f | Buffer: %.2f",
 		sweepID, initiationID, sweepType, finalSweepAmount, buffer)
 
 	// Fire notification for successful sweep execution (fire-and-forget)

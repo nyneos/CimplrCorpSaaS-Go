@@ -37,6 +37,9 @@ func RegisterCounterpartyHubRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *s
 	mux.Handle("/master/v2/counterparty-hub/additional-files/download", pre(counterpartyHubMF.Download))
 	mux.Handle("/master/v2/counterparty-hub/additional-files/download-bulk", pre(counterpartyHubMF.DownloadBulk))
 	mux.Handle("/master/v2/counterparty-hub/additional-files/delete", pre(counterpartyHubMF.Delete))
+	mux.Handle("/master/v2/counterparty-hub/additional-files/audit", pre(counterpartyHubMF.Audit))
+	mux.Handle("/master/v2/counterparty-hub/additional-files/approve-delete", pre(counterpartyHubMF.ApproveDelete))
+	mux.Handle("/master/v2/counterparty-hub/additional-files/reject-delete", pre(counterpartyHubMF.RejectDelete))
 
 	// ── Per-type handlers below are superseded by the unified hub v2 routes ──
 	// They remain compiled but are not registered. Remove the comment prefix

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
@@ -16,7 +15,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/lib/pq"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 var rates = map[string]float64{
 	"USD": 1.0,
@@ -33,7 +33,7 @@ var rates = map[string]float64{
 }
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
+	logger.LogError("", errMsg)
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{

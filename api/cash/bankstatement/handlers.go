@@ -2,7 +2,9 @@ package bankstatement
 
 import (
 	apictx "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"archive/zip"
@@ -14,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -23,7 +24,40 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
+
+	"CimplrCorpSaas/internal/logger"
 )
+
+func auditActorDisplayName(ctx context.Context, userID string) string {
+	if session := middlewares.GetSessionFromContext(ctx); session != nil {
+		if name := strings.TrimSpace(session.Name); name != "" {
+			return name
+		}
+		if email := strings.TrimSpace(session.Email); email != "" {
+			return email
+		}
+		if id := strings.TrimSpace(session.UserID); id != "" {
+			return id
+		}
+	}
+
+	for _, session := range auth.GetActiveSessions() {
+		if session.UserID != userID {
+			continue
+		}
+		if name := strings.TrimSpace(session.Name); name != "" {
+			return name
+		}
+		if email := strings.TrimSpace(session.Email); email != "" {
+			return email
+		}
+		if id := strings.TrimSpace(session.UserID); id != "" {
+			return id
+		}
+	}
+
+	return strings.TrimSpace(userID)
+}
 
 // 1. Get all bank statements (POST, req: user_id)
 func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
@@ -66,6 +100,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 										LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 										LEFT JOIN latest_audit la ON la.bankstatementid = s.bank_statement_id
 										WHERE s.entity_id = ANY($1)
+										  AND COALESCE(s.is_deleted, false) = false
 										ORDER BY s.uploaded_at DESC
 						`, pq.Array(entityIDs))
 		if err != nil {
@@ -88,7 +123,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 				continue
 			}
 			isDeletePending := false
-			if actionType.String == "DELETE" && processingStatus.String == "DELETE_PENDING_APPROVAL" {
+			if actionType.String == "DELETE" && processingStatus.String == "PENDING_DELETE_APPROVAL" {
 				isDeletePending = true
 			}
 			resp = append(resp, map[string]interface{}{
@@ -308,6 +343,7 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
+			UserID          string `json:"user_id"`
 			BankStatementID string `json:"bank_statement_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
@@ -319,11 +355,15 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 
 		ctx := r.Context()
 		var uploadS3Key sql.NullString
+		var entityName sql.NullString
+		var auditFileID sql.NullString
 		err := db.QueryRowContext(ctx, `
-			SELECT upload_s3_key
-			FROM cimplrcorpsaas.bank_statements
-			WHERE bank_statement_id = $1
-		`, body.BankStatementID).Scan(&uploadS3Key)
+			SELECT s.upload_s3_key, COALESCE(e.entity_name, '') AS entity_name, p.id
+			FROM cimplrcorpsaas.bank_statements s
+			LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
+			LEFT JOIN cimplrcorpsaas.bank_pdf_uploads p ON p.storage_path = s.upload_s3_key
+			WHERE s.bank_statement_id = $1
+		`, body.BankStatementID).Scan(&uploadS3Key, &entityName, &auditFileID)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			if errors.Is(err, sql.ErrNoRows) {
@@ -351,6 +391,26 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 			return
 		}
 
+		requestedBy := requestedByFromCtx(ctx, strings.TrimSpace(body.UserID))
+		if requestedBy == "" {
+			requestedBy = strings.TrimSpace(body.UserID)
+		}
+		if requestedBy != "" {
+			auditFileID.String = strings.TrimSpace(auditFileID.String)
+			auditFileID.Valid = auditFileID.String != ""
+			if err := insertDownloadAudit(
+				ctx,
+				db,
+				auditFileID,
+				sql.NullString{String: strings.TrimSpace(body.BankStatementID), Valid: strings.TrimSpace(body.BankStatementID) != ""},
+				requestedBy,
+				r.RemoteAddr,
+				entityName,
+			); err != nil {
+				logger.LogError("failed to insert bank statement download audit for %s: %v", body.BankStatementID, err)
+			}
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
@@ -364,6 +424,7 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
+			UserID           string   `json:"user_id"`
 			BankStatementIDs []string `json:"bank_statement_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.BankStatementIDs) == 0 {
@@ -384,11 +445,15 @@ func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 			}
 
 			var uploadS3Key sql.NullString
+			var entityName sql.NullString
+			var auditFileID sql.NullString
 			err := db.QueryRowContext(ctx, `
-				SELECT upload_s3_key
-				FROM cimplrcorpsaas.bank_statements
-				WHERE bank_statement_id = $1
-			`, bankStatementID).Scan(&uploadS3Key)
+				SELECT s.upload_s3_key, COALESCE(e.entity_name, '') AS entity_name, p.id
+				FROM cimplrcorpsaas.bank_statements s
+				LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
+				LEFT JOIN cimplrcorpsaas.bank_pdf_uploads p ON p.storage_path = s.upload_s3_key
+				WHERE s.bank_statement_id = $1
+			`, bankStatementID).Scan(&uploadS3Key, &entityName, &auditFileID)
 			if err != nil {
 				failedIDs = append(failedIDs, bankStatementID)
 				continue
@@ -404,6 +469,26 @@ func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 			if err != nil {
 				failedIDs = append(failedIDs, bankStatementID)
 				continue
+			}
+
+			requestedBy := requestedByFromCtx(ctx, strings.TrimSpace(body.UserID))
+			if requestedBy == "" {
+				requestedBy = strings.TrimSpace(body.UserID)
+			}
+			if requestedBy != "" {
+				auditFileID.String = strings.TrimSpace(auditFileID.String)
+				auditFileID.Valid = auditFileID.String != ""
+				if err := insertDownloadAudit(
+					ctx,
+					db,
+					auditFileID,
+					sql.NullString{String: strings.TrimSpace(bankStatementID), Valid: strings.TrimSpace(bankStatementID) != ""},
+					requestedBy,
+					r.RemoteAddr,
+					entityName,
+				); err != nil {
+					logger.LogError("failed to insert bank statement bulk download audit for %s: %v", bankStatementID, err)
+				}
 			}
 
 			files = append(files, map[string]string{
@@ -577,7 +662,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 					SET category_id = $1
 					WHERE transaction_id = $2
 				`, catParam, transactionID); err != nil {
-					log.Printf("failed to update category_id for transaction_id %d: %v", transactionID, err)
+					logger.LogError("failed to update category_id for transaction_id %d: %v", transactionID, err)
 				}
 			}
 
@@ -707,6 +792,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 		}
 		results := make([]map[string]interface{}, 0)
 		ctx := r.Context()
+		actorName := auditActorDisplayName(ctx, body.UserID)
 		for _, bsid := range body.BankStatementIDs {
 			var entityID string
 			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
@@ -725,7 +811,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 			err := db.QueryRowContext(ctx, `
 				       SELECT actiontype, processing_status FROM cimplrcorpsaas.auditactionbankstatement
 				       WHERE bankstatementid = $1
-				       ORDER BY action_id DESC LIMIT 1
+				       ORDER BY requested_at DESC, action_id DESC LIMIT 1
 			       `, bsid).Scan(&actionType, &processingStatus)
 			if err != nil {
 				results = append(results, map[string]interface{}{
@@ -735,7 +821,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				})
 				continue
 			}
-			if actionType == "DELETE" && processingStatus == "DELETE_PENDING_APPROVAL" {
+			if actionType == "DELETE" && processingStatus == "PENDING_DELETE_APPROVAL" {
 				tx, err := db.BeginTx(ctx, nil)
 				if err != nil {
 					results = append(results, map[string]interface{}{
@@ -746,53 +832,47 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					continue
 				}
 				defer tx.Rollback()
-				_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statement_transactions WHERE bank_statement_id = $1`, bsid)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				_, err = tx.Exec(`DELETE FROM public.bank_balances_manual WHERE balance_id = $1`, bsid)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				// Cleanup corresponding PDF upload metadata by checksum.
-				// bank_statements.file_hash stores the uploaded file hash; stream upload table
-				// stores it as bank_pdf_uploads.checksum_sha256.
+				// _, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statement_transactions WHERE bank_statement_id = $1`, bsid)
+				// _, err = tx.Exec(`DELETE FROM public.bank_balances_manual WHERE balance_id = $1`, bsid)
+				// _, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid)
 				_, err = tx.Exec(`
-					DELETE FROM cimplrcorpsaas.bank_pdf_uploads
-					WHERE checksum_sha256 IN (
-						SELECT file_hash
-						FROM cimplrcorpsaas.bank_statements
-						WHERE bank_statement_id = $1
+					UPDATE cimplrcorpsaas.auditactionbankstatement
+					SET processing_status = 'APPROVED',
+						checker_by = $2,
+						checker_at = now(),
+						checker_comment = $3
+					WHERE action_id = (
+						SELECT action_id
+						FROM cimplrcorpsaas.auditactionbankstatement
+						WHERE bankstatementid = $1
+						  AND actiontype = 'DELETE'
+						  AND processing_status = 'PENDING_DELETE_APPROVAL'
+						ORDER BY requested_at DESC, action_id DESC
+						LIMIT 1
 					)
+				`, bsid, actorName, body.Comment)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+				_, err = tx.Exec(`
+					UPDATE cimplrcorpsaas.bank_statements
+					SET is_deleted = TRUE,
+						deleted_at = now(),
+						deleted_by = (
+							SELECT requested_by
+							FROM cimplrcorpsaas.auditactionbankstatement
+							WHERE bankstatementid = $1
+							  AND actiontype = 'DELETE'
+							ORDER BY requested_at DESC, action_id DESC
+							LIMIT 1
+						)
+					WHERE bank_statement_id = $1
 				`, bsid)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "DELETE", "DELETED", body.UserID, time.Now(), body.Comment)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -812,7 +892,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
 					"success":           true,
-					"message":           "Bank statement and related data deleted after approval",
+					"message":           "Bank statement soft deleted after approval",
 				})
 			} else {
 				tx, err := db.BeginTx(ctx, nil)
@@ -953,20 +1033,24 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				// already reviewed and approved by the approver, so the derived balance
 				// does not need a separate approval cycle.
 				// Use WHERE NOT EXISTS to prevent duplicate audit rows if approval is called twice.
+				actionTime := time.Now()
 				_, err = tx.Exec(`
 				       INSERT INTO auditactionbankbalances (
-					       balance_id, actiontype, processing_status, requested_by, requested_at
+					       balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
 				       )
-				       SELECT $1, $2, $3, $4, $5
+				       SELECT $1, $2, $3, $4, $5, $6, $7, $8
 				       WHERE NOT EXISTS (
-				           SELECT 1 FROM auditactionbankbalances WHERE balance_id = $6
+				           SELECT 1 FROM auditactionbankbalances WHERE balance_id = $9
 				       )
 				       `,
 					bsid,
 					"CREATE",
 					"APPROVED",
-					body.UserID,
-					time.Now(),
+					actorName,
+					actionTime,
+					actorName,
+					actionTime,
+					body.Comment,
 					bsid,
 				)
 				if err != nil {
@@ -978,7 +1062,28 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					continue
 				}
 
-				_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "APPROVE", "APPROVED", body.UserID, time.Now(), body.Comment)
+				// _, err = tx.Exec(`INSERT INTO auditactionbankbalances (
+				//        balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
+				// ) SELECT $1, $2, $3, $4, $5, $6, $7, $8 WHERE NOT EXISTS (
+				//        SELECT 1 FROM auditactionbankbalances WHERE balance_id = $9 AND actiontype = 'APPROVE'
+				// )`, bsid, "APPROVE", "APPROVED", actorName, actionTime, actorName, actionTime, body.Comment, bsid)
+				// _, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, bsid, "APPROVE", "APPROVED", actorName, actionTime, actorName, actionTime, body.Comment)
+				_, err = tx.Exec(`
+					UPDATE cimplrcorpsaas.auditactionbankstatement
+					SET processing_status = 'APPROVED',
+						checker_by = $2,
+						checker_at = now(),
+						checker_comment = $3
+					WHERE action_id = (
+						SELECT action_id
+						FROM cimplrcorpsaas.auditactionbankstatement
+						WHERE bankstatementid = $1
+						  AND actiontype IN ('CREATE', 'EDIT')
+						  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL')
+						ORDER BY requested_at DESC, action_id DESC
+						LIMIT 1
+					)
+				`, bsid, actorName, body.Comment)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1014,9 +1119,16 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				})
 			}
 		}
+		overallSuccess := len(results) > 0
+		for _, result := range results {
+			if success, ok := result["success"].(bool); !ok || !success {
+				overallSuccess = false
+				break
+			}
+		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success": overallSuccess,
 			"results": results,
 		})
 	})
@@ -1040,6 +1152,7 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 		}
 		results := make([]map[string]interface{}, 0)
 		ctx := r.Context()
+		actorName := auditActorDisplayName(ctx, body.UserID)
 		for _, bsid := range body.BankStatementIDs {
 			var entityID string
 			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
@@ -1054,8 +1167,42 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 					}
 				}
 			}
-			_, err := db.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "REJECT", "REJECTED", body.UserID, time.Now(), body.Comment)
+			tx, err := db.BeginTx(ctx, nil)
 			if err != nil {
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           false,
+					"error":             err.Error(),
+				})
+				continue
+			}
+			defer tx.Rollback()
+			// _, err = db.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, bsid, "REJECT", "REJECTED", actorName, actionTime, actorName, actionTime, body.Comment)
+			_, err = tx.ExecContext(ctx, `
+				UPDATE cimplrcorpsaas.auditactionbankstatement
+				SET processing_status = 'REJECTED',
+					checker_by = $2,
+					checker_at = now(),
+					checker_comment = $3
+				WHERE action_id = (
+					SELECT action_id
+					FROM cimplrcorpsaas.auditactionbankstatement
+					WHERE bankstatementid = $1
+					  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+					  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+					ORDER BY requested_at DESC, action_id DESC
+					LIMIT 1
+				)
+			`, bsid, actorName, body.Comment)
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           false,
+					"error":             err.Error(),
+				})
+				continue
+			}
+			if err := tx.Commit(); err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
 					"success":           false,
@@ -1069,9 +1216,16 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 				"message":           "Bank statement rejected",
 			})
 		}
+		overallSuccess := len(results) > 0
+		for _, result := range results {
+			if success, ok := result["success"].(bool); !ok || !success {
+				overallSuccess = false
+				break
+			}
+		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success": overallSuccess,
 			"results": results,
 		})
 		if pgxPool != nil {
@@ -1101,6 +1255,7 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 			UserID           string   `json:"user_id"`
 			BankStatementIDs []string `json:"bank_statement_ids"`
 			Comment          string   `json:"comment"`
+			Reason           string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.BankStatementIDs) == 0 {
 			http.Error(w, missingUserIDOrBankStatementIDs, http.StatusBadRequest)
@@ -1122,11 +1277,33 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 					}
 				}
 			}
+			var latestActionType, latestProcessingStatus string
+			latestAuditErr := db.QueryRowContext(ctx, `
+				SELECT actiontype, processing_status
+				FROM cimplrcorpsaas.auditactionbankstatement
+				WHERE bankstatementid = $1
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, bsid).Scan(&latestActionType, &latestProcessingStatus)
+			if latestAuditErr == nil && latestActionType == "DELETE" && latestProcessingStatus == "PENDING_DELETE_APPROVAL" {
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           false,
+					"error":             "delete request already pending approval",
+				})
+				continue
+			}
+			deleteComment := body.Comment
+			if strings.TrimSpace(deleteComment) == "" {
+				deleteComment = body.Reason
+			}
+			requestedBy := auditActorDisplayName(ctx, body.UserID)
 			_, err := db.ExecContext(ctx, `
 				       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
-					       bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment
+					       bankstatementid, actiontype, processing_status, requested_by, requested_at, reason
 				       ) VALUES ($1, $2, $3, $4, $5, $6)
-			       `, bsid, "DELETE", "DELETE_PENDING_APPROVAL", body.UserID, time.Now(), body.Comment)
+			       `, bsid, "DELETE", "PENDING_DELETE_APPROVAL", requestedBy, time.Now(), deleteComment)
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
@@ -1141,15 +1318,25 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 				"message":           "Delete request submitted for approval",
 			})
 		}
+		overallSuccess := len(results) > 0
+		for _, result := range results {
+			if success, ok := result["success"].(bool); !ok || !success {
+				overallSuccess = false
+				break
+			}
+		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success": overallSuccess,
 			"results": results,
 		})
 		if pgxPool != nil {
 			capturedIDs := body.BankStatementIDs
 			capturedUser := body.UserID
 			capturedComment := body.Comment
+			if strings.TrimSpace(capturedComment) == "" {
+				capturedComment = body.Reason
+			}
 			go catalog.TriggerNotification(
 				context.Background(), pgxPool,
 				"/cash/bank-statements/v2/delete",
@@ -1159,7 +1346,7 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 					"Count":            len(capturedIDs),
 					"UserID":           capturedUser,
 					"Comment":          capturedComment,
-					"Action":           "DELETE_PENDING_APPROVAL",
+					"Action":           "PENDING_DELETE_APPROVAL",
 					"ActionAt":         time.Now().Format(time.RFC3339),
 				},
 			)
@@ -1182,7 +1369,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		isPDF := r.URL.Query().Get("is_pdf") == "true"
 
 		if isPDF {
-			log.Println("[BANK_STATEMENT] PDF flag detected, processing from bank.json")
+			logger.LogInfo("[BANK_STATEMENT] PDF flag detected, processing from bank.json")
 			result, err := ProcessBankStatementFromJSON(r.Context(), db)
 			if err != nil {
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1206,7 +1393,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			log.Printf("[BANK-UPLOAD-ERROR] Failed to parse multipart form: %v", err)
+			logger.LogError("[BANK-UPLOAD-ERROR] Failed to parse multipart form: %v", err)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
 				"message": "Unable to read the uploaded file. Please try again.",
@@ -1232,14 +1419,14 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			if mappingsJSON != "" {
 				mappings = &ColumnMappings{}
 				if err := json.Unmarshal([]byte(mappingsJSON), mappings); err != nil {
-					log.Printf("[BANK-UPLOAD-ERROR] Invalid column_mappings JSON: %v", err)
+					logger.LogError("[BANK-UPLOAD-ERROR] Invalid column_mappings JSON: %v", err)
 					json.NewEncoder(w).Encode(map[string]interface{}{
 						"success": false,
 						"message": "Invalid column_mappings JSON: " + err.Error(),
 					})
 					return
 				}
-				log.Printf("[BANK-UPLOAD-DEBUG] Custom column mappings provided: %+v", mappings)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Custom column mappings provided: %+v", mappings)
 			} else {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"success": false,
@@ -1262,9 +1449,9 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			for fieldName := range r.MultipartForm.File {
 				fileFieldsAvailable = append(fileFieldsAvailable, fieldName)
 			}
-			log.Printf("[BANK-UPLOAD-DEBUG] Available file form fields: %v", fileFieldsAvailable)
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] Available file form fields: %v", fileFieldsAvailable)
 		} else {
-			log.Printf("[BANK-UPLOAD-ERROR] No file fields found in multipart form - request may not include a file attachment")
+			logger.LogError("[BANK-UPLOAD-ERROR] No file fields found in multipart form - request may not include a file attachment")
 		}
 
 		file, fileHeader, err := r.FormFile("file")
@@ -1273,7 +1460,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			uploadFileName = fileHeader.Filename
 		}
 		if err != nil {
-			log.Printf("[BANK-UPLOAD-ERROR] FormFile('file') error: %v", err)
+			logger.LogError("[BANK-UPLOAD-ERROR] FormFile('file') error: %v", err)
 			if file == nil {
 				file, fileHeader, err = r.FormFile("statement")
 				if fileHeader != nil {
@@ -1288,10 +1475,10 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			}
 			if err != nil && file == nil {
 				if r.MultipartForm != nil && len(r.MultipartForm.File) > 0 {
-					log.Printf("[BANK-UPLOAD-DEBUG] Trying first available file field from: %v", fileFieldsAvailable)
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] Trying first available file field from: %v", fileFieldsAvailable)
 					for fieldName, files := range r.MultipartForm.File {
 						if len(files) > 0 {
-							log.Printf("[BANK-UPLOAD-DEBUG] Using field: %s", fieldName)
+							logger.LogInfo("[BANK-UPLOAD-DEBUG] Using field: %s", fieldName)
 							file, err = files[0].Open()
 							uploadFileName = files[0].Filename
 							break
@@ -1326,7 +1513,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		// This keeps preview/upload behavior aligned with user expectation for mixed-account CSVs.
 		if !multiFlag {
 			if isLikelyMultiAccountStatement(uploadFileName, fileBytes) {
-				log.Printf("[BANK-UPLOAD-DEBUG] Auto-detected multi-account statement for %s; routing to multi handler", uploadFileName)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Auto-detected multi-account statement for %s; routing to multi handler", uploadFileName)
 				UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
 				return
 			}
@@ -1359,7 +1546,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 				return
 			case 1:
 				accountOverride = accountNumbers[0]
-				log.Printf("[BANK-UPLOAD-DEBUG] force_override=true — using account %s directly", accountOverride)
+				logger.LogError("[BANK-UPLOAD-DEBUG] force_override=true — using account %s directly", accountOverride)
 			default:
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"success": false,
@@ -1376,12 +1563,12 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			matched := matchAccountNumberToFile(r.Context(), db, uploadFileName, "", accountNumbers, fileContent)
 			if matched != "" {
 				accountOverride = matched
-				log.Printf("[BANK-UPLOAD-DEBUG] Matched file to account %s via weighted scoring", matched)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Matched file to account %s via weighted scoring", matched)
 			} else if len(accountNumbers) == 1 {
 				accountOverride = accountNumbers[0]
-				log.Printf("[BANK-UPLOAD-DEBUG] Single account fallback: %s", accountOverride)
+				logger.LogError("[BANK-UPLOAD-DEBUG] Single account fallback: %s", accountOverride)
 			} else {
-				log.Printf("[BANK-UPLOAD-DEBUG] Multiple accounts, no weighted match found for %s — relying on file content extraction", uploadFileName)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Multiple accounts, no weighted match found for %s — relying on file content extraction", uploadFileName)
 			}
 		}
 		result, err := UploadBankStatementV2WithCategorization(
@@ -1401,7 +1588,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		)
 		if err != nil {
 			// V2 failed — try multi as a last-resort fallback (e.g. multi-account sheet)
-			log.Printf("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
+			logger.LogError("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
 			multiRec := httptest.NewRecorder()
 			UploadMultiAccountBankStatementHandler(db).ServeHTTP(multiRec, r)
 			// Multi handler returns outer "success":true even when ALL individual accounts fail.
@@ -1423,7 +1610,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 				}
 			}
 			if multiActuallySucceeded {
-				log.Printf("[BANK-UPLOAD-DEBUG] Multi fallback succeeded for at least one account")
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Multi fallback succeeded for at least one account")
 				for k, v := range multiRec.Header() {
 					w.Header()[k] = v
 				}
@@ -1476,11 +1663,11 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 					// those messages — they are more actionable than V2's account-not-found error.
 					if allAlreadyStored && len(multiMsgs) > 0 {
 						surfaceMsg = strings.Join(multiMsgs, " | ")
-						log.Printf("[BANK-UPLOAD-DEBUG] Surfacing multi 'already stored' error instead of V2 error: %s", surfaceMsg)
+						logger.LogError("[BANK-UPLOAD-DEBUG] Surfacing multi 'already stored' error instead of V2 error: %s", surfaceMsg)
 					}
 				}
 			}
-			log.Printf("[BANK-UPLOAD-DEBUG] Multi fallback also failed; returning error: %s", surfaceMsg)
+			logger.LogError("[BANK-UPLOAD-DEBUG] Multi fallback also failed; returning error: %s", surfaceMsg)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
 				"message": surfaceMsg,
@@ -1621,7 +1808,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 		//   force=false + N accounts → match each file to one account via weighted scoring (filename+content); unmatched → error
 		//   force=false + 0 accounts → auto-detect account per file from filename/content against DB
 		forceOverride := r.FormValue("force_override") == "true"
-		log.Printf("[ZIP-UPLOAD] Received %d account number(s) from form-data, force_override=%v", len(accountNumbers), forceOverride)
+		logger.LogInfo("[ZIP-UPLOAD] Received %d account number(s) from form-data, force_override=%v", len(accountNumbers), forceOverride)
 
 		zipData, err := readBankStatementZipBytes(zipFile, zipHeader)
 		if err != nil {
@@ -1714,12 +1901,12 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 			case forceOverride && len(accountNumbers) > 1:
 				// 1:1 positional mapping — already validated counts above
 				accountOverride = accountNumbers[fileIdx]
-				log.Printf("[ZIP-UPLOAD] force+N: file[%d] %s → account %s", fileIdx, ze.name, accountOverride)
+				logger.LogError("[ZIP-UPLOAD] force+N: file[%d] %s → account %s", fileIdx, ze.name, accountOverride)
 
 			case forceOverride && len(accountNumbers) == 1:
 				// All files → single account
 				accountOverride = accountNumbers[0]
-				log.Printf("[ZIP-UPLOAD] force+1: assigning file %s → account %s", ze.name, accountOverride)
+				logger.LogError("[ZIP-UPLOAD] force+1: assigning file %s → account %s", ze.name, accountOverride)
 
 			case forceOverride && len(accountNumbers) == 0:
 				// Trust filename: extract account number segment from the filename.
@@ -1794,7 +1981,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 					failureCount++
 					continue
 				}
-				log.Printf("[ZIP-UPLOAD] force+filename: file %s → account %s (from filename)", ze.name, accountOverride)
+				logger.LogInfo("[ZIP-UPLOAD] force+filename: file %s → account %s (from filename)", ze.name, accountOverride)
 
 			case !forceOverride && len(accountNumbers) > 0:
 				// Match each file to one of the provided accounts via weighted scoring
@@ -1805,10 +1992,10 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 				matched := matchAccountNumberToFile(ctx, db, ze.name, "", accountNumbers, fileContent)
 				if matched != "" {
 					accountOverride = matched
-					log.Printf("[ZIP-UPLOAD] matched: file %s → account %s", ze.name, matched)
+					logger.LogInfo("[ZIP-UPLOAD] matched: file %s → account %s", ze.name, matched)
 				} else if len(accountNumbers) == 1 {
 					accountOverride = accountNumbers[0]
-					log.Printf("[ZIP-UPLOAD] single-account fallback: file %s → account %s", ze.name, accountOverride)
+					logger.LogError("[ZIP-UPLOAD] single-account fallback: file %s → account %s", ze.name, accountOverride)
 				} else {
 					results = append(results, FileResult{
 						FileName: ze.name, Success: false,
@@ -1820,7 +2007,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 
 			default: // !forceOverride && len(accountNumbers) == 0
 				// Auto-detect: UploadBankStatementV2 resolves account from filename+content against DB
-				log.Printf("[ZIP-UPLOAD] auto-detect: file %s — no account hint, resolving from filename/content", ze.name)
+				logger.LogInfo("[ZIP-UPLOAD] auto-detect: file %s — no account hint, resolving from filename/content", ze.name)
 			}
 
 			bytesReader := bytes.NewReader(ze.data)

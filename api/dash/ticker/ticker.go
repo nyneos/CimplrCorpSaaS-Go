@@ -4,13 +4,13 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // inrRates holds INR-per-unit for each currency (loaded from api/dash/rate.json).
 var inrRates map[string]float64
@@ -36,14 +36,14 @@ func init() {
 	var lastErr error
 	for _, p := range paths {
 		if err := LoadInrRates(p); err == nil {
-			log.Printf("ticker: loaded rates from %s", p)
+			logger.LogInfo("ticker: loaded rates from %s", p)
 			return
 		} else {
 			lastErr = err
 		}
 	}
 
-	log.Printf("ticker: failed to load rate.json from known paths: %v, using minimal fallback", lastErr)
+	logger.LogError("ticker: failed to load rate.json from known paths: %v, using minimal fallback", lastErr)
 	inrRates = map[string]float64{
 		"USD": 83.1,
 		"EUR": 90.2,
@@ -165,21 +165,7 @@ func RateBetween(base, target string) (float64, error) {
 // the resulting payload (already ready to encode to JSON), an HTTP status
 // code and an error (nil on success). Call this directly from other handlers.
 func ProcessTicker(req TickerRequest) (interface{}, int, error) {
-	// normalize bases
-	base := strings.ToUpper(strings.TrimSpace(req.Base))
-	bases := make([]string, 0)
-	if len(req.Bases) > 0 {
-		for _, b := range req.Bases {
-			if s := strings.ToUpper(strings.TrimSpace(b)); s != "" {
-				bases = append(bases, s)
-			}
-		}
-	} else {
-		if base == "" {
-			base = "INR"
-		}
-		bases = append(bases, base)
-	}
+	bases := []string{"INR"}
 
 	// target case
 	if req.Target != "" {
@@ -273,21 +259,7 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	base := strings.ToUpper(strings.TrimSpace(req.Base))
-	// support either single `base` or array `bases`
-	bases := make([]string, 0)
-	if len(req.Bases) > 0 {
-		for _, b := range req.Bases {
-			if s := strings.ToUpper(strings.TrimSpace(b)); s != "" {
-				bases = append(bases, s)
-			}
-		}
-	} else {
-		if base == "" {
-			base = "INR"
-		}
-		bases = append(bases, base)
-	}
+	bases := []string{"INR"}
 
 	// single target case: support multiple bases -> return rate per base for the same target
 	if req.Target != "" {

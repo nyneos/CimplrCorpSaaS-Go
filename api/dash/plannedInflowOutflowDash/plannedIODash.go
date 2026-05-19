@@ -1,9 +1,7 @@
 package plannedinflowoutflowdash
 
 import (
-	"context"
 	"encoding/json"
-	"log"
 	"math"
 	"net/http"
 	"time"
@@ -11,7 +9,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // Currency conversion rates to USD
 var rates = map[string]float64{
@@ -32,7 +31,7 @@ func getCurrencyRate(currency string) float64 {
 	if rate, ok := rates[currency]; ok {
 		return rate
 	}
-	log.Printf("Unknown currency encountered: %s, using default rate 1.0", currency)
+	logger.LogInfo("Unknown currency encountered: %s, using default rate 1.0", currency)
 	return 1.0
 }
 
@@ -65,7 +64,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrMissingUserID})
 			return
 		}
-		ctx := context.Background()
+		ctx := r.Context()
 		now := time.Now()
 		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		qStart := quarterStart(today)

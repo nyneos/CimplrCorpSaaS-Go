@@ -8,14 +8,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // ===================================================================================
 // SWEEP SIMULATION & ANALYSIS SYSTEM V2
@@ -192,7 +192,7 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.ExecutionTime = "18:00" // Default to 6 PM
 		}
 
-		log.Printf("[SWEEP SIMULATION] User: %s, Date: %s, Time: %s, Frequency: %s, SweepIDs: %v",
+		logger.LogInfo("[SWEEP SIMULATION] User: %s, Date: %s, Time: %s, Frequency: %s, SweepIDs: %v",
 			req.UserID, req.EffectiveDate, req.ExecutionTime, req.Frequency, req.SweepIDs)
 
 		// Get middleware-filtered entities and banks
@@ -219,7 +219,7 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[SWEEP SIMULATION] Found %d approved sweeps to simulate", len(sweeps))
+		logger.LogInfo("[SWEEP SIMULATION] Found %d approved sweeps to simulate", len(sweeps))
 
 		// Fetch current balances (including ALL accounts mentioned in sweeps)
 		balances, err := fetchCurrentBalancesWithSweepAccounts(ctx, pgxPool, sweeps, entityNames, bankNames)
@@ -872,7 +872,7 @@ func fetchApprovedSweepsForSimulation(ctx context.Context, pgxPool *pgxpool.Pool
 		var requiresInitiation bool
 
 		if err := rows.Scan(&sweepID, &entityName, &sourceAcc, &sourceBank, &targetAcc, &targetBank, &sweepType, &frequency, &effectiveDate, &executionTime, &bufferAmt, &sweepAmt, &requiresInitiation); err != nil {
-			log.Printf("[ERROR] Sweep scan error: %v", err)
+			logger.LogError("Sweep scan error: %v", err)
 			continue
 		}
 
@@ -964,14 +964,14 @@ func fetchCurrentBalances(ctx context.Context, pgxPool *pgxpool.Pool, entityName
 		ORDER BY lab.account_no
 	`, filters)
 
-	log.Printf("[BALANCE FETCH] Query: %s", query)
-	log.Printf("[BALANCE FETCH] Args: %v", args)
-	log.Printf("[BALANCE FETCH] EntityNames: %v", entityNames)
-	log.Printf("[BALANCE FETCH] BankNames: %v", bankNames)
+	logger.LogInfo("[BALANCE FETCH] Query: %s", query)
+	logger.LogInfo("[BALANCE FETCH] Args: %v", args)
+	logger.LogInfo("[BALANCE FETCH] EntityNames: %v", entityNames)
+	logger.LogInfo("[BALANCE FETCH] BankNames: %v", bankNames)
 
 	rows, err := pgxPool.Query(ctx, query, args...)
 	if err != nil {
-		log.Printf("[BALANCE FETCH ERROR] %v", err)
+		logger.LogError("[BALANCE FETCH ERROR] %v", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -984,11 +984,11 @@ func fetchCurrentBalances(ctx context.Context, pgxPool *pgxpool.Pool, entityName
 		var balance float64
 
 		if err := rows.Scan(&accountNo, &bankName, &entityName, &balance, &currency); err != nil {
-			log.Printf("[BALANCE FETCH] Scan error on row %d: %v", rowCount, err)
+			logger.LogError("[BALANCE FETCH] Scan error on row %d: %v", rowCount, err)
 			continue
 		}
 
-		log.Printf("[BALANCE FETCH] Found balance: Account=%s, Bank=%s, Entity=%s, Balance=%.2f", accountNo, bankName, entityName, balance)
+		logger.LogInfo("[BALANCE FETCH] Found balance: Account=%s, Bank=%s, Entity=%s, Balance=%.2f", accountNo, bankName, entityName, balance)
 
 		balances = append(balances, AccountBalance{
 			AccountNumber: accountNo,
@@ -999,7 +999,7 @@ func fetchCurrentBalances(ctx context.Context, pgxPool *pgxpool.Pool, entityName
 		})
 	}
 
-	log.Printf("[BALANCE FETCH] Total rows: %d, Balances collected: %d", rowCount, len(balances))
+	logger.LogInfo("[BALANCE FETCH] Total rows: %d, Balances collected: %d", rowCount, len(balances))
 
 	return balances, nil
 }
@@ -1018,7 +1018,7 @@ func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool
 		}
 	}
 
-	log.Printf("[BALANCE FETCH WITH SWEEPS] Sweep accounts identified: %v", sweepAccounts)
+	logger.LogInfo("[BALANCE FETCH WITH SWEEPS] Sweep accounts identified: %v", sweepAccounts)
 
 	// Build filters
 	filters := ""
@@ -1091,12 +1091,12 @@ func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool
 		ORDER BY lab.account_no
 	`, filters)
 
-	log.Printf("[BALANCE FETCH WITH SWEEPS] Existing balances query: %s", existingBalancesQuery)
-	log.Printf("[BALANCE FETCH WITH SWEEPS] Args: %v", args)
+	logger.LogInfo("[BALANCE FETCH WITH SWEEPS] Existing balances query: %s", existingBalancesQuery)
+	logger.LogInfo("[BALANCE FETCH WITH SWEEPS] Args: %v", args)
 
 	rows, err := pgxPool.Query(ctx, existingBalancesQuery, args...)
 	if err != nil {
-		log.Printf("[BALANCE FETCH WITH SWEEPS ERROR] %v", err)
+		logger.LogError("[BALANCE FETCH WITH SWEEPS ERROR] %v", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -1112,11 +1112,11 @@ func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool
 		var balance float64
 
 		if err := rows.Scan(&accountNo, &bankName, &entityName, &balance, &currency); err != nil {
-			log.Printf("[BALANCE FETCH WITH SWEEPS] Scan error on row %d: %v", rowCount, err)
+			logger.LogError("[BALANCE FETCH WITH SWEEPS] Scan error on row %d: %v", rowCount, err)
 			continue
 		}
 
-		log.Printf("[BALANCE FETCH WITH SWEEPS] Found existing balance: Account=%s, Bank=%s, Entity=%s, Balance=%.2f", accountNo, bankName, entityName, balance)
+		logger.LogInfo("[BALANCE FETCH WITH SWEEPS] Found existing balance: Account=%s, Bank=%s, Entity=%s, Balance=%.2f", accountNo, bankName, entityName, balance)
 
 		balances = append(balances, AccountBalance{
 			AccountNumber: accountNo,
@@ -1137,7 +1137,7 @@ func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool
 	}
 
 	if len(missingAccounts) > 0 {
-		log.Printf("[BALANCE FETCH WITH SWEEPS] Missing accounts from sweep: %v", missingAccounts)
+		logger.LogInfo("[BALANCE FETCH WITH SWEEPS] Missing accounts from sweep: %v", missingAccounts)
 
 		// Build query for missing accounts to get their bank/entity info
 		placeholders := make([]string, len(missingAccounts))
@@ -1172,12 +1172,12 @@ func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool
 				AND la.processing_status = 'APPROVED'
 		`, strings.Join(placeholders, ","))
 
-		log.Printf("[BALANCE FETCH WITH SWEEPS] Missing accounts query: %s", missingAccountsQuery)
-		log.Printf("[BALANCE FETCH WITH SWEEPS] Missing accounts query args: %v", args[len(args)-len(missingAccounts):])
+		logger.LogInfo("[BALANCE FETCH WITH SWEEPS] Missing accounts query: %s", missingAccountsQuery)
+		logger.LogInfo("[BALANCE FETCH WITH SWEEPS] Missing accounts query args: %v", args[len(args)-len(missingAccounts):])
 
 		missingRows, err := pgxPool.Query(ctx, missingAccountsQuery, args...)
 		if err != nil {
-			log.Printf("[BALANCE FETCH WITH SWEEPS] Error fetching missing accounts: %v", err)
+			logger.LogError("[BALANCE FETCH WITH SWEEPS] Error fetching missing accounts: %v", err)
 			// Continue with existing balances even if we can't fetch missing account info
 		} else {
 			defer missingRows.Close()
@@ -1187,12 +1187,12 @@ func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool
 				var accountNo, bankName, entityName, currency string
 
 				if err := missingRows.Scan(&accountNo, &bankName, &entityName, &currency); err != nil {
-					log.Printf("[BALANCE FETCH WITH SWEEPS] Scan error for missing account: %v", err)
+					logger.LogError("[BALANCE FETCH WITH SWEEPS] Scan error for missing account: %v", err)
 					continue
 				}
 
 				foundInMaster++
-				log.Printf("[BALANCE FETCH WITH SWEEPS] Adding missing account with 0 balance: Account=%s, Bank=%s, Entity=%s", accountNo, bankName, entityName)
+				logger.LogInfo("[BALANCE FETCH WITH SWEEPS] Adding missing account with 0 balance: Account=%s, Bank=%s, Entity=%s", accountNo, bankName, entityName)
 
 				balances = append(balances, AccountBalance{
 					AccountNumber: accountNo,
@@ -1203,7 +1203,7 @@ func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool
 				})
 			}
 
-			log.Printf("[BALANCE FETCH WITH SWEEPS] Found %d missing accounts in masterbankaccount table", foundInMaster)
+			logger.LogInfo("[BALANCE FETCH WITH SWEEPS] Found %d missing accounts in masterbankaccount table", foundInMaster)
 		}
 
 		// For any accounts we still couldn't find in masterbankaccount, add minimal records
@@ -1216,9 +1216,9 @@ func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool
 		}
 
 		if len(accountsStillMissing) > 0 {
-			log.Printf("[BALANCE FETCH WITH SWEEPS] Accounts not found in masterbankaccount: %v", accountsStillMissing)
+			logger.LogInfo("[BALANCE FETCH WITH SWEEPS] Accounts not found in masterbankaccount: %v", accountsStillMissing)
 			for accountNo := range accountsStillMissing {
-				log.Printf("[BALANCE FETCH WITH SWEEPS] Adding fallback record for non-existent account: %s", accountNo)
+				logger.LogInfo("[BALANCE FETCH WITH SWEEPS] Adding fallback record for non-existent account: %s", accountNo)
 				balances = append(balances, AccountBalance{
 					AccountNumber: accountNo,
 					BankName:      "Account Not Found in Master",
@@ -1230,7 +1230,7 @@ func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool
 		}
 	}
 
-	log.Printf("[BALANCE FETCH WITH SWEEPS] Total existing rows: %d, Total balances including missing: %d", rowCount, len(balances))
+	logger.LogInfo("[BALANCE FETCH WITH SWEEPS] Total existing rows: %d, Total balances including missing: %d", rowCount, len(balances))
 
 	return balances, nil
 }

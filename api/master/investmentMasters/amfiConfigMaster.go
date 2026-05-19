@@ -3,7 +3,6 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
-	"context"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -11,7 +10,7 @@ import (
 
 func GetAMFISchemeMasterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.Background()
+		ctx := r.Context()
 
 		query := `
 			SELECT DISTINCT ON (sm.scheme_code)
@@ -53,7 +52,7 @@ func GetAMFISchemeMasterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.Background()
+		ctx := r.Context()
 
 		query := `
 			SELECT DISTINCT ON (nv.scheme_code)

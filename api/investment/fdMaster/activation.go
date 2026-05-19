@@ -10,7 +10,6 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 
@@ -62,11 +61,9 @@ func (r *bulkFDActionRequest) normalize() {
 	}
 }
 
-func getUserEmail(userID string) string {
-	for _, s := range auth.GetActiveSessions() {
-		if s.UserID == userID {
-			return s.Email
-		}
+func getUserEmail(ctx context.Context) string {
+	if s := api.GetSessionFromCtx(ctx); s != nil {
+		return s.Email
 	}
 	return ""
 }
@@ -585,7 +582,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := getUserEmail(req.UserID)
+		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -789,7 +786,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := getUserEmail(req.UserID)
+		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -965,7 +962,7 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := getUserEmail(req.UserID)
+		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1472,49 +1469,6 @@ func GetActiveFDsInRange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		fdID := strings.TrimSpace(r.URL.Query().Get("fd_id"))
-		if fdID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFDIDRequired)
-			return
-		}
-
-		auditTable := resolveFDAuditTable(ctx, pgxPool)
-		if auditTable == "" {
-			api.RespondWithPayload(w, true, "", []map[string]interface{}{})
-			return
-		}
-
-		schemaName, tableName := splitQualifiedTable(auditTable)
-		cols, err := loadTableColumns(ctx, pgxPool, schemaName, tableName)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
-			return
-		}
-		refCol := pickFirstExistingColumn(cols, "fd_id", "master_id", "confirmation_id")
-		if refCol == "" {
-			api.RespondWithPayload(w, true, "", []map[string]interface{}{})
-			return
-		}
-
-		rows, err := pgxPool.Query(ctx, fmt.Sprintf("SELECT * FROM %s WHERE %s = $1 ORDER BY requested_at DESC", auditTable, refCol), fdID)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
-			return
-		}
-		defer rows.Close()
-
-		payload, err := rowsToMaps(rows)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
-			return
-		}
-		api.RespondWithPayload(w, true, "", payload)
-	}
-}
-
 func GetCashflowSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -1898,7 +1852,7 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := getUserEmail(req.UserID)
+		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2027,7 +1981,7 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := getUserEmail(req.UserID)
+		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2234,7 +2188,7 @@ func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := getUserEmail(req.UserID)
+		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2349,7 +2303,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := getUserEmail(req.UserID)
+		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2919,7 +2873,7 @@ func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAuditIDRequired)
 			return
 		}
-		userEmail := getUserEmail(req.UserID)
+		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -3020,7 +2974,7 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAuditIDRequired)
 			return
 		}
-		userEmail := getUserEmail(req.UserID)
+		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -3115,7 +3069,7 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "fd_id and cashflow_id are required")
 			return
 		}
-		userEmail := getUserEmail(req.UserID)
+		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -3289,7 +3243,7 @@ func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAuditIDRequired)
 			return
 		}
-		userEmail := getUserEmail(req.UserID)
+		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -3349,47 +3303,3 @@ func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─── GetCashflowAuditHistory ──────────────────────────────────────────────────
-// GET /investment/fd/master/cashflow/audit?fd_id=&cashflow_id=
-func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		fdID := strings.TrimSpace(r.URL.Query().Get("fd_id"))
-		cashflowID := strings.TrimSpace(r.URL.Query().Get("cashflow_id"))
-		if fdID == "" && cashflowID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "fd_id or cashflow_id is required")
-			return
-		}
-
-		query := `SELECT * FROM investment.fd_audit_cashflow_schedule WHERE 1=1`
-		var args []interface{}
-		pos := 1
-		if fdID != "" {
-			query += fmt.Sprintf(" AND fd_id = $%d", pos)
-			args = append(args, fdID)
-			pos++
-		}
-		if cashflowID != "" {
-			query += fmt.Sprintf(" AND cashflow_id = $%d", pos)
-			args = append(args, cashflowID)
-			pos++
-		}
-		query += " ORDER BY requested_at DESC"
-
-		rows, err := pgxPool.Query(ctx, query, args...)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
-			return
-		}
-		defer rows.Close()
-		payload, err := rowsToMaps(rows)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
-			return
-		}
-		if payload == nil {
-			payload = []map[string]interface{}{}
-		}
-		api.RespondWithPayload(w, true, "", payload)
-	}
-}

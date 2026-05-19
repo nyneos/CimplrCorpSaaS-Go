@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"net/http"
 	"sort"
@@ -17,7 +16,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/lib/pq"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 var rates = map[string]float64{
 	"USD": 1.0,
@@ -35,7 +35,7 @@ var rates = map[string]float64{
 }
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
+	logger.LogError("", errMsg)
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -172,7 +172,7 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 			rate, found := rates[cur]
 			if !found {
 				rate = 1.0 // Default to 1 if no rate is found
-				log.Printf("No rate found for currency: %s. Using default rate of 1.0", cur)
+				logger.LogInfo("No rate found for currency: %s. Using default rate of 1.0", cur)
 			}
 
 			usdValue := math.Abs(amount.Float64) * rate

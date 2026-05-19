@@ -2,6 +2,7 @@ package forwards
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/fx/auditutil"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"bytes"
 	"context"
@@ -23,6 +24,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 // Helper: send JSON error response
@@ -398,7 +401,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 				_ = tx.Rollback()
 				if s3Uploaded {
 					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
-						log.Printf("[mtm-upload] failed to cleanup S3 object after insert failure for %s: %v", fileHeader.Filename, cleanupErr)
+						logger.LogError("[mtm-upload] failed to cleanup S3 object after insert failure for %s: %v", fileHeader.Filename, cleanupErr)
 					}
 				}
 				results = append(results, map[string]interface{}{
@@ -412,7 +415,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 		if err != nil {
 			if s3Uploaded {
 				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
-					log.Printf("[mtm-upload] failed to cleanup S3 object after commit failure for %s: %v", fileHeader.Filename, cleanupErr)
+					logger.LogError("[mtm-upload] failed to cleanup S3 object after commit failure for %s: %v", fileHeader.Filename, cleanupErr)
 				}
 			}
 			results = append(results, map[string]interface{}{
@@ -426,6 +429,11 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 			"inserted": len(validRows),
 			"skipped":  skippedDuplicates,
 		})
+		for _, row := range validRows {
+			if len(row) > 0 {
+				auditutil.RecordAction(ctx, db, auditutil.TableForwardMTM, "mtm_id", fmt.Sprint(row[0]), "CREATE", "PENDING_APPROVAL", "Imported via uploader", uploadedBy, nil, map[string]interface{}{"upload_s3_key": s3Key})
+			}
+		}
 	}
 
 	return results, nil
@@ -492,6 +500,7 @@ func GetMTMDownloadURL(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "failed to generate download url")
 			return
 		}
+		auditutil.RecordDownload(r.Context(), db, auditutil.TableForwardMTMDownloads, "mtm_id", mtmID, auditutil.ActorFromContext(r.Context()), s3Key, nil)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -552,6 +561,7 @@ func GetMTMBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 				"mtm_id":       mtmID,
 				"download_url": downloadURL,
 			})
+			auditutil.RecordDownload(ctx, db, auditutil.TableForwardMTMDownloads, "mtm_id", mtmID, auditutil.ActorFromContext(ctx), s3Key, nil)
 		}
 
 		writeBulkDownloadResponse(w, files, failedIDs)

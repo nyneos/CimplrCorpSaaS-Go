@@ -10,7 +10,6 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 
@@ -20,11 +19,9 @@ import (
 
 // ─── internal helpers ─────────────────────────────────────────────────────────
 
-func resolveUserEmail(userID string) string {
-	for _, s := range auth.GetActiveSessions() {
-		if s.UserID == userID {
-			return s.Email
-		}
+func resolveUserEmail(ctx context.Context) string {
+	if s := api.GetSessionFromCtx(ctx); s != nil {
+		return s.Email
 	}
 	return ""
 }
@@ -128,7 +125,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "receipt_date must be YYYY-MM-DD")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -360,7 +357,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "reason is required")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -546,7 +543,7 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -661,7 +658,7 @@ func SubmitReceiptForApproval(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrReceiptIDRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -701,7 +698,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -715,12 +712,26 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
 
-		// Step 1: Audit UPDATE
+		// Step 1: Approve only the latest pending audit row per receipt.
 		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_interest_receipt_audit
+			WITH latest_pending AS (
+				SELECT DISTINCT ON (a.receipt_id)
+					a.audit_id
+				FROM investment.fd_interest_receipt_audit a
+				WHERE a.receipt_id = ANY($3)
+				  AND a.processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+				ORDER BY a.receipt_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC,
+					a.audit_id DESC
+			)
+			UPDATE investment.fd_interest_receipt_audit a
 			SET processing_status='APPROVED', checker_by=$1,
 			    checker_at=now(), checker_comment=$2
-			WHERE receipt_id=ANY($3) AND processing_status LIKE 'PENDING%'`, userEmail, req.Comment, req.ReceiptIDs)
+			FROM latest_pending lp
+			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit update failed: "+err.Error())
 			return
@@ -728,9 +739,26 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Step 2: Receipt status
 		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_interest_receipt
+			WITH latest_actions AS (
+				SELECT DISTINCT ON (a.receipt_id)
+					a.receipt_id, a.action_type, a.processing_status
+				FROM investment.fd_interest_receipt_audit a
+				WHERE a.receipt_id = ANY($1)
+				ORDER BY a.receipt_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC,
+					a.audit_id DESC
+			)
+			UPDATE investment.fd_interest_receipt r
 			SET receipt_status='APPROVED'
-			WHERE receipt_id=ANY($1) AND receipt_status='CAPTURED'`, req.ReceiptIDs)
+			FROM latest_actions la
+			WHERE r.receipt_id = la.receipt_id
+			  AND r.receipt_id = ANY($1)
+			  AND la.action_type <> 'DELETE'
+			  AND la.processing_status = 'APPROVED'
+			  AND r.receipt_status='CAPTURED'`, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Receipt update failed: "+err.Error())
 			return
@@ -739,13 +767,25 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		// Step 2b: Approve TDS audit rows for these receipts.
 		// fd_tds_receipt_audit is keyed by tds_id (not receipt_id) — join through fd_tds_receipt.
 		_, err = tx.Exec(ctx, `
+			WITH latest_pending_tds AS (
+				SELECT DISTINCT ON (a.tds_id)
+					a.audit_id
+				FROM investment.fd_tds_receipt_audit a
+				JOIN investment.fd_tds_receipt t ON t.tds_id = a.tds_id
+				WHERE t.receipt_id = ANY($3)
+				  AND a.processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+				ORDER BY a.tds_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC,
+					a.audit_id DESC
+			)
 			UPDATE investment.fd_tds_receipt_audit a
 			SET processing_status='APPROVED', checker_by=$1,
 			    checker_at=now(), checker_comment=$2
-			FROM investment.fd_tds_receipt t
-			WHERE a.tds_id = t.tds_id
-			  AND t.receipt_id = ANY($3)
-			  AND a.processing_status LIKE 'PENDING%'`, userEmail, req.Comment, req.ReceiptIDs)
+			FROM latest_pending_tds lp
+			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "TDS audit update failed: "+err.Error())
 			return
@@ -753,9 +793,27 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Step 2c: Update TDS status to APPROVED
 		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_tds_receipt
+			WITH latest_tds_actions AS (
+				SELECT DISTINCT ON (a.tds_id)
+					a.tds_id, a.action_type, a.processing_status
+				FROM investment.fd_tds_receipt_audit a
+				JOIN investment.fd_tds_receipt t ON t.tds_id = a.tds_id
+				WHERE t.receipt_id = ANY($1)
+				ORDER BY a.tds_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC,
+					a.audit_id DESC
+			)
+			UPDATE investment.fd_tds_receipt t
 			SET tds_status='APPROVED'
-			WHERE receipt_id=ANY($1) AND tds_status='CAPTURED'`, req.ReceiptIDs)
+			FROM latest_tds_actions lta
+			WHERE t.tds_id = lta.tds_id
+			  AND t.receipt_id = ANY($1)
+			  AND lta.action_type <> 'DELETE'
+			  AND lta.processing_status = 'APPROVED'
+			  AND t.tds_status='CAPTURED'`, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "TDS status update failed: "+err.Error())
 			return
@@ -841,7 +899,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -856,19 +914,50 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx) //nolint:errcheck
 
 		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_interest_receipt_audit
+			WITH latest_pending AS (
+				SELECT DISTINCT ON (a.receipt_id)
+					a.audit_id
+				FROM investment.fd_interest_receipt_audit a
+				WHERE a.receipt_id = ANY($3)
+				  AND a.processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+				ORDER BY a.receipt_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC,
+					a.audit_id DESC
+			)
+			UPDATE investment.fd_interest_receipt_audit a
 			SET processing_status='REJECTED', checker_by=$1,
 			    checker_at=now(), checker_comment=$2
-			WHERE receipt_id=ANY($3) AND processing_status LIKE 'PENDING%'`, userEmail, req.Comment, req.ReceiptIDs)
+			FROM latest_pending lp
+			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit update failed: "+err.Error())
 			return
 		}
 
 		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_interest_receipt
+			WITH latest_actions AS (
+				SELECT DISTINCT ON (a.receipt_id)
+					a.receipt_id, a.action_type, a.processing_status
+				FROM investment.fd_interest_receipt_audit a
+				WHERE a.receipt_id = ANY($1)
+				ORDER BY a.receipt_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC,
+					a.audit_id DESC
+			)
+			UPDATE investment.fd_interest_receipt r
 			SET receipt_status='REJECTED'
-			WHERE receipt_id=ANY($1) AND receipt_status='CAPTURED'`, req.ReceiptIDs)
+			FROM latest_actions la
+			WHERE r.receipt_id = la.receipt_id
+			  AND r.receipt_id = ANY($1)
+			  AND la.action_type <> 'DELETE'
+			  AND la.processing_status = 'REJECTED'
+			  AND r.receipt_status='CAPTURED'`, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Receipt update failed: "+err.Error())
 			return
@@ -942,7 +1031,7 @@ func GetReceiptsWithAudit(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -963,7 +1052,8 @@ WITH latest_audit AS (
     GREATEST(
       COALESCE(a.requested_at,'1970-01-01'::timestamptz),
       COALESCE(a.checker_at,'1970-01-01'::timestamptz)
-    ) DESC
+    ) DESC,
+    a.audit_id DESC
 ),
 history AS (
   SELECT
@@ -1137,7 +1227,8 @@ WITH latest_audit AS (
   FROM investment.fd_interest_receipt_audit a
   WHERE a.processing_status = 'APPROVED'
   ORDER BY a.receipt_id,
-	GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+	GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC,
+	a.audit_id DESC
 ),
 history AS (
   SELECT
@@ -1257,7 +1348,8 @@ WITH latest_audit AS (
   FROM investment.fd_tds_receipt_audit a
   WHERE a.processing_status = 'APPROVED'
   ORDER BY a.tds_id,
-	GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+	GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC,
+	a.audit_id DESC
 ),
 history AS (
   SELECT
@@ -1365,7 +1457,7 @@ func GetTDSReceiptsAll(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1518,7 +1610,7 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrReceiptIDRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1615,7 +1707,7 @@ func GetReceiptAuditHistory(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1668,7 +1760,7 @@ func GetTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1781,7 +1873,7 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Provide either receipt_ids/tds_ids or (entity_id + period_start + period_end)")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1871,7 +1963,7 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Provide either receipt_ids/tds_ids or (entity_id + period_start + period_end)")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2078,7 +2170,7 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2350,7 +2442,7 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "reconcile_run_id is required")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2710,7 +2802,7 @@ func GetReconcileCandidates(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2940,7 +3032,7 @@ func GetExceptions(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2969,7 +3061,224 @@ func GetExceptions(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// Exception workflow handlers: exception_handlers.go (resolve, edit, approve, close, reject).
+// ─── HANDLER 15: ResolveException ────────────────────────────────────────────
+
+func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID             string `json:"user_id"`
+			ExceptionID        string `json:"exception_id"`
+			ProposedResolution string `json:"proposed_resolution"`
+			ReasonCode         string `json:"reason_code"`
+			ResolutionRemarks  string `json:"resolution_remarks"`
+			Attachment         string `json:"attachment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.ExceptionID == "" || req.ProposedResolution == "" || req.ReasonCode == "" || req.ResolutionRemarks == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "exception_id, proposed_resolution, reason_code, resolution_remarks are required")
+			return
+		}
+		userEmail := resolveUserEmail(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		var exStatus string
+		err := pool.QueryRow(ctx, `SELECT exception_status FROM investment.fd_receipt_exception WHERE exception_id=$1 AND is_deleted=false`, req.ExceptionID).Scan(&exStatus)
+		if err != nil {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrExceptionNotFound)
+			return
+		}
+		if exStatus != "OPEN" && exStatus != "IN_REVIEW" {
+			api.RespondWithError(w, http.StatusBadRequest, "Exception must be OPEN or IN_REVIEW")
+			return
+		}
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			return
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		_, err = tx.Exec(ctx, `
+			UPDATE investment.fd_receipt_exception SET
+				exception_status='IN_REVIEW',
+				proposed_resolution=$1, reason_code=$2, resolution_remarks=$3, attachment=$4,
+				reviewed_by=$5, reviewed_at=now(), updated_at=now()
+			WHERE exception_id=$6 AND exception_status IN ('OPEN','IN_REVIEW')`,
+			req.ProposedResolution, req.ReasonCode, req.ResolutionRemarks, nullStr(req.Attachment),
+			userEmail, req.ExceptionID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			return
+		}
+
+		if err = tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":          true,
+			"exception_id":     req.ExceptionID,
+			"exception_status": "IN_REVIEW",
+		})
+	}
+}
+
+// ─── HANDLER 16: ApproveException ────────────────────────────────────────────
+
+func ApproveException(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID      string `json:"user_id"`
+			ExceptionID string `json:"exception_id"`
+			Comment     string `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.ExceptionID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "exception_id is required")
+			return
+		}
+		userEmail := resolveUserEmail(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		var exStatus, reviewedBy string
+		err := pool.QueryRow(ctx, `
+			SELECT exception_status, COALESCE(reviewed_by,'')
+			FROM investment.fd_receipt_exception WHERE exception_id=$1 AND is_deleted=false`, req.ExceptionID).Scan(&exStatus, &reviewedBy)
+		if err != nil {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrExceptionNotFound)
+			return
+		}
+		if exStatus != "IN_REVIEW" {
+			api.RespondWithError(w, http.StatusBadRequest, "Exception must be IN_REVIEW to approve")
+			return
+		}
+		if reviewedBy == userEmail {
+			api.RespondWithError(w, http.StatusForbidden, "Maker and checker cannot be the same user")
+			return
+		}
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			return
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		_, err = tx.Exec(ctx, `
+			UPDATE investment.fd_receipt_exception SET
+				exception_status='APPROVED',
+				approved_by=$1, approved_at=now(),
+				checker_comment=$2, updated_at=now()
+			WHERE exception_id=$3 AND exception_status='IN_REVIEW'`, userEmail, req.Comment, req.ExceptionID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			return
+		}
+
+		if err = tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			return
+		}
+
+		go func(eID, uEmail string) {
+			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/exceptions/approve", eID, map[string]interface{}{
+				"record_id":   eID,
+				"event":       "FD_RECEIPT_EXCEPTION_APPROVED",
+				"actor_email": uEmail,
+			})
+		}(req.ExceptionID, userEmail)
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":          true,
+			"exception_id":     req.ExceptionID,
+			"exception_status": "APPROVED",
+		})
+	}
+}
+
+// ─── HANDLER 17: CloseException ──────────────────────────────────────────────
+
+func CloseException(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID      string `json:"user_id"`
+			ExceptionID string `json:"exception_id"`
+			Comment     string `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.ExceptionID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "exception_id is required")
+			return
+		}
+		userEmail := resolveUserEmail(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		var exStatus string
+		err := pool.QueryRow(ctx, `SELECT exception_status FROM investment.fd_receipt_exception WHERE exception_id=$1 AND is_deleted=false`, req.ExceptionID).Scan(&exStatus)
+		if err != nil {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrExceptionNotFound)
+			return
+		}
+		if exStatus != "APPROVED" {
+			api.RespondWithError(w, http.StatusBadRequest, "Exception must be APPROVED to close")
+			return
+		}
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
+			return
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		_, err = tx.Exec(ctx, `
+			UPDATE investment.fd_receipt_exception SET
+				exception_status='CLOSED',
+				closed_by=$1, closed_at=now(), updated_at=now()
+			WHERE exception_id=$2 AND exception_status='APPROVED'`, userEmail, req.ExceptionID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			return
+		}
+
+		if err = tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":          true,
+			"exception_id":     req.ExceptionID,
+			"exception_status": "CLOSED",
+		})
+	}
+}
 
 // ─── HANDLER 18: PostReceiptJournals ─────────────────────────────────────────
 
@@ -2984,7 +3293,7 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -3099,7 +3408,7 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "tds_id, fields, and reason are required")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -3232,7 +3541,7 @@ func GetTDSDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "tds_id is required")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -3290,7 +3599,7 @@ func GetTDSAuditHistory(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return

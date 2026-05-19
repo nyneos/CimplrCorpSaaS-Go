@@ -3,7 +3,6 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	approvalengine "CimplrCorpSaas/api/approvalengine"
@@ -34,7 +33,7 @@ func (s *CronService) Name() string {
 }
 
 func (s *CronService) Start() error {
-	log.Println("Starting cron service...")
+	logger.LogInfo("Starting cron service...")
 
 	// ---------------- AMFI ----------------
 	amfiConfig := investmentjobs.NewDefaultConfig()
@@ -113,13 +112,13 @@ func (s *CronService) Start() error {
 	// ---------------- DB Cleanup Worker ----------------
 	go s.startDBCleanupWorker()
 	logger.GlobalLogger.LogAudit("DB cleanup worker started")
-	log.Println("Cron service started — DB Cleanup Worker running")
+	logger.LogInfo("Cron service started — DB Cleanup Worker running")
 
 	return nil
 }
 
 func (s *CronService) Stop() error {
-	log.Println("Cron service stopped.")
+	logger.LogInfo("Cron service stopped.")
 	return nil
 }
 
@@ -137,7 +136,7 @@ func (s *CronService) startDBCleanupWorker() {
 		}
 	}
 
-	log.Printf("DB Cleanup Worker running every %d seconds\n", interval)
+	logger.LogInfo("DB Cleanup Worker running every %d seconds\n", interval)
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
@@ -162,12 +161,12 @@ func (s *CronService) cleanupIdleConnections() {
 
 	tag, err := s.db.Exec(context.Background(), query)
 	if err != nil {
-		log.Println("DB cleanup error:", err)
+		logger.LogError("DB cleanup error:", err)
 		if logger.GlobalLogger != nil {
 			logger.GlobalLogger.LogAudit("DB cleanup failed: " + err.Error())
 		}
 		return
 	}
 
-	log.Printf("DB cleanup executed. Rows affected: %d\n", tag.RowsAffected())
+	logger.LogInfo("DB cleanup executed. Rows affected: %d\n", tag.RowsAffected())
 }

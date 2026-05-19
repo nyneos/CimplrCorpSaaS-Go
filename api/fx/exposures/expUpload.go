@@ -3,6 +3,8 @@ package exposures
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/fx/auditutil"
+	"CimplrCorpSaas/api/utils"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"database/sql"
@@ -11,12 +13,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +27,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/lib/pq"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 var ErrExposureFileAlreadyUploaded = errors.New("exposure file already uploaded")
@@ -106,7 +108,7 @@ func UploadExposure(w http.ResponseWriter, r *http.Request) {
 
 // Helper: send JSON error response and log
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
+	logger.LogError("%s", errMsg)
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -126,143 +128,7 @@ func contains(slice []string, item string) bool {
 }
 
 func NormalizeDate(dateStr string) string {
-	dateStr = strings.TrimSpace(dateStr)
-	if dateStr == "" {
-		return ""
-	}
-
-	// Normalize spaces
-	dateStr = regexp.MustCompile(`\s+`).ReplaceAllString(dateStr, " ")
-
-	// Try common layouts first (preserve original behavior)
-	layouts := []string{
-		// ISO formats
-		constants.DateFormat,
-		"2006/01/02",
-		"2006.01.02",
-		time.RFC3339,
-		constants.DateTimeFormat,
-		constants.DateFormatISO,
-		"2006-01-02T15:04:05Z",
-		"2006-01-02T15:04:05.000Z",
-
-		// DD-MM-YYYY formats
-		constants.DateFormatAlt,
-		"02/01/2006",
-		"02.01.2006",
-		"02-01-2006 15:04:05",
-		"02/01/2006 15:04:05",
-		"02.01.2006 15:04:05",
-
-		// MM-DD-YYYY formats
-		"01-02-2006",
-		"01/02/2006",
-		"01.02.2006",
-		"01-02-2006 15:04:05",
-		"01/02/2006 15:04:05",
-		"01.02.2006 15:04:05",
-
-		// Text month formats
-		constants.DateFormatDash,
-		"02-Jan-06",
-		"2-Jan-2006",
-		"2-Jan-06",
-		"02-Jan-2006 15:04:05",
-		"02 Jan 2006",
-		"2 Jan 2006",
-		"02 Jan 06",
-		"2 Jan 06",
-		"Jan 02, 2006",
-		"Jan 2, 2006",
-		"January 02, 2006",
-		"January 2, 2006",
-
-		// Single digit day/month formats
-		"2-1-2006",
-		"2/1/2006",
-		"2.1.2006",
-		"1-2-2006",
-		"1/2/2006",
-		"1.2.2006",
-
-		// Short year formats
-		"02-01-06",
-		"02/01/06",
-		"02.01.06",
-		"01-02-06",
-		"01/02/06",
-		"01.02.06",
-		"2-1-06",
-		"2/1/06",
-		"1-2-06",
-		"1/2-06",
-
-		// compact
-		"20060102",
-	}
-
-	for _, l := range layouts {
-		if t, err := time.Parse(l, dateStr); err == nil {
-			if t.Year() < 1900 || t.Year() > 9999 {
-				continue
-			}
-			return t.Format(constants.DateFormat)
-		}
-	}
-
-	// If the string is purely numeric try several heuristics:
-	// - YYYYMMDD (8 digits)
-	// - Unix timestamp (seconds / ms / us / ns)
-	// - Excel serial (days since 1899-12-30)
-	digits := true
-	for _, r := range dateStr {
-		if r < '0' || r > '9' {
-			digits = false
-			break
-		}
-	}
-
-	if digits {
-		// YYYYMMDD
-		if len(dateStr) == 8 {
-			if y, err := strconv.Atoi(dateStr[0:4]); err == nil {
-				if m, err := strconv.Atoi(dateStr[4:6]); err == nil {
-					if d, err := strconv.Atoi(dateStr[6:8]); err == nil {
-						if y >= 1900 && y <= 9999 {
-							return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC).Format(constants.DateFormat)
-						}
-					}
-				}
-			}
-		}
-
-		if v, err := strconv.ParseInt(dateStr, 10, 64); err == nil {
-			var t time.Time
-			switch {
-			case v >= 1e17:
-				// nanoseconds since epoch
-				t = time.Unix(0, v)
-			case v >= 1e14:
-				// microseconds -> ns
-				t = time.Unix(0, v*1000)
-			case v >= 1e11:
-				// milliseconds -> ns
-				t = time.Unix(0, v*1000000)
-			case v >= 1e9:
-				// seconds
-				t = time.Unix(v, 0)
-			default:
-				// Treat as Excel serial date (days since 1899-12-30)
-				base := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
-				t = base.AddDate(0, 0, int(v))
-			}
-			if t.Year() >= 1900 && t.Year() <= 9999 {
-				return t.Format(constants.DateFormat)
-			}
-		}
-	}
-
-	return ""
+	return utils.NormalizeDateString(dateStr)
 }
 
 // Helper: parse DB value to correct Go type
@@ -358,7 +224,7 @@ func exposureHeadersHasUploadBatchID(ctx context.Context, db *sql.DB) bool {
 			WHERE table_name = 'exposure_headers' AND column_name = 'upload_batch_id'
 		)
 	`).Scan(&exists); err != nil {
-		log.Printf("[FX-DOWNLOAD] failed to detect exposure_headers.upload_batch_id: %v", err)
+		logger.LogError("[FX-DOWNLOAD] failed to detect exposure_headers.upload_batch_id: %v", err)
 		return false
 	}
 	return exists
@@ -444,7 +310,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 		// Get columns for each table
 		headerColsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_headers'`)
 		if err != nil {
-			log.Printf("[ERROR] failed to query header columns: %v", err)
+			logger.LogError("failed to query header columns: %v", err)
 			respondWithError(w, http.StatusInternalServerError, "failed to read table metadata")
 			return
 		}
@@ -452,7 +318,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 
 		lineColsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_line_items'`)
 		if err != nil {
-			log.Printf("[ERROR] failed to query line columns: %v", err)
+			logger.LogError("failed to query line columns: %v", err)
 			respondWithError(w, http.StatusInternalServerError, "failed to read table metadata")
 			return
 		}
@@ -583,6 +449,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			constants.ValueSuccess: true,
 			"data":                 results,
 		})
+		auditutil.RecordAction(r.Context(), db, auditutil.TableExposure, "exposure_header_id", exposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", auditutil.Actor(req.UserID), nil, req.Fields)
 	}
 }
 
@@ -610,7 +477,9 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			SELECT h.*, l.*
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
-			WHERE h.entity = ANY($1) AND lower(coalesce(h.exposure_creation_status, '')) = 'approved'
+			WHERE h.entity = ANY($1)
+			  AND lower(coalesce(h.exposure_creation_status, '')) = 'approved'
+			  AND COALESCE(h.is_deleted, false) = false
 		`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure headers/line items")
@@ -741,7 +610,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			resp[constants.ExposureUpload] = perms
 		}
 		// Debug: log sizes so we can see why clients receive empty responses
-		log.Printf("[DEBUG] GetExposureHeadersLineItems: buAccessible=%d, pageData=%d", len(buNames), len(joinData))
+		logger.LogInfo("[DEBUG] GetExposureHeadersLineItems: buAccessible=%d, pageData=%d", len(buNames), len(joinData))
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		b, jerr := json.Marshal(resp)
 		if jerr != nil {
@@ -749,7 +618,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		if _, werr := w.Write(b); werr != nil {
-			log.Printf("[ERROR] Failed to write response: %v", werr)
+			logger.LogError("Failed to write response: %v", werr)
 		}
 	}
 }
@@ -796,7 +665,10 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			SELECT h.*, l.*
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
-			WHERE h.entity = ANY($1) AND h.approval_status NOT IN ('Approved', 'approved') AND lower(coalesce(h.exposure_creation_status, '')) = 'approved'
+			WHERE h.entity = ANY($1)
+			  AND h.approval_status NOT IN ('Approved', 'approved', 'APPROVED')
+			  AND lower(coalesce(h.exposure_creation_status, '')) = 'approved'
+			  AND COALESCE(h.is_deleted, false) = false
 		`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch pending approval headers/line items")
@@ -938,6 +810,7 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 			UserID            string   `json:"user_id"`
 			ExposureHeaderIds []string `json:"exposureHeaderIds"`
 			DeleteComment     string   `json:"delete_comment"`
+			Reason            string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.UserID == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrExposureHeaderIDsUserID)
@@ -959,9 +832,19 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Mark for delete approval first
+		deleteComment := req.DeleteComment
+		if strings.TrimSpace(deleteComment) == "" {
+			deleteComment = req.Reason
+		}
+
 		res, err := db.Exec(
-			`UPDATE exposure_headers SET approval_status = 'Delete-Approval', delete_comment = $1, requested_by = $2 WHERE exposure_header_id = ANY($3::uuid[])`,
-			req.DeleteComment,
+			`UPDATE exposure_headers
+			 SET approval_status = 'PENDING_DELETE_APPROVAL',
+			     delete_comment = $1,
+			     requested_by = $2
+			 WHERE exposure_header_id = ANY($3::uuid[])
+			   AND COALESCE(is_deleted, false) = false`,
+			deleteComment,
 			requestedBy,
 			pq.Array(req.ExposureHeaderIds),
 		)
@@ -982,6 +865,9 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 			constants.ValueSuccess: true,
 			"message":              fmt.Sprintf("%d exposure_header(s) marked for delete approval", count),
 		})
+		for _, id := range req.ExposureHeaderIds {
+			auditutil.RecordAction(r.Context(), db, auditutil.TableExposure, "exposure_header_id", id, "DELETE", "PENDING_DELETE_APPROVAL", deleteComment, requestedBy, nil, nil)
+		}
 	}
 }
 
@@ -1013,7 +899,14 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		}
 
 		rows, err := db.Query(
-			`UPDATE exposure_headers SET approval_status = 'Rejected', rejected_by = $1, rejection_comment = $2, rejected_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`,
+			`UPDATE exposure_headers
+			 SET approval_status = 'REJECTED',
+			     rejected_by = $1,
+			     rejection_comment = $2,
+			     rejected_at = NOW()
+			 WHERE exposure_header_id = ANY($3::uuid[])
+			   AND COALESCE(is_deleted, false) = false
+			 RETURNING *`,
 			rejectedBy,
 			req.RejectionComment,
 			pq.Array(req.ExposureHeaderIds),
@@ -1039,6 +932,9 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 				rowMap[col] = parseDBValue(col, vals[i])
 			}
 			rejected = append(rejected, rowMap)
+			if id, ok := rowMap["exposure_header_id"]; ok {
+				auditutil.RecordDecision(r.Context(), db, auditutil.TableExposure, "exposure_header_id", fmt.Sprint(id), "REJECTED", rejectedBy, req.RejectionComment)
+			}
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -1120,9 +1016,9 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		skipped := []string{}
 		for _, h := range headers {
 			status := strings.ToLower(h.ApprovalStatus)
-			if strings.Contains(status, "delete") {
+			if status == "pending_delete_approval" || strings.Contains(status, "delete-approval") {
 				toDelete = append(toDelete, h.ExposureHeaderId)
-			} else if status == "pending" || status == "rejected" {
+			} else if status == "pending" || status == "rejected" || status == "pending_approval" || status == "pending_edit_approval" {
 				toApprove = append(toApprove, h.ExposureHeaderId)
 			} else if status == "approved" {
 				skipped = append(skipped, h.ExposureHeaderId)
@@ -1134,26 +1030,25 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			"rolled":   []map[string]interface{}{},
 			"skipped":  skipped,
 		}
-		// Handle delete-approval: delete header and line items
+		var approvalErr error
+		// Handle delete approval as a soft delete on the master row.
 		if len(toDelete) > 0 {
-			errors := []string{}
-			// Delete from exposure_rollover_log
-			if _, err := tx.Exec(`DELETE FROM exposure_rollover_log WHERE child_header_id = ANY($1::uuid[]) OR parent_header_id = ANY($1::uuid[])`, pq.Array(toDelete)); err != nil {
-				errors = append(errors, "exposure_rollover_log: "+err.Error())
-			}
-			// Delete from exposure_bucketing
-			if _, err := tx.Exec(`DELETE FROM exposure_bucketing WHERE exposure_header_id = ANY($1::uuid[])`, pq.Array(toDelete)); err != nil {
-				errors = append(errors, "exposure_bucketing: "+err.Error())
-			}
-			// Delete from hedging_proposal
-			if _, err := tx.Exec(`DELETE FROM hedging_proposal WHERE exposure_header_id = ANY($1::uuid[])`, pq.Array(toDelete)); err != nil {
-				errors = append(errors, "hedging_proposal: "+err.Error())
-			}
-			// Log deleted headers before deletion
-			delRows, errDel := tx.Query(`DELETE FROM exposure_headers WHERE exposure_header_id = ANY($1::uuid[]) RETURNING *`, pq.Array(toDelete))
+			delRows, errDel := tx.Query(`
+				UPDATE exposure_headers
+				SET approval_status = 'APPROVED',
+				    approved_by = $1,
+				    approval_comment = $2,
+				    approved_at = NOW(),
+				    is_deleted = TRUE,
+				    deleted_at = NOW(),
+				    deleted_by = $1
+				WHERE exposure_header_id = ANY($3::uuid[])
+				  AND COALESCE(is_deleted, false) = false
+				RETURNING *
+			`, approvedBy, req.ApprovalComment, pq.Array(toDelete))
 			deletedHeaders := []map[string]interface{}{}
 			if errDel != nil {
-				errors = append(errors, "exposure_headers: "+errDel.Error())
+				approvalErr = errDel
 			} else {
 				delCols, _ := delRows.Columns()
 				for delRows.Next() {
@@ -1172,10 +1067,6 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 					deletedHeaders = append(deletedHeaders, rowMap)
 				}
 				delRows.Close()
-			}
-			// Delete from exposure_line_items
-			if _, err := tx.Exec(`DELETE FROM exposure_line_items WHERE exposure_header_id = ANY($1::uuid[])`, pq.Array(toDelete)); err != nil {
-				errors = append(errors, "exposure_line_items: "+err.Error())
 			}
 			results["deleted"] = deletedHeaders
 			// Reverse rollover if needed
@@ -1234,7 +1125,8 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		if len(toApprove) > 0 {
 			appRows, err := tx.Query(`UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approval_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
 			if err != nil {
-				log.Printf("[WARN] approving exposure headers failed: %v", err)
+				logger.LogError("[WARN] approving exposure headers failed: %v", err)
+				approvalErr = err
 			} else {
 				defer appRows.Close()
 				approvedHeaders := []map[string]interface{}{}
@@ -1311,15 +1203,36 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 					}
 				}
 			}
-			tx.Commit()
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: true,
-				"deleted":              results["deleted"],
-				"approved":             results["approved"],
-				"rolled":               results["rolled"],
-				"skipped":              results["skipped"],
-			})
 		}
+
+		if approvalErr != nil {
+			respondWithError(w, http.StatusInternalServerError, approvalErr.Error())
+			return
+		}
+
+		if len(toDelete) == 0 && len(toApprove) == 0 {
+			respondWithError(w, http.StatusBadRequest, "No eligible exposure headers found for approval")
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, id := range toApprove {
+			auditutil.RecordDecision(r.Context(), db, auditutil.TableExposure, "exposure_header_id", id, "APPROVED", approvedBy, req.ApprovalComment)
+		}
+		for _, id := range toDelete {
+			auditutil.RecordDecision(r.Context(), db, auditutil.TableExposure, "exposure_header_id", id, "APPROVED", approvedBy, req.ApprovalComment)
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"deleted":              results["deleted"],
+			"approved":             results["approved"],
+			"rolled":               results["rolled"],
+			"skipped":              results["skipped"],
+		})
 	}
 }
 
@@ -1407,6 +1320,7 @@ func GetExposureDownloadURL(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			RecordID string `json:"record_id"`
+			UserID   string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
@@ -1436,6 +1350,7 @@ func GetExposureDownloadURL(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "failed to generate download url")
 			return
 		}
+		recordExposureDownloadAudit(r.Context(), db, recordID, exposureDownloadActor(r.Context(), req.UserID), s3Key)
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -1461,6 +1376,21 @@ func normalizeBulkIDs(ids []string) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+func exposureDownloadActor(ctx context.Context, userID string) string {
+	requestedBy := strings.TrimSpace(api.RequestedByFromCtx(ctx, userID))
+	if requestedBy == "" {
+		requestedBy = strings.TrimSpace(auditutil.ActorFromContext(ctx))
+	}
+	if requestedBy == "" {
+		requestedBy = strings.TrimSpace(userID)
+	}
+	return requestedBy
+}
+
+func recordExposureDownloadAudit(ctx context.Context, db *sql.DB, exposureHeaderID, requestedBy, uploadS3Key string) {
+	auditutil.RecordDownload(ctx, db, auditutil.TableExposureDownloads, "exposure_header_id", exposureHeaderID, requestedBy, uploadS3Key, nil)
 }
 
 func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
@@ -1491,6 +1421,7 @@ func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UploadBatchIDs []string `json:"upload_batch_ids"`
 			RecordIDs      []string `json:"record_ids"`
+			UserID         string   `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
@@ -1506,6 +1437,7 @@ func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 		ctx := r.Context()
 		files := make([]map[string]string, 0, len(recordIDs))
 		failedIDs := make([]string, 0)
+		requestedBy := exposureDownloadActor(ctx, req.UserID)
 
 		for _, recordID := range recordIDs {
 			uploadS3Key, err := lookupExposureUploadS3Key(ctx, db, recordID)
@@ -1530,6 +1462,7 @@ func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 				"record_id":    recordID,
 				"download_url": downloadURL,
 			})
+			recordExposureDownloadAudit(ctx, db, recordID, requestedBy, s3Key)
 		}
 
 		writeBulkDownloadResponse(w, files, failedIDs)
@@ -1588,7 +1521,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					}
 					if uploadedNewObject && !txCommitted && s3Key != "" {
 						if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
-							log.Printf("[FX-STAGING-S3] cleanup failed for key=%s: %v", s3Key, cleanupErr)
+							logger.LogError("[FX-STAGING-S3] cleanup failed for key=%s: %v", s3Key, cleanupErr)
 						}
 					}
 				}()
@@ -1756,7 +1689,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					return
 				}
 				s3Key = s3storage.BuildUploadedS3Key("fx/exposures", exposureTypeFolder, filename, uploadedBy, time.Now().UTC())
-				log.Printf("[FX-STAGING] UPLOAD START: filename=%s, field.DataType=%s, s3Key=%s, S3Enabled=%v",
+				logger.LogInfo("[FX-STAGING] UPLOAD START: filename=%s, field.DataType=%s, s3Key=%s, S3Enabled=%v",
 					filename, field.DataType, s3Key, s3storage.IsS3UploadEnabled())
 				if s3storage.IsS3UploadEnabled() {
 					if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, s3storage.DetectContentType(fileBytes)); err != nil {
@@ -1764,9 +1697,9 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 						return
 					}
 					uploadedNewObject = true
-					log.Printf("[FX-STAGING] S3 UPLOAD SUCCESS: s3Key=%s", s3Key)
+					logger.LogInfo("[FX-STAGING] S3 UPLOAD SUCCESS: s3Key=%s", s3Key)
 				} else {
-					log.Printf("[FX-STAGING] S3 DISABLED - file will not be uploaded to S3!")
+					logger.LogInfo("[FX-STAGING] S3 DISABLED - file will not be uploaded to S3!")
 				}
 
 				tableColumnsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = $1`, field.TableName)
@@ -1795,7 +1728,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 						WHERE table_name = 'exposure_headers' AND column_name = 'upload_batch_id'
 					)
 				`).Scan(&hasHeaderUploadBatchID); err != nil {
-					log.Printf("[FX-STAGING] failed to detect exposure_headers.upload_batch_id; proceeding without it: %v", err)
+					logger.LogError("[FX-STAGING] failed to detect exposure_headers.upload_batch_id; proceeding without it: %v", err)
 					hasHeaderUploadBatchID = false
 				}
 
@@ -2071,7 +2004,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 
 					header["additional_header_details"] = headerDetails
 					header["upload_s3_key"] = persistedS3Key
-					log.Printf("[FX-STAGING] About to insert into exposure_headers with upload_s3_key=%s, upload_batch_id=%s", persistedS3Key, uploadBatchId)
+					logger.LogInfo("[FX-STAGING] About to insert into exposure_headers with upload_s3_key=%s, upload_batch_id=%s", persistedS3Key, uploadBatchId)
 					if hasHeaderUploadBatchID {
 						header["upload_batch_id"] = uploadBatchId
 					}
@@ -2098,14 +2031,14 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					}
 
 					headerInsert := fmt.Sprintf("INSERT INTO exposure_headers (%s) VALUES (%s) RETURNING exposure_header_id", strings.Join(headerKeys, ", "), strings.Join(headerPlaceholders, ", "))
-					log.Printf("[FX-STAGING] INSERT QUERY: %s", headerInsert)
-					log.Printf("[FX-STAGING] INSERT VALUES count=%d, first few: %v", len(headerVals), headerVals)
-					log.Printf("[FX-STAGING] Trying INSERT into exposure_headers now...")
+					logger.LogInfo("[FX-STAGING] INSERT QUERY: %s", headerInsert)
+					logger.LogInfo("[FX-STAGING] INSERT VALUES count=%d, first few: %v", len(headerVals), headerVals)
+					logger.LogInfo("[FX-STAGING] Trying INSERT into exposure_headers now...")
 					var exposureHeaderId string
 					err := tx.QueryRowContext(ctx, headerInsert, headerVals...).Scan(&exposureHeaderId)
 					if err != nil {
 						absorptionErrors = append(absorptionErrors, fmt.Sprintf("header insert error for file %s: %v", filename, err))
-						log.Printf("[FX-STAGING] INSERT FAILED: %v", err)
+						logger.LogError("[FX-STAGING] INSERT FAILED: %v", err)
 						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: absorptionErrors[len(absorptionErrors)-1]})
 						return
 					}
@@ -2131,7 +2064,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 						)
 						if _, err := tx.ExecContext(ctx, headerMetaUpdate, headerMetaVals...); err != nil {
 							absorptionErrors = append(absorptionErrors, fmt.Sprintf("header upload metadata update error for file %s: %v", filename, err))
-							log.Printf("[FX-STAGING] upload metadata update failed: %v", err)
+							logger.LogError("[FX-STAGING] upload metadata update failed: %v", err)
 							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: absorptionErrors[len(absorptionErrors)-1]})
 							return
 						}
@@ -2144,18 +2077,18 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 							WHERE exposure_header_id = $1
 						`, exposureHeaderId).Scan(&storedUploadS3Key); err != nil {
 							absorptionErrors = append(absorptionErrors, fmt.Sprintf("header upload key verification error for file %s: %v", filename, err))
-							log.Printf("[FX-STAGING] upload key verification failed: %v", err)
+							logger.LogError("[FX-STAGING] upload key verification failed: %v", err)
 							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: absorptionErrors[len(absorptionErrors)-1]})
 							return
 						}
 						if strings.TrimSpace(storedUploadS3Key) != strings.TrimSpace(persistedS3Key) {
 							absorptionErrors = append(absorptionErrors, fmt.Sprintf("header upload key verification failed for file %s: persisted key is empty or mismatched", filename))
-							log.Printf("[FX-STAGING] upload key verification mismatch: expected=%q actual=%q", persistedS3Key, storedUploadS3Key)
+							logger.LogInfo("[FX-STAGING] upload key verification mismatch: expected=%q actual=%q", persistedS3Key, storedUploadS3Key)
 							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: absorptionErrors[len(absorptionErrors)-1]})
 							return
 						}
 					}
-					log.Printf("[FX-STAGING] INSERT SUCCESS: exposureHeaderId=%s, insertedFinalRows=%d", exposureHeaderId, insertedFinalRows+1)
+					logger.LogInfo("[FX-STAGING] INSERT SUCCESS: exposureHeaderId=%s, insertedFinalRows=%d", exposureHeaderId, insertedFinalRows+1)
 					insertedFinalRows++
 
 					line := map[string]interface{}{}
@@ -2225,7 +2158,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					}
 				}
 
-				log.Printf("[FX-STAGING] FINAL RESULT: filename=%s, insertedRows=%d, insertedFinalRows=%d, absorptionErrors=%v", filename, insertedRows, insertedFinalRows, absorptionErrors)
+				logger.LogError("[FX-STAGING] FINAL RESULT: filename=%s, insertedRows=%d, insertedFinalRows=%d, absorptionErrors=%v", filename, insertedRows, insertedFinalRows, absorptionErrors)
 				success := insertedFinalRows > 0 && len(absorptionErrors) == 0
 				msg := fmt.Sprintf("Batch uploaded to staging table only (staged: %d rows, absorbed: %d rows, errors: %d)", insertedRows, insertedFinalRows, len(absorptionErrors))
 				if success {
@@ -2233,15 +2166,15 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 				}
 				if len(absorptionErrors) > 0 {
 					msg = "Upload failed: " + absorptionErrors[0]
-					log.Printf("[FX-STAGING] ERROR DETAIL: %v", absorptionErrors)
+					logger.LogError("[FX-STAGING] ERROR DETAIL: %v", absorptionErrors)
 				}
-				log.Printf("[FX-STAGING] About to COMMIT transaction...")
+				logger.LogInfo("[FX-STAGING] About to COMMIT transaction...")
 				if err := tx.Commit(); err != nil {
-					log.Printf("[FX-STAGING] COMMIT FAILED: %v", err)
+					logger.LogError("[FX-STAGING] COMMIT FAILED: %v", err)
 					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to commit staged exposure upload: " + err.Error()})
 					return
 				}
-				log.Printf("[FX-STAGING] COMMIT SUCCESS for filename=%s", filename)
+				logger.LogInfo("[FX-STAGING] COMMIT SUCCESS for filename=%s", filename)
 				txCommitted = true
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: success,

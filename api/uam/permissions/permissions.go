@@ -1,7 +1,7 @@
 package permissions
 
 import (
-	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
@@ -12,7 +12,8 @@ import (
 	"time"
 
 	"github.com/lib/pq"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // ---------------------------------------------------------------------------
 // Helper: send JSON error response
@@ -190,7 +191,8 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Step 3: Bulk insert or fetch permission IDs
-		tx, err := db.Begin()
+		ctx := r.Context()
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction)
 			return
@@ -324,7 +326,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 				`, roleIDs[i], pid, oldValArg, newVal, req.UserID)
 				if insErr != nil {
 					// Non-fatal: log but don't fail the whole upsert
-					log.Printf("warn: failed to stage permission request role=%s perm=%d: %v", roleIDs[i], pid, insErr)
+					logger.LogError("warn: failed to stage permission request role=%s perm=%d: %v", roleIDs[i], pid, insErr)
 				}
 			}
 		}
@@ -376,13 +378,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 				http.Error(w, `{"success":false,"error":constants.ErrUserIDRequired}`, http.StatusBadRequest)
 				return
 			}
-			sessions := auth.GetActiveSessions()
-			for _, s := range sessions {
-				if s.UserID == req.UserID {
-					roleName = s.Role
-					break
-				}
-			}
+			roleName = api.GetUserRoleFromCtx(r.Context())
 			if roleName == "" {
 				http.Error(w, `{"success":false,"error":"Role not found in session"}`, http.StatusUnauthorized)
 				return
@@ -510,7 +506,8 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		tx, err := db.Begin()
+		ctx := r.Context()
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction)
 			return

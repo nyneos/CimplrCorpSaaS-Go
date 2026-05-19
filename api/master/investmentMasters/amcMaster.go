@@ -2,11 +2,9 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -228,16 +226,14 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
-		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		userName := session.Email
+		if userName == "" {
+			userName = session.Name
 		}
 
 		// === Step 2: Parse uploaded CSV ===
@@ -454,13 +450,7 @@ func CreateAMCsingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// --- Get user email from active sessions ---
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -579,13 +569,7 @@ func CreateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// 🔍 Identify user
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -702,13 +686,7 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -864,13 +842,7 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// --- Identify user ---
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -991,13 +963,7 @@ func DeleteAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		requestedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				requestedBy = s.Email
-				break
-			}
-		}
+		requestedBy := api.GetUserEmailFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1049,19 +1015,13 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Email
-				break
-			}
-		}
+		checkerBy := api.GetUserEmailFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrTxBeginFailedCapitalized)
@@ -1129,19 +1089,13 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// 🔍 Identify the checker
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Email
-				break
-			}
-		}
+		checkerBy := api.GetUserEmailFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrTxBeginFailedCapitalized)

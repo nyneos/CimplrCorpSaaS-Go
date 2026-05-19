@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -17,7 +16,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // TransactionDetail is the common structure for transaction-related data
 // InvestmentDetail is the common detail structure for all investment-related data
@@ -483,7 +483,7 @@ func fetchAUMDetails(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter st
 
 	rows, err := pgxPool.Query(ctx, query)
 	if err != nil {
-		log.Printf("[investmentOverview] fetchAUMDetails query error: %v", err)
+		logger.LogError("[investmentOverview] fetchAUMDetails query error: %v", err)
 		return []InvestmentDetail{}
 	}
 	defer rows.Close()
@@ -543,7 +543,7 @@ func fetchRawTransactionDetails(ctx context.Context, pgxPool *pgxpool.Pool, enti
 	// Pass entity filters the same way other queries do to ensure consistent results
 	rows, err := pgxPool.Query(ctx, query, fromDate, nullIfEmpty(entityFilter), allowedEntities)
 	if err != nil {
-		log.Printf("[investmentOverview] fetchRawTransactionDetails query error: %v", err)
+		logger.LogError("[investmentOverview] fetchRawTransactionDetails query error: %v", err)
 		return []TransactionDetail{}
 	}
 	defer rows.Close()
@@ -603,7 +603,7 @@ func getAUMAtDate(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter strin
 	var aum float64
 	err := pgxPool.QueryRow(ctx, q, asOf.Format(constants.DateFormat), nullIfEmpty(entityFilter), allowedParam).Scan(&aum)
 	if err != nil {
-		log.Printf("[investmentOverview] getAUMAtDate query error: %v", err)
+		logger.LogError("[investmentOverview] getAUMAtDate query error: %v", err)
 		return 0
 	}
 	return aum
@@ -658,7 +658,7 @@ func fetchAUMDetailsWithRisk(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 
 	rows, err := pgxPool.Query(ctx, query)
 	if err != nil {
-		log.Printf("[investmentOverview] fetchAUMDetailsWithRisk query error: %v", err)
+		logger.LogError("[investmentOverview] fetchAUMDetailsWithRisk query error: %v", err)
 		return []InvestmentDetail{}
 	}
 	defer rows.Close()
@@ -671,12 +671,12 @@ func fetchAUMDetailsWithRisk(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 			&d.FolioNumber, &d.DematAccount, &d.ISIN, &d.Units, &d.NAV, &d.AMFINAV, &d.PurchaseNAV,
 			&d.InvestedAmount, &d.CurrentValue, &d.GainLoss, &d.GainLossPct,
 			&d.RiskRating, &d.InternalRiskScore); err != nil {
-			log.Printf("[investmentOverview] fetchAUMDetailsWithRisk row scan error: %v", err)
+			logger.LogError("[investmentOverview] fetchAUMDetailsWithRisk row scan error: %v", err)
 			continue
 		}
 		details = append(details, d)
 	}
-	log.Printf("[investmentOverview] fetchAUMDetailsWithRisk returned %d rows", len(details))
+	logger.LogInfo("[investmentOverview] fetchAUMDetailsWithRisk returned %d rows", len(details))
 	return details
 }
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -195,6 +196,8 @@ var (
 	}
 )
 
+const investmentAdditionalFilesAuditTable = "investment.additional_file_audit"
+
 func ListOnboardAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(onboardingFilesDefinition))
 }
@@ -213,6 +216,18 @@ func DownloadSelectedOnboardAdditionalFilesHandler(pool *pgxpool.Pool) http.Hand
 
 func DeleteOnboardAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(onboardingFilesDefinition))
+}
+
+func AuditOnboardAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(onboardingFilesDefinition))
+}
+
+func ApproveDeleteOnboardAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(onboardingFilesDefinition))
+}
+
+func RejectDeleteOnboardAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(onboardingFilesDefinition))
 }
 
 func ListProposalAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -235,6 +250,18 @@ func DeleteProposalAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(proposalFilesDefinition))
 }
 
+func AuditProposalAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(proposalFilesDefinition))
+}
+
+func ApproveDeleteProposalAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(proposalFilesDefinition))
+}
+
+func RejectDeleteProposalAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(proposalFilesDefinition))
+}
+
 func ListInitiationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(initiationFilesDefinition))
 }
@@ -253,6 +280,18 @@ func DownloadSelectedInitiationAdditionalFilesHandler(pool *pgxpool.Pool) http.H
 
 func DeleteInitiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(initiationFilesDefinition))
+}
+
+func AuditInitiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(initiationFilesDefinition))
+}
+
+func ApproveDeleteInitiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(initiationFilesDefinition))
+}
+
+func RejectDeleteInitiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(initiationFilesDefinition))
 }
 
 func ListConfirmationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -275,6 +314,18 @@ func DeleteConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFun
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(confirmationFilesDefinition))
 }
 
+func AuditConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(confirmationFilesDefinition))
+}
+
+func ApproveDeleteConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(confirmationFilesDefinition))
+}
+
+func RejectDeleteConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(confirmationFilesDefinition))
+}
+
 func ListRedemptionInitiationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(redemptionInitiationFilesDefinition))
 }
@@ -293,6 +344,18 @@ func DownloadSelectedRedemptionInitiationAdditionalFilesHandler(pool *pgxpool.Po
 
 func DeleteRedemptionInitiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(redemptionInitiationFilesDefinition))
+}
+
+func AuditRedemptionInitiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(redemptionInitiationFilesDefinition))
+}
+
+func ApproveDeleteRedemptionInitiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(redemptionInitiationFilesDefinition))
+}
+
+func RejectDeleteRedemptionInitiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(redemptionInitiationFilesDefinition))
 }
 
 func ListRedemptionConfirmationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -315,6 +378,18 @@ func DeleteRedemptionConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(redemptionConfirmationFilesDefinition))
 }
 
+func AuditRedemptionConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(redemptionConfirmationFilesDefinition))
+}
+
+func ApproveDeleteRedemptionConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(redemptionConfirmationFilesDefinition))
+}
+
+func RejectDeleteRedemptionConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(redemptionConfirmationFilesDefinition))
+}
+
 func ListAccountingActivityAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(accountingActivityFilesDefinition))
 }
@@ -333,6 +408,18 @@ func DownloadSelectedAccountingActivityAdditionalFilesHandler(pool *pgxpool.Pool
 
 func DeleteAccountingActivityAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(accountingActivityFilesDefinition))
+}
+
+func AuditAccountingActivityAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(accountingActivityFilesDefinition))
+}
+
+func ApproveDeleteAccountingActivityAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(accountingActivityFilesDefinition))
+}
+
+func RejectDeleteAccountingActivityAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(accountingActivityFilesDefinition))
 }
 
 func ListFDBookingAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -355,6 +442,18 @@ func DeleteFDBookingAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdBookingFilesDefinition))
 }
 
+func AuditFDBookingAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdBookingFilesDefinition))
+}
+
+func ApproveDeleteFDBookingAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdBookingFilesDefinition))
+}
+
+func RejectDeleteFDBookingAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdBookingFilesDefinition))
+}
+
 func ListFDConfirmationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdConfirmationFilesDefinition))
 }
@@ -373,6 +472,18 @@ func DownloadSelectedFDConfirmationAdditionalFilesHandler(pool *pgxpool.Pool) ht
 
 func DeleteFDConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdConfirmationFilesDefinition))
+}
+
+func AuditFDConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdConfirmationFilesDefinition))
+}
+
+func ApproveDeleteFDConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdConfirmationFilesDefinition))
+}
+
+func RejectDeleteFDConfirmationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdConfirmationFilesDefinition))
 }
 
 func ListFDMasterAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -395,6 +506,18 @@ func DeleteFDMasterAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdMasterFilesDefinition))
 }
 
+func AuditFDMasterAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdMasterFilesDefinition))
+}
+
+func ApproveDeleteFDMasterAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdMasterFilesDefinition))
+}
+
+func RejectDeleteFDMasterAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdMasterFilesDefinition))
+}
+
 func ListFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
 }
@@ -413,6 +536,18 @@ func DownloadSelectedFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.Ha
 
 func DeleteFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+}
+
+func AuditFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+}
+
+func ApproveDeleteFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+}
+
+func RejectDeleteFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
 }
 
 func ListFDRolloverAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -435,6 +570,18 @@ func DeleteFDRolloverAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc 
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdRolloverFilesDefinition))
 }
 
+func AuditFDRolloverAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdRolloverFilesDefinition))
+}
+
+func ApproveDeleteFDRolloverAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdRolloverFilesDefinition))
+}
+
+func RejectDeleteFDRolloverAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdRolloverFilesDefinition))
+}
+
 func ListFDCashflowAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdCashflowFilesDefinition))
 }
@@ -453,6 +600,18 @@ func DownloadSelectedFDCashflowAdditionalFilesHandler(pool *pgxpool.Pool) http.H
 
 func DeleteFDCashflowAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdCashflowFilesDefinition))
+}
+
+func AuditFDCashflowAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdCashflowFilesDefinition))
+}
+
+func ApproveDeleteFDCashflowAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdCashflowFilesDefinition))
+}
+
+func RejectDeleteFDCashflowAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdCashflowFilesDefinition))
 }
 
 func ListFDInterestReceiptAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -475,6 +634,18 @@ func DeleteFDInterestReceiptAdditionalFileHandler(pool *pgxpool.Pool) http.Handl
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdInterestReceiptFilesDefinition))
 }
 
+func AuditFDInterestReceiptAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdInterestReceiptFilesDefinition))
+}
+
+func ApproveDeleteFDInterestReceiptAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdInterestReceiptFilesDefinition))
+}
+
+func RejectDeleteFDInterestReceiptAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdInterestReceiptFilesDefinition))
+}
+
 func ListFDTDSReceiptAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdTDSReceiptFilesDefinition))
 }
@@ -493,6 +664,18 @@ func DownloadSelectedFDTDSReceiptAdditionalFilesHandler(pool *pgxpool.Pool) http
 
 func DeleteFDTDSReceiptAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdTDSReceiptFilesDefinition))
+}
+
+func AuditFDTDSReceiptAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdTDSReceiptFilesDefinition))
+}
+
+func ApproveDeleteFDTDSReceiptAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdTDSReceiptFilesDefinition))
+}
+
+func RejectDeleteFDTDSReceiptAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdTDSReceiptFilesDefinition))
 }
 
 func ListFDReconcileResultAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -515,6 +698,18 @@ func DeleteFDReconcileResultAdditionalFileHandler(pool *pgxpool.Pool) http.Handl
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdReconcileResultFilesDefinition))
 }
 
+func AuditFDReconcileResultAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdReconcileResultFilesDefinition))
+}
+
+func ApproveDeleteFDReconcileResultAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdReconcileResultFilesDefinition))
+}
+
+func RejectDeleteFDReconcileResultAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdReconcileResultFilesDefinition))
+}
+
 func ListFDReceiptExceptionAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdReceiptExceptionFilesDefinition))
 }
@@ -533,6 +728,18 @@ func DownloadSelectedFDReceiptExceptionAdditionalFilesHandler(pool *pgxpool.Pool
 
 func DeleteFDReceiptExceptionAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdReceiptExceptionFilesDefinition))
+}
+
+func AuditFDReceiptExceptionAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdReceiptExceptionFilesDefinition))
+}
+
+func ApproveDeleteFDReceiptExceptionAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdReceiptExceptionFilesDefinition))
+}
+
+func RejectDeleteFDReceiptExceptionAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdReceiptExceptionFilesDefinition))
 }
 
 func ListFDAccrualRunAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -555,6 +762,18 @@ func DeleteFDAccrualRunAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFun
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccrualRunFilesDefinition))
 }
 
+func AuditFDAccrualRunAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdAccrualRunFilesDefinition))
+}
+
+func ApproveDeleteFDAccrualRunAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccrualRunFilesDefinition))
+}
+
+func RejectDeleteFDAccrualRunAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccrualRunFilesDefinition))
+}
+
 func ListFDAccrualLedgerAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdAccrualLedgerFilesDefinition))
 }
@@ -573,6 +792,18 @@ func DownloadSelectedFDAccrualLedgerAdditionalFilesHandler(pool *pgxpool.Pool) h
 
 func DeleteFDAccrualLedgerAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccrualLedgerFilesDefinition))
+}
+
+func AuditFDAccrualLedgerAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdAccrualLedgerFilesDefinition))
+}
+
+func ApproveDeleteFDAccrualLedgerAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccrualLedgerFilesDefinition))
+}
+
+func RejectDeleteFDAccrualLedgerAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccrualLedgerFilesDefinition))
 }
 
 func ListFDAccountingJournalAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -595,24 +826,47 @@ func DeleteFDAccountingJournalAdditionalFileHandler(pool *pgxpool.Pool) http.Han
 	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccountingJournalFilesDefinition))
 }
 
+func AuditFDAccountingJournalAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdAccountingJournalFilesDefinition))
+}
+
+func ApproveDeleteFDAccountingJournalAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccountingJournalFilesDefinition))
+}
+
+func RejectDeleteFDAccountingJournalAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccountingJournalFilesDefinition))
+}
+
 func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Config {
 	return cashfiles.Config{
-		Module:        def.Module,
-		ParentIDField: def.ParentIDField,
+		Module:         def.Module,
+		AuditSource:    strings.ToUpper(strings.ReplaceAll(def.Module, "-", "_")),
+		AuditTableName: investmentAdditionalFilesAuditTable,
+		ParentIDField:  def.ParentIDField,
 		List: func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]cashfiles.FileRecord, error) {
 			return listInvestmentAdditionalFiles(ctx, pool, def, parentID)
 		},
 		Create: func(ctx context.Context, tx pgx.Tx, input cashfiles.CreateInput) error {
 			return createInvestmentAdditionalFile(ctx, tx, def, input)
 		},
+		CreateReturning: func(ctx context.Context, tx pgx.Tx, input cashfiles.CreateInput) (string, error) {
+			return createInvestmentAdditionalFileReturningID(ctx, tx, def, input)
+		},
 		GetOne: func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*cashfiles.FileRecord, error) {
-			return getInvestmentAdditionalFile(ctx, pool, def, parentID, fileID)
+			return getInvestmentAdditionalFile(ctx, pool, def, parentID, fileID, false)
+		},
+		GetAnyFile: func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*cashfiles.FileRecord, error) {
+			return getInvestmentAdditionalFile(ctx, pool, def, parentID, fileID, true)
 		},
 		GetMany: func(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]cashfiles.FileRecord, []string, error) {
 			return getInvestmentAdditionalFiles(ctx, pool, def, parentID, fileIDs)
 		},
 		SoftDelete: func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 			return deleteInvestmentAdditionalFile(ctx, pool, def, parentID, fileID, deletedBy, deletedAt)
+		},
+		SoftDeleteTx: func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+			return deleteInvestmentAdditionalFile(ctx, tx, def, parentID, fileID, deletedBy, deletedAt)
 		},
 	}
 }
@@ -631,25 +885,35 @@ func listInvestmentAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, def 
 }
 
 func createInvestmentAdditionalFile(ctx context.Context, tx pgx.Tx, def investmentFileDefinition, input cashfiles.CreateInput) error {
+	_, err := createInvestmentAdditionalFileReturningID(ctx, tx, def, input)
+	return err
+}
+
+func createInvestmentAdditionalFileReturningID(ctx context.Context, tx pgx.Tx, def investmentFileDefinition, input cashfiles.CreateInput) (string, error) {
 	parentScope := fmt.Sprintf(`
 		SELECT p.%s AS parent_id
 		FROM %s p
 		WHERE p.%s::text = $8
 		  %s
 	`, def.ParentColumn, def.ParentTable, def.ParentColumn, def.ParentFilter)
-	return cashfiles.InsertAdditionalFileRow(ctx, tx, def.TableName, def.ParentColumn, input, parentScope, strings.TrimSpace(input.ParentID))
+	return cashfiles.InsertAdditionalFileRowReturningID(ctx, tx, def.TableName, def.ParentColumn, input, parentScope, strings.TrimSpace(input.ParentID))
 }
 
-func getInvestmentAdditionalFile(ctx context.Context, pool *pgxpool.Pool, def investmentFileDefinition, parentID, fileID string) (*cashfiles.FileRecord, error) {
+func getInvestmentAdditionalFile(ctx context.Context, pool *pgxpool.Pool, def investmentFileDefinition, parentID, fileID string, includeDeleted bool) (*cashfiles.FileRecord, error) {
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
+	}
+
 	query := fmt.Sprintf(`
 		SELECT f.file_id, f.stored_file_name, f.content_type, f.file_size, f.upload_s3_key, f.uploaded_by, f.uploaded_at
 		FROM %s f
 		JOIN %s p ON p.%s = f.%s
 		WHERE f.%s::text = $1
 		  AND f.file_id = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
 		  %s
-	`, def.TableName, def.ParentTable, def.ParentColumn, def.ParentColumn, def.ParentColumn, def.ParentFilter)
+		  %s
+	`, def.TableName, def.ParentTable, def.ParentColumn, def.ParentColumn, def.ParentColumn, deletedClause, def.ParentFilter)
 	return cashfiles.FirstFile(ctx, pool, query, strings.TrimSpace(parentID), strings.TrimSpace(fileID))
 }
 
@@ -673,7 +937,11 @@ func getInvestmentAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, def i
 	return files, missingInvestmentAdditionalFileIDs(trimmedIDs, files), nil
 }
 
-func deleteInvestmentAdditionalFile(ctx context.Context, pool *pgxpool.Pool, def investmentFileDefinition, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+type investmentFileExec interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+}
+
+func deleteInvestmentAdditionalFile(ctx context.Context, exec investmentFileExec, def investmentFileDefinition, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	query := fmt.Sprintf(`
 		UPDATE %s f
 		SET is_deleted = TRUE,
@@ -686,7 +954,7 @@ func deleteInvestmentAdditionalFile(ctx context.Context, pool *pgxpool.Pool, def
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
 		  %s
 	`, def.TableName, def.ParentTable, def.ParentColumn, def.ParentColumn, def.ParentColumn, def.ParentFilter)
-	result, err := pool.Exec(ctx, query, strings.TrimSpace(parentID), strings.TrimSpace(fileID), deletedBy, deletedAt)
+	result, err := exec.Exec(ctx, query, strings.TrimSpace(parentID), strings.TrimSpace(fileID), deletedBy, deletedAt)
 	if err != nil {
 		return false, err
 	}

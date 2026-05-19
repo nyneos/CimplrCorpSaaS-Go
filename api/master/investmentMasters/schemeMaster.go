@@ -774,7 +774,7 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailedCapitalized)
@@ -903,7 +903,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailedCapitalized)

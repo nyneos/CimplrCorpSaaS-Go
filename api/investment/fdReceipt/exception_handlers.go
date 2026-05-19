@@ -39,7 +39,7 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, valErr)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -128,7 +128,7 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, valErr)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -209,7 +209,7 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "exception_ids is required")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -387,7 +387,7 @@ func closeVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "exception_ids is required")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -432,7 +432,7 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "reason is required when rejecting")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -524,15 +524,6 @@ func normalizeExceptionIDs(single string, ids []string) []string {
 	}
 	return nil
 }
-
-// ResolveException delegates to resolveVarianceHandler.
-func ResolveException(pool *pgxpool.Pool) http.HandlerFunc { return resolveVarianceHandler(pool) }
-
-// ApproveException delegates to approveVarianceHandler.
-func ApproveException(pool *pgxpool.Pool) http.HandlerFunc { return approveVarianceHandler(pool) }
-
-// CloseException delegates to closeVarianceHandler.
-func CloseException(pool *pgxpool.Pool) http.HandlerFunc { return closeVarianceHandler(pool) }
 
 // RejectException delegates to rejectVarianceHandler.
 func RejectException(pool *pgxpool.Pool) http.HandlerFunc { return rejectVarianceHandler(pool) }
