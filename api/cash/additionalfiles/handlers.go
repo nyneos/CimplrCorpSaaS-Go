@@ -935,15 +935,31 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 	}
 
 	query := `
-		SELECT file_id, requested_by, requested_at, checker_by, checker_at, checker_comment, processing_status
+		SELECT DISTINCT ON (file_id)
+			file_id,
+			requested_by,
+			requested_at,
+			checker_by,
+			checker_at,
+			checker_comment,
+			processing_status
 		FROM ` + auditTableName(cfg) + `
 		WHERE module_key = $1
 		  AND parent_record_id = $2
 		  AND file_id = ANY($3)
 		  AND action_type = $4
-		  AND processing_status = $5
+		  AND processing_status = ANY($5)
+		ORDER BY file_id, requested_at DESC, audit_id DESC
 	`
-	rows, err := pool.Query(ctx, query, cfg.Module, parentID, fileIDs, fileAuditDeleteAction, fileAuditPendingDeleteApproval)
+	rows, err := pool.Query(
+		ctx,
+		query,
+		cfg.Module,
+		parentID,
+		fileIDs,
+		fileAuditDeleteAction,
+		[]string{fileAuditPendingDeleteApproval, fileAuditRejectedStatus},
+	)
 	if err != nil {
 		return nil, err
 	}
