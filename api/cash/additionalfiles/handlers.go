@@ -30,7 +30,7 @@ const (
 	fileAuditRejectedStatus        = "REJECTED"
 	fileAuditPendingDeleteApproval = "PENDING_DELETE_APPROVAL"
 	fileAuditActiveStatus          = "ACTIVE"
-	fileAuditTableName             = "cimplrcorpsaas.cash_additional_file_audit"
+	defaultFileAuditTableName      = "cimplrcorpsaas.cash_additional_file_audit"
 )
 
 type FileRecord struct {
@@ -70,6 +70,7 @@ type MainUploadAuditPayload struct {
 type Config struct {
 	Module                string
 	AuditSource           string
+	AuditTableName        string
 	ParentIDField         string
 	FolderName            string
 	List                  func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]FileRecord, error)
@@ -412,7 +413,7 @@ func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			return
 		}
 
-		pending, err := latestPendingDelete(r.Context(), pool, cfg.Module, req.FileID)
+		pending, err := latestPendingDelete(r.Context(), pool, cfg, req.FileID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -815,7 +816,7 @@ func newDeleteDecisionHandler(pool *pgxpool.Pool, cfg Config, nextStatus string)
 		}
 		defer tx.Rollback(r.Context())
 
-		auditRow, err := latestPendingDeleteForUpdate(r.Context(), tx, cfg.Module, req.FileID)
+		auditRow, err := latestPendingDeleteForUpdate(r.Context(), tx, cfg, req.FileID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -827,7 +828,7 @@ func newDeleteDecisionHandler(pool *pgxpool.Pool, cfg Config, nextStatus string)
 
 		checkerBy := requestedByOrFallback(r.Context(), req.UserID)
 		checkerAt := time.Now().UTC()
-		if err := updateDeleteAuditDecision(r.Context(), tx, auditRow.AuditID, nextStatus, checkerBy, checkerAt, strings.TrimSpace(req.Comment)); err != nil {
+		if err := updateDeleteAuditDecision(r.Context(), tx, cfg, auditRow.AuditID, nextStatus, checkerBy, checkerAt, strings.TrimSpace(req.Comment)); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -915,6 +916,13 @@ func auditEnabled(cfg Config) bool {
 	return strings.TrimSpace(cfg.AuditSource) != ""
 }
 
+func auditTableName(cfg Config) string {
+	if tableName := strings.TrimSpace(cfg.AuditTableName); tableName != "" {
+		return tableName
+	}
+	return defaultFileAuditTableName
+}
+
 func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, parentID string, files []FileRecord) ([]FileRecord, error) {
 	if len(files) == 0 {
 		return files, nil
@@ -928,7 +936,7 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 
 	query := `
 		SELECT file_id, requested_by, requested_at, checker_by, checker_at, checker_comment, processing_status
-		FROM ` + fileAuditTableName + `
+		FROM ` + auditTableName(cfg) + `
 		WHERE module_key = $1
 		  AND parent_record_id = $2
 		  AND file_id = ANY($3)
@@ -996,7 +1004,7 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 }
 
 func recordCreateAuditTx(ctx context.Context, exec auditExecutor, cfg Config, parentID, fileID string, input CreateInput) error {
-	return insertAuditEvent(ctx, exec, fileAuditEvent{
+	return insertAuditEvent(ctx, exec, cfg, fileAuditEvent{
 		EntityID:         fileID,
 		ModuleKey:        cfg.Module,
 		ParentRecordID:   parentID,
@@ -1010,7 +1018,7 @@ func recordCreateAuditTx(ctx context.Context, exec auditExecutor, cfg Config, pa
 
 func recordDownloadAudit(ctx context.Context, exec auditExecutor, cfg Config, parentID string, file FileRecord, requestedBy string) error {
 	requestedAt := time.Now().UTC()
-	return insertAuditEvent(ctx, exec, fileAuditEvent{
+	return insertAuditEvent(ctx, exec, cfg, fileAuditEvent{
 		EntityID:         file.FileID,
 		ModuleKey:        cfg.Module,
 		ParentRecordID:   parentID,
@@ -1024,7 +1032,7 @@ func recordDownloadAudit(ctx context.Context, exec auditExecutor, cfg Config, pa
 
 func recordDeleteRequestAudit(ctx context.Context, exec auditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, reason string) error {
 	requestedAt := time.Now().UTC()
-	return insertAuditEvent(ctx, exec, fileAuditEvent{
+	return insertAuditEvent(ctx, exec, cfg, fileAuditEvent{
 		EntityID:         file.FileID,
 		ModuleKey:        cfg.Module,
 		ParentRecordID:   parentID,
@@ -1037,9 +1045,9 @@ func recordDeleteRequestAudit(ctx context.Context, exec auditExecutor, cfg Confi
 	})
 }
 
-func insertAuditEvent(ctx context.Context, exec auditExecutor, event fileAuditEvent) error {
+func insertAuditEvent(ctx context.Context, exec auditExecutor, cfg Config, event fileAuditEvent) error {
 	query := `
-		INSERT INTO ` + fileAuditTableName + ` (
+		INSERT INTO ` + auditTableName(cfg) + ` (
 			module_key,
 			parent_record_id,
 			file_id,
@@ -1121,7 +1129,7 @@ func listAuditEvents(ctx context.Context, pool *pgxpool.Pool, cfg Config, parent
 		       checker_at,
 		       checker_comment,
 		       reason
-		FROM ` + fileAuditTableName + `
+		FROM ` + auditTableName(cfg) + `
 		WHERE module_key = $1
 		  AND parent_record_id = $2
 		  AND file_id = $3
@@ -1186,19 +1194,19 @@ func listAuditEvents(ctx context.Context, pool *pgxpool.Pool, cfg Config, parent
 	return events, nil
 }
 
-func latestPendingDelete(ctx context.Context, pool *pgxpool.Pool, moduleKey, fileID string) (*fileAuditEvent, error) {
-	return latestPendingDeleteForQuery(ctx, pool, moduleKey, fileID, false)
+func latestPendingDelete(ctx context.Context, pool *pgxpool.Pool, cfg Config, fileID string) (*fileAuditEvent, error) {
+	return latestPendingDeleteForQuery(ctx, pool, cfg, fileID, false)
 }
 
-func latestPendingDeleteForUpdate(ctx context.Context, tx pgx.Tx, moduleKey, fileID string) (*fileAuditEvent, error) {
-	return latestPendingDeleteForQuery(ctx, tx, moduleKey, fileID, true)
+func latestPendingDeleteForUpdate(ctx context.Context, tx pgx.Tx, cfg Config, fileID string) (*fileAuditEvent, error) {
+	return latestPendingDeleteForQuery(ctx, tx, cfg, fileID, true)
 }
 
 type queryRower interface {
 	QueryRow(context.Context, string, ...interface{}) pgx.Row
 }
 
-func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, moduleKey, fileID string, forUpdate bool) (*fileAuditEvent, error) {
+func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, cfg Config, fileID string, forUpdate bool) (*fileAuditEvent, error) {
 	query := `
 		SELECT audit_id,
 		       module_key,
@@ -1212,7 +1220,7 @@ func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, module
 		       checker_at,
 		       checker_comment,
 		       reason
-		FROM ` + fileAuditTableName + `
+		FROM ` + auditTableName(cfg) + `
 		WHERE module_key = $1
 		  AND file_id = $2
 		  AND action_type = $3
@@ -1233,7 +1241,7 @@ func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, module
 	var checkerAt sql.NullTime
 	var checkerComment sql.NullString
 	var reason sql.NullString
-	err := queryer.QueryRow(ctx, query, moduleKey, fileID, fileAuditDeleteAction, fileAuditPendingDeleteApproval).Scan(
+	err := queryer.QueryRow(ctx, query, cfg.Module, fileID, fileAuditDeleteAction, fileAuditPendingDeleteApproval).Scan(
 		&event.AuditID,
 		&module,
 		&parent,
@@ -1271,9 +1279,9 @@ func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, module
 	return &event, nil
 }
 
-func updateDeleteAuditDecision(ctx context.Context, exec auditExecutor, auditID int64, nextStatus, checkerBy string, checkerAt time.Time, checkerComment string) error {
+func updateDeleteAuditDecision(ctx context.Context, exec auditExecutor, cfg Config, auditID int64, nextStatus, checkerBy string, checkerAt time.Time, checkerComment string) error {
 	query := `
-		UPDATE ` + fileAuditTableName + `
+		UPDATE ` + auditTableName(cfg) + `
 		SET processing_status = $2,
 		    checker_by = $3,
 		    checker_at = $4,

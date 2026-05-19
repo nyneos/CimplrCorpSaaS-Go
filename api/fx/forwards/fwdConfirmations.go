@@ -19,6 +19,21 @@ func isForwardPendingDeleteStatus(status string) bool {
 	return normalized == "PENDING_DELETE_APPROVAL" || normalized == "DELETE-APPROVAL"
 }
 
+func normalizeForwardSystemTransactionID(value interface{}) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		text := strings.TrimSpace(fmt.Sprint(v))
+		if text == "<nil>" {
+			return ""
+		}
+		return text
+	}
+}
+
 func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Accept system_transaction_id and fields in the JSON body
@@ -125,6 +140,9 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			UserID               string   `json:"user_id"`
 			SystemTransactionIDs []string `json:"system_transaction_ids"`
 			ProcessingStatus     string   `json:"processing_status"`
+			ApprovalComment      string   `json:"approval_comment"`
+			RejectionComment     string   `json:"rejection_comment"`
+			Comment              string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -251,12 +269,21 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 		}
 		if len(updatedRows) > 0 || len(deletedIds) > 0 {
 			decisionStatus := strings.ToUpper(req.ProcessingStatus)
+			decisionComment := strings.TrimSpace(req.Comment)
+			if decisionComment == "" && req.ProcessingStatus == "Approved" {
+				decisionComment = strings.TrimSpace(req.ApprovalComment)
+			}
+			if decisionComment == "" && req.ProcessingStatus == "Rejected" {
+				decisionComment = strings.TrimSpace(req.RejectionComment)
+			}
 			for _, id := range deletedIds {
-				auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", id, decisionStatus, auditutil.Actor(req.UserID), "")
+				auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", id, decisionStatus, auditutil.Actor(req.UserID), decisionComment)
 			}
 			for _, row := range updatedRows {
 				if id, ok := row["system_transaction_id"]; ok {
-					auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", fmt.Sprint(id), decisionStatus, auditutil.Actor(req.UserID), "")
+					if normalizedID := normalizeForwardSystemTransactionID(id); normalizedID != "" {
+						auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", normalizedID, decisionStatus, auditutil.Actor(req.UserID), decisionComment)
+					}
 				}
 			}
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -345,7 +372,9 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 				}
 				updated = append(updated, rowMap)
 				if id, ok := rowMap["system_transaction_id"]; ok {
-					auditutil.RecordAction(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", fmt.Sprint(id), "DELETE", "PENDING_DELETE_APPROVAL", "", auditutil.Actor(req.UserID), nil, nil)
+					if normalizedID := normalizeForwardSystemTransactionID(id); normalizedID != "" {
+						auditutil.RecordAction(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", normalizedID, "DELETE", "PENDING_DELETE_APPROVAL", "", auditutil.Actor(req.UserID), nil, nil)
+					}
 				}
 			}
 		}

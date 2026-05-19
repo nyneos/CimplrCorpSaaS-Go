@@ -30,7 +30,42 @@ const (
 )
 
 type ExecContext interface {
-	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	ExecContext(ctx context.Context, query string, args ...interface{}) error
+}
+
+type sqlExecAdapter struct {
+	db *sql.DB
+}
+
+func (a sqlExecAdapter) ExecContext(ctx context.Context, query string, args ...interface{}) error {
+	_, err := a.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+type pgxExecAdapter struct {
+	pool *pgxpool.Pool
+}
+
+func (a pgxExecAdapter) ExecContext(ctx context.Context, query string, args ...interface{}) error {
+	_, err := a.pool.Exec(ctx, query, args...)
+	return err
+}
+
+type execAttempt struct {
+	query string
+	args  []interface{}
+}
+
+func execFirstSuccess(ctx context.Context, exec ExecContext, attempts []execAttempt) error {
+	var lastErr error
+	for _, attempt := range attempts {
+		if err := exec.ExecContext(ctx, attempt.query, attempt.args...); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	return lastErr
 }
 
 func Actor(userID string) string {
@@ -90,17 +125,29 @@ func JSONValue(value interface{}) interface{} {
 	return string(bytes)
 }
 
-func RecordAction(ctx context.Context, exec ExecContext, tableName, parentColumn, parentID, actionType, status, reason, requestedBy string, oldValues, newValues interface{}) {
+func RecordAction(ctx context.Context, db *sql.DB, tableName, parentColumn, parentID, actionType, status, reason, requestedBy string, oldValues, newValues interface{}) {
 	parentID = strings.TrimSpace(parentID)
 	requestedBy = strings.TrimSpace(requestedBy)
-	if parentID == "" || requestedBy == "" {
+	if parentID == "" || requestedBy == "" || db == nil {
 		return
 	}
-	query := fmt.Sprintf(`
-		INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values, change_summary)
-		VALUES ($1, $2, $3, $4, $5, now(), $6, $7, $8)
-	`, tableName, parentColumn)
-	if _, err := exec.ExecContext(ctx, query, parentID, actionType, status, NullIfBlank(reason), requestedBy, JSONValue(oldValues), JSONValue(newValues), JSONValue(BuildChangeSummary(oldValues, newValues))); err != nil {
+	attempts := []execAttempt{
+		{
+			query: fmt.Sprintf(`
+			INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values, change_summary)
+			VALUES ($1, $2, $3, $4, $5, now(), $6, $7, $8)
+		`, tableName, parentColumn),
+			args: []interface{}{parentID, actionType, status, NullIfBlank(reason), requestedBy, JSONValue(oldValues), JSONValue(newValues), JSONValue(BuildChangeSummary(oldValues, newValues))},
+		},
+		{
+			query: fmt.Sprintf(`
+			INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at)
+			VALUES ($1, $2, $3, $4, $5, now())
+		`, tableName, parentColumn),
+			args: []interface{}{parentID, actionType, status, NullIfBlank(reason), requestedBy},
+		},
+	}
+	if err := execFirstSuccess(ctx, sqlExecAdapter{db: db}, attempts); err != nil {
 		logger.LogError("fx audit insert failed table=%s parent=%s action=%s: %v", tableName, parentID, actionType, err)
 	}
 }
@@ -111,13 +158,79 @@ func RecordActionPGX(ctx context.Context, pool *pgxpool.Pool, tableName, parentC
 	if parentID == "" || requestedBy == "" || pool == nil {
 		return
 	}
-	query := fmt.Sprintf(`
-		INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values, change_summary)
-		VALUES ($1, $2, $3, $4, $5, now(), $6, $7, $8)
-	`, tableName, parentColumn)
-	if _, err := pool.Exec(ctx, query, parentID, actionType, status, NullIfBlank(reason), requestedBy, JSONValue(oldValues), JSONValue(newValues), JSONValue(BuildChangeSummary(oldValues, newValues))); err != nil {
+	attempts := []execAttempt{
+		{
+			query: fmt.Sprintf(`
+			INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values, change_summary)
+			VALUES ($1, $2, $3, $4, $5, now(), $6, $7, $8)
+		`, tableName, parentColumn),
+			args: []interface{}{parentID, actionType, status, NullIfBlank(reason), requestedBy, JSONValue(oldValues), JSONValue(newValues), JSONValue(BuildChangeSummary(oldValues, newValues))},
+		},
+		{
+			query: fmt.Sprintf(`
+			INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at)
+			VALUES ($1, $2, $3, $4, $5, now())
+		`, tableName, parentColumn),
+			args: []interface{}{parentID, actionType, status, NullIfBlank(reason), requestedBy},
+		},
+	}
+	if err := execFirstSuccess(ctx, pgxExecAdapter{pool: pool}, attempts); err != nil {
 		logger.LogError("fx audit insert failed table=%s parent=%s action=%s: %v", tableName, parentID, actionType, err)
 	}
+}
+
+func recordDecision(ctx context.Context, exec ExecContext, tableName, parentColumn, parentID, status, checkerBy, comment string) error {
+	attempts := []execAttempt{
+		{
+			query: fmt.Sprintf(`
+			UPDATE %s
+			SET processing_status = $1,
+			    checker_by = $2,
+			    checker_at = now(),
+			    checker_comment = $3
+			WHERE action_id = (
+				SELECT action_id
+				FROM %s
+				WHERE %s = $4
+				  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL', 'pending')
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			)
+		`, tableName, tableName, parentColumn),
+			args: []interface{}{status, checkerBy, NullIfBlank(comment), parentID},
+		},
+		{
+			query: fmt.Sprintf(`
+			UPDATE %s
+			SET processing_status = $1,
+			    checker_by = $2,
+			    checker_at = now(),
+			    checker_comment = $3
+			WHERE audit_id = (
+				SELECT audit_id
+				FROM %s
+				WHERE %s = $4
+				  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL', 'pending')
+				ORDER BY requested_at DESC, audit_id DESC
+				LIMIT 1
+			)
+		`, tableName, tableName, parentColumn),
+			args: []interface{}{status, checkerBy, NullIfBlank(comment), parentID},
+		},
+		{
+			query: fmt.Sprintf(`
+			UPDATE %s
+			SET processing_status = $1,
+			    checker_by = $2,
+			    checker_at = now(),
+			    checker_comment = $3
+			WHERE %s = $4
+			  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL', 'pending')
+		`, tableName, parentColumn),
+			args: []interface{}{status, checkerBy, NullIfBlank(comment), parentID},
+		},
+	}
+	return execFirstSuccess(ctx, exec, attempts)
 }
 
 func RecordDecision(ctx context.Context, db *sql.DB, tableName, parentColumn, parentID, status, checkerBy, comment string) {
@@ -126,22 +239,7 @@ func RecordDecision(ctx context.Context, db *sql.DB, tableName, parentColumn, pa
 	if parentID == "" || checkerBy == "" || db == nil {
 		return
 	}
-	query := fmt.Sprintf(`
-		UPDATE %s
-		SET processing_status = $1,
-		    checker_by = $2,
-		    checker_at = now(),
-		    checker_comment = $3
-		WHERE action_id = (
-			SELECT action_id
-			FROM %s
-			WHERE %s = $4
-			  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL', 'pending')
-			ORDER BY requested_at DESC, action_id DESC
-			LIMIT 1
-		)
-	`, tableName, tableName, parentColumn)
-	if _, err := db.ExecContext(ctx, query, status, checkerBy, NullIfBlank(comment), parentID); err != nil {
+	if err := recordDecision(ctx, sqlExecAdapter{db: db}, tableName, parentColumn, parentID, status, checkerBy, comment); err != nil {
 		logger.LogError("fx audit decision failed table=%s parent=%s status=%s: %v", tableName, parentID, status, err)
 	}
 }
@@ -152,22 +250,7 @@ func RecordDecisionPGX(ctx context.Context, pool *pgxpool.Pool, tableName, paren
 	if parentID == "" || checkerBy == "" || pool == nil {
 		return
 	}
-	query := fmt.Sprintf(`
-		UPDATE %s
-		SET processing_status = $1,
-		    checker_by = $2,
-		    checker_at = now(),
-		    checker_comment = $3
-		WHERE action_id = (
-			SELECT action_id
-			FROM %s
-			WHERE %s = $4
-			  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL', 'pending')
-			ORDER BY requested_at DESC, action_id DESC
-			LIMIT 1
-		)
-	`, tableName, tableName, parentColumn)
-	if _, err := pool.Exec(ctx, query, status, checkerBy, NullIfBlank(comment), parentID); err != nil {
+	if err := recordDecision(ctx, pgxExecAdapter{pool: pool}, tableName, parentColumn, parentID, status, checkerBy, comment); err != nil {
 		logger.LogError("fx audit decision failed table=%s parent=%s status=%s: %v", tableName, parentID, status, err)
 	}
 }
