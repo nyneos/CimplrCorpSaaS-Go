@@ -137,4 +137,12 @@ func RegisterFDAccrualRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 		"/investment/fd/accrual/schedule/delete",
 		mid(http.HandlerFunc(DeleteScheduleConfig(pool))),
 	)
+	mux.Handle(
+		"/investment/fd/accrual/schedule/execution-log",
+		mid(http.HandlerFunc(GetScheduleExecutionLog(pool))),
+	)
+	mux.Handle(
+		"/investment/fd/accrual/schedule/recalc-next-run",
+		mid(http.HandlerFunc(RecalcScheduleNextRun(pool))),
+	)
 }

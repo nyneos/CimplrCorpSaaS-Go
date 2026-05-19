@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ─── Variance tolerances ──────────────────────────────────────────────────────
@@ -50,6 +51,18 @@ func coerceDateValue(iv interface{}) interface{} {
 	default:
 		return v
 	}
+}
+
+// coerceDateString returns a YYYY-MM-DD string for variance comparisons, or "" when unset.
+func coerceDateString(iv interface{}) string {
+	v := coerceDateValue(iv)
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return strings.TrimSpace(fmt.Sprint(v))
 }
 
 // ─── logDBError ───────────────────────────────────────────────────────────────
@@ -508,4 +521,319 @@ func buildVarianceDetailsJSON(items []varianceengine.VarianceItem) *string {
 // Trailing zeroes are stripped; e.g. 456688888.0 → "456688888".
 func formatNumber(v float64) string {
 	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// ─── FD confirmation variance (shared) ───────────────────────────────────────
+//
+// Pending variance is represented by confirmation_status = VARIANCE_PENDING and
+// variance_flag = true. variance_action stays NULL until ACCEPTED (exception) or REJECTED.
+
+// fdConfirmationVarianceInput holds booked vs actual values for varianceengine.Compare.
+type fdConfirmationVarianceInput struct {
+	BookingID, EntityID, RunID string
+	ResolvedBy, ResolvedByEmail string
+
+	BookedPrincipal, ActualPrincipal float64
+	BookedRate, ActualRate           float64
+	BookedTenorDays, ActualTenorDays int
+	BookedTenorMonths, ActualTenorMonths int
+	BookedTenorYears, ActualTenorYears   int
+	BookedValueDate, ActualValueDate         string
+	BookedMaturityDate, ActualMaturityDate string
+	BookedInterestType, ActualInterestType   string
+	BookedFrequencyID, ActualFrequencyID     string
+	BookedTenorType, ActualTenorType         string
+	BookedFirstCapDate, ActualFirstCapDate   string
+	BookedFirstPayoutDate, ActualFirstPayoutDate string
+}
+
+func buildFDConfirmationVarianceRules(in fdConfirmationVarianceInput) []varianceengine.Rule {
+	return []varianceengine.Rule{
+		{FieldName: "interest_rate", VarianceType: varianceengine.TypeRate, ExpectedValue: formatNumber(in.BookedRate), ActualValue: formatNumber(in.ActualRate), Tolerance: rateTolerance, Priority: varianceengine.PriorityHigh},
+		{FieldName: "principal_amount", VarianceType: varianceengine.TypeAmount, ExpectedValue: formatNumber(in.BookedPrincipal), ActualValue: formatNumber(in.ActualPrincipal), Tolerance: amountTolerance, Priority: varianceengine.PriorityHigh},
+		{FieldName: "tenor_days", VarianceType: varianceengine.TypeDays, ExpectedValue: fmt.Sprintf("%d", in.BookedTenorDays), ActualValue: fmt.Sprintf("%d", in.ActualTenorDays), Priority: varianceengine.PriorityMedium},
+		{FieldName: "tenor_months", VarianceType: varianceengine.TypeDays, ExpectedValue: fmt.Sprintf("%d", in.BookedTenorMonths), ActualValue: fmt.Sprintf("%d", in.ActualTenorMonths), Priority: varianceengine.PriorityMedium},
+		{FieldName: "tenor_years", VarianceType: varianceengine.TypeDays, ExpectedValue: fmt.Sprintf("%d", in.BookedTenorYears), ActualValue: fmt.Sprintf("%d", in.ActualTenorYears), Priority: varianceengine.PriorityMedium},
+		{FieldName: "value_date", VarianceType: varianceengine.TypeDate, ExpectedValue: in.BookedValueDate, ActualValue: in.ActualValueDate, Priority: varianceengine.PriorityMedium},
+		{FieldName: "maturity_date", VarianceType: varianceengine.TypeDate, ExpectedValue: in.BookedMaturityDate, ActualValue: in.ActualMaturityDate, Priority: varianceengine.PriorityHigh},
+		{FieldName: "interest_type_code", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedInterestType, ActualValue: in.ActualInterestType, Priority: varianceengine.PriorityHigh},
+		{FieldName: "frequency_id", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedFrequencyID, ActualValue: in.ActualFrequencyID, Priority: varianceengine.PriorityMedium},
+		{FieldName: "tenor_type", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedTenorType, ActualValue: in.ActualTenorType, Priority: varianceengine.PriorityLow},
+		{FieldName: "first_capitalization_date", VarianceType: varianceengine.TypeDate, ExpectedValue: in.BookedFirstCapDate, ActualValue: in.ActualFirstCapDate, Priority: varianceengine.PriorityMedium},
+		{FieldName: "first_payout_date", VarianceType: varianceengine.TypeDate, ExpectedValue: in.BookedFirstPayoutDate, ActualValue: in.ActualFirstPayoutDate, Priority: varianceengine.PriorityMedium},
+	}
+}
+
+// runFDConfirmationVarianceCompare evaluates rules, persists OPEN rows, and auto-resolves cleared fields.
+func runFDConfirmationVarianceCompare(ctx context.Context, pool *pgxpool.Pool, in fdConfirmationVarianceInput) ([]varianceengine.VarianceItem, bool) {
+	if in.BookingID == "" || (in.BookedPrincipal <= 0 && in.BookedRate <= 0) {
+		return nil, false
+	}
+	if in.RunID == "" {
+		in.RunID = varianceengine.NewRunID()
+	}
+	items := varianceengine.Compare("FD_CONFIRMATION", in.BookingID, in.EntityID, in.RunID, buildFDConfirmationVarianceRules(in))
+	hasVariance := false
+	for _, v := range items {
+		if v.HasVariance {
+			hasVariance = true
+			break
+		}
+	}
+	if err := varianceengine.PersistVariances(ctx, pool, items); err != nil {
+		api.LogError("[FDBooking] PersistVariances booking=%s: %v", in.BookingID, err)
+	}
+	if err := varianceengine.AutoResolveCleared(ctx, pool, in.BookingID, items, in.ResolvedBy, in.ResolvedByEmail); err != nil {
+		api.LogError("[FDBooking] AutoResolveCleared booking=%s: %v", in.BookingID, err)
+	}
+	return items, hasVariance
+}
+
+func fetchOpenVarianceIDs(ctx context.Context, pool *pgxpool.Pool, bookingID, confirmationID string) ([]string, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT variance_id FROM public.variance_log
+		WHERE status = 'OPEN'
+		  AND (
+		    ($1 <> '' AND record_id = $1)
+		    OR ($2 <> '' AND record_id = $2)
+		  )
+		ORDER BY field_name`,
+		bookingID, confirmationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr == nil && id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
+}
+
+func varianceTypeForField(field string) string {
+	switch field {
+	case "interest_rate":
+		return varianceengine.TypeRate
+	case "principal_amount":
+		return varianceengine.TypeAmount
+	case "tenor_days", "tenor_months", "tenor_years":
+		return varianceengine.TypeDays
+	case "value_date", "maturity_date", "first_capitalization_date", "first_payout_date":
+		return varianceengine.TypeDate
+	case "interest_type_code", "frequency_id", "tenor_type":
+		return varianceengine.TypeIdentity
+	default:
+		return varianceengine.TypeOther
+	}
+}
+
+func backfillOpenVarianceLogFromDetails(ctx context.Context, pool *pgxpool.Pool, bookingID, entityID, confirmationID, detailsJSON string) ([]string, error) {
+	detailsJSON = strings.TrimSpace(detailsJSON)
+	if detailsJSON == "" || detailsJSON == "null" {
+		return nil, nil
+	}
+	var entries []struct {
+		Field    string  `json:"field"`
+		Expected string  `json:"expected"`
+		Actual   string  `json:"actual"`
+		Delta    float64 `json:"delta"`
+		Priority string  `json:"priority"`
+	}
+	if err := json.Unmarshal([]byte(detailsJSON), &entries); err != nil {
+		return nil, err
+	}
+	recordID := bookingID
+	if recordID == "" {
+		recordID = confirmationID
+	}
+	if recordID == "" {
+		return nil, nil
+	}
+	runID := varianceengine.NewRunID()
+	items := make([]varianceengine.VarianceItem, 0, len(entries))
+	for _, e := range entries {
+		if strings.TrimSpace(e.Field) == "" {
+			continue
+		}
+		pri := e.Priority
+		if pri == "" {
+			pri = varianceengine.PriorityMedium
+		}
+		items = append(items, varianceengine.VarianceItem{
+			ModuleCode:    "FD_CONFIRMATION",
+			RecordID:      recordID,
+			EntityID:      entityID,
+			RunID:         runID,
+			FieldName:     e.Field,
+			VarianceType:  varianceTypeForField(e.Field),
+			ExpectedValue: e.Expected,
+			ActualValue:   e.Actual,
+			VarianceDelta: e.Delta,
+			Priority:      pri,
+			Status:        varianceengine.StatusOpen,
+			HasVariance:   true,
+		})
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	if err := varianceengine.PersistVariances(ctx, pool, items); err != nil {
+		return nil, err
+	}
+	return fetchOpenVarianceIDs(ctx, pool, bookingID, confirmationID)
+}
+
+// buildEditConfirmationFieldMap maps JSON field keys from the UI to fd_confirmation column names.
+// Only columns present in the live schema are included (except core columns always assumed present).
+func buildEditConfirmationFieldMap(confCols map[string]bool) map[string]string {
+	// clientKey → dbColumn
+	candidates := map[string]string{
+		"actual_principal":              "actual_principal",
+		"confirmed_principal_amount":    "actual_principal",
+		"confirmed_rate":                "confirmed_rate",
+		"confirmed_interest_rate":       "confirmed_rate",
+		"actual_start_date":             "actual_start_date",
+		"confirmed_value_date":          "actual_start_date",
+		"actual_maturity_date":          "actual_maturity_date",
+		"confirmed_maturity_date":       "actual_maturity_date",
+		"bank_fd_ref_no":                "bank_fd_ref_no",
+		"bank_fd_reference":             "bank_fd_ref_no",
+		"confirmation_received_date":    "confirmation_received_date",
+		"receipt_date":                  "confirmation_received_date",
+		"confirmed_interest_type_code":  "confirmed_interest_type_code",
+		"confirmed_interest_type":       "confirmed_interest_type_code",
+		"confirmed_frequency_id":        "confirmed_frequency_id",
+		"tenor_type":                    "tenor_type",
+		"confirmed_tenor_type":          "tenor_type",
+		"tenor_days":                    "tenor_days",
+		"confirmed_tenor_days":        "tenor_days",
+		"tenor_months":                  "tenor_months",
+		"confirmed_tenor_months":        "tenor_months",
+		"tenor_years":                   "tenor_years",
+		"confirmed_tenor_years":         "tenor_years",
+		"payout_dates":                  "payout_dates",
+		"compounding_dates":             "compounding_dates",
+		"penalty_id":                    "penalty_id",
+		"first_payout_date":             "first_payout_date",
+		"first_capitalization_date":     "first_capitalization_date",
+		"accrual_frequency_code":        "accrual_frequency_code",
+		"reset_type":                    "reset_type",
+		"payout_frequency_id":           "payout_frequency_id",
+		"bank_reference_number":         "bank_reference_number",
+		"premature_closure_terms":       "premature_closure_terms",
+		"confirmation_notes":            "confirmation_notes",
+		"notes":                         "confirmation_notes",
+		"confirmation_mode":             "confirmation_mode",
+	}
+	out := make(map[string]string, len(candidates))
+	for clientKey, dbCol := range candidates {
+		if confCols[dbCol] {
+			out[clientKey] = dbCol
+			continue
+		}
+		// bank_reference_number: fall back to bank_fd_ref_no when dedicated column missing
+		if clientKey == "bank_reference_number" && confCols["bank_fd_ref_no"] {
+			out[clientKey] = "bank_fd_ref_no"
+		}
+		// notes alias when only generic notes column exists
+		if clientKey == "notes" && confCols["notes"] {
+			out[clientKey] = "notes"
+		}
+	}
+	return out
+}
+
+// fdConfirmationDetailExtraSelect returns optional confirmation columns for GET detail/list
+// (empty string literals when the column is absent in the live schema).
+func fdConfirmationDetailExtraSelect(confCols map[string]bool) string {
+	textCol := func(col, alias string) string {
+		if confCols[col] {
+			return fmt.Sprintf("COALESCE(c.%s,'') AS %s", col, alias)
+		}
+		return fmt.Sprintf("'' AS %s", alias)
+	}
+	jsonCol := func(col, alias string) string {
+		if confCols[col] {
+			return fmt.Sprintf("COALESCE(c.%s::text,'') AS %s", col, alias)
+		}
+		return fmt.Sprintf("'' AS %s", alias)
+	}
+	parts := []string{
+		textCol("penalty_id", "penalty_id"),
+		textCol("premature_closure_terms", "premature_closure_terms"),
+		textCol("confirmation_notes", "confirmation_notes"),
+		textCol("accrual_frequency_code", "accrual_frequency_code"),
+		textCol("accrual_frequency_code", "confirmed_accrual_frequency_code"),
+		textCol("reset_type", "reset_type"),
+		textCol("reset_type", "confirmed_reset_type"),
+		textCol("payout_frequency_id", "payout_frequency_id"),
+		jsonCol("payout_dates", "payout_dates"),
+		jsonCol("compounding_dates", "compounding_dates"),
+	}
+	return strings.Join(parts, ",\n\t\t\t\t")
+}
+
+func editConfirmationCoerceFieldValue(clientKey, dbCol string, v interface{}) interface{} {
+	switch dbCol {
+	case "actual_start_date", "actual_maturity_date", "confirmation_received_date",
+		"first_payout_date", "first_capitalization_date":
+		return coerceDateValue(v)
+	case "accrual_frequency_code", "reset_type":
+		if sv, ok := v.(string); ok {
+			return strings.ToUpper(strings.TrimSpace(sv))
+		}
+	case "bank_fd_ref_no", "bank_reference_number", "premature_closure_terms", "confirmation_notes", "notes":
+		if sv, ok := v.(string); ok {
+			return strings.TrimSpace(sv)
+		}
+	case "payout_dates", "compounding_dates":
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		if string(b) == "null" {
+			return nil
+		}
+		return string(b)
+	}
+	if clientKey == "receipt_date" || clientKey == "confirmation_received_date" {
+		return coerceDateValue(v)
+	}
+	return v
+}
+
+// ensureOpenVarianceLogForException returns OPEN variance_log IDs, backfilling from variance_details when needed.
+func ensureOpenVarianceLogForException(ctx context.Context, pool *pgxpool.Pool, confirmationID, bookingID, entityID string) ([]string, bool, error) {
+	ids, err := fetchOpenVarianceIDs(ctx, pool, bookingID, confirmationID)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(ids) > 0 {
+		return ids, true, nil
+	}
+	var varianceFlag bool
+	var details *string
+	err = pool.QueryRow(ctx, `
+		SELECT COALESCE(variance_flag, false), variance_details
+		FROM investment.fd_confirmation
+		WHERE confirmation_id = $1 AND COALESCE(is_deleted, false) = false`,
+		confirmationID).Scan(&varianceFlag, &details)
+	if err != nil {
+		return nil, false, err
+	}
+	if !varianceFlag {
+		return nil, false, nil
+	}
+	detailsStr := ""
+	if details != nil {
+		detailsStr = *details
+	}
+	ids, err = backfillOpenVarianceLogFromDetails(ctx, pool, bookingID, entityID, confirmationID, detailsStr)
+	if err != nil {
+		return nil, true, err
+	}
+	return ids, true, nil
 }

@@ -2210,6 +2210,12 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 			HasException    bool    `json:"has_exception"`
 			ExceptionID     string  `json:"exception_id,omitempty"`
 			CreatedAt       string  `json:"created_at"`
+			// Live receipt/TDS posting status (not frozen at reconcile time)
+			ReceiptStatus       string `json:"receipt_status,omitempty"`
+			ReconcileStatus     string `json:"reconcile_status,omitempty"`
+			JournalEntryID      string `json:"journal_entry_id,omitempty"`
+			TDSStatus           string `json:"tds_status,omitempty"`
+			TDSJournalEntryID   string `json:"tds_journal_entry_id,omitempty"`
 			// Detail arrays — same shape as preview
 			Cashflows     []CashflowLine      `json:"cashflows"`
 			AccrualLedger []AccrualLedgerLine `json:"accrual_ledger"`
@@ -2302,6 +2308,10 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 					exRows.Close()
 				}
 			}
+
+			applyReconcilePostingEnrichment(ctx, pool, rl.ReceiptID, rl.TDSID, rl.ResultType,
+				&rl.ReceiptStatus, &rl.ReconcileStatus, &rl.JournalEntryID, &rl.TDSStatus, &rl.TDSJournalEntryID,
+				&rl.Cashflows)
 		}
 
 		if results == nil {
@@ -2545,6 +2555,11 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			HasException          bool                `json:"has_exception"`
 			ExceptionID           string              `json:"exception_id"`
 			CreatedAt             string              `json:"created_at"`
+			ReceiptStatus         string              `json:"receipt_status,omitempty"`
+			ReconcileStatus       string              `json:"reconcile_status,omitempty"`
+			JournalEntryID        string              `json:"journal_entry_id,omitempty"`
+			TDSStatus             string              `json:"tds_status,omitempty"`
+			TDSJournalEntryID     string              `json:"tds_journal_entry_id,omitempty"`
 			AuditProcessingStatus string              `json:"audit_processing_status"`
 			AuditActionType       string              `json:"audit_action_type"`
 			AuditRequestedBy      string              `json:"audit_requested_by"`
@@ -2639,6 +2654,10 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 					exRows.Close()
 				}
 			}
+
+			applyReconcilePostingEnrichment(ctx, pool, row.ReceiptID, row.TDSID, row.ReceiptType,
+				&row.ReceiptStatus, &row.ReconcileStatus, &row.JournalEntryID, &row.TDSStatus, &row.TDSJournalEntryID,
+				&row.Cashflows)
 		}
 
 		if results == nil {
@@ -2928,34 +2947,18 @@ func GetExceptions(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		baseSQL := `SELECT * FROM investment.fd_receipt_exception WHERE is_deleted=false`
-		args := []interface{}{}
-		argIdx := 1
-
-		if req.ReconcileRunID != "" {
-			baseSQL += fmt.Sprintf(" AND reconcile_run_id=$%d", argIdx)
-			args = append(args, req.ReconcileRunID)
-			argIdx++
-		}
-		if req.FdID != "" {
-			baseSQL += fmt.Sprintf(" AND fd_id=$%d", argIdx)
-			args = append(args, req.FdID)
-			argIdx++
-		}
-		if req.ExceptionStatus != "" {
-			baseSQL += fmt.Sprintf(" AND exception_status=$%d", argIdx)
-			args = append(args, req.ExceptionStatus)
-			argIdx++
-		}
-		baseSQL += " ORDER BY raised_at DESC"
-
-		rows, err := pool.Query(ctx, baseSQL, args...)
+		out, err := loadVarianceListRows(ctx, pool, varianceListFilters{
+			ReconcileRunID:  req.ReconcileRunID,
+			FdID:            req.FdID,
+			ExceptionStatus: req.ExceptionStatus,
+		})
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
-		defer rows.Close()
-		out, _ := rowsToMapSlice(rows)
+		if out == nil {
+			out = []map[string]interface{}{}
+		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2966,224 +2969,7 @@ func GetExceptions(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─── HANDLER 15: ResolveException ────────────────────────────────────────────
-
-func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID             string `json:"user_id"`
-			ExceptionID        string `json:"exception_id"`
-			ProposedResolution string `json:"proposed_resolution"`
-			ReasonCode         string `json:"reason_code"`
-			ResolutionRemarks  string `json:"resolution_remarks"`
-			Attachment         string `json:"attachment"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
-		}
-		if req.ExceptionID == "" || req.ProposedResolution == "" || req.ReasonCode == "" || req.ResolutionRemarks == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "exception_id, proposed_resolution, reason_code, resolution_remarks are required")
-			return
-		}
-		userEmail := resolveUserEmail(req.UserID)
-		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
-			return
-		}
-
-		ctx := r.Context()
-		var exStatus string
-		err := pool.QueryRow(ctx, `SELECT exception_status FROM investment.fd_receipt_exception WHERE exception_id=$1 AND is_deleted=false`, req.ExceptionID).Scan(&exStatus)
-		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrExceptionNotFound)
-			return
-		}
-		if exStatus != "OPEN" && exStatus != "IN_REVIEW" {
-			api.RespondWithError(w, http.StatusBadRequest, "Exception must be OPEN or IN_REVIEW")
-			return
-		}
-
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
-			return
-		}
-		defer tx.Rollback(ctx) //nolint:errcheck
-
-		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_receipt_exception SET
-				exception_status='IN_REVIEW',
-				proposed_resolution=$1, reason_code=$2, resolution_remarks=$3, attachment=$4,
-				reviewed_by=$5, reviewed_at=now(), updated_at=now()
-			WHERE exception_id=$6 AND exception_status IN ('OPEN','IN_REVIEW')`,
-			req.ProposedResolution, req.ReasonCode, req.ResolutionRemarks, nullStr(req.Attachment),
-			userEmail, req.ExceptionID)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
-			return
-		}
-
-		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
-			return
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":          true,
-			"exception_id":     req.ExceptionID,
-			"exception_status": "IN_REVIEW",
-		})
-	}
-}
-
-// ─── HANDLER 16: ApproveException ────────────────────────────────────────────
-
-func ApproveException(pool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID      string `json:"user_id"`
-			ExceptionID string `json:"exception_id"`
-			Comment     string `json:"comment"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
-		}
-		if req.ExceptionID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "exception_id is required")
-			return
-		}
-		userEmail := resolveUserEmail(req.UserID)
-		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
-			return
-		}
-
-		ctx := r.Context()
-		var exStatus, reviewedBy string
-		err := pool.QueryRow(ctx, `
-			SELECT exception_status, COALESCE(reviewed_by,'')
-			FROM investment.fd_receipt_exception WHERE exception_id=$1 AND is_deleted=false`, req.ExceptionID).Scan(&exStatus, &reviewedBy)
-		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrExceptionNotFound)
-			return
-		}
-		if exStatus != "IN_REVIEW" {
-			api.RespondWithError(w, http.StatusBadRequest, "Exception must be IN_REVIEW to approve")
-			return
-		}
-		if reviewedBy == userEmail {
-			api.RespondWithError(w, http.StatusForbidden, "Maker and checker cannot be the same user")
-			return
-		}
-
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
-			return
-		}
-		defer tx.Rollback(ctx) //nolint:errcheck
-
-		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_receipt_exception SET
-				exception_status='APPROVED',
-				approved_by=$1, approved_at=now(),
-				checker_comment=$2, updated_at=now()
-			WHERE exception_id=$3 AND exception_status='IN_REVIEW'`, userEmail, req.Comment, req.ExceptionID)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
-			return
-		}
-
-		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
-			return
-		}
-
-		go func(eID, uEmail string) {
-			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/exceptions/approve", eID, map[string]interface{}{
-				"record_id":   eID,
-				"event":       "FD_RECEIPT_EXCEPTION_APPROVED",
-				"actor_email": uEmail,
-			})
-		}(req.ExceptionID, userEmail)
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":          true,
-			"exception_id":     req.ExceptionID,
-			"exception_status": "APPROVED",
-		})
-	}
-}
-
-// ─── HANDLER 17: CloseException ──────────────────────────────────────────────
-
-func CloseException(pool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID      string `json:"user_id"`
-			ExceptionID string `json:"exception_id"`
-			Comment     string `json:"comment"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
-		}
-		if req.ExceptionID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "exception_id is required")
-			return
-		}
-		userEmail := resolveUserEmail(req.UserID)
-		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
-			return
-		}
-
-		ctx := r.Context()
-		var exStatus string
-		err := pool.QueryRow(ctx, `SELECT exception_status FROM investment.fd_receipt_exception WHERE exception_id=$1 AND is_deleted=false`, req.ExceptionID).Scan(&exStatus)
-		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrExceptionNotFound)
-			return
-		}
-		if exStatus != "APPROVED" {
-			api.RespondWithError(w, http.StatusBadRequest, "Exception must be APPROVED to close")
-			return
-		}
-
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
-			return
-		}
-		defer tx.Rollback(ctx) //nolint:errcheck
-
-		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_receipt_exception SET
-				exception_status='CLOSED',
-				closed_by=$1, closed_at=now(), updated_at=now()
-			WHERE exception_id=$2 AND exception_status='APPROVED'`, userEmail, req.ExceptionID)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
-			return
-		}
-
-		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
-			return
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":          true,
-			"exception_id":     req.ExceptionID,
-			"exception_status": "CLOSED",
-		})
-	}
-}
+// Exception workflow handlers: exception_handlers.go (resolve, edit, approve, close, reject).
 
 // ─── HANDLER 18: PostReceiptJournals ─────────────────────────────────────────
 
@@ -3236,6 +3022,11 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 			if rec.ReceiptStatus != "APPROVED" {
 				skipped++
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "receipt_status is not APPROVED"})
+				continue
+			}
+			if blockMsg := checkReceiptPostingEligibility(ctx, pool, rid); blockMsg != "" {
+				skipped++
+				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": blockMsg})
 				continue
 			}
 			if journalEntryID != nil && *journalEntryID != "" {

@@ -2,6 +2,7 @@ package fdMaster
 
 import (
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/rounding"
 	"context"
 	"fmt"
 	"log"
@@ -344,6 +345,15 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			rec.FirstCapitalizationDate = *capDate
 		}
 	}
+	if confCols["reset_type"] {
+		var resetType string
+		_ = exec.QueryRow(ctx, `
+			SELECT COALESCE(NULLIF(c.reset_type,''), NULLIF(b.reset_type,''), 'AT_MATURITY')
+			FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE c.confirmation_id = $1`, confirmationID).Scan(&resetType)
+		rec.ResetType = resetType
+	}
 	return rec, nil
 }
 
@@ -476,9 +486,7 @@ func loadBankConfig(ctx context.Context, exec queryExecutor, bankConfigID string
 			HolidayAccrual:           true,
 		}, nil
 	}
-	if cfg.InterestRoundingDecimals == 0 {
-		cfg.InterestRoundingDecimals = 2
-	}
+	// interest_rounding_decimals = 0 (whole rupees) is valid; NULL is already COALESCE'd to 2 in SQL.
 	return cfg, nil
 }
 
@@ -1213,33 +1221,14 @@ func toFloat64(v interface{}) (float64, bool) {
 	return 0, false
 }
 
-// roundByMethod applies the requested rounding method to value.
+// roundByMethod delegates to the shared investment/rounding package.
 func roundByMethod(value float64, decimals int, method string) float64 {
-	if decimals < 0 {
-		decimals = 2
-	}
-	pow := math.Pow(10, float64(decimals))
-	switch strings.ToUpper(strings.TrimSpace(method)) {
-	case "TRUNCATE":
-		return math.Trunc(value*pow) / pow
-	case "ROUND_UP":
-		sign := math.Copysign(1, value)
-		return sign * math.Ceil(math.Abs(value)*pow) / pow
-	case "ROUND_DOWN":
-		sign := math.Copysign(1, value)
-		return sign * math.Floor(math.Abs(value)*pow) / pow
-	default: // ROUND
-		return math.Round(value*pow) / pow
-	}
+	return rounding.RoundByMethod(value, decimals, method)
 }
 
-// applyRounding applies rounding according to method and frequency.
-// If frequency is AT_MATURITY and this is not the final rounding, the value is returned unrounded.
+// applyRounding delegates to the shared investment/rounding package.
 func applyRounding(value float64, decimals int, method string, frequency string, isFinal bool) float64 {
-	if strings.ToUpper(strings.TrimSpace(frequency)) == "AT_MATURITY" && !isFinal {
-		return value
-	}
-	return roundByMethod(value, decimals, method)
+	return rounding.Apply(value, decimals, method, frequency, isFinal)
 }
 
 // getDivisorAndDaysWithCal is like getDivisorAndDays but uses countAccrualDays
@@ -1590,44 +1579,14 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 	hasTDS := tdsCfg != nil && tdsCfg.TDSRate > 0 // tdsDeductionTiming is left for downstream logic (compound handler).
 
 	// ── Engine dispatch ────────────────────────────────────────────────────
-	// The new spec-compliant engine (cashflow_engine.go) is the UNCONDITIONAL
-	// default for all FDs. It generates correct calendar month-end dates and
-	// matches the workbook for every standard Actual/365 scenario.
-	//
-	// The ONLY legacy fallback is when the caller supplies an explicit
-	// FirstCapitalizationDate override. That signals a non-standard broken-period
-	// start date (e.g. first cap is on a specific non-month-end date) that the
-	// legacy engine handles via its special first-period arithmetic.
-	//
-	// Everything else — CapitalizationScheduleType labels, BrokenPeriodMethod,
-	// holiday calendars, rounding config, TDS timing — is orthogonal to the
-	// boundary-date logic and does NOT affect which engine runs.
-	if fd.FirstCapitalizationDate.IsZero() {
-		if isCompound {
-			return engCOSchedule(p)
-		}
-		return engSISchedule(p)
-	}
-
-	// ── COMPOUND FDs: use capitalization dates ─────────────────────────────
+	// Compound FDs always use engCOSchedule. first_capitalization_date /
+	// first_payout_date anchor the first cap/payout event_date; later events
+	// step by frequency from that anchor (see engEventDatesAnchored).
 	if isCompound {
-		// payoutFreqOverride[0] is set when the simulator passes a separate payout frequency.
-		// For real FDs loaded from DB, payout freq is the same as compounding freq (freq).
-		var payoutFreq *CompoundingFreq
-		if p.PayoutFreqOverride != nil && p.PayoutFreqOverride.FrequencyID != "" {
-			payoutFreq = p.PayoutFreqOverride
-		} else {
-			payoutFreq = freq
-		}
-		return generateCompoundSchedule(CompoundScheduleParams{
-			FD: fd, Cfg: cfg, Freq: freq, PayoutFreq: payoutFreq,
-			TDSCfg: tdsCfg, CalInfo: calInfo,
-			EffectiveConvention:   effectiveConvention,
-			EffectiveDayCountCode: effectiveDayCountCode,
-			Decimals:              decimals, HasTDS: hasTDS,
-			TDSDeductionTiming: tdsDeductionTiming,
-			AccrualFreqMonths:  p.AccrualFreqMonths,
-		})
+		return engCOSchedule(p)
+	}
+	if fd.FirstCapitalizationDate.IsZero() {
+		return engSISchedule(p)
 	}
 
 	// BRD: Build ACCRUAL rows first (monthly), then CAPITALIZATION/TDS/MATURITY.
@@ -2680,7 +2639,10 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 		fd.InterestTypeCode, fd.DayCountConvention)
 
 	cfg, _ := loadBankConfig(ctx, exec, fd.BankConfigID)
-	log.Printf("[CFGEN][%s] ✓ loadBankConfig (+%s) calCode=%q dcCode=%q", fd.ConfirmationID, time.Since(tg).Round(time.Millisecond), cfg.HolidayCalendarCode, cfg.DayCountCode)
+	log.Printf("[CFGEN][%s] ✓ loadBankConfig (+%s) calCode=%q dcCode=%q rounding=%s decimals=%d freq=%s",
+		fd.ConfirmationID, time.Since(tg).Round(time.Millisecond),
+		cfg.HolidayCalendarCode, cfg.DayCountCode,
+		cfg.RoundingMethod, cfg.InterestRoundingDecimals, cfg.RoundingFrequency)
 
 	t1 := time.Now()
 	freq, _ := loadCompoundingFreq(ctx, exec, firstNonEmpty(fd.CompoundingFrequency, fd.InterestPayoutFrequency, fd.FrequencyID))

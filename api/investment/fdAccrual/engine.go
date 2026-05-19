@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,6 +12,8 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/fdMaster"
+	"CimplrCorpSaas/api/investment/rounding"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -255,18 +256,6 @@ func getDivisorForPeriod(dayCountCode string, start, end time.Time) int {
 	default:
 		return 365
 	}
-}
-
-// roundAccrual rounds to the given decimals using the specified rule.
-func roundAccrual(amount float64, decimals int, rule string) float64 {
-	if decimals <= 0 {
-		decimals = 2
-	}
-	pow := math.Pow(10, float64(decimals))
-	if strings.EqualFold(rule, "TRUNCATE") {
-		return math.Floor(amount*pow) / pow
-	}
-	return math.Round(amount*pow) / pow
 }
 
 // buildAccrualPeriod returns "APR 2025" uppercase month-year string.
@@ -797,17 +786,103 @@ func hasBlockers(findings []ValidationFinding) bool {
 	return false
 }
 
-// generateSubPeriods splits [start, end) into consecutive sub-periods
-// of the requested granularity. RUN returns the whole range as one chunk.
+// accrualPeriodGranularities are valid accrual_granularity / run_type values.
+var accrualPeriodGranularities = map[string]bool{
+	"DAILY": true, "MONTHLY": true, "QUARTERLY": true,
+	"HALF_YEARLY": true, "YEARLY": true, "RUN": true,
+}
+
+// scheduleFrequencies are valid schedule_frequency values (when the job fires).
+var scheduleFrequencies = map[string]bool{
+	"DAILY": true, "MONTHLY": true, "QUARTERLY": true,
+	"HALF_YEARLY": true, "YEARLY": true,
+}
+
+func normalizeAccrualGranularity(g string) string {
+	return strings.ToUpper(strings.TrimSpace(g))
+}
+
+func normalizeScheduleFrequency(f string) string {
+	return strings.ToUpper(strings.TrimSpace(f))
+}
+
+func isValidAccrualGranularity(g string) bool {
+	return accrualPeriodGranularities[normalizeAccrualGranularity(g)]
+}
+
+func isValidScheduleFrequency(f string) bool {
+	return scheduleFrequencies[normalizeScheduleFrequency(f)]
+}
+
+// AccrualPeriodBounds returns inclusive calendar start/end for the accrual window
+// that contains `at`, based on accrual_granularity (not schedule_frequency).
+func AccrualPeriodBounds(at time.Time, granularity string) (time.Time, time.Time) {
+	at = at.UTC()
+	switch normalizeAccrualGranularity(granularity) {
+	case "DAILY":
+		d := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC)
+		return d, d
+	case "QUARTERLY":
+		qMonth := time.Month(((int(at.Month())-1)/3)*3 + 1)
+		start := time.Date(at.Year(), qMonth, 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 3, -1)
+	case "HALF_YEARLY":
+		if at.Month() <= 6 {
+			return time.Date(at.Year(), time.January, 1, 0, 0, 0, 0, time.UTC),
+				time.Date(at.Year(), time.June, 30, 0, 0, 0, 0, time.UTC)
+		}
+		return time.Date(at.Year(), time.July, 1, 0, 0, 0, 0, time.UTC),
+			time.Date(at.Year(), time.December, 31, 0, 0, 0, 0, time.UTC)
+	case "YEARLY":
+		return time.Date(at.Year(), 1, 1, 0, 0, 0, 0, time.UTC),
+			time.Date(at.Year(), 12, 31, 0, 0, 0, 0, time.UTC)
+	default: // MONTHLY and unknown
+		start := time.Date(at.Year(), at.Month(), 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 1, -1)
+	}
+}
+
+// RunTypeForGranularity maps accrual_granularity to fd_accrual_run.run_type.
+func RunTypeForGranularity(granularity string) string {
+	switch normalizeAccrualGranularity(granularity) {
+	case "DAILY":
+		return "DAILY"
+	case "QUARTERLY":
+		return "QUARTERLY"
+	case "HALF_YEARLY":
+		return "HALF_YEARLY"
+	case "YEARLY":
+		return "YEARLY"
+	default:
+		return "MONTHLY"
+	}
+}
+
+// periodGranularityForScheduler resolves the calendar window when granularity is RUN.
+func periodGranularityForScheduler(accrualGranularity, scheduleFrequency string) string {
+	g := normalizeAccrualGranularity(accrualGranularity)
+	if g == "" || g == "RUN" {
+		if isValidScheduleFrequency(scheduleFrequency) {
+			return normalizeScheduleFrequency(scheduleFrequency)
+		}
+		return "MONTHLY"
+	}
+	return g
+}
+
+// generateSubPeriods splits [start, end] (inclusive calendar dates) into consecutive
+// sub-periods of the requested granularity. RUN returns the whole range as one chunk.
 // Each element is [subStart, subEnd) where subEnd is exclusive.
 func generateSubPeriods(start, end time.Time, granularity string) [][2]time.Time {
 	var periods [][2]time.Time
 	cur := start.Truncate(24 * time.Hour)
-	e := end.Truncate(24 * time.Hour)
+	endDay := end.Truncate(24 * time.Hour)
+	// fd_accrual_run stores inclusive end dates; treat as [start, end+1day) for slicing.
+	e := endDay.AddDate(0, 0, 1)
 	if !cur.Before(e) {
 		return periods
 	}
-	switch strings.ToUpper(granularity) {
+	switch normalizeAccrualGranularity(granularity) {
 	case "DAILY":
 		for cur.Before(e) {
 			next := cur.AddDate(0, 0, 1)
@@ -819,7 +894,6 @@ func generateSubPeriods(start, end time.Time, granularity string) [][2]time.Time
 		}
 	case "MONTHLY":
 		for cur.Before(e) {
-			// advance to first day of next month
 			next := time.Date(cur.Year(), cur.Month()+1, 1, 0, 0, 0, 0, time.UTC)
 			if next.After(e) {
 				next = e
@@ -830,10 +904,32 @@ func generateSubPeriods(start, end time.Time, granularity string) [][2]time.Time
 	case "QUARTERLY":
 		for cur.Before(e) {
 			next := cur.AddDate(0, 3, 0)
-			// snap to quarter start (Jan/Apr/Jul/Oct)
 			qMonth := ((int(next.Month())-1)/3)*3 + 1
 			next = time.Date(next.Year(), time.Month(qMonth), 1, 0, 0, 0, 0, time.UTC)
-			if next.After(e) || next.Equal(cur) {
+			if next.After(e) || !next.After(cur) {
+				next = e
+			}
+			periods = append(periods, [2]time.Time{cur, next})
+			cur = next
+		}
+	case "HALF_YEARLY":
+		for cur.Before(e) {
+			var next time.Time
+			if cur.Month() <= 6 {
+				next = time.Date(cur.Year(), time.July, 1, 0, 0, 0, 0, time.UTC)
+			} else {
+				next = time.Date(cur.Year()+1, time.January, 1, 0, 0, 0, 0, time.UTC)
+			}
+			if next.After(e) || !next.After(cur) {
+				next = e
+			}
+			periods = append(periods, [2]time.Time{cur, next})
+			cur = next
+		}
+	case "YEARLY":
+		for cur.Before(e) {
+			next := time.Date(cur.Year()+1, time.January, 1, 0, 0, 0, 0, time.UTC)
+			if next.After(e) {
 				next = e
 			}
 			periods = append(periods, [2]time.Time{cur, next})
@@ -1092,13 +1188,14 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 		}
 	}
 
-	// Bank rounding: bank config decimals take precedence, then run-level
+	// Bank rounding: bank config decimals take precedence, then run-level.
+	// Zero decimals (whole rupees) is valid — do not treat 0 as "unset".
 	configDecimals := fd.BankRoundingDecimals
-	if configDecimals <= 0 {
+	if configDecimals < 0 {
 		configDecimals = params.PrecisionDecimals
 	}
-	if configDecimals <= 0 {
-		configDecimals = 2
+	if configDecimals < 0 {
+		configDecimals = rounding.DefaultDecimals
 	}
 	configRoundingRule := fd.BankRoundingMethod
 	if configRoundingRule == "" {
@@ -1110,20 +1207,49 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 
 	configDailyRate := (fd.InterestRate / 100.0) / float64(configDivisor)
 	configRaw := configOpeningPrincipal * configDailyRate * float64(configAccrualDays)
-	configPeriodInterest := roundAccrual(configRaw, configDecimals, configRoundingRule)
+
+	configRoundingFreq := fd.BankRoundingFrequency
+	if configRoundingFreq == "" {
+		configRoundingFreq = "EACH_PERIOD"
+	}
+
+	// Prefer posted cashflow schedule (same rounded rows as simulator / cashflow engine).
+	configPeriodInterest := rounding.Apply(
+		configRaw, configDecimals, configRoundingRule, configRoundingFreq, true)
+	interestSource := "formula"
+	var schedCFIDs []string
+	if schedInterest, ids, hasSched := fdMaster.PeriodInterestFromSchedule(
+		ctx, pool, fd.FDID, effectiveStart, effectiveEnd, fd.InterestTypeCode,
+	); hasSched {
+		configPeriodInterest = schedInterest
+		schedCFIDs = ids
+		interestSource = "cashflow_schedule"
+	}
 
 	// Cashflow data (same for both paths — receipts come from bank, not formula)
 	interestReceived, tdsDeducted, cashflowIDs := getCashflowDataForPeriod(
 		ctx, pool, fd.FDID, effectiveStart, effectiveEnd)
+	if len(schedCFIDs) > 0 {
+		seen := make(map[string]struct{}, len(cashflowIDs))
+		for _, id := range cashflowIDs {
+			seen[id] = struct{}{}
+		}
+		for _, id := range schedCFIDs {
+			if _, ok := seen[id]; !ok {
+				cashflowIDs = append(cashflowIDs, id)
+			}
+		}
+	}
 
 	configTDSApplicable := configPeriodInterest
 	configClosingBalance := openingBalance + configPeriodInterest - interestReceived
 	configNetInterest := configPeriodInterest - tdsDeducted
 
 	configFormula := fmt.Sprintf(
-		"[CONFIG] P(%.2f) × r(%.4f%%) × d(%d) / D(%d) = %.4f | rnd(%s,%d) = %.2f | holiday_excl=%d",
-		configOpeningPrincipal, fd.InterestRate, configAccrualDays, configDivisor,
-		configRaw, configRoundingRule, configDecimals, configPeriodInterest, configHolidaysExcluded)
+		"[CONFIG] src=%s P(%.2f) × r(%.4f%%) × d(%d) / D(%d) = %.4f | rnd(%s,%d,freq=%s) = %.2f | holiday_excl=%d",
+		interestSource, configOpeningPrincipal, fd.InterestRate, configAccrualDays, configDivisor,
+		configRaw, configRoundingRule, configDecimals, configRoundingFreq,
+		configPeriodInterest, configHolidaysExcluded)
 
 	// ─────────────────────────────────────────────────────────────────────
 	// REQ PATH — run-level baseline calculation
@@ -1143,8 +1269,8 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 	reqOpeningPrincipal := fd.PrincipalAmount // always original principal
 
 	reqDecimals := params.PrecisionDecimals
-	if reqDecimals <= 0 {
-		reqDecimals = 2
+	if reqDecimals < 0 {
+		reqDecimals = rounding.DefaultDecimals
 	}
 	reqRoundingRule := params.RoundingRule
 	if reqRoundingRule == "" {
@@ -1153,7 +1279,7 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 
 	reqDailyRate := (fd.InterestRate / 100.0) / float64(reqDivisor)
 	reqRaw := reqOpeningPrincipal * reqDailyRate * float64(reqAccrualDays)
-	reqPeriodInterest := roundAccrual(reqRaw, reqDecimals, reqRoundingRule)
+	reqPeriodInterest := rounding.RoundByMethod(reqRaw, reqDecimals, reqRoundingRule)
 
 	reqClosingBalance := openingBalance + reqPeriodInterest - interestReceived
 	reqNetInterest := reqPeriodInterest - tdsDeducted
