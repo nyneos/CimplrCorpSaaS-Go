@@ -185,8 +185,8 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		delRows.Close()
-		// Soft-delete approvals stay in the table and only flip is_deleted.
-		if len(deletedIds) > 0 {
+		// Only approved delete requests should soft-delete the booking.
+		if len(deletedIds) > 0 && req.ProcessingStatus == "Approved" {
 			_, err := db.Exec(`
 				UPDATE forward_bookings
 				SET processing_status = 'APPROVED',
@@ -196,6 +196,19 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 				WHERE system_transaction_id = ANY($1)
 				  AND UPPER(COALESCE(processing_status, '')) IN ('DELETE-APPROVAL', 'PENDING_DELETE_APPROVAL')
 			`, pq.Array(deletedIds), req.UserID)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				return
+			}
+		}
+		if len(deletedIds) > 0 && req.ProcessingStatus == "Rejected" {
+			_, err := db.Exec(`
+				UPDATE forward_bookings
+				SET processing_status = 'APPROVED'
+				WHERE system_transaction_id = ANY($1)
+				  AND UPPER(COALESCE(processing_status, '')) IN ('DELETE-APPROVAL', 'PENDING_DELETE_APPROVAL')
+			`, pq.Array(deletedIds))
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
