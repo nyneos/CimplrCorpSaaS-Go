@@ -36,6 +36,7 @@ type ReceiptRow struct {
 // TDSRow holds minimal TDS receipt data used during reconciliation.
 type TDSRow struct {
 	TDSID         string
+	ReceiptID     string
 	FDID          string
 	FdRefNo       string
 	EntityID      string
@@ -275,9 +276,14 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 					RaisedBy:      triggeredBy,
 				})
 				if exID != "" {
+					varianceAbs := variance
+					if varianceAbs < 0 {
+						varianceAbs = -varianceAbs
+					}
+					insertVarianceRaisedAudit(ctx, pool, exID, triggeredBy, deriveExceptionType(variance, expected), expected, rec.Gross, varianceAbs) //nolint:errcheck
 					pool.Exec(ctx, //nolint:errcheck
 						`UPDATE investment.fd_receipt_reconcile_result
-						 SET has_exception=true, exception_id=$1 WHERE result_id=$2`,
+						 SET has_exception=false, exception_id=$1 WHERE result_id=$2`,
 						exID, resultID)
 				}
 			}
@@ -385,7 +391,12 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 
 				if matchStatus != "MATCHED" && tdsResultID != "" {
 					exID, _ := insertException(ctx, pool, ExceptionParams{
-						Rec:           ReceiptRow{FDID: tds.FDID, FdRefNo: tds.FdRefNo, EntityID: tds.EntityID},
+						Rec: ReceiptRow{
+							ReceiptID: tds.ReceiptID,
+							FDID:      tds.FDID,
+							FdRefNo:   tds.FdRefNo,
+							EntityID:  tds.EntityID,
+						},
 						RunID:         runID,
 						ResultID:      tdsResultID,
 						ExceptionType: deriveExceptionType(variance, expected),
@@ -397,9 +408,14 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 						RaisedBy:      triggeredBy,
 					})
 					if exID != "" {
+						varianceAmt := tds.Actual - expected
+						if varianceAmt < 0 {
+							varianceAmt = -varianceAmt
+						}
+						insertVarianceRaisedAudit(ctx, pool, exID, triggeredBy, deriveExceptionType(variance, expected), expected, tds.Actual, varianceAmt) //nolint:errcheck
 						pool.Exec(ctx, //nolint:errcheck
 							`UPDATE investment.fd_receipt_reconcile_result
-							 SET has_exception=true, exception_id=$1 WHERE result_id=$2`,
+							 SET has_exception=false, exception_id=$1 WHERE result_id=$2`,
 							exID, tdsResultID)
 					}
 				}
@@ -750,7 +766,7 @@ func loadTDSReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, periodSt
 	var err error
 	if len(filterIDs) > 0 {
 		rows, err = pool.Query(ctx, `
-			SELECT t.tds_id, t.fd_id, t.fd_ref_no, t.entity_id,
+			SELECT t.tds_id, COALESCE(t.receipt_id,''), t.fd_id, t.fd_ref_no, t.entity_id,
 			       COALESCE(m.entity_name, t.entity_id, '') AS entity_name,
 			       COALESCE(t.bank_id,'')                    AS bank_id,
 			       COALESCE(m.bank_name, '')                 AS bank_name,
@@ -763,7 +779,7 @@ func loadTDSReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, periodSt
 			  AND t.is_deleted = false`, filterIDs)
 	} else {
 		rows, err = pool.Query(ctx, `
-			SELECT t.tds_id, t.fd_id, t.fd_ref_no, t.entity_id,
+			SELECT t.tds_id, COALESCE(t.receipt_id,''), t.fd_id, t.fd_ref_no, t.entity_id,
 			       COALESCE(m.entity_name, t.entity_id, '') AS entity_name,
 			       COALESCE(t.bank_id,'')                    AS bank_id,
 			       COALESCE(m.bank_name, '')                 AS bank_name,
@@ -783,7 +799,7 @@ func loadTDSReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, periodSt
 	var out []TDSRow
 	for rows.Next() {
 		var t TDSRow
-		if e := rows.Scan(&t.TDSID, &t.FDID, &t.FdRefNo, &t.EntityID, &t.EntityName, &t.BankID, &t.BankName,
+		if e := rows.Scan(&t.TDSID, &t.ReceiptID, &t.FDID, &t.FdRefNo, &t.EntityID, &t.EntityName, &t.BankID, &t.BankName,
 			&t.PeriodStart, &t.PeriodEnd, &t.DeductionDate, &t.Actual); e == nil {
 			out = append(out, t)
 		}
@@ -1342,7 +1358,7 @@ func insertException(ctx context.Context, pool *pgxpool.Pool, p ExceptionParams)
 			receipt_id, tds_id,
 			exception_type, severity,
 			expected_amount, received_amount, variance_amount,
-			exception_status, raised_by, raised_at,
+			case_type, exception_status, raised_by, raised_at,
 			is_active, is_deleted
 		) VALUES (
 			'IREX-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
@@ -1351,7 +1367,7 @@ func insertException(ctx context.Context, pool *pgxpool.Pool, p ExceptionParams)
 			$6,$7,
 			$8,$9,
 			$10,$11,$12,
-			'OPEN',$13,now(),
+			'VARIANCE','OPEN',$13,now(),
 			true,false
 		) RETURNING exception_id`,
 		p.RunID, p.ResultID,

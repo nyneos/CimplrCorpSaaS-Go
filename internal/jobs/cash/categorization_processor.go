@@ -108,7 +108,14 @@ func RunCategorizationScheduler(cfg *CategorizationConfig, db *pgxpool.Pool) err
 //  5. For each batch: process narration → filter rules → run waterfall → collect results.
 //  6. Persist via PersistBatch (pgx.Batch pipeline, 4 ops per item).
 //  7. Track affected bank statements and insert audit approval rows afterwards.
-func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
+//
+// Pass an optional bankStatementID to restrict processing to a single statement.
+// If empty (or not supplied), all eligible transactions are processed.
+func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankStatementID ...string) error {
+	filterBSID := ""
+	if len(bankStatementID) > 0 {
+		filterBSID = bankStatementID[0]
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
 	defer cancel()
 
@@ -128,9 +135,15 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 	}
 
 	// ── 0. Advisory lock — prevent concurrent runs ────────────────────────────
+	// Targeted runs (specific bankStatementID) use a per-statement lock key so
+	// they don't block each other or the global cron batch.
+	lockKey := "smart-cat-batch"
+	if filterBSID != "" {
+		lockKey = "smart-cat-bs-" + filterBSID
+	}
 	var lockAcquired bool
 	if err := db.QueryRow(ctx,
-		`SELECT pg_try_advisory_lock(hashtext('smart-cat-batch'))`,
+		`SELECT pg_try_advisory_lock(hashtext($1))`, lockKey,
 	).Scan(&lockAcquired); err != nil {
 		return fmt.Errorf("advisory lock check: %w", err)
 	}
@@ -144,7 +157,8 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions
 		WHERE bank_statement_id IS NOT NULL
 		  AND (classification_step IS NULL OR classification_step NOT IN ('CORRECTION', 'CONFIRMATION'))
-	`).Scan(&totalCount); err != nil {
+		  AND ($1 = '' OR bank_statement_id::text = $1)
+	`, filterBSID).Scan(&totalCount); err != nil {
 		return fmt.Errorf("count transactions: %w", err)
 	}
 	if totalCount == 0 {
@@ -197,9 +211,10 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 			        t.classification_step IS NULL
 			        OR t.classification_step NOT IN ('CORRECTION', 'CONFIRMATION')
 			  )
+			  AND ($3 = '' OR t.bank_statement_id::text = $3)
 			ORDER BY t.transaction_id
 			LIMIT $2
-		`, lastID, batchSize)
+		`, lastID, batchSize, filterBSID)
 		if err != nil {
 			return fmt.Errorf("query batch after id=%d: %w", lastID, err)
 		}

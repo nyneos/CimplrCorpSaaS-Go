@@ -31,11 +31,13 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/rounding"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -563,9 +565,9 @@ type SimulateCashflowRequest struct {
 	HolidayAccrual               *bool   `json:"holiday_accrual"`
 	TDSDeductionTiming           *string `json:"tds_deduction_timing"`
 	QuarterDefinition            *string `json:"quarter_definition"`
-	// User-overridable payout / cap dates (YYYY-MM-DD).
-	// If set, the value_date of the first matching event is shifted to this date
-	// and all subsequent value_dates of that event type are shifted by the same offset.
+	// User-overridable first cap / payout event dates (YYYY-MM-DD).
+	// First event lands on this date; later cap/payout events step by frequency.
+	// applyFirstPayoutDateOverride may still nudge value_date when it differs from event_date.
 	FirstPayoutDate         *string `json:"first_payout_date,omitempty"`
 	FirstCapitalizationDate *string `json:"first_capitalization_date,omitempty"`
 	// ResetType controls how the interest base principal resets after each payout.
@@ -913,6 +915,7 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 	for _, row := range rawRows {
 		simRows = append(simRows, cashflowRowToSim(row))
 	}
+	sortSimulatedCashflowRows(simRows)
 
 	// ── Holidays for display ──────────────────────────────────────────────
 	holidays, _ := GetHolidayListForRange(ctx, exec, calCode, startDate, maturityDate)
@@ -980,9 +983,9 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 				tdsPct = tds.TDSRate
 			}
 			if isCompound {
-				enrichCompoundWorkbookSummary(&sum, fd, firstNonEmpty(capFreq.FrequencyType, capFreq.FrequencyCode), tdsPct)
+				enrichCompoundWorkbookSummary(&sum, fd, cfg, firstNonEmpty(capFreq.FrequencyType, capFreq.FrequencyCode), tdsPct)
 			} else {
-				enrichSimpleWorkbookSummary(&sum, fd, tdsPct)
+				enrichSimpleWorkbookSummary(&sum, fd, cfg, tdsPct)
 			}
 			return sum
 		}(),
@@ -1170,8 +1173,8 @@ func applyGracePeriod(fd *FDRecord, cfg *BankConfig, rows []CashflowRow, dcInfo 
 	graceEnd = adjustToWorkingDay(graceEnd, cfg.CapitalizationDateAdjustment, cfg, cal)
 
 	decimals := cfg.InterestRoundingDecimals
-	if decimals <= 0 {
-		decimals = 2
+	if decimals < 0 {
+		decimals = rounding.DefaultDecimals
 	}
 	effectiveConvention := firstNonEmpty(dcInfo.ConventionType, "ACT_365")
 	divisor, days := getDivisorAndDaysWithCal(effectiveConvention, graceStart, graceEnd, cfg, cal)
@@ -1285,25 +1288,27 @@ func capPeriodsPerYear(freqType string) int {
 	}
 }
 
-// simpleFormulaInterest implements workbook C16 for SI:
-// ROUND(P * r * tenorDays / 365, 0).
-func simpleFormulaInterest(principal, annualRatePct float64, tenorDays int) float64 {
+// simpleFormulaInterest implements workbook C16: P * r * tenorDays / 365 with bank rounding.
+func simpleFormulaInterest(principal, annualRatePct float64, tenorDays int, cfg *BankConfig) float64 {
 	if principal <= 0 || annualRatePct <= 0 || tenorDays <= 0 {
 		return 0
 	}
-	return math.Round(principal * (annualRatePct / 100.0) * float64(tenorDays) / 365.0)
+	raw := principal * (annualRatePct / 100.0) * float64(tenorDays) / 365.0
+	rnd := engRoundingFromCfg(cfg)
+	return rnd.RoundFinal(raw)
 }
 
-// compoundFormulaInterest implements workbook C17:
-// ROUND(P * ((1 + r/n)^(n * tenorDays/365) - 1), 0).
-func compoundFormulaInterest(principal, annualRatePct float64, capPeriodsPerYear, tenorDays int) float64 {
+// compoundFormulaInterest implements workbook C17 with bank rounding.
+func compoundFormulaInterest(principal, annualRatePct float64, capPeriodsPerYear, tenorDays int, cfg *BankConfig) float64 {
 	if principal <= 0 || annualRatePct <= 0 || tenorDays <= 0 || capPeriodsPerYear <= 0 {
 		return 0
 	}
 	r := annualRatePct / 100.0
 	n := float64(capPeriodsPerYear)
 	tenorYears := float64(tenorDays) / 365.0
-	return math.Round(principal * (math.Pow(1+r/n, n*tenorYears) - 1))
+	raw := principal * (math.Pow(1+r/n, n*tenorYears) - 1)
+	rnd := engRoundingFromCfg(cfg)
+	return rnd.RoundFinal(raw)
 }
 
 // buildSimulateSummary aggregates totals across the simulated schedule.
@@ -1405,26 +1410,29 @@ func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 }
 
 // enrichSimpleWorkbookSummary fills workbook C16-style header totals (ACT/365 simple interest).
-// Schedule total_interest_accrued is the sum of rounded per-period payout rows and may differ by a few rupees.
-func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, tdsRatePct float64) {
+// Schedule total_interest_accrued is the sum of per-period rounded rows; with unified rounding
+// it should match workbook totals when decimals and method align with bank config.
+func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, tdsRatePct float64) {
 	if fd == nil || s == nil {
 		return
 	}
-	s.WorkbookTotalInterest = simpleFormulaInterest(fd.PrincipalAmount, fd.InterestRate, fd.TenorDays)
+	s.WorkbookTotalInterest = simpleFormulaInterest(fd.PrincipalAmount, fd.InterestRate, fd.TenorDays, cfg)
 	if tdsRatePct > 0 && s.WorkbookTotalInterest > 0 {
-		s.WorkbookTotalTDS = math.Round(s.WorkbookTotalInterest * tdsRatePct / 100.0)
+		rnd := engRoundingFromCfg(cfg)
+		s.WorkbookTotalTDS = rnd.RoundFinal(s.WorkbookTotalInterest * tdsRatePct / 100.0)
 	}
 }
 
 // enrichCompoundWorkbookSummary fills workbook C17-style header totals on a summary.
-func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, capFreqType string, tdsRatePct float64) {
+func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, capFreqType string, tdsRatePct float64) {
 	if fd == nil || s == nil {
 		return
 	}
 	n := capPeriodsPerYear(capFreqType)
-	s.WorkbookTotalInterest = compoundFormulaInterest(fd.PrincipalAmount, fd.InterestRate, n, fd.TenorDays)
+	s.WorkbookTotalInterest = compoundFormulaInterest(fd.PrincipalAmount, fd.InterestRate, n, fd.TenorDays, cfg)
 	if tdsRatePct > 0 && s.WorkbookTotalInterest > 0 {
-		s.WorkbookTotalTDS = math.Round(s.WorkbookTotalInterest * tdsRatePct / 100.0)
+		rnd := engRoundingFromCfg(cfg)
+		s.WorkbookTotalTDS = rnd.RoundFinal(s.WorkbookTotalInterest * tdsRatePct / 100.0)
 	}
 }
 
@@ -1540,8 +1548,12 @@ type SimulateDiffResponse struct {
 	// Confirmation-side resolved inputs.
 	ConfirmationInput SimulatedFDSummary `json:"confirmation_input"`
 
-	// Merged diff schedule — every row from either side.
+	// Merged diff schedule — every row from either side (sorted by event_date).
 	DiffSchedule []DiffCashflowRow `json:"diff_schedule"`
+
+	// Full schedules for side-by-side UI (same sort as /simulator/cashflow).
+	BookingSchedule      []SimulatedCashflowRow `json:"booking_schedule,omitempty"`
+	ConfirmationSchedule []SimulatedCashflowRow `json:"confirmation_schedule,omitempty"`
 
 	// Summary metrics for each side.
 	BookingSummary      SimulateSummary `json:"booking_summary"`
@@ -1594,15 +1606,85 @@ func diffFloat64(a, b float64) bool {
 	return d > diffEpsilon
 }
 
-// diffSchedules merges two ordered schedules (old = booking, new = confirmation)
-// and produces a DiffCashflowRow slice.
+// cashflowEventTypeRank orders rows that share the same event_date (BRD / workbook).
+func cashflowEventTypeRank(eventType string) int {
+	switch strings.ToUpper(strings.TrimSpace(eventType)) {
+	case "INITIAL_INVESTMENT":
+		return 0
+	case "ACCRUAL":
+		return 1
+	case "CAPITALIZATION":
+		return 2
+	case "INTEREST_RECEIPT":
+		return 3
+	case "TDS_DEDUCTION":
+		return 4
+	case "MATURITY":
+		return 5
+	case "PRINCIPAL_RETURN":
+		return 6
+	default:
+		return 99
+	}
+}
+
+func sortSimulatedCashflowRows(rows []SimulatedCashflowRow) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].EventDate != rows[j].EventDate {
+			return rows[i].EventDate < rows[j].EventDate
+		}
+		ri := cashflowEventTypeRank(rows[i].EventType)
+		rj := cashflowEventTypeRank(rows[j].EventType)
+		if ri != rj {
+			return ri < rj
+		}
+		return rows[i].PeriodNumber < rows[j].PeriodNumber
+	})
+}
+
+func sortDiffCashflowRows(rows []DiffCashflowRow) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].EventDate != rows[j].EventDate {
+			return rows[i].EventDate < rows[j].EventDate
+		}
+		ri := cashflowEventTypeRank(rows[i].EventType)
+		rj := cashflowEventTypeRank(rows[j].EventType)
+		if ri != rj {
+			return ri < rj
+		}
+		// UNCHANGED/CHANGED before REMOVED/NEW at same slot for readability
+		return diffChangeTypeRank(rows[i].ChangeType) < diffChangeTypeRank(rows[j].ChangeType)
+	})
+}
+
+func diffChangeTypeRank(ct DiffChangeType) int {
+	switch ct {
+	case DiffUnchanged:
+		return 0
+	case DiffChanged:
+		return 1
+	case DiffNew:
+		return 2
+	case DiffRemoved:
+		return 3
+	default:
+		return 9
+	}
+}
+
+// diffSchedules merges two schedules (old = booking, new = confirmation)
+// and produces a DiffCashflowRow slice sorted by event_date.
 //
 // Matching strategy:
 //   - Build a map from diffKey → old row index.
 //   - Walk new rows: if matching old key exists → CHANGED or UNCHANGED; else → NEW.
 //   - Walk old rows that were never matched → REMOVED.
-//   - Output order: new rows first (in order), then REMOVED rows (in old order).
+//   - Output order: chronological by event_date, then event_type rank.
 func diffSchedules(oldRows, newRows []SimulatedCashflowRow) []DiffCashflowRow {
+	oldRows = append([]SimulatedCashflowRow(nil), oldRows...)
+	newRows = append([]SimulatedCashflowRow(nil), newRows...)
+	sortSimulatedCashflowRows(oldRows)
+	sortSimulatedCashflowRows(newRows)
 	// Index old rows by key.  If the same key appears more than once in the
 	// old schedule (rare but possible, e.g. two ACCRUAL rows on the same date)
 	// we keep a slice per key and consume them in order.
@@ -1718,7 +1800,8 @@ func diffSchedules(oldRows, newRows []SimulatedCashflowRow) []DiffCashflowRow {
 				diffFloat64(oldRow.ProvisionalTDS, nr.ProvisionalTDS) ||
 				oldRow.PeriodDays != nr.PeriodDays ||
 				oldRow.DayCountCode != nr.DayCountCode ||
-				oldRow.AccrualFrequency != nr.AccrualFrequency
+				oldRow.AccrualFrequency != nr.AccrualFrequency ||
+				oldRow.ValueDate != nr.ValueDate
 
 			if changed {
 				dr.ChangeType = DiffChanged
@@ -1776,6 +1859,7 @@ func diffSchedules(oldRows, newRows []SimulatedCashflowRow) []DiffCashflowRow {
 		})
 	}
 
+	sortDiffCashflowRows(out)
 	return out
 }
 
@@ -1885,6 +1969,8 @@ func SimulateDiffHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			BookingInput:                 bookingResult.ResolvedInput,
 			ConfirmationInput:            confirmResult.ResolvedInput,
 			DiffSchedule:                 diffRows,
+			BookingSchedule:              bookingResult.Schedule,
+			ConfirmationSchedule:         confirmResult.Schedule,
 			BookingSummary:               bookingResult.Summary,
 			ConfirmationSummary:          confirmResult.Summary,
 			TotalRows:                    len(diffRows),

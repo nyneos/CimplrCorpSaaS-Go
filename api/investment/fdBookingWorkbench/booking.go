@@ -48,7 +48,10 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RenewalInstructions string  `json:"renewal_instructions"` // kept for compat, maps to auto_renewal
 			Notes               string  `json:"notes"`                // → booking_remarks
 			BookingRemarks      string  `json:"booking_remarks"`
-			OfferValidTill      string  `json:"offer_valid_till"`      // YYYY-MM-DD; bank offer validity date
+			OfferValidTill          string `json:"offer_valid_till"` // YYYY-MM-DD; bank offer validity date
+			AccrualFrequencyCode    string `json:"accrual_frequency_code"`
+			ResetType               string `json:"reset_type"` // AT_MATURITY | AT_EACH_PAYOUT
+			PayoutFrequencyID       string `json:"payout_frequency_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -123,6 +126,10 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// auto_renewal: true if field set OR renewal_instructions contains AUTO
 		autoRenewal := req.AutoRenewal || strings.Contains(strings.ToUpper(req.RenewalInstructions), "AUTO")
+		resetType := strings.ToUpper(strings.TrimSpace(req.ResetType))
+		if resetType == "" {
+			resetType = "AT_MATURITY"
+		}
 		// Normalize tenor: compute tenure_days from tenor_type/months/years if needed
 		tenorTypeNorm := strings.ToUpper(strings.TrimSpace(req.TenorType))
 		computedTenorDays := req.TenorDays
@@ -159,7 +166,10 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"product_code":           nullIfEmpty(req.ProductCode),
 			"auto_renewal":           autoRenewal,
 			"booking_remarks":        nullIfEmpty(bookingRemarks),
-			"offer_valid_till":       nullIfEmpty(req.OfferValidTill),
+			"offer_valid_till":         nullIfEmpty(req.OfferValidTill),
+			"accrual_frequency_code":   nullIfEmpty(strings.ToUpper(strings.TrimSpace(req.AccrualFrequencyCode))),
+			"reset_type":             resetType,
+			"payout_frequency_id":    nullIfEmpty(req.PayoutFrequencyID),
 			"booking_status":         "DRAFT",
 			"created_by":             userEmail,
 		}
@@ -170,7 +180,9 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"tenor_type", "tenure_years",
 			"interest_type_code", "interest_type_id", "expected_start_date", "expected_maturity_date", "value_date",
 			"frequency_id", "day_count_code", "tds_plan_id", "product_code",
-			"auto_renewal", "booking_remarks", "offer_valid_till", "booking_status", "created_by",
+			"auto_renewal", "booking_remarks", "offer_valid_till",
+			"accrual_frequency_code", "reset_type", "payout_frequency_id",
+			"booking_status", "created_by",
 		}
 		insertQ, insertArgs, returningColumn, ok := buildFDDynamicInsert(
 			constants.QuerryBookingRequest,
@@ -1621,9 +1633,43 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(aie.approvals_required,0)                                  AS approvals_required,
 				COALESCE(aie.approvals_received,0)                                  AS approvals_received,
 				aie.sla_deadline                                                    AS sla_deadline,
-				COALESCE(aie.is_escalated,false)                                    AS is_escalated
+				COALESCE(aie.is_escalated,false)                                    AS is_escalated,
+
+				COALESCE(bc.holiday_calendar_code,'')                               AS holiday_calendar_code,
+				COALESCE(bc.tds_deduction_timing,'')                                AS tds_deduction_timing,
+				COALESCE(bc.rounding_method,'')                                     AS rounding_method,
+				COALESCE(bc.rounding_frequency,'')                                  AS rounding_frequency,
+				COALESCE(bc.interest_rounding_decimals,2)                           AS interest_rounding_decimals,
+				COALESCE(bc.broken_period_method,'')                                AS broken_period_method,
+				COALESCE(bc.broken_period_location,'')                              AS broken_period_location,
+				COALESCE(bc.grace_period_days,0)                                    AS grace_period_days,
+				COALESCE(bc.grace_period_rate_type,'')                              AS grace_period_rate_type,
+				COALESCE(bc.capitalization_schedule_type,'')                        AS capitalization_schedule_type,
+				COALESCE(bc.capitalization_date_adjustment,'')                        AS capitalization_date_adjustment,
+				COALESCE(bc.weekend_accrual,true)                                     AS weekend_accrual,
+				COALESCE(bc.holiday_accrual,true)                                     AS holiday_accrual,
+				COALESCE(bc.accrual_start_convention,'')                              AS accrual_start_convention,
+				COALESCE(bc.accrual_end_convention,'')                              AS accrual_end_convention,
+				COALESCE(bc.period_boundary_definition,'')                          AS period_boundary_definition,
+				COALESCE(bc.quarter_definition,'')                                  AS quarter_definition,
+				COALESCE(m.accrual_frequency_code,'')                                 AS accrual_frequency_code,
+				COALESCE(NULLIF(m.reset_type,''),'AT_MATURITY')                       AS reset_type,
+				COALESCE(NULLIF(m.payout_frequency_id,''), m.frequency_id, '')      AS payout_frequency_id,
+				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')               AS first_payout_date,
+				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')       AS first_capitalization_date,
+				COALESCE(c.accrual_frequency_code,'')                                 AS confirmed_accrual_frequency_code,
+				COALESCE(c.reset_type,'')                                             AS confirmed_reset_type,
+				COALESCE(c.actual_principal,0)                                        AS actual_principal,
+				COALESCE(c.confirmed_rate,0)                                          AS confirmed_rate,
+				COALESCE(TO_CHAR(c.actual_start_date,'YYYY-MM-DD'),'')                AS actual_start_date,
+				COALESCE(TO_CHAR(c.actual_maturity_date,'YYYY-MM-DD'),'')             AS actual_maturity_date,
+				COALESCE(c.confirmed_interest_type_code,'')                           AS confirmed_interest_type
 
 			FROM investment.fd_booking_request m
+			LEFT JOIN investment.fd_confirmation c
+				ON c.booking_id = m.booking_id AND COALESCE(c.is_deleted,false) = false
+			LEFT JOIN investment.fd_bank_config_master bc
+				ON bc.config_id = m.bank_config_id AND COALESCE(bc.is_deleted,false) = false
 			LEFT JOIN latest_audit l    ON l.booking_id = m.booking_id
 			LEFT JOIN history h         ON h.booking_id = m.booking_id
 			LEFT JOIN uam.approval_instance ai
@@ -1659,6 +1705,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					row[string(f.Name)] = vals[i]
 				}
 			}
+			AttachSimulateDiffInput(row)
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
@@ -2065,7 +2112,14 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(bc.accrual_start_convention,'')                       AS accrual_start_convention,
 				COALESCE(bc.accrual_end_convention,'')                         AS accrual_end_convention,
 				COALESCE(bc.period_boundary_definition,'')                     AS period_boundary_definition,
-				COALESCE(bc.quarter_definition,'')                             AS quarter_definition
+				COALESCE(bc.quarter_definition,'')                             AS quarter_definition,
+				COALESCE(m.accrual_frequency_code,'')                          AS accrual_frequency_code,
+				COALESCE(NULLIF(m.reset_type,''),'AT_MATURITY')                AS reset_type,
+				COALESCE(NULLIF(m.payout_frequency_id,''), m.frequency_id, '')  AS payout_frequency_id,
+				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')          AS first_payout_date,
+				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'') AS first_capitalization_date,
+				COALESCE(c.accrual_frequency_code,'')                          AS confirmed_accrual_frequency_code,
+				COALESCE(c.reset_type,'')                                      AS confirmed_reset_type
 			FROM investment.fd_booking_request m
 			LEFT JOIN investment.fd_confirmation c
 				ON c.booking_id = m.booking_id AND COALESCE(c.is_deleted,false) = false
@@ -2126,116 +2180,7 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// ── Build simulate_diff_input — maps to SimulateDiffRequest ────────────
-			// booking  = always the original booked values (immutable baseline).
-			// confirmation = starts as a copy of booking values; the frontend
-			//                overwrites it with whatever the bank actually confirmed
-			//                before calling /simulator/diff.
-			// When a confirmation row already exists (post-CONFIRMED status),
-			// confirmation fields are pre-populated with the confirmed actuals so
-			// the diff is ready to render immediately.
-			bookingStart := strVal(row["value_date"])
-			if bookingStart == "" {
-				bookingStart = strVal(row["expected_start_date"])
-			}
-			bookingMaturity := strVal(row["expected_maturity_date"])
-
-			// confirmed actuals — empty when not yet confirmed
-			confirmedStart := strVal(row["actual_start_date"])
-			if confirmedStart == "" {
-				confirmedStart = bookingStart // fall back to booked
-			}
-			confirmedMaturity := strVal(row["actual_maturity_date"])
-			if confirmedMaturity == "" {
-				confirmedMaturity = bookingMaturity
-			}
-			confirmedPrincipal := row["actual_principal"]
-			if isZeroNumeric(confirmedPrincipal) {
-				confirmedPrincipal = row["principal_amount"]
-			}
-			confirmedRate := row["confirmed_rate"]
-			if isZeroNumeric(confirmedRate) {
-				confirmedRate = row["interest_rate"]
-			}
-			confirmedInterestType := strVal(row["confirmed_interest_type"])
-			if confirmedInterestType == "" {
-				confirmedInterestType = strVal(row["interest_type"])
-			}
-
-			// shared config block — same for both sides (bank config doesn't change on confirmation)
-			configBlock := map[string]interface{}{
-				"bank_config_id":                 row["bank_config_id"],
-				"frequency_id":                   row["frequency_id"],
-				"day_count_code":                 row["day_count_code"],
-				"tds_plan_id":                    row["tds_plan_id"],
-				"holiday_calendar_code":          row["holiday_calendar_code"],
-				"tds_deduction_timing":           row["tds_deduction_timing"],
-				"rounding_method":                row["rounding_method"],
-				"rounding_frequency":             row["rounding_frequency"],
-				"interest_rounding_decimals":     row["interest_rounding_decimals"],
-				"broken_period_method":           row["broken_period_method"],
-				"broken_period_location":         row["broken_period_location"],
-				"grace_period_days":              row["grace_period_days"],
-				"grace_period_rate_type":         row["grace_period_rate_type"],
-				"capitalization_schedule_type":   row["capitalization_schedule_type"],
-				"capitalization_date_adjustment": row["capitalization_date_adjustment"],
-				"weekend_accrual":                row["weekend_accrual"],
-				"holiday_accrual":                row["holiday_accrual"],
-				"accrual_start_convention":       row["accrual_start_convention"],
-				"accrual_end_convention":         row["accrual_end_convention"],
-				"period_boundary_definition":     row["period_boundary_definition"],
-				"quarter_definition":             row["quarter_definition"],
-			}
-
-			// booking leg — original booked values, never changes
-			bookingLeg := map[string]interface{}{
-				"principal_amount": row["principal_amount"],
-				"interest_rate":    row["interest_rate"],
-				"start_date":       bookingStart,
-				"maturity_date":    bookingMaturity,
-				"tenor_days":       row["tenor_days"],
-				"tenor_months":     row["tenor_months"],
-				"tenor_years":      row["tenor_years"],
-				"interest_type":    strVal(row["interest_type"]),
-			}
-			for k, v := range configBlock {
-				bookingLeg[k] = v
-			}
-
-			// confirmation leg — pre-filled with confirmed actuals (or booked if not yet confirmed)
-			confirmationLeg := map[string]interface{}{
-				"principal_amount": confirmedPrincipal,
-				"interest_rate":    confirmedRate,
-				"start_date":       confirmedStart,
-				"maturity_date":    confirmedMaturity,
-				"tenor_days":       row["tenor_days"],
-				"tenor_months":     row["tenor_months"],
-				"tenor_years":      row["tenor_years"],
-				"interest_type":    confirmedInterestType,
-			}
-			for k, v := range configBlock {
-				confirmationLeg[k] = v
-			}
-
-			row["simulate_diff_input"] = map[string]interface{}{
-				"booking":      bookingLeg,
-				"confirmation": confirmationLeg,
-			}
-
-			// Remove the bank-config detail columns from the flat row —
-			// they are already embedded in simulate_diff_input above.
-			for _, k := range []string{
-				"tds_deduction_timing", "rounding_method", "rounding_frequency",
-				"interest_rounding_decimals", "broken_period_method", "broken_period_location",
-				"grace_period_days", "grace_period_rate_type",
-				"capitalization_schedule_type", "capitalization_date_adjustment",
-				"weekend_accrual", "holiday_accrual",
-				"accrual_start_convention", "accrual_end_convention",
-				"period_boundary_definition", "quarter_definition",
-			} {
-				delete(row, k)
-			}
-
+			AttachSimulateDiffInput(row)
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {

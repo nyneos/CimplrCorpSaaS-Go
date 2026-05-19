@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -297,7 +296,7 @@ func ValidateScope(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			findingRows.Close()
 		}
 
-		payload := buildAccrualResponse(ctx, pgxPool, req.RunID, false)
+		payload := buildAccrualResponse(ctx, pgxPool, req.RunID)
 		payload["run_id"] = req.RunID
 		payload["validation_summary"] = map[string]interface{}{
 			"eligible_fds":  eligible,
@@ -388,7 +387,7 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── Enrich: return full ledger table for immediate UI rendering ───────
 		var runModeCheck string
 		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(run_mode,'FINAL') FROM investment.fd_accrual_run WHERE run_id=$1`, req.RunID).Scan(&runModeCheck)
-		payload := buildAccrualResponse(ctx, pgxPool, req.RunID, strings.EqualFold(runModeCheck, "SIMULATION"))
+		payload := buildAccrualResponse(ctx, pgxPool, req.RunID)
 		payload["calculated"] = calculated
 		payload["failed"] = failed
 
@@ -1674,7 +1673,7 @@ func GetExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY logged_at DESC`
 			args = append(args, req.RunID)
 		} else if req.ScheduleID != "" {
-			// All runs from a schedule
+			// All execution logs for scheduler runs tied to this schedule (entity match or detail.config_id)
 			query = `
 				SELECT el.log_id, el.run_id,
 				       COALESCE(el.fd_id,'') AS fd_id,
@@ -1687,7 +1686,10 @@ func GetExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND EXISTS (
 					SELECT 1 FROM investment.fd_accrual_schedule_config sc
 					WHERE sc.config_id = $1
-					  AND sc.entity_id = r.entity_id
+					  AND (
+					    sc.entity_id = r.entity_id
+					    OR COALESCE(el.detail->>'schedule_config_id','') = sc.config_id::text
+					  )
 				  )
 				ORDER BY el.logged_at DESC`
 			args = append(args, req.ScheduleID)
@@ -2904,6 +2906,8 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 			// Roll opening balance forward for next sub-period
 			openingBalance = result.ClosingAccruedBalance
 
+			// Persist ledger for both SIMULATION and FINAL so /execute returns the same payload shape.
+			// GL posting remains gated on approval when run_mode=SIMULATION.
 			if isSimulation {
 				logAccrualEvent(ctx, pool, LogAccrualParams{
 					RunID:     runID,
@@ -2922,11 +2926,9 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 					),
 					Detail: nil,
 				})
-				fdCalculated = true
-				continue
 			}
 
-			// FINAL mode: write ledger row for this sub-period
+			// Write ledger row for this sub-period (SIMULATION + FINAL)
 			cashflowIDsJSON, _ := json.Marshal(result.CashflowRowIDs)
 
 			_, upsertErr := pool.Exec(ctx, `
@@ -3869,8 +3871,8 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // buildAccrualResponse constructs a unified response payload for accrual run endpoints.
-// isSimulation=true → include simulation_rows from execution_log, no ledger rows.
-func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string, isSimulation bool) map[string]interface{} {
+// SIMULATION and FINAL runs share the same shape: run_header, kpi, ledger, fd_kpis, execution_log.
+func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string) map[string]interface{} {
 	// ── Run header ────────────────────────────────────────────────────────────
 	type runHeader struct {
 		RunID           string  `json:"run_id"`
@@ -3935,144 +3937,86 @@ func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string,
 		"accrual_granularity":    hdr.Granularity,
 	}
 
+	isSimulation := strings.EqualFold(hdr.RunMode, "SIMULATION")
 	payload := map[string]interface{}{
-		"run_header": hdr,
-		"kpi":        kpi,
+		"run_header":              hdr,
+		"kpi":                     kpi,
+		"run_mode":                hdr.RunMode,
+		"is_simulation":           isSimulation,
+		"posts_to_gl_on_approval": !isSimulation,
 	}
 
-	if isSimulation {
-		// ── Simulation rows from execution log — parsed into structured fields ─
-		var parseSimMsg = func(msg string) map[string]interface{} {
-			result := map[string]interface{}{
-				"raw_message": msg,
-				"days":        0,
-				"interest":    0.0,
-				"tds":         0.0,
-				"net":         0.0,
-				"formula":     "",
-				"sub_period":  "",
+	// ── Ledger rows (same for SIMULATION and FINAL) ───────────────────────────
+	ledgerRows := []map[string]interface{}{}
+	lR, lErr := pool.Query(ctx, `
+		SELECT
+			ledger_id,
+			COALESCE(fd_id,''),
+			COALESCE(fd_ref_no,''),
+			COALESCE(bank_name,''),
+			accrual_period_start,
+			accrual_period_end,
+			COALESCE(accrual_days,0),
+			COALESCE(principal_amount,0),
+			COALESCE(interest_rate,0),
+			COALESCE(period_interest_accrued,0),
+			COALESCE(tds_deducted_in_period,0),
+			COALESCE(net_interest_in_period,0),
+			COALESCE(closing_accrued_balance,0),
+			COALESCE(ledger_row_status,''),
+			COALESCE(formula_used,''),
+			COALESCE(config_rounding_rule,'ROUND'),
+			COALESCE(config_precision_decimals,2),
+			COALESCE(req_period_interest,0),
+			COALESCE(req_rounding_rule,'ROUND'),
+			COALESCE(req_precision_decimals,2)
+		FROM investment.fd_accrual_ledger
+		WHERE run_id=$1 AND is_active=true AND is_deleted=false
+		ORDER BY fd_id, accrual_period_start`, runID)
+	if lErr == nil {
+		defer lR.Close()
+		for lR.Next() {
+			var ledgerID, fdID, fdRefNo, bankName, rowStatus, formula string
+			var configRoundRule, reqRoundRule string
+			var lStart, lEnd time.Time
+			var accrualDays, configDecimals, reqDecimals int
+			var principal, rate, interest, tds, net, closing, reqInterest float64
+			if sErr := lR.Scan(
+				&ledgerID, &fdID, &fdRefNo, &bankName,
+				&lStart, &lEnd, &accrualDays,
+				&principal, &rate, &interest, &tds, &net, &closing,
+				&rowStatus, &formula,
+				&configRoundRule, &configDecimals,
+				&reqInterest, &reqRoundRule, &reqDecimals,
+			); sErr == nil {
+				ledgerRows = append(ledgerRows, map[string]interface{}{
+					"ledger_id":               ledgerID,
+					"fd_id":                   fdID,
+					"fd_ref_no":               fdRefNo,
+					"bank_name":               bankName,
+					"accrual_period_start":    lStart.Format(constants.DateFormat),
+					"accrual_period_end":      lEnd.Format(constants.DateFormat),
+					"accrual_days":            accrualDays,
+					"principal_amount":        principal,
+					"interest_rate":           rate,
+					"period_interest_accrued": math.Round(interest*100) / 100,
+					"tds_deducted_in_period":  math.Round(tds*100) / 100,
+					"net_interest_in_period":  math.Round(net*100) / 100,
+					"closing_accrued_balance": math.Round(closing*100) / 100,
+					"ledger_row_status":       rowStatus,
+					"formula_used":            formula,
+					"config_rounding_rule":    configRoundRule,
+					"config_precision_decimals": configDecimals,
+					"req_period_interest":     math.Round(reqInterest*100) / 100,
+					"req_rounding_rule":       reqRoundRule,
+					"req_precision_decimals":  reqDecimals,
+				})
 			}
-			parts := strings.Fields(msg)
-			for _, p := range parts {
-				kv := strings.SplitN(p, "=", 2)
-				if len(kv) != 2 {
-					continue
-				}
-				switch kv[0] {
-				case "days":
-					if v, err := strconv.Atoi(kv[1]); err == nil {
-						result["days"] = v
-					}
-				case "interest":
-					if v, err := strconv.ParseFloat(kv[1], 64); err == nil {
-						result["interest"] = math.Round(v*100) / 100
-					}
-				case "tds":
-					if v, err := strconv.ParseFloat(kv[1], 64); err == nil {
-						result["tds"] = math.Round(v*100) / 100
-					}
-				case "net":
-					if v, err := strconv.ParseFloat(kv[1], 64); err == nil {
-						result["net"] = math.Round(v*100) / 100
-					}
-				case "formula":
-					result["formula"] = kv[1]
-				}
-			}
-			// extract sub_period from "sub=[2024-10-01,2024-10-02]"
-			if idx := strings.Index(msg, "sub=["); idx >= 0 {
-				end := strings.Index(msg[idx:], "]")
-				if end >= 0 {
-					result["sub_period"] = msg[idx+5 : idx+end]
-				}
-			}
-			return result
 		}
+	}
 
-		simRows := []map[string]interface{}{}
-		simR, simErr := pool.Query(ctx, `
-			SELECT
-				COALESCE(fd_id,'')                               AS fd_id,
-				COALESCE(message,'')                             AS message,
-				TO_CHAR(logged_at,'YYYY-MM-DD')                  AS period_date,
-				logged_at
-			FROM investment.fd_accrual_run_execution_log
-			WHERE run_id=$1 AND event_type='SIMULATED'
-			ORDER BY fd_id, logged_at`, runID)
-		if simErr == nil {
-			defer simR.Close()
-			for simR.Next() {
-				var fdID, msg, periodDate string
-				var loggedAt time.Time
-				if scanErr := simR.Scan(&fdID, &msg, &periodDate, &loggedAt); scanErr == nil {
-					row := parseSimMsg(msg)
-					row["fd_id"] = fdID
-					row["period_date"] = periodDate
-					row["logged_at"] = loggedAt.Format(time.RFC3339)
-					simRows = append(simRows, row)
-				}
-			}
-		}
-		payload["simulation_rows"] = simRows
-	} else {
-		// ── Ledger rows ───────────────────────────────────────────────────────
-		ledgerRows := []map[string]interface{}{}
-		lR, lErr := pool.Query(ctx, `
-			SELECT
-				ledger_id,
-				COALESCE(fd_id,''),
-				COALESCE(fd_ref_no,''),
-				COALESCE(bank_name,''),
-				accrual_period_start,
-				accrual_period_end,
-				COALESCE(accrual_days,0),
-				COALESCE(principal_amount,0),
-				COALESCE(interest_rate,0),
-				COALESCE(period_interest_accrued,0),
-				COALESCE(tds_deducted_in_period,0),
-				COALESCE(net_interest_in_period,0),
-				COALESCE(closing_accrued_balance,0),
-				COALESCE(ledger_row_status,''),
-				COALESCE(formula_used,'')
-			FROM investment.fd_accrual_ledger
-			WHERE run_id=$1 AND is_active=true AND is_deleted=false
-			ORDER BY fd_id, accrual_period_start`, runID)
-		if lErr == nil {
-			defer lR.Close()
-			for lR.Next() {
-				var ledgerID, fdID, fdRefNo, bankName, rowStatus, formula string
-				var lStart, lEnd time.Time
-				var accrualDays int
-				var principal, rate, interest, tds, net, closing float64
-				if sErr := lR.Scan(
-					&ledgerID, &fdID, &fdRefNo, &bankName,
-					&lStart, &lEnd, &accrualDays,
-					&principal, &rate, &interest, &tds, &net, &closing,
-					&rowStatus, &formula,
-				); sErr == nil {
-					ledgerRows = append(ledgerRows, map[string]interface{}{
-						"ledger_id":               ledgerID,
-						"fd_id":                   fdID,
-						"fd_ref_no":               fdRefNo,
-						"bank_name":               bankName,
-						"accrual_period_start":    lStart.Format(constants.DateFormat),
-						"accrual_period_end":      lEnd.Format(constants.DateFormat),
-						"accrual_days":            accrualDays,
-						"principal_amount":        principal,
-						"interest_rate":           rate,
-						"period_interest_accrued": math.Round(interest*100) / 100,
-						"tds_deducted_in_period":  math.Round(tds*100) / 100,
-						"net_interest_in_period":  math.Round(net*100) / 100,
-						"closing_accrued_balance": math.Round(closing*100) / 100,
-						"ledger_row_status":       rowStatus,
-						"formula_used":            formula,
-					})
-				}
-			}
-		}
-
-		// ── Enrich each ledger row with audit_trail + exception ──────────────
-		for i, row := range ledgerRows {
+	// ── Enrich each ledger row with audit_trail + exception ──────────────
+	for i, row := range ledgerRows {
 			ledgerID, _ := row["ledger_id"].(string)
 			if ledgerID == "" {
 				ledgerRows[i]["audit_trail"] = []map[string]interface{}{}
@@ -4181,11 +4125,11 @@ func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string,
 			ledgerRows[i]["exception"] = exceptionRecord
 		}
 
-		payload["ledger"] = ledgerRows
+	payload["ledger"] = ledgerRows
 
-		// ── Per-FD KPIs ───────────────────────────────────────────────────────
-		fdKPIMap := map[string]map[string]interface{}{}
-		for _, row := range ledgerRows {
+	// ── Per-FD KPIs ───────────────────────────────────────────────────────
+	fdKPIMap := map[string]map[string]interface{}{}
+	for _, row := range ledgerRows {
 			fdID := row["fd_id"].(string)
 			entry, ok := fdKPIMap[fdID]
 			if !ok {
@@ -4209,8 +4153,7 @@ func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string,
 		for _, v := range fdKPIMap {
 			fdKPIs = append(fdKPIs, v)
 		}
-		payload["fd_kpis"] = fdKPIs
-	}
+	payload["fd_kpis"] = fdKPIs
 
 	// ── Execution log ─────────────────────────────────────────────────────────
 	execLog := []map[string]interface{}{}

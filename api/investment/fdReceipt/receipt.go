@@ -2302,6 +2302,12 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 			HasException    bool    `json:"has_exception"`
 			ExceptionID     string  `json:"exception_id,omitempty"`
 			CreatedAt       string  `json:"created_at"`
+			// Live receipt/TDS posting status (not frozen at reconcile time)
+			ReceiptStatus       string `json:"receipt_status,omitempty"`
+			ReconcileStatus     string `json:"reconcile_status,omitempty"`
+			JournalEntryID      string `json:"journal_entry_id,omitempty"`
+			TDSStatus           string `json:"tds_status,omitempty"`
+			TDSJournalEntryID   string `json:"tds_journal_entry_id,omitempty"`
 			// Detail arrays — same shape as preview
 			Cashflows     []CashflowLine      `json:"cashflows"`
 			AccrualLedger []AccrualLedgerLine `json:"accrual_ledger"`
@@ -2394,6 +2400,10 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 					exRows.Close()
 				}
 			}
+
+			applyReconcilePostingEnrichment(ctx, pool, rl.ReceiptID, rl.TDSID, rl.ResultType,
+				&rl.ReceiptStatus, &rl.ReconcileStatus, &rl.JournalEntryID, &rl.TDSStatus, &rl.TDSJournalEntryID,
+				&rl.Cashflows)
 		}
 
 		if results == nil {
@@ -2637,6 +2647,11 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			HasException          bool                `json:"has_exception"`
 			ExceptionID           string              `json:"exception_id"`
 			CreatedAt             string              `json:"created_at"`
+			ReceiptStatus         string              `json:"receipt_status,omitempty"`
+			ReconcileStatus       string              `json:"reconcile_status,omitempty"`
+			JournalEntryID        string              `json:"journal_entry_id,omitempty"`
+			TDSStatus             string              `json:"tds_status,omitempty"`
+			TDSJournalEntryID     string              `json:"tds_journal_entry_id,omitempty"`
 			AuditProcessingStatus string              `json:"audit_processing_status"`
 			AuditActionType       string              `json:"audit_action_type"`
 			AuditRequestedBy      string              `json:"audit_requested_by"`
@@ -2731,6 +2746,10 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 					exRows.Close()
 				}
 			}
+
+			applyReconcilePostingEnrichment(ctx, pool, row.ReceiptID, row.TDSID, row.ReceiptType,
+				&row.ReceiptStatus, &row.ReconcileStatus, &row.JournalEntryID, &row.TDSStatus, &row.TDSJournalEntryID,
+				&row.Cashflows)
 		}
 
 		if results == nil {
@@ -3020,34 +3039,18 @@ func GetExceptions(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		baseSQL := `SELECT * FROM investment.fd_receipt_exception WHERE is_deleted=false`
-		args := []interface{}{}
-		argIdx := 1
-
-		if req.ReconcileRunID != "" {
-			baseSQL += fmt.Sprintf(" AND reconcile_run_id=$%d", argIdx)
-			args = append(args, req.ReconcileRunID)
-			argIdx++
-		}
-		if req.FdID != "" {
-			baseSQL += fmt.Sprintf(" AND fd_id=$%d", argIdx)
-			args = append(args, req.FdID)
-			argIdx++
-		}
-		if req.ExceptionStatus != "" {
-			baseSQL += fmt.Sprintf(" AND exception_status=$%d", argIdx)
-			args = append(args, req.ExceptionStatus)
-			argIdx++
-		}
-		baseSQL += " ORDER BY raised_at DESC"
-
-		rows, err := pool.Query(ctx, baseSQL, args...)
+		out, err := loadVarianceListRows(ctx, pool, varianceListFilters{
+			ReconcileRunID:  req.ReconcileRunID,
+			FdID:            req.FdID,
+			ExceptionStatus: req.ExceptionStatus,
+		})
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
-		defer rows.Close()
-		out, _ := rowsToMapSlice(rows)
+		if out == nil {
+			out = []map[string]interface{}{}
+		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3328,6 +3331,11 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 			if rec.ReceiptStatus != "APPROVED" {
 				skipped++
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "receipt_status is not APPROVED"})
+				continue
+			}
+			if blockMsg := checkReceiptPostingEligibility(ctx, pool, rid); blockMsg != "" {
+				skipped++
+				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": blockMsg})
 				continue
 			}
 			if journalEntryID != nil && *journalEntryID != "" {

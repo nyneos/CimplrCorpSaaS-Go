@@ -10,7 +10,7 @@
 // Key rules (all from the spec):
 //  1. Event dates = addMonthsRollback(start, k*months) — calendar month-end, NOT month_end-1.
 //  2. Accrual tenor = D - prev_row_D (simple subtraction).
-//  3. Rounding: math.Round to 0 decimal places (rupees).
+//  3. Rounding: bank config interest_rounding_decimals + rounding_method (shared rounding package).
 //  4. SI: per payout-window — accruals first (date ≤ payout_date), then payout/maturity row.
 //  5. CO: per cap-window  — accruals first (date ≤ cap_date), then cap row, then optional payout.
 //  6. Same-date ordering: INITIAL_INVESTMENT → ACCRUAL → CAPITALIZATION → INTEREST_PAYOUT/MATURITY → PRINCIPAL_RETURN.
@@ -20,9 +20,10 @@
 package fdMaster
 
 import (
-	"math"
 	"strings"
 	"time"
+
+	"CimplrCorpSaas/api/investment/rounding"
 )
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -65,6 +66,34 @@ func engEventDates(start, maturity time.Time, monthsPerStep int) []time.Time {
 	return out
 }
 
+// engEventDatesAnchored steps from firstAnchor when set (first cap/payout on that calendar day),
+// then adds monthsPerStep from each prior boundary. Without anchor, delegates to engEventDates.
+func engEventDatesAnchored(start, maturity time.Time, monthsPerStep int, anchor time.Time) []time.Time {
+	if monthsPerStep <= 0 {
+		return []time.Time{maturity}
+	}
+	if anchor.IsZero() {
+		return engEventDates(start, maturity, monthsPerStep)
+	}
+	first := anchor
+	if !first.After(start) {
+		first = engAddMonths(start, monthsPerStep)
+	}
+	var out []time.Time
+	cur := first
+	for range engEventDatesMaxIter {
+		if !cur.Before(maturity) {
+			break
+		}
+		out = append(out, cur)
+		cur = engAddMonths(cur, monthsPerStep)
+	}
+	if len(out) == 0 || !out[len(out)-1].Equal(maturity) {
+		out = append(out, maturity)
+	}
+	return out
+}
+
 // engResolveAccrualMonths picks accrual step months: explicit param, then payout/cap, then monthly.
 func engResolveAccrualMonths(explicit, payoutOrCapMonths int) int {
 	m := explicit
@@ -81,8 +110,13 @@ func engResolveAccrualMonths(explicit, payoutOrCapMonths int) int {
 // samples which all use Actual/365). Kept as a function for future extension.
 func engDaysDivisor() int { return 365 }
 
-// engRound rounds a monetary value to the nearest rupee.
-func engRound(v float64) float64 { return math.Round(v) }
+// engRoundingFromCfg builds unified rounding settings from bank config.
+func engRoundingFromCfg(cfg *BankConfig) rounding.Config {
+	if cfg == nil {
+		return rounding.FromBankConfig(rounding.DefaultDecimals, "ROUND", "EACH_PERIOD")
+	}
+	return rounding.FromBankConfig(cfg.InterestRoundingDecimals, cfg.RoundingMethod, cfg.RoundingFrequency)
+}
 
 // engDaysBetween returns the integer number of days from a to b.
 func engDaysBetween(a, b time.Time) int {
@@ -105,6 +139,7 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 		tRate = tdsCfg.TDSRate / 100.0
 	}
 	DC := engDaysDivisor()
+	rnd := engRoundingFromCfg(p.Cfg)
 
 	// Payout and accrual frequencies
 	payoutMonths := p.AccrualFreqMonths // for SI freq is stored in Freq
@@ -127,7 +162,7 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 
 	var payoutDates []time.Time
 	if payoutMonths > 0 {
-		payoutDates = engEventDates(fd.ValueDate, fd.MaturityDate, payoutMonths)
+		payoutDates = engEventDatesAnchored(fd.ValueDate, fd.MaturityDate, payoutMonths, fd.FirstPayoutDate)
 	} else {
 		payoutDates = []time.Time{fd.MaturityDate}
 	}
@@ -158,13 +193,13 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 		for _, ad := range accrualDates {
 			if ad.After(lastPayoutDate) && !ad.After(pd) {
 				tenor := engDaysBetween(prevRowDate, ad)
-				gross := engRound(P * r * float64(tenor) / float64(DC))
+				gross := rnd.RoundInterest(P * r * float64(tenor) / float64(DC))
 				if gross < 0 {
 					gross = 0
 				}
 				var provTDS float64
 				if hasTDS {
-					provTDS = engRound(gross * tRate)
+					provTDS = rnd.RoundInterest(gross * tRate)
 				}
 				rows = append(rows, CashflowRow{
 					EventType:        "ACCRUAL",
@@ -188,13 +223,22 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 
 		// Compute payout row (Interest Payout or Maturity)
 		payoutTenor := engDaysBetween(lastPayoutDate, pd)
-		payoutGross := engRound(P * r * float64(payoutTenor) / float64(DC))
+		var payoutGross float64
+		if isMaturity {
+			payoutGross = rnd.RoundFinal(P * r * float64(payoutTenor) / float64(DC))
+		} else {
+			payoutGross = rnd.RoundInterest(P * r * float64(payoutTenor) / float64(DC))
+		}
 		if payoutGross < 0 {
 			payoutGross = 0
 		}
 		var payoutTDS float64
 		if hasTDS {
-			payoutTDS = engRound(payoutGross * tRate)
+			if isMaturity {
+				payoutTDS = rnd.RoundFinal(payoutGross * tRate)
+			} else {
+				payoutTDS = rnd.RoundInterest(payoutGross * tRate)
+			}
 		}
 		payoutNet := payoutGross - payoutTDS
 
@@ -292,6 +336,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 		tRate = tdsCfg.TDSRate / 100.0
 	}
 	DC := engDaysDivisor()
+	rnd := engRoundingFromCfg(p.Cfg)
 
 	// Cap frequency (from Freq)
 	capMonths := 3 // default quarterly
@@ -323,13 +368,13 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 	}
 	accrualMonths := engResolveAccrualMonths(p.AccrualFreqMonths, capMonths)
 
-	capDates := engEventDates(fd.ValueDate, fd.MaturityDate, capMonths)
+	capDates := engEventDatesAnchored(fd.ValueDate, fd.MaturityDate, capMonths, fd.FirstCapitalizationDate)
 	accrualDates := engEventDates(fd.ValueDate, fd.MaturityDate, accrualMonths)
 
 	// Payout dates: explicit AT_MATURITY (maturity only) vs stepped schedule.
 	var payoutDateSlice []time.Time
 	if payoutMonths > 0 {
-		payoutDateSlice = engEventDates(fd.ValueDate, fd.MaturityDate, payoutMonths)
+		payoutDateSlice = engEventDatesAnchored(fd.ValueDate, fd.MaturityDate, payoutMonths, fd.FirstPayoutDate)
 	} else {
 		payoutDateSlice = []time.Time{fd.MaturityDate}
 	}
@@ -384,13 +429,13 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 		for _, ad := range accrualDates {
 			if ad.After(lastCapDate) && !ad.After(cd) {
 				tenor := engDaysBetween(prevRowDate, ad)
-				gross := engRound(F * r * float64(tenor) / float64(DC))
+				gross := rnd.RoundInterest(F * r * float64(tenor) / float64(DC))
 				if gross < 0 {
 					gross = 0
 				}
 				var provTDS float64
 				if hasTDS {
-					provTDS = engRound(gross * tRate)
+					provTDS = rnd.RoundInterest(gross * tRate)
 				}
 				rows = append(rows, CashflowRow{
 					EventType:        "ACCRUAL",
@@ -414,18 +459,16 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 
 		// ── Emit CAPITALIZATION row at cd ────────────────────────────────────
 		capTenor := engDaysBetween(lastCapDate, cd)
-		capGross := engRound(F * r * float64(capTenor) / float64(DC))
+		capGross := rnd.RoundInterest(F * r * float64(capTenor) / float64(DC))
 		if capGross < 0 {
 			capGross = 0
 		}
 		var capTDS float64
 		if hasTDS {
-			capTDS = engRound(capGross * tRate)
+			capTDS = rnd.RoundInterest(capGross * tRate)
 		}
-		// capJRaw: unrounded, used as F for the next cap window (Excel float chain).
-		// capJRnd: rounded to whole rupee for display.
 		capJRaw := F + capGross - capTDS
-		capJRnd := engRound(capJRaw)
+		capJRnd := rnd.RoundPrincipal(capJRaw)
 
 		rows = append(rows, CashflowRow{
 			EventType:         "CAPITALIZATION",
@@ -462,7 +505,12 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 			}
 
 			payoutTenor := engDaysBetween(lastPayoutDate, cd)
-			payoutGross := engRound(capJRaw - P) // compounded interest above original principal
+			var payoutGross float64
+			if isMaturity {
+				payoutGross = rnd.RoundFinal(capJRaw - P)
+			} else {
+				payoutGross = rnd.RoundInterest(capJRaw - P)
+			}
 			if payoutGross < 0 {
 				payoutGross = 0
 			}
@@ -475,7 +523,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 				// CO Maturity: E = D + 2
 				var matTDS float64
 				if hasTDS {
-					matTDS = engRound(payoutGross * tRate)
+					matTDS = rnd.RoundFinal(payoutGross * tRate)
 				}
 				rows = append(rows, CashflowRow{
 					EventType:       "MATURITY",

@@ -19,8 +19,9 @@ func ManualCategorizationTriggerHandler(pgxPool *pgxpool.Pool) http.Handler {
 		}
 
 		var body struct {
-			UserID    string `json:"user_id"`
-			BatchSize int    `json:"batch_size,omitempty"`
+			UserID          string `json:"user_id"`
+			BatchSize       int    `json:"batch_size,omitempty"`
+			BankStatementID string `json:"bank_statement_id,omitempty"` // optional: restrict to one statement
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -49,8 +50,8 @@ func ManualCategorizationTriggerHandler(pgxPool *pgxpool.Pool) http.Handler {
 			batchSize = 5000 // Cap at 5000 for safety
 		}
 
-		// Trigger the categorization job
-		err := cashjobs.ProcessUncategorizedTransactions(pgxPool, batchSize)
+		// Trigger the categorization job (optionally scoped to one bank statement)
+		err := cashjobs.ProcessUncategorizedTransactions(pgxPool, batchSize, body.BankStatementID)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{

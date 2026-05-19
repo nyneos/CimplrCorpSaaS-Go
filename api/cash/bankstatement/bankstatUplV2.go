@@ -2723,10 +2723,12 @@ RETURNING bank_statement_id
 	// M7: Trigger full smart-categorization waterfall after commit so newly
 	// uploaded transactions are classified via the 10-step engine (rules,
 	// counterparty defaults, corrections, similarity, account defaults, AI).
+	// Scoped to this bank statement so it doesn't block the global cron batch.
 	if opts.PgxPool != nil {
 		pool := opts.PgxPool
+		bsID := bankStatementID // capture for goroutine
 		go func() {
-			if err := cashjobs.ProcessUncategorizedTransactions(pool, 500); err != nil {
+			if err := cashjobs.ProcessUncategorizedTransactions(pool, 500, bsID); err != nil {
 				log.Printf("[SMART-CAT] post-upload trigger failed: %v", err)
 			}
 		}()

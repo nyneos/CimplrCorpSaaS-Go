@@ -76,10 +76,16 @@ func RegisterFDReceiptRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 	// ── Exceptions ────────────────────────────────────────────────────────────
 	mux.Handle("/investment/fd/exception/all",
 		mid(http.HandlerFunc(GetExceptions(pool))))
+	mux.Handle("/investment/fd/exception/detail",
+		mid(http.HandlerFunc(GetExceptionDetail(pool))))
+	mux.Handle("/investment/fd/exception/edit",
+		mid(http.HandlerFunc(EditVariance(pool))))
 	mux.Handle("/investment/fd/exception/resolve",
 		mid(http.HandlerFunc(ResolveException(pool))))
 	mux.Handle("/investment/fd/exception/approve",
 		mid(http.HandlerFunc(ApproveException(pool))))
 	mux.Handle("/investment/fd/exception/close",
 		mid(http.HandlerFunc(CloseException(pool))))
+	mux.Handle("/investment/fd/exception/reject",
+		mid(http.HandlerFunc(RejectException(pool))))
 }
