@@ -88,6 +88,16 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.AcrualGranularity == "" {
 			req.AcrualGranularity = "RUN"
 		}
+		req.AcrualGranularity = normalizeAccrualGranularity(req.AcrualGranularity)
+		if !isValidAccrualGranularity(req.AcrualGranularity) {
+			api.RespondWithError(w, http.StatusBadRequest,
+				"accrual_granularity must be DAILY, MONTHLY, QUARTERLY, HALF_YEARLY, YEARLY, or RUN")
+			return
+		}
+		req.RunType = normalizeAccrualGranularity(req.RunType)
+		if req.RunType == "" {
+			req.RunType = RunTypeForGranularity(req.AcrualGranularity)
+		}
 
 		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
@@ -1364,9 +1374,11 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID        string `json:"user_id"`
 			EntityID      string `json:"entity_id"`
-			RunType       string `json:"run_type"`       // filter: MANUAL, SCHEDULED_MONTHLY, SCHEDULED_QUARTERLY, SCHEDULED_YEARLY
-			ScheduleID    string `json:"schedule_id"`    // filter by config_id (gets all runs from that schedule)
-			OnlyScheduled bool   `json:"only_scheduled"` // if true, show only scheduled runs (any frequency)
+			RunType       string `json:"run_type"`        // filter: MANUAL, SCHEDULED_MONTHLY, etc.
+			RunStatus     string `json:"run_status"`      // optional: PENDING_APPROVAL | APPROVED | REJECTED | POSTED | ...
+			ScheduleID    string `json:"schedule_id"`     // filter by config_id (gets all runs from that schedule)
+			OnlyScheduled bool   `json:"only_scheduled"`  // if true, show only scheduled runs (any frequency)
+			IncludeAll    bool   `json:"include_all"`     // if true, include DRAFT/COMPUTED/etc. (ops only)
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
@@ -1398,6 +1410,27 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE COALESCE(r.is_deleted, false) = false`
 		args := []interface{}{}
 		argIdx := 1
+
+		if !req.IncludeAll {
+			query += ` AND r.run_status = ANY($` + fmt.Sprint(argIdx) + `)`
+			args = append(args, []string{
+				"PENDING_APPROVAL", "APPROVED", "REJECTED",
+				"POSTED", "POSTED_TO_GL", "LOCKED",
+			})
+			argIdx++
+		}
+
+		if req.RunStatus != "" {
+			st := strings.ToUpper(strings.TrimSpace(req.RunStatus))
+			if !req.IncludeAll && !isAccrualRunApprovalListStatus(st) {
+				api.RespondWithError(w, http.StatusBadRequest,
+					"run_status must be PENDING_APPROVAL, APPROVED, REJECTED, POSTED, POSTED_TO_GL, or LOCKED")
+				return
+			}
+			query += fmt.Sprintf(" AND r.run_status = $%d", argIdx)
+			args = append(args, st)
+			argIdx++
+		}
 
 		if req.EntityID != "" {
 			query += fmt.Sprintf(" AND r.entity_id = $%d", argIdx)
@@ -1581,6 +1614,7 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"count": len(runs),
 			"runs":  runs,
+			"note":  "Lists submitted approval-queue runs only (PENDING_APPROVAL, APPROVED, REJECTED, POSTED+). Use include_all:true for DRAFT/COMPUTED/etc.",
 		})
 	}
 }
@@ -2577,9 +2611,16 @@ func createAccrualRunInternal(ctx context.Context, pool *pgxpool.Pool, input Cre
 	if fdInclusion == "" {
 		fdInclusion = "ALL"
 	}
-	granularity := input.Granularity
+	granularity := normalizeAccrualGranularity(input.Granularity)
 	if granularity == "" {
 		granularity = "RUN"
+	}
+	if !isValidAccrualGranularity(granularity) {
+		return "", fmt.Errorf("invalid accrual_granularity %q", input.Granularity)
+	}
+	runType := normalizeAccrualGranularity(input.RunType)
+	if runType == "" {
+		runType = RunTypeForGranularity(granularity)
 	}
 
 	// Look up entity_name if not provided (fd_accrual_run.entity_name is NOT NULL)
@@ -2617,7 +2658,7 @@ func createAccrualRunInternal(ctx context.Context, pool *pgxpool.Pool, input Cre
 			'2.0',
 			true, false, $13, now()
 		) RETURNING run_id`,
-		input.RunType, input.RunMode,
+		runType, input.RunMode,
 		input.EntityID, entityName,
 		nullIfEmpty(input.BankIDFilter), fdStatus,
 		input.AccrualPeriodStart, input.AccrualPeriodEnd, input.FinancialPeriod,

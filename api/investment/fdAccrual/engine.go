@@ -798,6 +798,21 @@ var scheduleFrequencies = map[string]bool{
 	"HALF_YEARLY": true, "YEARLY": true,
 }
 
+// accrualRunApprovalListStatuses — /run/all shows only submitted approval-queue runs
+// (excludes DRAFT, VALIDATED, COMPUTED, IN_PROGRESS, VALIDATION_FAILED, FAILED, etc.).
+var accrualRunApprovalListStatuses = map[string]bool{
+	"PENDING_APPROVAL": true,
+	"APPROVED":         true,
+	"REJECTED":         true,
+	"POSTED":           true,
+	"POSTED_TO_GL":     true,
+	"LOCKED":           true,
+}
+
+func isAccrualRunApprovalListStatus(status string) bool {
+	return accrualRunApprovalListStatuses[strings.ToUpper(strings.TrimSpace(status))]
+}
+
 func normalizeAccrualGranularity(g string) string {
 	return strings.ToUpper(strings.TrimSpace(g))
 }
@@ -1367,8 +1382,10 @@ func friendlyAccrualError(err error, context string) string {
 	}
 	s := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(s, "fd_accrual_run_granularity_check"):
+		return "Invalid accrual_granularity. Allowed: DAILY, MONTHLY, QUARTERLY, HALF_YEARLY, YEARLY, RUN. Run migration 20260519_fd_accrual_run_granularity_yearly.sql if YEARLY fails."
 	case strings.Contains(s, "fd_accrual_run_type_check"):
-		return "Invalid run_type. Allowed: MONTHLY, QUARTERLY, AD_HOC, MANUAL, SCHEDULED."
+		return "Invalid run_type. Allowed: DAILY, MONTHLY, QUARTERLY, HALF_YEARLY, YEARLY, AD_HOC, MANUAL, SCHEDULED, RUN."
 	case strings.Contains(s, "fd_accrual_run_status_check"):
 		return "Invalid run_status transition. Check allowed statuses."
 	case strings.Contains(s, "fd_accrual_run_mode_check"):
