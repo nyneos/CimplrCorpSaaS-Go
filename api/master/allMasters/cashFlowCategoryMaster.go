@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 
 	// "bufio"
@@ -1846,10 +1847,10 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			columns := append([]string{"upload_batch_id"}, headerRow...)
 
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
 				folder := s3storage.GetStoragePrefix("master-cashflow-category")
-				storedFileName := s3storage.BuildUploadedFilename(fileHeader.Filename, userName, time.Now().UTC())
+				storedFileName = s3storage.BuildUploadedFilename(fileHeader.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
 					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
@@ -2107,6 +2108,20 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			committed = true
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        "master-cashflow-category",
+				OriginalFileName: fileHeader.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(dataRows),
+				InsertedCount:    len(copyRows),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userName,
+				UploadedAt:       time.Now().UTC(),
+			})
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"batch_ids": batchIDs,
@@ -2217,10 +2232,10 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		timings = append(timings, map[string]interface{}{"phase": "read_csv", "rows": rowCount, "ms": readDur.Milliseconds()})
 		logger.LogInfo("[UploadCashFlowCategorySimple] read rows=%d elapsed=%v file=%s", rowCount, readDur, fh.Filename)
 
-		s3Key := ""
+		s3Key, storedFileName := "", ""
 		if s3storage.IsS3UploadEnabled() {
 			folder := s3storage.GetStoragePrefix("master-cashflow-category")
-			storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+			storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
@@ -2471,6 +2486,20 @@ ON CONFLICT DO NOTHING;
 		timings = append(timings, map[string]interface{}{"phase": "commit", "ms": commitDur.Milliseconds()})
 		logger.LogInfo("[UploadCashFlowCategorySimple] commit elapsed=%v file=%s", commitDur, fh.Filename)
 		tx = nil
+		bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+			ModuleKey:        "master-cashflow-category",
+			OriginalFileName: fh.Filename,
+			StoredFileName:   storedFileName,
+			UploadS3Key:      s3Key,
+			ContentType:      contentType,
+			FileSize:         int64(len(fileBytes)),
+			TotalRows:        rowCount,
+			InsertedCount:    rowCount,
+			ErrorCount:       0,
+			Status:           bulkuploadaudit.StatusCompleted,
+			UploadedBy:       userName,
+			UploadedAt:       time.Now().UTC(),
+		})
 
 		dur := time.Since(startOverall)
 		timings = append(timings, map[string]interface{}{"phase": "total", "ms": dur.Milliseconds()})
