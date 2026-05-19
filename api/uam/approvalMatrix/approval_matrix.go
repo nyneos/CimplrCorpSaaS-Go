@@ -2076,7 +2076,7 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		req.EyeCount = normaliseEyeCount(len(req.Members))
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
