@@ -1082,7 +1082,7 @@ func RecalcScheduleNextRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfigIDRequired)
 			return
 		}
-		if getUserEmail(req.UserID) == "" {
+		if getUserEmail(r.Context()) == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
