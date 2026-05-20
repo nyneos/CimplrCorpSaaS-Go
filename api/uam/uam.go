@@ -72,6 +72,7 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.Handle("/uam/users/delete-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.DeleteUser(db))))
 	mux.Handle("/uam/users/approve-multiple-users", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.ApproveMultipleUsers(db))))
 	mux.Handle("/uam/users/reject-multiple-users", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.RejectMultipleUsers(db))))
+	mux.Handle("/uam/users/audit-history", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetUserAuditHistory(db))))
 	/*roles*/
 	mux.Handle("/uam/roles/create-role", api.BusinessUnitMiddleware(db)(http.HandlerFunc(role.CreateRole(db))))
 	mux.Handle("/uam/roles/page-data", api.BusinessUnitMiddleware(db)(http.HandlerFunc(role.GetRolesPageData(db))))
@@ -82,6 +83,7 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.Handle("/uam/roles/get-just-roles", api.BusinessUnitMiddleware(db)(http.HandlerFunc(role.GetJustRoles(db))))
 	mux.Handle("/uam/roles/get-user-roles", api.BusinessUnitMiddleware(db)(http.HandlerFunc(role.GetJustRolesPERMISSIONapproved(db))))
 	mux.Handle("/uam/roles/get-pending-roles", api.BusinessUnitMiddleware(db)(http.HandlerFunc(role.GetPendingRoles(db))))
+	mux.Handle("/uam/roles/audit-history", api.BusinessUnitMiddleware(db)(http.HandlerFunc(role.GetRoleAuditHistory(db))))
 	/*Permissions*/
 	mux.Handle("/uam/permissions/upsert-role-permissions", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.UpsertRolePermissions(db))))
 	mux.Handle("/uam/permissions/permissions-json", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolePermissionsJson(db))))
