@@ -643,6 +643,196 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
+		// ── 9b. fd_confirmation rows awaiting approval (confirmation.go: PENDING_APPROVAL) ──
+		run("pending_confirmations", func(ctx context.Context) (interface{}, error) {
+			rows, err := pool.Query(ctx, `
+				SELECT
+				  COALESCE(c.booking_id,''),
+				  COALESCE(m.fd_id,''),
+				  COALESCE(b.entity_name,''),
+				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,''),
+				  COALESCE(c.confirmed_principal_amount, b.principal_amount, 0),
+				  COALESCE(c.confirmed_interest_rate, b.interest_rate, m.interest_rate, 0),
+				  COALESCE(TO_CHAR(c.confirmed_maturity_date,'YYYY-MM-DD'), TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
+				  COALESCE(c.confirmation_status,''),
+				  COALESCE(c.created_by,''),
+				  COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				  COALESCE(EXTRACT(EPOCH FROM (NOW()-c.created_at))/3600, 0)
+				FROM investment.fd_confirmation c
+				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id AND b.is_deleted=false
+				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
+				WHERE COALESCE(c.is_deleted,false)=false
+				  AND c.confirmation_status = 'PENDING_APPROVAL'
+				  AND ($1::text='' OR b.entity_id=$1)
+				ORDER BY c.created_at ASC
+				LIMIT 100`, entityFilter)
+			if err != nil {
+				api.LogError("[TreasuryDash] pending_confirmations query error: %v", err)
+				return map[string]interface{}{"rows": []interface{}{}, "total": 0}, nil
+			}
+			defer rows.Close()
+
+			type pendConfRow struct {
+				BookingID          string  `json:"booking_id"`
+				FDID               string  `json:"fd_id"`
+				Entity             string  `json:"entity"`
+				Bank               string  `json:"bank"`
+				Amount             float64 `json:"amount"`
+				Rate               float64 `json:"rate"`
+				MaturityDate       string  `json:"maturity_date"`
+				ConfirmationStatus string  `json:"confirmation_status"`
+				CreatedBy          string  `json:"created_by"`
+				CreatedAt          string  `json:"created_at"`
+				ElapsedHours       float64 `json:"elapsed_hours"`
+			}
+			out := []pendConfRow{}
+			for rows.Next() {
+				var r pendConfRow
+				if err2 := rows.Scan(
+					&r.BookingID, &r.FDID, &r.Entity, &r.Bank, &r.Amount, &r.Rate,
+					&r.MaturityDate, &r.ConfirmationStatus, &r.CreatedBy, &r.CreatedAt, &r.ElapsedHours,
+				); err2 != nil {
+					continue
+				}
+				r.Amount = fdRound(r.Amount, 2)
+				r.Rate = fdRound(r.Rate, 4)
+				r.ElapsedHours = fdRound(r.ElapsedHours, 1)
+				out = append(out, r)
+			}
+			return map[string]interface{}{"rows": out, "total": len(out)}, nil
+		})
+
+		// ── 9b2. fd_confirmation approved / confirmed (confirmation.go lifecycle) ──
+		run("confirmed_confirmations", func(ctx context.Context) (interface{}, error) {
+			rows, err := pool.Query(ctx, `
+				SELECT
+				  COALESCE(c.confirmation_id,''),
+				  COALESCE(c.booking_id,''),
+				  COALESCE(m.fd_id,''),
+				  COALESCE(b.entity_name,''),
+				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,''),
+				  COALESCE(c.confirmed_principal_amount, b.principal_amount, 0),
+				  COALESCE(c.confirmed_interest_rate, b.interest_rate, m.interest_rate, 0),
+				  COALESCE(TO_CHAR(c.confirmed_maturity_date,'YYYY-MM-DD'), TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
+				  COALESCE(c.confirmation_status,''),
+				  COALESCE(c.bank_fd_reference,''),
+				  COALESCE(TO_CHAR(c.confirmation_received_date,'YYYY-MM-DD'), TO_CHAR(c.receipt_date,'YYYY-MM-DD'),''),
+				  COALESCE(b.booking_status,''),
+				  COALESCE(c.created_by,''),
+				  COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				  EXISTS (
+				    SELECT 1 FROM investment.fd_master fm
+				    WHERE fm.confirmation_id = c.confirmation_id
+				      AND COALESCE(fm.is_deleted,false) = false
+				  ) AS fd_activated
+				FROM investment.fd_confirmation c
+				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id AND b.is_deleted=false
+				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
+				WHERE COALESCE(c.is_deleted,false)=false
+				  AND c.confirmation_status IN ('CONFIRMED','APPROVED','VARIANCE_ACCEPTED')
+				  AND ($1::text='' OR b.entity_id=$1)
+				ORDER BY c.created_at DESC
+				LIMIT 100`, entityFilter)
+			if err != nil {
+				api.LogError("[TreasuryDash] confirmed_confirmations query error: %v", err)
+				return map[string]interface{}{"rows": []interface{}{}, "total": 0}, nil
+			}
+			defer rows.Close()
+
+			type confDoneRow struct {
+				ConfirmationID     string  `json:"confirmation_id"`
+				BookingID          string  `json:"booking_id"`
+				FDID               string  `json:"fd_id"`
+				Entity             string  `json:"entity"`
+				Bank               string  `json:"bank"`
+				Amount             float64 `json:"amount"`
+				Rate               float64 `json:"rate"`
+				MaturityDate       string  `json:"maturity_date"`
+				ConfirmationStatus string  `json:"confirmation_status"`
+				BankFDReference    string  `json:"bank_fd_reference"`
+				ReceiptDate        string  `json:"receipt_date"`
+				BookingStatus      string  `json:"booking_status"`
+				CreatedBy          string  `json:"created_by"`
+				CreatedAt          string  `json:"created_at"`
+				FDActivated        bool    `json:"fd_activated"`
+			}
+			out := []confDoneRow{}
+			for rows.Next() {
+				var r confDoneRow
+				if err2 := rows.Scan(
+					&r.ConfirmationID, &r.BookingID, &r.FDID, &r.Entity, &r.Bank,
+					&r.Amount, &r.Rate, &r.MaturityDate, &r.ConfirmationStatus,
+					&r.BankFDReference, &r.ReceiptDate, &r.BookingStatus,
+					&r.CreatedBy, &r.CreatedAt, &r.FDActivated,
+				); err2 != nil {
+					continue
+				}
+				r.Amount = fdRound(r.Amount, 2)
+				r.Rate = fdRound(r.Rate, 4)
+				out = append(out, r)
+			}
+			return map[string]interface{}{"rows": out, "total": len(out)}, nil
+		})
+
+		// ── 9c. rollover / closure decisions pending (closure.go: PENDING_APPROVAL) ──
+		run("rollover_pending", func(ctx context.Context) (interface{}, error) {
+			rows, err := pool.Query(ctx, `
+				SELECT
+				  COALESCE(cr.closure_request_id::text, ''),
+				  COALESCE(cr.fd_id,''),
+				  COALESCE(b.entity_name, m.entity_name,''),
+				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,''),
+				  COALESCE(m.principal_amount, 0),
+				  COALESCE(m.interest_rate, 0),
+				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
+				  COALESCE(cr.closure_status,''),
+				  COALESCE(cr.closure_type,''),
+				  COALESCE((m.maturity_date - CURRENT_DATE)::int, 0),
+				  COALESCE(m.maturity_instructions,'')
+				FROM investment.fd_closure_request cr
+				LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id AND m.is_deleted=false
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				WHERE COALESCE(cr.is_deleted,false)=false
+				  AND cr.closure_status = 'PENDING_APPROVAL'
+				  AND ($1::text='' OR COALESCE(m.entity_id, cr.entity_id, b.entity_id)=$1)
+				ORDER BY m.maturity_date ASC NULLS LAST
+				LIMIT 100`, entityFilter)
+			if err != nil {
+				api.LogError("[TreasuryDash] rollover_pending query error: %v", err)
+				return map[string]interface{}{"rows": []interface{}{}, "total": 0}, nil
+			}
+			defer rows.Close()
+
+			type rollRow struct {
+				ClosureRequestID     string  `json:"closure_request_id"`
+				FDID                 string  `json:"fd_id"`
+				Entity               string  `json:"entity"`
+				Bank                 string  `json:"bank"`
+				Principal            float64 `json:"principal"`
+				Rate                 float64 `json:"rate"`
+				MaturityDate         string  `json:"maturity_date"`
+				ClosureStatus        string  `json:"closure_status"`
+				ClosureType          string  `json:"closure_type"`
+				DaysToMaturity       int     `json:"days_to_maturity"`
+				MaturityInstructions string  `json:"maturity_instructions"`
+			}
+			out := []rollRow{}
+			for rows.Next() {
+				var r rollRow
+				if err2 := rows.Scan(
+					&r.ClosureRequestID, &r.FDID, &r.Entity, &r.Bank,
+					&r.Principal, &r.Rate, &r.MaturityDate, &r.ClosureStatus,
+					&r.ClosureType, &r.DaysToMaturity, &r.MaturityInstructions,
+				); err2 != nil {
+					continue
+				}
+				r.Principal = fdRound(r.Principal, 2)
+				r.Rate = fdRound(r.Rate, 4)
+				out = append(out, r)
+			}
+			return map[string]interface{}{"rows": out, "total": len(out)}, nil
+		})
+
 		// ── 10a. full FD list with all info ─────────────────────────────────────
 		run("fd_list", func(ctx context.Context) (interface{}, error) {
 			fdRows, err := pool.Query(ctx, `
@@ -757,98 +947,26 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return out, nil
 		})
 
-		// ── 10b. interest_trend (same logic as CFO / Operational FD dashboards)
+		// ── 10b. interest_trend (same logic as CFO dashboard — cashflow + ledger fallback)
 		run("interest_trend", func(ctx context.Context) (interface{}, error) {
-			accrualSQL := `
-				SELECT
-				  TO_CHAR(DATE_TRUNC('month', al.accrual_period_end),'Mon') AS month,
-				  TO_CHAR(DATE_TRUNC('month', al.accrual_period_end),'YYYY-MM') AS month_sort,
-				  COALESCE(SUM(
-				    CASE
-				      WHEN COALESCE(al.period_interest_accrued,0) <> 0 THEN al.period_interest_accrued
-				      ELSE COALESCE(al.req_period_interest,0)
-				    END
-				  ),0) AS accrued
-				FROM investment.fd_accrual_ledger al
-				LEFT JOIN investment.fd_master m ON m.fd_id = al.fd_id
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE COALESCE(al.is_deleted,false)=false
-				  AND al.accrual_period_end >= CURRENT_DATE - INTERVAL '12 months'
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				GROUP BY 1, 2
-				ORDER BY 2`
-			type trendRow struct {
-				Period   string  `json:"period"`
-				SortKey  string  `json:"month_sort"`
-				Accrued  float64 `json:"accrued"`
-				Realized float64 `json:"realized"`
+			daily, dErr := buildInterestTrendSeries(ctx, pool, entityFilter, "DAY")
+			if dErr != nil {
+				daily = []interestTrendRow{}
 			}
-			out := []trendRow{}
-			accrRows, errAcc := pool.Query(ctx, accrualSQL, entityFilter)
-			if errAcc != nil {
-				api.LogError("[TreasuryDash] interest_trend accrual query error: %v", errAcc)
-			} else {
-				defer accrRows.Close()
-				for accrRows.Next() {
-					var tr trendRow
-					if scanErr := accrRows.Scan(&tr.Period, &tr.SortKey, &tr.Accrued); scanErr == nil {
-						tr.Accrued = fdRound(tr.Accrued, 2)
-						out = append(out, tr)
-					}
-				}
+			monthly, mErr := buildInterestTrendSeries(ctx, pool, entityFilter, "MONTH")
+			if mErr != nil {
+				monthly = []interestTrendRow{}
 			}
-			recSQL := `
-				SELECT
-				  TO_CHAR(DATE_TRUNC('month', ir.receipt_date),'Mon') AS month,
-				  TO_CHAR(DATE_TRUNC('month', ir.receipt_date),'YYYY-MM') AS month_sort,
-				  COALESCE(SUM(ir.gross_interest_received),0) AS received
-				FROM investment.fd_interest_receipt ir
-				WHERE ir.is_deleted=false
-				  AND ir.receipt_date >= CURRENT_DATE - INTERVAL '12 months'
-				  AND ($1::text='' OR ir.entity_id=$1)
-				GROUP BY 1, 2
-				ORDER BY 2`
-			recvMap := map[string]float64{}
-			recvOrder := []struct {
-				Month   string
-				SortKey string
-			}{}
-			recRows, rerr := pool.Query(ctx, recSQL, entityFilter)
-			if rerr != nil {
-				api.LogError("[TreasuryDash] interest_trend receipt query error: %v", rerr)
-			} else {
-				defer recRows.Close()
-				for recRows.Next() {
-					var mon, sortK string
-					var recv float64
-					if err2 := recRows.Scan(&mon, &sortK, &recv); err2 == nil {
-						recvMap[sortK] = fdRound(recv, 2)
-						recvOrder = append(recvOrder, struct {
-							Month   string
-							SortKey string
-						}{mon, sortK})
-					}
-				}
+			yearly, yErr := buildInterestTrendSeries(ctx, pool, entityFilter, "YEAR")
+			if yErr != nil {
+				yearly = []interestTrendRow{}
 			}
-			for i := range out {
-				out[i].Realized = recvMap[out[i].SortKey]
-			}
-			seen := map[string]bool{}
-			for _, r := range out {
-				seen[r.SortKey] = true
-			}
-			for _, r := range recvOrder {
-				if !seen[r.SortKey] {
-					out = append(out, trendRow{Period: r.Month, SortKey: r.SortKey, Realized: recvMap[r.SortKey]})
-					seen[r.SortKey] = true
-				}
-			}
-			for i := 1; i < len(out); i++ {
-				for j := i; j > 0 && out[j-1].SortKey > out[j].SortKey; j-- {
-					out[j-1], out[j] = out[j], out[j-1]
-				}
-			}
-			return out, nil
+			return map[string]interface{}{
+				"daily":   daily,
+				"monthly": monthly,
+				"yearly":  yearly,
+				"weekly":  daily,
+			}, nil
 		})
 
 		// ── 11. approval_workflow (TC-117) ────────────────────────────────────
@@ -1152,19 +1270,27 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			},
 			"charts": map[string]interface{}{
 				"maturity_ladder":       get("maturity_ladder_treasury"),
-				"deployment_by_bank":  get("deployment_by_bank"),
+				"interest_trend":        get("interest_trend"),
+				"deployment_by_bank":    get("deployment_by_bank"),
 				"yield_by_bank":         get("yield_by_bank"),
 				"rate_by_bank":          get("rate_by_bank"),
 				"yield_curve":           get("yield_curve"),
 				"interest_income_trend": get("interest_trend"),
 			},
 			"tables": map[string]interface{}{
-				"near_maturity_fds":     get("near_maturity"),
-				"booking_confirmations": get("booking_confirmations"),
-				"negotiations":          get("negotiations"),
-				"fd_list":               get("fd_list"),
-				"approval_workflow":     get("approval_workflow"),
+				"near_maturity_fds":       get("near_maturity"),
+				"booking_confirmations":   get("booking_confirmations"),
+				"pending_confirmations":   get("pending_confirmations"),
+				"confirmed_confirmations": get("confirmed_confirmations"),
+				"rollover_pending":        get("rollover_pending"),
+				"negotiations":            get("negotiations"),
+				"fd_list":                 get("fd_list"),
+				"approval_workflow":       get("approval_workflow"),
 			},
+			"fd_list":                 get("fd_list"),
+			"pending_confirmations":   get("pending_confirmations"),
+			"confirmed_confirmations": get("confirmed_confirmations"),
+			"rollover_pending":        get("rollover_pending"),
 			"approval_workflow": get("approval_workflow"),
 			"lifecycle_summary": get("lifecycle_summary"),
 			"period_start":      periodStart.Format(constants.DateFormat),

@@ -530,96 +530,6 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 6b. interest_trend (chart — last 6 months, accrued vs received) ───
-		// Mirrors the CFO dashboard's interest_trend computation: monthly
-		// accruals from fd_accrual_ledger and monthly receipts from
-		// fd_interest_receipt. Powers "Interest Income Trend (Accrued vs
-		// Realized)" on the operational dashboard.
-		run("interest_trend", func(ctx context.Context) (interface{}, error) {
-			accrualSQL := `
-				SELECT
-				  TO_CHAR(DATE_TRUNC('month', al.accrual_period_end),'Mon') AS month,
-				  TO_CHAR(DATE_TRUNC('month', al.accrual_period_end),'YYYY-MM') AS month_sort,
-				  COALESCE(SUM(al.period_interest_accrued),0) AS accrued
-				FROM investment.fd_accrual_ledger al
-				LEFT JOIN investment.fd_master m ON m.fd_id = al.fd_id
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE COALESCE(al.is_deleted,false)=false
-				  AND al.accrual_period_end >= CURRENT_DATE - INTERVAL '6 months'
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				GROUP BY 1, 2
-				ORDER BY 2`
-			type trendRow struct {
-				Period   string  `json:"period"`
-				SortKey  string  `json:"sort_key"`
-				Accrued  float64 `json:"accrued"`
-				Realized float64 `json:"realized"`
-			}
-			out := []trendRow{}
-			if accrRows, err := pool.Query(ctx, accrualSQL, entityFilter); err == nil {
-				defer accrRows.Close()
-				for accrRows.Next() {
-					var tr trendRow
-					if scanErr := accrRows.Scan(&tr.Period, &tr.SortKey, &tr.Accrued); scanErr == nil {
-						tr.Accrued = fdRound(tr.Accrued, 2)
-						out = append(out, tr)
-					}
-				}
-			}
-			recSQL := `
-				SELECT
-				  TO_CHAR(DATE_TRUNC('month', ir.receipt_date),'Mon') AS month,
-				  TO_CHAR(DATE_TRUNC('month', ir.receipt_date),'YYYY-MM') AS month_sort,
-				  COALESCE(SUM(ir.gross_interest_received),0) AS received
-				FROM investment.fd_interest_receipt ir
-				WHERE ir.is_deleted=false
-				  AND ir.receipt_date >= CURRENT_DATE - INTERVAL '6 months'
-				  AND ($1::text='' OR ir.entity_id=$1)
-				GROUP BY 1, 2
-				ORDER BY 2`
-			recvMap := map[string]float64{}
-			recvOrder := []struct {
-				Month   string
-				SortKey string
-			}{}
-			if recRows, rerr := pool.Query(ctx, recSQL, entityFilter); rerr == nil {
-				defer recRows.Close()
-				for recRows.Next() {
-					var mon, sortK string
-					var recv float64
-					if err2 := recRows.Scan(&mon, &sortK, &recv); err2 == nil {
-						recvMap[sortK] = fdRound(recv, 2)
-						recvOrder = append(recvOrder, struct {
-							Month   string
-							SortKey string
-						}{mon, sortK})
-					}
-				}
-			}
-			// Merge realized into existing rows
-			for i := range out {
-				out[i].Realized = recvMap[out[i].SortKey]
-			}
-			// Append months that only have receipts (no accrual entry)
-			seen := map[string]bool{}
-			for _, r := range out {
-				seen[r.SortKey] = true
-			}
-			for _, r := range recvOrder {
-				if !seen[r.SortKey] {
-					out = append(out, trendRow{Period: r.Month, SortKey: r.SortKey, Realized: recvMap[r.SortKey]})
-					seen[r.SortKey] = true
-				}
-			}
-			// Final sort by SortKey ascending so chart axis stays chronological.
-			for i := 1; i < len(out); i++ {
-				for j := i; j > 0 && out[j-1].SortKey > out[j].SortKey; j-- {
-					out[j-1], out[j] = out[j], out[j-1]
-				}
-			}
-			return out, nil
-		})
-
 		// ── 7. posting queue ─────────────────────────────────────────────────
 		run("posting_queue", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
@@ -1310,75 +1220,6 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return res, nil
 		})
 
-		// ── 14. full FD list with all info ────────────────────────────────────
-		run("fd_list", func(ctx context.Context) (interface{}, error) {
-			rows, err := pool.Query(ctx, `
-				SELECT
-				  m.fd_id,
-				  COALESCE(m.bank_name, m.bank_id,'') AS bank,
-				  COALESCE(b.entity_name, m.entity_name, '') AS entity,
-				  COALESCE(m.entity_id, b.entity_id, '') AS entity_id,
-				  COALESCE(m.principal_amount,0) AS principal_amount,
-				  COALESCE(m.interest_rate,0) AS interest_rate,
-				  COALESCE(m.interest_type_code,'') AS interest_type,
-				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'') AS maturity_date,
-				  COALESCE(m.fd_status,'') AS fd_status,
-				  COALESCE(m.maturity_instructions,'') AS maturity_instructions,
-				  COALESCE(b.booking_id,'') AS booking_id,
-				  COALESCE(b.booking_status,'') AS booking_status,
-				  COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD'),'') AS booking_date,
-				  COALESCE(b.created_by, m.created_by,'') AS created_by,
-				  COALESCE((m.maturity_date - CURRENT_DATE)::int, 0) AS days_to_maturity
-				FROM investment.fd_master m
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE m.is_deleted=false
-				  AND m.fd_status IN ('ACTIVE','MATURED','PENDING_ACTIVATION')
-				  AND ($1::text='' OR COALESCE(m.entity_id, b.entity_id)=$1)
-				ORDER BY m.maturity_date ASC NULLS LAST
-				LIMIT 500`, entityFilter)
-			if err != nil {
-				api.LogError("[OperationalDash] fd_list query error: %v", err)
-				return []interface{}{}, nil
-			}
-			defer rows.Close()
-
-			type fdRow struct {
-				FDID                 string  `json:"fd_id"`
-				Bank                 string  `json:"bank"`
-				Entity               string  `json:"entity"`
-				EntityID             string  `json:"entity_id"`
-				PrincipalAmount      float64 `json:"principal_amount"`
-				InterestRate         float64 `json:"interest_rate"`
-				InterestType         string  `json:"interest_type"`
-				MaturityDate         string  `json:"maturity_date"`
-				FDStatus             string  `json:"fd_status"`
-				MaturityInstructions string  `json:"maturity_instructions"`
-				BookingID            string  `json:"booking_id"`
-				BookingStatus        string  `json:"booking_status"`
-				BookingDate          string  `json:"booking_date"`
-				CreatedBy            string  `json:"created_by"`
-				DaysToMaturity       int     `json:"days_to_maturity"`
-			}
-			out := []fdRow{}
-			for rows.Next() {
-				var fr fdRow
-				if err2 := rows.Scan(
-					&fr.FDID, &fr.Bank, &fr.Entity, &fr.EntityID,
-					&fr.PrincipalAmount, &fr.InterestRate, &fr.InterestType,
-					&fr.MaturityDate, &fr.FDStatus, &fr.MaturityInstructions,
-					&fr.BookingID, &fr.BookingStatus, &fr.BookingDate,
-					&fr.CreatedBy, &fr.DaysToMaturity,
-				); err2 != nil {
-					api.LogError("[OperationalDash] fd_list scan error: %v", err2)
-					continue
-				}
-				fr.PrincipalAmount = fdRound(fr.PrincipalAmount, 2)
-				fr.InterestRate = fdRound(fr.InterestRate, 4)
-				out = append(out, fr)
-			}
-			return out, nil
-		})
-
 		// wait
 		wg.Wait()
 
@@ -1492,16 +1333,12 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"tds_receipts":          get("tds_receipts"),
 				"exceptions":            get("exceptions"),
 				"posting_queue":         get("posting_queue"),
-				"fd_list":               get("fd_list"),
 			},
 			"top_mismatch_causes": get("top_mismatch_causes"),
 			"lifecycle_pipeline":  get("lifecycle_pipeline"),
 			"accrual_run":         get("accrual_run"),
 			"tds_pending":         get("tds_pending"),
 			"sla_distribution":    get("sla_distribution"),
-			"charts": map[string]interface{}{
-				"interest_income_trend": get("interest_trend"),
-			},
 		}
 
 		api.RespondWithPayload(w, true, "", payload)
