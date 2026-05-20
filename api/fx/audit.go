@@ -1,11 +1,14 @@
 package fx
 
 import (
+	"encoding/base64"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
+	"time"
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
@@ -46,6 +49,7 @@ func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 			writeFXAuditError(w, http.StatusBadRequest, cfg.ActionParentCol+" is required")
 			return
 		}
+		parentID = normalizeFXAuditParentID(cfg, parentID)
 
 		payload := make([]map[string]interface{}, 0)
 		parentWhere, args := buildFXAuditParentFilter(cfg.ActionParentCol, parentID)
@@ -59,10 +63,18 @@ func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 		}
 		actionRows, err := queryFXActionAudit(r, db, cfg, parentWhere, args, extraWhere)
 		if err != nil {
-			writeFXAuditError(w, http.StatusInternalServerError, "failed to read FX audit history")
-			return
+			if cfg.Source != "FX_FORWARD_MTM" {
+				writeFXAuditError(w, http.StatusInternalServerError, "failed to read FX audit history")
+				return
+			}
 		}
 		payload = append(payload, actionRows...)
+
+		if cfg.Source == "FX_FORWARD_MTM" && len(actionRows) == 0 {
+			if synthesized := synthesizeMTMAuditRow(r, db, parentID); synthesized != nil {
+				payload = append(payload, synthesized)
+			}
+		}
 
 		if strings.TrimSpace(cfg.DownloadTable) != "" {
 			downloadRows, downloadErr := queryFXDownloadAudit(r, db, cfg, parentID)
@@ -214,6 +226,136 @@ func buildFXAuditParentFilter(columnName, parentID string) (string, []interface{
 		return fmt.Sprintf("%s = $1", columnName), []interface{}{parentID}
 	}
 	return fmt.Sprintf("(%s = $1 OR %s = $2)", columnName, columnName), []interface{}{parentID, legacyByteString}
+}
+
+func normalizeFXAuditParentID(cfg fxAuditConfig, parentID string) string {
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" {
+		return parentID
+	}
+
+	switch cfg.Source {
+	case "FX_FORWARD_MTM":
+		if decoded, err := base64.StdEncoding.DecodeString(parentID); err == nil {
+			if normalized := strings.TrimSpace(string(decoded)); normalized != "" {
+				return normalized
+			}
+		}
+	}
+
+	return parentID
+}
+
+func synthesizeMTMAuditRow(r *http.Request, db *sql.DB, parentID string) map[string]interface{} {
+	row := auditutil.FetchRowSnapshot(r.Context(), db, "public.forward_mtm", "mtm_id", parentID)
+	if len(row) == 0 {
+		return nil
+	}
+
+	requestedBy := firstNonBlankString(
+		row["created_by"],
+		row["uploaded_by"],
+		row["user_id"],
+		row["entity"],
+	)
+	if requestedBy == "" {
+		requestedBy = "system"
+	}
+
+	requestedAt := firstNonZeroTime(row["calculated_at"], row["created_at"], row["deal_date"])
+	status := firstNonBlankString(row["processing_status"], row["status"])
+	if status == "" {
+		status = "PENDING_APPROVAL"
+	}
+
+	entry := map[string]interface{}{
+		"audit_id":          "synthetic-create-" + parentID,
+		"action_id":         "synthetic-create-" + parentID,
+		"entity_id":         parentID,
+		"action_type":       "CREATE",
+		"processing_status": status,
+		"requested_by":      requestedBy,
+		"requested_at":      requestedAt,
+		"checker_by":        "",
+		"checker_at":        nil,
+		"checker_comment":   "",
+		"reason":            "Synthesized from forward_mtm because no MTM audit action row was found.",
+		"source":            "FX_FORWARD_MTM",
+	}
+
+	if uploadKey := firstNonBlankString(row["upload_s3_key"]); uploadKey != "" {
+		entry["upload_s3_key"] = uploadKey
+		entry["file_name"] = auditutil.FileName(uploadKey)
+	}
+
+	if summary := buildSyntheticChangeSummary(row); len(summary) > 0 {
+		entry["change_summary"] = summary
+	}
+
+	return entry
+}
+
+func buildSyntheticChangeSummary(row map[string]interface{}) []map[string]interface{} {
+	keys := []string{
+		"booking_id",
+		"internal_reference_id",
+		"entity",
+		"currency_pair",
+		"buy_sell",
+		"notional_amount",
+		"contract_rate",
+		"mtm_rate",
+		"mtm_value",
+		"status",
+		"upload_s3_key",
+	}
+	sort.Strings(keys)
+
+	changes := make([]map[string]interface{}, 0, len(keys))
+	for _, key := range keys {
+		value, ok := row[key]
+		if !ok || value == nil || strings.TrimSpace(fmt.Sprint(value)) == "" {
+			continue
+		}
+		changes = append(changes, map[string]interface{}{
+			"field":     key,
+			"old_value": nil,
+			"new_value": value,
+		})
+	}
+	return changes
+}
+
+func firstNonBlankString(values ...interface{}) string {
+	for _, value := range values {
+		text := strings.TrimSpace(fmt.Sprint(value))
+		if text != "" && text != "<nil>" {
+			return text
+		}
+	}
+	return ""
+}
+
+func firstNonZeroTime(values ...interface{}) interface{} {
+	for _, value := range values {
+		switch v := value.(type) {
+		case time.Time:
+			if !v.IsZero() {
+				return v
+			}
+		case string:
+			text := strings.TrimSpace(v)
+			if text != "" {
+				return text
+			}
+		case []byte:
+			text := strings.TrimSpace(string(v))
+			if text != "" {
+				return text
+			}
+		}
+	}
+	return nil
 }
 
 func queryFXAdditionalFileAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentID string) ([]map[string]interface{}, error) {

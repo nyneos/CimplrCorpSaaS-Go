@@ -231,6 +231,8 @@ func StartFXService(db *sql.DB, port string) {
 		mux.Handle("/fx/forwards/get-mtm", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetMTMData(db)))
 		mux.Handle("/fx/forwards/download-mtm", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetMTMDownloadURL(db)))
 		mux.Handle("/fx/forwards/download-mtm-bulk", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetMTMBulkDownloadURL(db)))
+		mux.Handle("/fx/forwards/mtm/delete", middlewares.PreValidationMiddleware(pgxPool)(forwards.RequestDeleteMTMRecords(db)))
+		mux.Handle("/fx/forwards/mtm/update-processing-status", middlewares.PreValidationMiddleware(pgxPool)(forwards.BulkUpdateMTMProcessingStatus(db)))
 		mux.Handle("/fx/forwards/mtm/audit", middlewares.PreValidationMiddleware(pgxPool)(NewFXAuditHandler(db, fxMTMAuditConfig())))
 		mux.Handle("/fx/forwards/mtm/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(forwards.ListMTMAdditionalFilesHandler(pgxPool)))
 		mux.Handle("/fx/forwards/mtm/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadMTMAdditionalFilesHandler(pgxPool)))
