@@ -734,10 +734,6 @@ func buildEditConfirmationFieldMap(confCols map[string]bool) map[string]string {
 			out[clientKey] = dbCol
 			continue
 		}
-		// bank_reference_number: fall back to bank_fd_ref_no when dedicated column missing
-		if clientKey == "bank_reference_number" && confCols["bank_fd_ref_no"] {
-			out[clientKey] = "bank_fd_ref_no"
-		}
 		// notes alias when only generic notes column exists
 		if clientKey == "notes" && confCols["notes"] {
 			out[clientKey] = "notes"

@@ -967,7 +967,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // Re-opens VARIANCE_PENDING when an edit re-introduces variance (including from VARIANCE_ACCEPTED).
 // Use /resolve-variance for full-body save on first capture after variance; use /edit for field tweaks.
 //
-// Blocked for APPROVED confirmations (FD is live — immutable).
+// Blocked for CONFIRMED / APPROVED confirmations (finalized — immutable).
 func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1003,6 +1003,18 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		editFieldMap := buildEditConfirmationFieldMap(confCols)
+		missingSchemaFields := make([]string, 0, 2)
+		if _, sent := req.Fields["bank_reference_number"]; sent && !confCols["bank_reference_number"] {
+			missingSchemaFields = append(missingSchemaFields, "bank_reference_number")
+		}
+		if _, sent := req.Fields["premature_closure_terms"]; sent && !confCols["premature_closure_terms"] {
+			missingSchemaFields = append(missingSchemaFields, "premature_closure_terms")
+		}
+		if len(missingSchemaFields) > 0 {
+			api.RespondWithError(w, http.StatusBadRequest,
+				"Cannot update fields missing from fd_confirmation schema: "+strings.Join(missingSchemaFields, ", ")+"; run scripts/migrations/20260520_fd_confirmation_edit_fields.sql")
+			return
+		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -1051,10 +1063,10 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// ── APPROVED guard — FD is live, nothing may be mutated ───────────────
-		if currentStatus == "APPROVED" {
+		// ── Final-state guard — confirmed/live records are immutable here ─────
+		if currentStatus == "CONFIRMED" || currentStatus == "APPROVED" {
 			api.RespondWithError(w, http.StatusBadRequest,
-				"Cannot edit an APPROVED confirmation — the FD is live and immutable")
+				"Cannot edit a "+currentStatus+" confirmation — create a new change request or reopen through the allowed workflow")
 			return
 		}
 
@@ -1453,7 +1465,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"confirmation_id":     req.ConfirmationID,
 					"booking_id":          bookingID,
 					"confirmation_status": "VARIANCE_ACCEPTED",
-					"already_accepted":  true,
+					"already_accepted":    true,
 				})
 			return
 		}
@@ -1682,6 +1694,22 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					); execErr != nil {
 						api.LogError("[FDConfirmation] is_deleted flip failed for %s: %v", cID, execErr)
 					}
+					if _, execErr := pgxPool.Exec(ctx,
+						`UPDATE investment.fd_booking_request
+						 SET booking_status='SENT_TO_BANK'
+						 WHERE booking_id IN (SELECT booking_id FROM investment.fd_confirmation WHERE confirmation_id=$1)
+						   AND EXISTS (
+							 SELECT 1 FROM investment.fd_audit_confirmation a
+							 WHERE a.confirmation_id=$1 AND a.action_type='DELETE' AND a.processing_status='APPROVED'
+						   )
+						   AND NOT EXISTS (
+							 SELECT 1 FROM investment.fd_master fm
+							 WHERE (fm.confirmation_id=$1 OR fm.booking_id=investment.fd_booking_request.booking_id)
+							   AND COALESCE(fm.is_deleted,false)=false
+						   )`, cID,
+					); execErr != nil {
+						api.LogError("[FDConfirmation] booking_status→SENT_TO_BANK after delete failed for %s: %v", cID, execErr)
+					}
 
 				}
 			} else {
@@ -1714,7 +1742,19 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						SELECT DISTINCT a.confirmation_id FROM investment.fd_audit_confirmation a
 						WHERE a.confirmation_id=$1 AND a.action_type='DELETE' AND a.processing_status='APPROVED'
 					)`, cID)
-				if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+				_, err5 := tx.Exec(ctx, `UPDATE investment.fd_booking_request
+					SET booking_status='SENT_TO_BANK'
+					WHERE booking_id IN (SELECT booking_id FROM investment.fd_confirmation WHERE confirmation_id=$1)
+					  AND EXISTS (
+						SELECT 1 FROM investment.fd_audit_confirmation a
+						WHERE a.confirmation_id=$1 AND a.action_type='DELETE' AND a.processing_status='APPROVED'
+					  )
+					  AND NOT EXISTS (
+						SELECT 1 FROM investment.fd_master fm
+						WHERE (fm.confirmation_id=$1 OR fm.booking_id=investment.fd_booking_request.booking_id)
+						  AND COALESCE(fm.is_deleted,false)=false
+					  )`, cID)
+				if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil {
 					_ = tx.Rollback(ctx)
 					errors = append(errors, cID+": direct stamp failed")
 					continue
@@ -2733,15 +2773,20 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
 
-		// CONFIRMED and APPROVED confirmations cannot be deleted (system depends on them).
-		// APPROVED = FD is fully live — absolutely immutable.
-		// Allow: PENDING_CONFIRMATION, VARIANCE_DETECTED, VARIANCE_PENDING, REJECTED, APPROVAL_PENDING.
+		// Allow deleting a confirmation until FD activation exists.
+		// CONFIRMED may be deleted to send the booking back to SENT_TO_BANK.
+		// Once fd_master exists, confirmation/booking become immutable from this flow.
 		rows, err := tx.Query(ctx, `
 			SELECT c.confirmation_id, b.entity_id, c.actual_principal
 			FROM investment.fd_confirmation c
 			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 			WHERE c.confirmation_id = ANY($1::text[])
-			  AND c.confirmation_status NOT IN ('CONFIRMED','VARIANCE_REJECTED','APPROVED')
+			  AND c.confirmation_status NOT IN ('VARIANCE_REJECTED','APPROVED')
+			  AND NOT EXISTS (
+				  SELECT 1 FROM investment.fd_master fm
+				  WHERE (fm.confirmation_id = c.confirmation_id OR fm.booking_id = c.booking_id)
+				    AND COALESCE(fm.is_deleted,false) = false
+			  )
 			  AND COALESCE(c.is_deleted,false) = false`,
 			req.ConfirmationIDs,
 		)
@@ -2773,7 +2818,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows.Close()
 
 		if len(validConfs) == 0 {
-			api.RespondWithPayload(w, false, "No eligible confirmations found (CONFIRMED confirmations cannot be deleted)", nil)
+			api.RespondWithPayload(w, false, "No eligible confirmations found (blocked if already activated, APPROVED, VARIANCE_REJECTED, or deleted)", nil)
 			return
 		}
 
@@ -2867,7 +2912,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, "confirmation_id": id,
-					constants.ValueError: "Not found or already CONFIRMED/VARIANCE_REJECTED (cannot be deleted)",
+					constants.ValueError: "Not found, already activated, APPROVED/VARIANCE_REJECTED, or already deleted",
 				})
 			}
 		}

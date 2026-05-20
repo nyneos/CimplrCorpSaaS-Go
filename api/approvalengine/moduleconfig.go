@@ -59,6 +59,14 @@ var txTypeRegistry = map[string]txTableConfig{
 	"FD_CLOSURE_ROLLOVER":     {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
 	"FD_CLOSURE_AUTO_RENEWAL": {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
 	"FD_CLOSURE_DELETE":       {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
+
+	// ── FD Closure / Maturity & Rollover (cimplr schema) ─────────────────
+	"FD_CLOSURE_INITIATE_CREATE": {AuditTable: "cimplr.fd_closure_initiate_audit", AuditIDColumn: "closure_initiate_id"},
+	"FD_CLOSURE_INITIATE_EDIT":   {AuditTable: "cimplr.fd_closure_initiate_audit", AuditIDColumn: "closure_initiate_id"},
+	"FD_CLOSURE_INITIATE_DELETE": {AuditTable: "cimplr.fd_closure_initiate_audit", AuditIDColumn: "closure_initiate_id"},
+	"FD_CLOSURE_CONFIRM_CREATE":  {AuditTable: "cimplr.fd_closure_confirm_audit", AuditIDColumn: "closure_confirm_id"},
+	"FD_CLOSURE_CONFIRM_EDIT":    {AuditTable: "cimplr.fd_closure_confirm_audit", AuditIDColumn: "closure_confirm_id"},
+	"FD_CLOSURE_CONFIRM_DELETE":  {AuditTable: "cimplr.fd_closure_confirm_audit", AuditIDColumn: "closure_confirm_id"},
 } // LookupTxTableConfig returns the audit table name and audit ID column for the
 // given transaction type. If the type is not registered, both strings are empty.
 func LookupTxTableConfig(transactionType string) (auditTable, auditIDColumn string) {

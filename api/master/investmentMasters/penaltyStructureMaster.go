@@ -11,13 +11,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-	"path/filepath"
 
-	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -95,6 +95,9 @@ func getUserFriendlyPenaltyError(err error, context string) (string, int) {
 		case "23503": // foreign_key_violation
 			return "Referenced record not found or is invalid.", http.StatusOK
 		case "23514": // check_violation
+			if pgErr.Detail != "" {
+				return fmt.Sprintf("Invalid value: check constraint '%s' failed (%s)", pgErr.ConstraintName, pgErr.Detail), http.StatusBadRequest
+			}
 			return fmt.Sprintf("Invalid value: check constraint '%s' failed", pgErr.ConstraintName), http.StatusBadRequest
 		case "22P02": // invalid_text_representation (enum cast failure)
 			return "Invalid enum value provided for one of the fields", http.StatusBadRequest

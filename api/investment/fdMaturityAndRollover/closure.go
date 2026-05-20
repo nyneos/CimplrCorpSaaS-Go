@@ -96,12 +96,21 @@ type maturityDashboardRequest struct {
 	PageSize    int    `json:"page_size"`
 }
 
+type maturityDashboardEnvelope struct {
+	Rows *maturityDashboardRequest `json:"rows"`
+	maturityDashboardRequest
+}
+
 func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req maturityDashboardRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var env maturityDashboardEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
+		}
+		req := env.maturityDashboardRequest
+		if env.Rows != nil {
+			req = *env.Rows
 		}
 		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
@@ -111,13 +120,6 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.DaysAhead <= 0 {
 			req.DaysAhead = 30
 		}
-		if req.Page <= 0 {
-			req.Page = 1
-		}
-		if req.PageSize <= 0 || req.PageSize > 200 {
-			req.PageSize = 50
-		}
-		offset := (req.Page - 1) * req.PageSize
 		ctx := r.Context()
 
 		// Maturity-dashboard eligibility rules:
@@ -134,6 +136,11 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			  SELECT 1 FROM investment.fd_closure_request xcr
 			  WHERE xcr.fd_id = m.fd_id
 			    AND xcr.is_deleted = false
+			)`,
+			`NOT EXISTS (
+			  SELECT 1 FROM cimplr.fd_closure_initiate ncr
+			  WHERE ncr.fd_id = m.fd_id
+			    AND ncr.is_deleted = false
 			)`,
 		}
 		args := []interface{}{}
@@ -162,8 +169,6 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = pool.QueryRow(ctx,
 			fmt.Sprintf("SELECT COUNT(DISTINCT m.fd_id) FROM investment.fd_master m LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id WHERE %s", where),
 			args...).Scan(&totalCount)
-
-		limitArgs := append(args, req.PageSize, offset)
 
 		dataSQL := fmt.Sprintf(`
 			SELECT
@@ -194,7 +199,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(cr.closure_type,'') AS closure_type,
 			  COALESCE(cr.closure_status,'') AS closure_status,
 			  COALESCE(cr.closure_is_deleted, false) AS closure_is_deleted,
-			  ` + sqlApprovalStatus + ` AS approval_status,
+			  `+sqlApprovalStatus+` AS approval_status,
 			  COALESCE((SELECT aud.processing_status FROM investment.fd_audit_closure_request aud WHERE aud.closure_request_id = cr.closure_request_id ORDER BY aud.created_at DESC LIMIT 1),'') AS latest_processing_status,
 			  COALESCE(cf.total_periods,0) AS total_cashflow_periods,
 			  COALESCE(cf.last_event_date::text,'') AS last_cashflow_event,
@@ -232,10 +237,9 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			  FROM investment.fd_cashflow_schedule WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
 			) cf ON true
 			WHERE %s
-			ORDER BY m.maturity_date ASC
-			LIMIT $%d OFFSET $%d`, where, argIdx, argIdx+1)
+			ORDER BY m.maturity_date ASC`, where)
 
-		rows, err := pool.Query(ctx, dataSQL, limitArgs...)
+		rows, err := pool.Query(ctx, dataSQL, args...)
 		if err != nil {
 			api.LogError("[FDClosure] GetFDsNearMaturity query error: %v", err)
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch maturity dashboard")
@@ -253,6 +257,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			records = append(records, row)
 		}
+		records = enrichCimplrMaturityDashboardRecords(ctx, pool, records)
 
 		// If no records found, and no entity/bank filter was provided, return all ACTIVE FDs (ignore date window).
 		if len(records) == 0 && req.EntityID == "" && req.BankID == "" {
@@ -263,6 +268,11 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			    WHERE xcr.fd_id = m.fd_id
 			      AND xcr.is_deleted = false
 			      AND xcr.closure_status IN ('PENDING_APPROVAL','APPROVED','POSTED')
+			  )
+			  AND NOT EXISTS (
+			    SELECT 1 FROM cimplr.fd_closure_initiate ncr
+			    WHERE ncr.fd_id = m.fd_id
+			      AND ncr.is_deleted = false
 			  )`
 			var totalAll int
 			_ = pool.QueryRow(ctx,
@@ -335,10 +345,9 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_cashflow_schedule WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
 				) cf ON true
 				WHERE ` + allWhere + `
-				ORDER BY m.maturity_date ASC
-				LIMIT $1 OFFSET $2`
+				ORDER BY m.maturity_date ASC`
 
-			rowsAll, err := pool.Query(ctx, allSQL, req.PageSize, offset)
+			rowsAll, err := pool.Query(ctx, allSQL)
 			if err != nil {
 				api.LogError("[FDClosure] GetFDsNearMaturity (all) query error: %v", err)
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch maturity dashboard")
@@ -356,10 +365,10 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				records = append(records, row)
 			}
+			records = enrichCimplrMaturityDashboardRecords(ctx, pool, records)
 
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"records": records, "total": totalAll, "page": req.Page,
-				"page_size": req.PageSize, "days_ahead": req.DaysAhead,
+				"records": records, "total": totalAll, "days_ahead": req.DaysAhead,
 			})
 			api.LogInfo("[FDClosure] GetFDsNearMaturity (all active) returned %d/%d by %s", len(records), totalAll, userEmail)
 			return
@@ -369,16 +378,14 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			// No results for the provided filters / window — return clear human-readable message
 			msg := fmt.Sprintf("No FDs found in the maturity window of %d day(s) for entity=%s bank=%s", req.DaysAhead, firstNonEmpty(req.EntityID, "ALL"), firstNonEmpty(req.BankID, "ALL"))
 			api.RespondWithPayload(w, false, msg, map[string]interface{}{
-				"records": records, "total": totalCount, "page": req.Page,
-				"page_size": req.PageSize, "days_ahead": req.DaysAhead,
+				"records": records, "total": totalCount, "days_ahead": req.DaysAhead,
 			})
 			api.LogInfo("[FDClosure] GetFDsNearMaturity: no records for %s — by %s", msg, userEmail)
 			return
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"records": records, "total": totalCount, "page": req.Page,
-			"page_size": req.PageSize, "days_ahead": req.DaysAhead,
+			"records": records, "total": totalCount, "days_ahead": req.DaysAhead,
 		})
 		api.LogInfo("[FDClosure] GetFDsNearMaturity: %d/%d by %s", len(records), totalCount, userEmail)
 	}
@@ -1449,7 +1456,7 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(m.interest_rate,0) AS interest_rate,
 			  COALESCE(m.tenure_days,0) AS tenure_days,
 			  COALESCE(m.fd_status,'') AS fd_status,
-			  ` + sqlApprovalStatus + ` AS approval_status,
+			  `+sqlApprovalStatus+` AS approval_status,
 			  COALESCE((
 			    SELECT aud.processing_status
 			    FROM investment.fd_audit_closure_request aud
@@ -1603,7 +1610,7 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(c.bank_fd_ref_no,''),
 			  COALESCE(c.confirmation_status,''),
 			  -- enriched: approval engine
-			  ` + sqlApprovalStatus + `,
+			  `+sqlApprovalStatus+`,
 			  COALESCE(ai.submitted_at::text,'')
 			FROM investment.fd_closure_request cr
 			LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
