@@ -494,10 +494,11 @@ func updateFDMasterStatusBy(ctx context.Context, exec queryExecutor, fdIDs []str
 	return err
 }
 
-// insertCashflowAuditRowsApproved writes one APPROVED audit entry per cashflow row
+// insertCashflowAuditRowsPending writes one PENDING_ACTIVATION audit entry per cashflow row
 // into fd_audit_cashflow_schedule. Called at FD activation to seed the audit trail.
-// The cashflow_id is read back from the just-inserted rows using the cashflow table.
-func insertCashflowAuditRowsApproved(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow, createdBy string) error {
+// Status is promoted to APPROVED later via markCashflowAuditApproved when the checker
+// approves the FD activation request (see BulkApproveActivation).
+func insertCashflowAuditRowsPending(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow, createdBy string) error {
 	table := resolveFirstExistingTable(ctx, exec, []string{
 		constants.QuerryCashflowSchedule,
 		constants.QuerryCashflow,
@@ -555,14 +556,12 @@ func insertCashflowAuditRowsApproved(ctx context.Context, exec queryExecutor, fd
 				cashflow_id, fd_id,
 				action_type, processing_status,
 				reason,
-				requested_by, requested_at,
-				checker_by, checker_at, checker_comment
+				requested_by, requested_at
 			) VALUES (
 				$1, $2,
-				'CREATE', 'APPROVED',
+				'CREATE', 'PENDING_ACTIVATION',
 				$3,
-				$4, now(),
-				$4, now(), 'Auto-approved at FD activation'
+				$4, now()
 			) ON CONFLICT DO NOTHING`,
 			cf.id, fdID, reason, createdBy,
 		)
@@ -571,6 +570,72 @@ func insertCashflowAuditRowsApproved(ctx context.Context, exec queryExecutor, fd
 		}
 	}
 	return nil
+}
+
+// markCashflowAuditApproved promotes all PENDING_ACTIVATION cashflow audit rows for an FD
+// to APPROVED, recording the checker email. Called from BulkApproveActivation inside the
+// same transaction as fd_status → ACTIVE so the promotion is atomic.
+func markCashflowAuditApproved(ctx context.Context, exec queryExecutor, fdID, checkerEmail string) {
+	_, _ = exec.Exec(ctx, `
+		UPDATE investment.fd_audit_cashflow_schedule
+		SET processing_status = 'APPROVED',
+		    checker_by = $2,
+		    checker_at = now(),
+		    checker_comment = 'Auto-approved on FD activation approval'
+		WHERE fd_id = $1 AND processing_status = 'PENDING_ACTIVATION'`,
+		fdID, checkerEmail,
+	)
+}
+
+// softDeleteFDCashflowForRejection performs the three-step cashflow cleanup when an FD
+// activation is rejected, inside the caller's transaction:
+//  1. Soft-delete cashflow rows (is_deleted=true, is_active=false) so the accrual engine
+//     cannot pick them up.
+//  2. Mark cashflow audit rows REJECTED so they no longer appear as PENDING_ACTIVATION.
+//  3. Clear cashflow_generated=false on fd_master so the generation flag stays consistent.
+func softDeleteFDCashflowForRejection(ctx context.Context, exec queryExecutor, fdID, userEmail, comment string) {
+	cfTable := resolveFirstExistingTable(ctx, exec, []string{
+		constants.QuerryCashflowSchedule,
+		constants.QuerryCashflow,
+		constants.QuerryMasterCashflowSchedule,
+	})
+	if cfTable != "" {
+		schemaName, tableName := splitQualifiedTable(cfTable)
+		cfCols, err := loadTableColumns(ctx, exec, schemaName, tableName)
+		if err == nil {
+			fdCol := pickFirstExistingColumn(cfCols, "fd_id", "master_id")
+			if fdCol != "" {
+				setParts := []string{"is_deleted = true"}
+				if cfCols["is_active"] {
+					setParts = append(setParts, "is_active = false")
+				}
+				if cfCols["updated_at"] {
+					setParts = append(setParts, "updated_at = now()")
+				}
+				args := []interface{}{fdID}
+				if cfCols["updated_by"] {
+					args = append(args, userEmail)
+					setParts = append(setParts, fmt.Sprintf("updated_by = $%d", len(args)))
+				}
+				q := fmt.Sprintf("UPDATE %s SET %s WHERE %s = $1", cfTable, strings.Join(setParts, ", "), fdCol)
+				_, _ = exec.Exec(ctx, q, args...)
+			}
+		}
+	}
+	// Mark cashflow audit rows as REJECTED.
+	_, _ = exec.Exec(ctx, `
+		UPDATE investment.fd_audit_cashflow_schedule
+		SET processing_status = 'REJECTED', checker_by = $2, checker_at = now(), checker_comment = $3
+		WHERE fd_id = $1 AND processing_status = 'PENDING_ACTIVATION'`,
+		fdID, userEmail, comment,
+	)
+	// Clear cashflow_generated flag on fd_master.
+	_, _ = exec.Exec(ctx, `
+		UPDATE investment.fd_master
+		SET cashflow_generated = false, cashflow_generated_at = NULL
+		WHERE fd_id = $1`,
+		fdID,
+	)
 }
 
 func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -670,21 +735,22 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		cashflows, _, err := GenerateCashflowForFD(ctx, tx, "", req.ConfirmationID)
+		// Use the already-loaded rec to avoid a redundant DB round-trip inside the transaction.
+		cashflows, _, err := GenerateCashflowFromRecord(ctx, tx, rec)
 		if err != nil {
 			msg, status := getFDMasterError(err, "Cashflow generation failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
-		if err := SaveCashflowScheduleWithCreator(ctx, tx, fdID, cashflows, userEmail); err != nil {
+		if err := SaveCashflowScheduleWithRecord(ctx, tx, fdID, cashflows, userEmail, rec); err != nil {
 			msg, status := getFDMasterError(err, "Cashflow save failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
 
-		// Write one APPROVED audit row per cashflow row to establish the initial
-		// audit trail. These represent the system-generated state at activation.
-		if auditErr := insertCashflowAuditRowsApproved(ctx, tx, fdID, cashflows, userEmail); auditErr != nil {
+		// Write one PENDING_ACTIVATION audit row per cashflow row to seed the audit trail.
+		// These will be promoted to APPROVED by BulkApproveActivation when the checker approves.
+		if auditErr := insertCashflowAuditRowsPending(ctx, tx, fdID, cashflows, userEmail); auditErr != nil {
 			// Non-fatal: log but don't block activation
 			api.LogError("[FDMaster] cashflow audit insert failed fd=%s: %v", fdID, auditErr)
 		}
@@ -777,6 +843,12 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	// Cashflow audit lifecycle on approval:
+	//   PENDING_ACTIVATION (written at FD activation by insertCashflowAuditRowsPending)
+	//   → APPROVED (written here by markCashflowAuditApproved)
+	// Both the engine-driven path (approval-matrix) and the direct-stamp path (no matrix)
+	// call markCashflowAuditApproved inside their respective transactions so the promotion
+	// is atomic with the fd_status → ACTIVE update.
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req bulkFDActionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -835,6 +907,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					auditTable := resolveFDAuditTable(ctx, tx)
 					_ = updateFDMasterStatusBy(ctx, tx, []string{fdID}, "ACTIVE", userEmail)
 					_ = updateFDAuditStatus(ctx, tx, auditTable, []string{fdID}, userEmail, "APPROVED", req.Comment)
+					markCashflowAuditApproved(ctx, tx, fdID, userEmail) // promote PENDING_ACTIVATION → APPROVED
 					rec, err := loadFDRecordByFDID(ctx, tx, fdID)
 					if err == nil {
 						activityID, err := CreateFDAccountingActivity(ctx, tx, fdID, rec.ValueDate, userEmail)
@@ -893,6 +966,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, fdID+": journal save failed")
 					continue
 				}
+				markCashflowAuditApproved(ctx, tx, fdID, userEmail) // promote PENDING_ACTIVATION → APPROVED
 				if cerr := tx.Commit(ctx); cerr != nil {
 					errors = append(errors, fdID+constants.ErrCommitFailed)
 					continue
@@ -933,6 +1007,12 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	// On rejection, three cleanup steps run inside the same transaction as fd_status → REJECTED:
+	//  1. Soft-delete all cashflow rows (is_deleted=true, is_active=false) so the accrual engine
+	//     cannot pick up cashflow for a rejected FD.
+	//  2. Mark cashflow audit rows REJECTED so they no longer appear as PENDING_ACTIVATION.
+	//  3. Clear cashflow_generated=false on fd_master so the generation flag stays consistent.
+	// Implemented via softDeleteFDCashflowForRejection, called in both engine and direct paths.
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req bulkFDActionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -979,12 +1059,22 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if actionRes.Acted {
-				// finalizeRecord stamped audit; flip fd_master status.
-				if _, execErr := pgxPool.Exec(ctx,
-					`UPDATE investment.fd_master SET fd_status='REJECTED'
-					 WHERE fd_id=$1 AND fd_status NOT IN ('ACTIVE','REJECTED')`, fdID,
-				); execErr != nil {
-					api.LogError("[FDMaster] fd_status→REJECTED failed for %s: %v", fdID, execErr)
+				// Wrap in a transaction so the three-step cleanup is atomic with the status update.
+				rejectTx, rejectTxErr := pgxPool.Begin(ctx)
+				if rejectTxErr != nil {
+					api.LogError("[FDMaster] fd_status→REJECTED tx begin failed for %s: %v", fdID, rejectTxErr)
+				} else {
+					softDeleteFDCashflowForRejection(ctx, rejectTx, fdID, userEmail, req.Comment)
+					if _, execErr := rejectTx.Exec(ctx,
+						`UPDATE investment.fd_master SET fd_status='REJECTED'
+						 WHERE fd_id=$1 AND fd_status NOT IN ('ACTIVE','REJECTED')`, fdID,
+					); execErr != nil {
+						api.LogError("[FDMaster] fd_status→REJECTED failed for %s: %v", fdID, execErr)
+					}
+					if cerr := rejectTx.Commit(ctx); cerr != nil {
+						_ = rejectTx.Rollback(ctx)
+						api.LogError("[FDMaster] fd_status→REJECTED commit failed for %s: %v", fdID, cerr)
+					}
 				}
 				engineActed++
 			} else {
@@ -1010,6 +1100,7 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, fdID+": status update failed")
 					continue
 				}
+				softDeleteFDCashflowForRejection(ctx, tx, fdID, userEmail, req.Comment)
 				if cerr := tx.Commit(ctx); cerr != nil {
 					errors = append(errors, fdID+constants.ErrCommitFailed)
 					continue

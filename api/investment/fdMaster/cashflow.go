@@ -355,6 +355,52 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			WHERE c.confirmation_id = $1`, confirmationID).Scan(&resetType)
 		rec.ResetType = resetType
 	}
+	// Read tenure_months, tenure_years, tenure_type — gate on whichever table has the column.
+	// Confirmation value takes precedence over booking when both exist.
+	if confCols["tenure_months"] {
+		var v int
+		_ = exec.QueryRow(ctx, `SELECT COALESCE(tenure_months, 0) FROM investment.fd_confirmation WHERE confirmation_id = $1`, confirmationID).Scan(&v)
+		rec.TenorMonths = v
+	} else if bookingCols["tenure_months"] {
+		var v int
+		_ = exec.QueryRow(ctx, `
+			SELECT COALESCE(b.tenure_months, 0)
+			FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE c.confirmation_id = $1`, confirmationID).Scan(&v)
+		rec.TenorMonths = v
+	}
+	if confCols["tenure_years"] {
+		var v int
+		_ = exec.QueryRow(ctx, `SELECT COALESCE(tenure_years, 0) FROM investment.fd_confirmation WHERE confirmation_id = $1`, confirmationID).Scan(&v)
+		rec.TenureYears = v
+	} else if bookingCols["tenure_years"] {
+		var v int
+		_ = exec.QueryRow(ctx, `
+			SELECT COALESCE(b.tenure_years, 0)
+			FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE c.confirmation_id = $1`, confirmationID).Scan(&v)
+		rec.TenureYears = v
+	}
+	if confCols["tenure_type"] {
+		var v string
+		_ = exec.QueryRow(ctx, `SELECT COALESCE(NULLIF(tenure_type,''),'') FROM investment.fd_confirmation WHERE confirmation_id = $1`, confirmationID).Scan(&v)
+		rec.TenureType = v
+	} else if bookingCols["tenure_type"] {
+		var v string
+		_ = exec.QueryRow(ctx, `
+			SELECT COALESCE(NULLIF(b.tenure_type,''),'')
+			FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE c.confirmation_id = $1`, confirmationID).Scan(&v)
+		rec.TenureType = v
+	}
+	// Derive TenorDays from maturity/start dates when tenure was stored only in months or years.
+	if rec.TenorDays == 0 && !rec.MaturityDate.IsZero() && !rec.ValueDate.IsZero() &&
+		(rec.TenorMonths > 0 || rec.TenureYears > 0) {
+		rec.TenorDays = int(rec.MaturityDate.Sub(rec.ValueDate).Hours() / 24)
+	}
 	return rec, nil
 }
 
@@ -415,6 +461,44 @@ func loadFDRecordByFDID(ctx context.Context, exec queryExecutor, fdID string) (*
 		if dc != "" {
 			rec.DayCountConvention = dc
 		}
+	}
+	// Override reset_type and tenure fields from fd_master when present (fd_master wins over confirmation).
+	if masterCols["reset_type"] {
+		var v string
+		_ = exec.QueryRow(ctx, fmt.Sprintf(
+			"SELECT COALESCE(NULLIF(reset_type,''),'') FROM investment.fd_master WHERE %s=$1", keyCol), fdID).Scan(&v)
+		if v != "" {
+			rec.ResetType = strings.ToUpper(strings.TrimSpace(v))
+		}
+	}
+	if masterCols["tenure_months"] {
+		var v int
+		_ = exec.QueryRow(ctx, fmt.Sprintf(
+			"SELECT COALESCE(tenure_months, 0) FROM investment.fd_master WHERE %s=$1", keyCol), fdID).Scan(&v)
+		if v > 0 {
+			rec.TenorMonths = v
+		}
+	}
+	if masterCols["tenure_years"] {
+		var v int
+		_ = exec.QueryRow(ctx, fmt.Sprintf(
+			"SELECT COALESCE(tenure_years, 0) FROM investment.fd_master WHERE %s=$1", keyCol), fdID).Scan(&v)
+		if v > 0 {
+			rec.TenureYears = v
+		}
+	}
+	if masterCols["tenure_type"] {
+		var v string
+		_ = exec.QueryRow(ctx, fmt.Sprintf(
+			"SELECT COALESCE(tenure_type,'') FROM investment.fd_master WHERE %s=$1", keyCol), fdID).Scan(&v)
+		if v != "" {
+			rec.TenureType = v
+		}
+	}
+	// Derive TenorDays from maturity/start dates when tenure was stored only in months or years.
+	if rec.TenorDays == 0 && !rec.MaturityDate.IsZero() && !rec.ValueDate.IsZero() &&
+		(rec.TenorMonths > 0 || rec.TenureYears > 0) {
+		rec.TenorDays = int(rec.MaturityDate.Sub(rec.ValueDate).Hours() / 24)
 	}
 	return rec, nil
 }
@@ -634,6 +718,10 @@ func loadInterestType(ctx context.Context, exec queryExecutor, interestTypeRef s
 	upper := strings.ToUpper(ref)
 	if upper == "COMPOUND" || upper == "STEPPED" {
 		return InterestTypeInfo{CalculationMethod: upper}
+	}
+	// Master lookup missed and value is not a canonical token — warn so ops can fix the data.
+	if upper != "SIMPLE" {
+		logger.LogInfo("[CFGEN] WARN: unrecognized interest_type_code %q — defaulting to SIMPLE", ref)
 	}
 	return InterestTypeInfo{CalculationMethod: "SIMPLE"}
 }
@@ -2660,12 +2748,25 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 	t4 := time.Now()
 	itInfo := loadInterestType(ctx, exec, fd.InterestTypeCode)
 	logger.LogInfo("[CFGEN][%s] ✓ loadInterestType (+%s)", fd.ConfirmationID, time.Since(t4).Round(time.Millisecond))
+	// Sanity check: refuse to silently default to SIMPLE for a non-canonical interest_type_code.
+	// If ops stored "CO", "Compound", or similar, fix the data rather than generate wrong cashflow.
+	{
+		canonical := func(s string) bool {
+			u := strings.ToUpper(strings.TrimSpace(s))
+			return u == "" || u == "SIMPLE" || u == "COMPOUND" || u == "STEPPED"
+		}
+		if !canonical(fd.InterestTypeCode) && itInfo.CalculationMethod == "SIMPLE" {
+			return nil, nil, fmt.Errorf("cannot resolve interest_type_code %q — refusing to silently fall back to SIMPLE for fd=%s", fd.InterestTypeCode, fd.ConfirmationID)
+		}
+	}
 
 	// Load holiday calendar from bank config's holiday_calendar_code.
 	t5 := time.Now()
 	calInfo := loadHolidayCalendar(ctx, exec, cfg.HolidayCalendarCode, fd.ValueDate, fd.MaturityDate)
 	logger.LogInfo("[CFGEN][%s] ✓ loadHolidayCalendar (+%s) holidays=%d", fd.ConfirmationID, time.Since(t5).Round(time.Millisecond), len(calInfo.HolidayDates))
 
+	logger.LogInfo("[CFGEN][%s] dispatch: calcMethod=%s resetType=%q firstPayout=%v firstCap=%v",
+		fd.ConfirmationID, itInfo.CalculationMethod, fd.ResetType, fd.FirstPayoutDate, fd.FirstCapitalizationDate)
 	rows := generateCashflowSchedule(CashflowScheduleParams{FD: fd, Cfg: cfg, Freq: freq, TDSCfg: tds, DCInfo: dcInfo, ITInfo: itInfo, CalInfo: calInfo})
 	logger.LogInfo("[CFGEN][%s] ✓ generateCashflowSchedule → %d rows TOTAL (+%s)", fd.ConfirmationID, len(rows), time.Since(tg).Round(time.Millisecond))
 
