@@ -2244,6 +2244,29 @@ func persistCimplrConfirmVariances(ctx context.Context, pool *pgxpool.Pool, reco
 	return cimplrVarianceSummary(runID, items), nil
 }
 
+func cimplrVarianceItemsToMaps(items []varianceengine.VarianceItem) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0)
+	for _, it := range items {
+		if !it.HasVariance {
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"variance_id":    it.VarianceID,
+			"field_name":     it.FieldName,
+			"variance_type":  it.VarianceType,
+			"expected_value": it.ExpectedValue,
+			"actual_value":   it.ActualValue,
+			"delta":          it.VarianceDelta,
+			"variance_delta": it.VarianceDelta,
+			"priority":       it.Priority,
+			"status":         it.Status,
+			"system_comment": it.SystemComment,
+			"has_variance":   it.HasVariance,
+		})
+	}
+	return out
+}
+
 func cimplrVarianceSummary(runID string, items []varianceengine.VarianceItem) map[string]interface{} {
 	openCount := 0
 	for _, it := range items {
@@ -2251,7 +2274,15 @@ func cimplrVarianceSummary(runID string, items []varianceengine.VarianceItem) ma
 			openCount++
 		}
 	}
-	return map[string]interface{}{"run_id": runID, "variance_count": countVariances(items), "open_count": openCount, "has_variance": openCount > 0}
+	itemMaps := cimplrVarianceItemsToMaps(items)
+	return map[string]interface{}{
+		"run_id":         runID,
+		"variance_count": countVariances(items),
+		"open_count":     openCount,
+		"has_variance":   openCount > 0,
+		"items":          itemMaps,
+		"total":          len(itemMaps),
+	}
 }
 
 func insertCimplrCalculation(ctx context.Context, exec dbExec, closureInitiateID, closureConfirmID string, src cimplrFDSource, calc cimplrClosureCalc) error {
@@ -2543,6 +2574,18 @@ func previewCimplrConfirmVariance(recordID string, req cimplrClosureConfirmReque
 		{FieldName: "interest_received", VarianceType: varianceengine.TypeAmount, ExpectedValue: ff(calc.AccruedInterest), ActualValue: ff(chooseFloat(req.InterestReceived, calc.AccruedInterest)), Priority: varianceengine.PriorityMedium, Tolerance: 1.0},
 		{FieldName: "tds_deducted", VarianceType: varianceengine.TypeAmount, ExpectedValue: ff(calc.TDSAmount), ActualValue: ff(chooseFloat(req.TDSDeducted, calc.TDSAmount)), Priority: varianceengine.PriorityMedium, Tolerance: 0.5},
 		{FieldName: "net_amount_received", VarianceType: varianceengine.TypeAmount, ExpectedValue: ff(calc.NetPayout), ActualValue: ff(chooseFloat(req.NetAmountReceived, calc.NetPayout)), Priority: varianceengine.PriorityHigh, Tolerance: 1.0},
+	}
+	if calc.ClosureType == "PREMATURE" {
+		rules = append(rules,
+			varianceengine.Rule{FieldName: "penalty_amount", VarianceType: varianceengine.TypeAmount, ExpectedValue: ff(calc.PenaltyAmount), ActualValue: ff(chooseFloat(req.PenaltyAmount, calc.PenaltyAmount)), Priority: varianceengine.PriorityHigh, Tolerance: 0.01},
+			varianceengine.Rule{FieldName: "applicable_rate", VarianceType: varianceengine.TypeRate, ExpectedValue: ff(calc.ApplicableRate), ActualValue: ff(chooseFloat(req.ApplicableRate, calc.ApplicableRate)), Priority: varianceengine.PriorityHigh, Tolerance: 0.001},
+		)
+	}
+	if calc.ClosureType == "ROLLOVER" {
+		rules = append(rules,
+			varianceengine.Rule{FieldName: "new_fd_amount", VarianceType: varianceengine.TypeAmount, ExpectedValue: ff(calc.NetPayout), ActualValue: ff(req.NewFDAmount), Priority: varianceengine.PriorityHigh, Tolerance: 1.0},
+			varianceengine.Rule{FieldName: "new_interest_rate", VarianceType: varianceengine.TypeRate, ExpectedValue: ff(src.InterestRate), ActualValue: ff(chooseFloat(req.NewInterestRate, src.InterestRate)), Priority: varianceengine.PriorityHigh, Tolerance: 0.001},
+		)
 	}
 	items := varianceengine.Compare("FD_CLOSURE", recordID, src.EntityID, runID, rules)
 	return cimplrVarianceSummary(runID, items)
