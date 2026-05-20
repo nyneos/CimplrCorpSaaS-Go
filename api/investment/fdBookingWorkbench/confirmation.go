@@ -34,6 +34,7 @@ type fdConfirmationCaptureRequest struct {
 	ConfirmedValueDate       string           `json:"confirmed_value_date"`
 	ConfirmedMaturityDate    string           `json:"confirmed_maturity_date"`
 	BankFDReference          string           `json:"bank_fd_reference"`
+	BankReferenceNumber      string           `json:"bank_reference_number"`
 	ReceiptDate              string           `json:"receipt_date"`
 	ConfirmedInterestType    string           `json:"confirmed_interest_type"`
 	ConfirmedFrequencyID     string           `json:"confirmed_frequency_id"`
@@ -44,6 +45,7 @@ type fdConfirmationCaptureRequest struct {
 	FirstCapitalizationDate  string           `json:"first_capitalization_date"`
 	AccrualFrequencyCode     string           `json:"accrual_frequency_code"`
 	ResetType                string           `json:"reset_type"`
+	PrematureClosureTerms    string           `json:"premature_closure_terms"`
 	Notes                    string           `json:"notes"`
 }
 
@@ -87,6 +89,7 @@ func fdConfirmationCaptureRequestFromForm(r *http.Request) fdConfirmationCapture
 		ConfirmedValueDate:       strings.TrimSpace(r.FormValue("confirmed_value_date")),
 		ConfirmedMaturityDate:    strings.TrimSpace(r.FormValue("confirmed_maturity_date")),
 		BankFDReference:          strings.TrimSpace(r.FormValue("bank_fd_reference")),
+		BankReferenceNumber:      strings.TrimSpace(r.FormValue("bank_reference_number")),
 		ReceiptDate:              strings.TrimSpace(r.FormValue("receipt_date")),
 		ConfirmedInterestType:    strings.TrimSpace(r.FormValue("confirmed_interest_type")),
 		ConfirmedFrequencyID:     strings.TrimSpace(r.FormValue("confirmed_frequency_id")),
@@ -97,6 +100,7 @@ func fdConfirmationCaptureRequestFromForm(r *http.Request) fdConfirmationCapture
 		FirstCapitalizationDate:  strings.TrimSpace(r.FormValue("first_capitalization_date")),
 		AccrualFrequencyCode:     strings.TrimSpace(r.FormValue("accrual_frequency_code")),
 		ResetType:                strings.TrimSpace(r.FormValue("reset_type")),
+		PrematureClosureTerms:    strings.TrimSpace(r.FormValue("premature_closure_terms")),
 		Notes:                    strings.TrimSpace(r.FormValue("notes")),
 	}
 }
@@ -320,7 +324,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					variance_threshold_breached = false,
 					variance_details          = NULL,
 					variance_action           = NULL,
-					variance_resolved_by      = $15,
+					variance_resolved_by      = $16,
 					variance_resolved_at      = now(),
 					confirmation_status       = 'PENDING_APPROVAL',
 					penalty_id                = NULLIF($15,''),
@@ -328,6 +332,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					first_capitalization_date = $19,
 					accrual_frequency_code    = NULLIF($21,''),
 					reset_type                = NULLIF($22,''),
+					bank_reference_number     = NULLIF($23,''),
+					premature_closure_terms   = NULLIF($24,''),
 					upload_s3_key             = COALESCE(NULLIF($20,''), upload_s3_key),
 					updated_by                = $16,
 					updated_at                = now()
@@ -346,6 +352,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				uploadS3Key,
 				strings.ToUpper(strings.TrimSpace(req.AccrualFrequencyCode)),
 				strings.ToUpper(strings.TrimSpace(req.ResetType)),
+				nullIfEmpty(req.BankReferenceNumber),
+				nullIfEmpty(req.PrematureClosureTerms),
 			); err != nil {
 				cleanupUpload()
 				msg, status := getUserFriendlyFDError(err, constants.ErrUpdateConfirmationFailed)
@@ -372,6 +380,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					first_capitalization_date,
 					accrual_frequency_code,
 					reset_type,
+					bank_reference_number,
+					premature_closure_terms,
 					upload_s3_key,
 					created_by
 				) VALUES (
@@ -391,6 +401,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					$19,
 					NULLIF($21,''),
 					NULLIF($22,''),
+					NULLIF($23,''),
+					NULLIF($24,''),
 					NULLIF($20,''),
 					$17
 				) RETURNING confirmation_id`,
@@ -409,6 +421,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				uploadS3Key,
 				strings.ToUpper(strings.TrimSpace(req.AccrualFrequencyCode)),
 				strings.ToUpper(strings.TrimSpace(req.ResetType)),
+				nullIfEmpty(req.BankReferenceNumber),
+				nullIfEmpty(req.PrematureClosureTerms),
 			).Scan(&confirmationID)
 			if err != nil {
 				cleanupUpload()

@@ -993,8 +993,8 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 			TDSThreshold:       effectiveTDSThreshold,
 			TDSDeductionTiming: effectiveTDSTiming,
 		},
-		Schedule:         simRows,
-		RawRows:          rawRows,
+		Schedule: simRows,
+		RawRows:  rawRows,
 		Summary: func() SimulateSummary {
 			sum := buildSimulateSummary(rawRows, fd)
 			tdsPct := 0.0
@@ -1593,10 +1593,10 @@ type SimulateDiffResponse struct {
 	ConfirmationSchedule []SimulatedCashflowRow `json:"confirmation_schedule,omitempty"`
 
 	// Summary metrics for each side.
-	BookingSummary      SimulateSummary      `json:"booking_summary"`
-	ConfirmationSummary SimulateSummary      `json:"confirmation_summary"`
+	BookingSummary      SimulateSummary `json:"booking_summary"`
+	ConfirmationSummary SimulateSummary `json:"confirmation_summary"`
 	// Confirmation − Booking delta for each summary metric.
-	SummaryDelta        SimulateSummaryDelta `json:"summary_delta"`
+	SummaryDelta SimulateSummaryDelta `json:"summary_delta"`
 
 	// Non-fatal warnings about structural differences between booking and confirmation.
 	Warnings []string `json:"warnings,omitempty"`
@@ -1735,22 +1735,22 @@ func diffChangeTypeRank(ct DiffChangeType) int {
 //
 // Two-pass matching strategy:
 //
-//   Pass 1 — primary key match:
-//     Rows are matched by diffKey (EventType + "|" + EventDate). A matching old
-//     row is found for each new row; unmatched new rows are tentatively NEW and
-//     unmatched old rows are tentatively REMOVED.
+//	Pass 1 — primary key match:
+//	  Rows are matched by diffKey (EventType + "|" + EventDate). A matching old
+//	  row is found for each new row; unmatched new rows are tentatively NEW and
+//	  unmatched old rows are tentatively REMOVED.
 //
-//   Pass 2 — sequence-within-type fallback (date-shifted events):
-//     For eligible event types (all except INITIAL_INVESTMENT, PRINCIPAL_RETURN,
-//     MATURITY, GRACE_PERIOD), remaining unmatched REMOVED and NEW rows of the
-//     same EventType are paired by their 1-based chronological position within
-//     the set of unmatched rows for that type.  A matched pair is promoted to a
-//     single CHANGED row with DateShifted=true and OldEventDate set to the
-//     booking event_date, making a date shift (e.g. from first_capitalization_date
-//     or holiday adjustment) visible without polluting the diff with false REMOVED
-//     + NEW noise.
+//	Pass 2 — sequence-within-type fallback (date-shifted events):
+//	  For eligible event types (all except INITIAL_INVESTMENT, PRINCIPAL_RETURN,
+//	  MATURITY, GRACE_PERIOD), remaining unmatched REMOVED and NEW rows of the
+//	  same EventType are paired by their 1-based chronological position within
+//	  the set of unmatched rows for that type.  A matched pair is promoted to a
+//	  single CHANGED row with DateShifted=true and OldEventDate set to the
+//	  booking event_date, making a date shift (e.g. from first_capitalization_date
+//	  or holiday adjustment) visible without polluting the diff with false REMOVED
+//	  + NEW noise.
 //
-//   Output order: chronological by event_date, then event_type rank.
+//	Output order: chronological by event_date, then event_type rank.
 func diffSchedules(oldRows, newRows []SimulatedCashflowRow) []DiffCashflowRow {
 	// Make defensive copies and sort both sides.
 	oldRows = append([]SimulatedCashflowRow(nil), oldRows...)
