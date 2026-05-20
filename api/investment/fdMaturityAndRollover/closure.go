@@ -17,6 +17,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/uploadutil"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
@@ -194,7 +195,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(cr.closure_type,'') AS closure_type,
 			  COALESCE(cr.closure_status,'') AS closure_status,
 			  COALESCE(cr.closure_is_deleted, false) AS closure_is_deleted,
-			  ` + sqlApprovalStatus + ` AS approval_status,
+			  `+sqlApprovalStatus+` AS approval_status,
 			  COALESCE((SELECT aud.processing_status FROM investment.fd_audit_closure_request aud WHERE aud.closure_request_id = cr.closure_request_id ORDER BY aud.created_at DESC LIMIT 1),'') AS latest_processing_status,
 			  COALESCE(cf.total_periods,0) AS total_cashflow_periods,
 			  COALESCE(cf.last_event_date::text,'') AS last_cashflow_event,
@@ -524,6 +525,19 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 				moduleKey = "fd-premature-closure"
 			}
 			if moduleKey != "" {
+				if err := uploadutil.EnsureUniqueMultipartUpload(ctx, pool, s3storage.CollectMultipartFiles(r.MultipartForm, "bank_advice", "bankAdviceDocument", "attachment", "file", "files"), `
+					SELECT upload_s3_key
+					FROM investment.fd_closure_request
+					WHERE COALESCE(is_deleted, false) = false
+					  AND COALESCE(upload_s3_key, '') <> ''
+				`); err != nil {
+					if errors.Is(err, uploadutil.ErrFileAlreadyUploaded) {
+						api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
+						return
+					}
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+err.Error())
+					return
+				}
 				var uploadErr error
 				uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, moduleKey, userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "bank_advice", "bankAdviceDocument", "attachment", "file", "files"))
 				if uploadErr != nil {
@@ -1449,7 +1463,7 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(m.interest_rate,0) AS interest_rate,
 			  COALESCE(m.tenure_days,0) AS tenure_days,
 			  COALESCE(m.fd_status,'') AS fd_status,
-			  ` + sqlApprovalStatus + ` AS approval_status,
+			  `+sqlApprovalStatus+` AS approval_status,
 			  COALESCE((
 			    SELECT aud.processing_status
 			    FROM investment.fd_audit_closure_request aud
@@ -1603,7 +1617,7 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(c.bank_fd_ref_no,''),
 			  COALESCE(c.confirmation_status,''),
 			  -- enriched: approval engine
-			  ` + sqlApprovalStatus + `,
+			  `+sqlApprovalStatus+`,
 			  COALESCE(ai.submitted_at::text,'')
 			FROM investment.fd_closure_request cr
 			LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id

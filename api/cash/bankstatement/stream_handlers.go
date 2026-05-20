@@ -1525,8 +1525,6 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 				entity_id, account_number, statement_period_start, statement_period_end, 
 				file_hash, opening_balance, closing_balance
 			) VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT ON CONSTRAINT uniq_stmt
-			DO UPDATE SET file_hash = EXCLUDED.file_hash, closing_balance = EXCLUDED.closing_balance
 			RETURNING bank_statement_id
 		`, entityID, accountNumber, periodStart, periodEnd, fileHash, openingBalance, closingBalance).Scan(&bankStatementID)
 		if err != nil {

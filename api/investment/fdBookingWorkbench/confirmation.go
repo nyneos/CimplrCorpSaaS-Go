@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/uploadutil"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
@@ -148,6 +149,19 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		uploadS3Key := ""
 		if isMultipart && r.MultipartForm != nil {
+			if err := uploadutil.EnsureUniqueMultipartUpload(ctx, pgxPool, s3storage.CollectMultipartFiles(r.MultipartForm, "attachment", "bank_statement", "file", "files"), `
+				SELECT upload_s3_key
+				FROM investment.fd_confirmation
+				WHERE COALESCE(is_deleted, false) = false
+				  AND COALESCE(upload_s3_key, '') <> ''
+			`); err != nil {
+				if errors.Is(err, uploadutil.ErrFileAlreadyUploaded) {
+					api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
+					return
+				}
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+err.Error())
+				return
+			}
 			var uploadErr error
 			uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, "fd-bank-confirmation-capture", userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "attachment", "bank_statement", "file", "files"))
 			if uploadErr != nil {
@@ -1453,7 +1467,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"confirmation_id":     req.ConfirmationID,
 					"booking_id":          bookingID,
 					"confirmation_status": "VARIANCE_ACCEPTED",
-					"already_accepted":  true,
+					"already_accepted":    true,
 				})
 			return
 		}

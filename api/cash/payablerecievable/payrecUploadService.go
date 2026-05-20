@@ -109,7 +109,9 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 	err = tx.QueryRow(ctx, `
 		SELECT batch_id, upload_s3_key
 		FROM public.staging_batches_transactions
-		WHERE file_hash = $1 AND status IN ('completed', 'processing')
+		WHERE file_hash = $1
+		  AND status IN ('completed', 'processing')
+		  AND COALESCE(is_deleted, false) = false
 		ORDER BY ingestion_timestamp DESC
 		LIMIT 1
 	`, fileHashHex).Scan(&duplicateBatchID, &existingUploadS3Key)

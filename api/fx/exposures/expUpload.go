@@ -40,6 +40,7 @@ func existingExposureUploadKeys(ctx context.Context, db *sql.DB) ([]string, erro
 		SELECT DISTINCT upload_s3_key
 		FROM exposure_headers
 		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
+		  AND COALESCE(is_deleted, false) = false
 	`)
 	if err != nil {
 		return nil, err

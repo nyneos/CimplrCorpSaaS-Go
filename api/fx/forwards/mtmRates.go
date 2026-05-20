@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -27,6 +28,68 @@ import (
 
 	"CimplrCorpSaas/internal/logger"
 )
+
+var ErrMTMFileAlreadyUploaded = errors.New("mtm file already uploaded")
+
+const duplicateMTMUploadMessage = "This MTM file was already uploaded earlier. Please upload a different file."
+
+func forwardMTMHasIsDeletedColumn(ctx context.Context, db *sql.DB) bool {
+	var exists bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = 'public'
+			  AND table_name = 'forward_mtm'
+			  AND column_name = 'is_deleted'
+		)
+	`).Scan(&exists); err != nil {
+		return false
+	}
+	return exists
+}
+
+func existingMTMUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
+	query := `
+		SELECT DISTINCT upload_s3_key
+		FROM forward_mtm
+		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
+	`
+	if forwardMTMHasIsDeletedColumn(ctx, db) {
+		query += ` AND COALESCE(is_deleted, false) = false`
+	}
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	keys := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if scanErr := rows.Scan(&key); scanErr != nil {
+			return nil, scanErr
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+func ensureUniqueMTMUpload(ctx context.Context, db *sql.DB, fileBytes []byte) error {
+	keys, err := existingMTMUploadKeys(ctx, db)
+	if err != nil {
+		return fmt.Errorf("failed to check duplicate mtm upload: %w", err)
+	}
+	duplicateKey, err := s3storage.FindDuplicateObjectKey(ctx, fileBytes, keys)
+	if err != nil {
+		return fmt.Errorf("failed to compare mtm upload content: %w", err)
+	}
+	if duplicateKey != "" {
+		return ErrMTMFileAlreadyUploaded
+	}
+	return nil
+}
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
@@ -124,6 +187,18 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 
 		ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
 		s3Key := s3storage.BuildUploadedS3Key("fx/mtm", "", fileHeader.Filename, uploadedBy, time.Now().UTC())
+
+		if err := ensureUniqueMTMUpload(ctx, db, fileBytes); err != nil {
+			message := err.Error()
+			if errors.Is(err, ErrMTMFileAlreadyUploaded) {
+				message = duplicateMTMUploadMessage
+			}
+			results = append(results, map[string]interface{}{
+				"filename":           fileHeader.Filename,
+				constants.ValueError: message,
+			})
+			continue
+		}
 
 		var rowsData []map[string]interface{}
 		if ext == ".csv" {

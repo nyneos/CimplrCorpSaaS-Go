@@ -2,11 +2,13 @@ package investmentsuite
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/investment/uploadutil"
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -183,6 +185,19 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		uploadS3Key := ""
 		if isMultipart {
+			if err := uploadutil.EnsureUniqueMultipartUpload(ctx, pgxPool, s3storage.CollectMultipartFiles(r.MultipartForm, "file", "files"), `
+				SELECT upload_s3_key
+				FROM investment.investment_confirmation
+				WHERE COALESCE(is_deleted, false) = false
+				  AND COALESCE(upload_s3_key, '') <> ''
+			`); err != nil {
+				if errors.Is(err, uploadutil.ErrFileAlreadyUploaded) {
+					api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
+					return
+				}
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+err.Error())
+				return
+			}
 			var uploadErr error
 			uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, "investment-confirmation", userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "file", "files"))
 			if uploadErr != nil {
