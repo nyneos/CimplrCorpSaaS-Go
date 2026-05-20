@@ -124,15 +124,15 @@ func BuildSimulateDiffInput(row map[string]interface{}) map[string]interface{} {
 		"tenor_months":     firstNonZero(row["tenor_months"], row["tenure_months"], row["confirmed_tenor_months"]),
 		"tenor_years":      firstNonZero(row["tenor_years"], row["tenure_years"], row["confirmed_tenor_years"]),
 		"interest_type":    confirmedInterestType,
-		"accrual_frequency_code": confirmedAccrualFreq,
-		"reset_type":             confirmedReset,
 	}
 	for k, v := range configBlock {
 		confirmationLeg[k] = v
 	}
-	// Override frequency_id with the bank-confirmed compounding frequency.
-	// This must happen after the configBlock copy so the booking value is replaced.
+	// Override booking-derived values with confirmed values.
+	// Must happen after the configBlock copy so booking values are replaced.
 	confirmationLeg["frequency_id"] = confirmedFrequencyID
+	confirmationLeg["accrual_frequency_code"] = confirmedAccrualFreq
+	confirmationLeg["reset_type"] = confirmedReset
 	if fp := strVal(row["first_payout_date"]); fp != "" {
 		confirmationLeg["first_payout_date"] = fp
 	}
