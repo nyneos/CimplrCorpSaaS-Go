@@ -3,6 +3,7 @@ package counterpartyHub
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"bytes"
 	"context"
@@ -73,10 +74,10 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
 
-		s3Key := ""
+		s3Key, storedFileName := "", ""
 		if s3storage.IsS3UploadEnabled() {
 			folder := s3storage.GetStoragePrefix("master-counterparty-hub")
-			storedFileName := s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
+			storedFileName = s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
@@ -175,6 +176,20 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "id": id, "counterparty_type": cpType})
 		}
 
+		bulkuploadaudit.Record(r.Context(), pgxPool, bulkuploadaudit.Entry{
+			ModuleKey:        "master-counterparty-hub",
+			OriginalFileName: header.Filename,
+			StoredFileName:   storedFileName,
+			UploadS3Key:      s3Key,
+			ContentType:      contentType,
+			FileSize:         int64(len(fileBytes)),
+			TotalRows:        len(rows),
+			InsertedCount:    len(inserted),
+			ErrorCount:       len(errList),
+			Status:           bulkuploadaudit.StatusFor(len(inserted), len(errList)),
+			UploadedBy:       userEmail,
+			UploadedAt:       time.Now().UTC(),
+		})
 		api.RespondWithPayload(w, len(inserted) > 0, "", map[string]interface{}{
 			"inserted_count": len(inserted),
 			"error_count":    len(errList),
@@ -552,10 +567,10 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
 
-		s3Key := ""
+		s3Key, storedFileName := "", ""
 		if s3storage.IsS3UploadEnabled() {
 			folder := s3storage.GetStoragePrefix("master-counterparty-hub-v2")
-			storedFileName := s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
+			storedFileName = s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
@@ -672,6 +687,20 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}(i, row)
 		}
 
+		bulkuploadaudit.Record(r.Context(), pgxPool, bulkuploadaudit.Entry{
+			ModuleKey:        "master-counterparty-hub-v2",
+			OriginalFileName: header.Filename,
+			StoredFileName:   storedFileName,
+			UploadS3Key:      s3Key,
+			ContentType:      contentType,
+			FileSize:         int64(len(fileBytes)),
+			TotalRows:        len(rows),
+			InsertedCount:    len(inserted),
+			ErrorCount:       len(errList),
+			Status:           bulkuploadaudit.StatusFor(len(inserted), len(errList)),
+			UploadedBy:       userEmail,
+			UploadedAt:       time.Now().UTC(),
+		})
 		api.RespondWithPayload(w, len(inserted) > 0, "", map[string]interface{}{
 			"inserted_count": len(inserted),
 			"error_count":    len(errList),

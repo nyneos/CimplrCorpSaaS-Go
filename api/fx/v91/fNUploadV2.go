@@ -438,7 +438,12 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				SELECT EXISTS (
 					SELECT 1
 					FROM public.staging_batches_exposures
-					WHERE file_hash = $1 AND status IN ('processing', 'completed')
+					WHERE file_hash = $1 AND status = 'processing'
+				) OR EXISTS (
+					SELECT 1
+					FROM public.exposure_headers
+					WHERE file_hash = $1
+					  AND COALESCE(is_deleted, false) = false
 				)
 			`, fileHash).Scan(&duplicateExists); err != nil {
 				return nil, 0, http.StatusInternalServerError, fmt.Errorf("failed to check duplicate exposure upload: %w", err)

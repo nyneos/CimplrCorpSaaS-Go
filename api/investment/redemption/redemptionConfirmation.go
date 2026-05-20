@@ -3,11 +3,13 @@ package redemption
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/uploadutil"
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -270,6 +272,19 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		ctx := r.Context()
 		var uploadS3Key string
 		if statementHeader != nil {
+			if err := uploadutil.EnsureUniqueMultipartUpload(ctx, pgxPool, []*multipart.FileHeader{statementHeader}, `
+				SELECT upload_s3_key
+				FROM investment.redemption_confirmation
+				WHERE COALESCE(is_deleted, false) = false
+				  AND COALESCE(upload_s3_key, '') <> ''
+			`); err != nil {
+				if errors.Is(err, uploadutil.ErrFileAlreadyUploaded) {
+					api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
+					return
+				}
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+err.Error())
+				return
+			}
 			key, err := uploadRedemptionConfirmationStatement(ctx, statementHeader, userEmail)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to store AMC statement: "+err.Error())

@@ -40,6 +40,7 @@ func existingExposureUploadKeys(ctx context.Context, db *sql.DB) ([]string, erro
 		SELECT DISTINCT upload_s3_key
 		FROM exposure_headers
 		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
+		  AND COALESCE(is_deleted, false) = false
 	`)
 	if err != nil {
 		return nil, err
@@ -411,6 +412,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 		}
 		defer rows.Close()
 
+		oldValues := auditutil.FetchRowSnapshot(r.Context(), db, "public.exposure_headers", "exposure_header_id", exposureHeaderID)
 		cols, _ := rows.Columns()
 		results := []map[string]interface{}{}
 		for rows.Next() {
@@ -449,7 +451,11 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			constants.ValueSuccess: true,
 			"data":                 results,
 		})
-		auditutil.RecordAction(r.Context(), db, auditutil.TableExposure, "exposure_header_id", exposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", auditutil.Actor(req.UserID), nil, req.Fields)
+		newValues := req.Fields
+		if len(results) > 0 {
+			newValues = results[0]
+		}
+		auditutil.RecordAction(r.Context(), db, auditutil.TableExposure, "exposure_header_id", exposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", auditutil.Actor(req.UserID), oldValues, newValues)
 	}
 }
 
@@ -900,7 +906,10 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 
 		rows, err := db.Query(
 			`UPDATE exposure_headers
-			 SET approval_status = 'REJECTED',
+			 SET approval_status = CASE
+			     	WHEN approval_status = 'PENDING_DELETE_APPROVAL' THEN 'APPROVED'
+			     	ELSE 'REJECTED'
+			     END,
 			     rejected_by = $1,
 			     rejection_comment = $2,
 			     rejected_at = NOW()

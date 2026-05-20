@@ -78,6 +78,7 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 				RETURNING exposure_header_id
 			`
 
+			oldValues := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.exposure_headers", "exposure_header_id", p.ExposureHeaderID)
 			row := pool.QueryRow(ctx, q, dt, requester, p.ExposureHeaderID)
 
 			var id string
@@ -87,7 +88,8 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			updated = append(updated, id)
-			auditutil.RecordActionPGX(ctx, pool, auditutil.TableExposure, "exposure_header_id", id, "EDIT", "PENDING_EDIT_APPROVAL", "", requester, nil, map[string]interface{}{"new_value_date": p.NewValueDate})
+			newValues := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.exposure_headers", "exposure_header_id", id)
+			auditutil.RecordActionPGX(ctx, pool, auditutil.TableExposure, "exposure_header_id", id, "EDIT", "PENDING_EDIT_APPROVAL", "", requester, oldValues, newValues)
 		}
 		api.RespondWithPayload(w, true, "value_date updated successfully", updated)
 	}
@@ -293,7 +295,16 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// q := `UPDATE public.exposure_headers SET approval_status='Rejected', rejection_comment=$1, rejected_by=$2, rejected_at=now(), updated_at=now() WHERE exposure_header_id = ANY($3) RETURNING exposure_header_id`
 		// rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), rejector, req.ExposureIDs)
-		q := `UPDATE public.exposure_headers SET exposure_creation_status='Rejected', updated_at=now() WHERE exposure_header_id = ANY($1) RETURNING exposure_header_id`
+		q := `
+			UPDATE public.exposure_headers
+			SET exposure_creation_status = CASE
+					WHEN exposure_creation_status = 'PENDING_DELETE_APPROVAL' THEN 'Approved'
+					ELSE 'Rejected'
+				END,
+			    updated_at = now()
+			WHERE exposure_header_id = ANY($1)
+			RETURNING exposure_header_id
+		`
 		rows, err := pool.Query(ctx, q, req.ExposureIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())

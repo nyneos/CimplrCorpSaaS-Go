@@ -41,6 +41,7 @@ func existingForwardBookingUploadKeys(ctx context.Context, db *sql.DB) ([]string
 		SELECT DISTINCT upload_s3_key
 		FROM forward_bookings
 		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
+		  AND COALESCE(is_deleted, false) = false
 	`)
 	if err != nil {
 		return nil, err
@@ -78,6 +79,7 @@ func existingForwardConfirmationUploadKeys(ctx context.Context, db *sql.DB) ([]s
 		SELECT DISTINCT confirmation_upload_s3_key
 		FROM forward_bookings
 		WHERE COALESCE(TRIM(confirmation_upload_s3_key), '') <> ''
+		  AND COALESCE(is_deleted, false) = false
 	`)
 	if err != nil {
 		return nil, err

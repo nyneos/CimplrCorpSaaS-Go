@@ -1,0 +1,212 @@
+package allMaster
+
+import (
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
+	"encoding/json"
+	"net/http"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// ─── Shared helpers ────────────────────────────────────────────────────────────
+
+func scanAuditRows(rows pgx.Rows) ([]map[string]interface{}, error) {
+	defer rows.Close()
+	fields := rows.FieldDescriptions()
+	out := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		vals, err := rows.Values()
+		if err != nil {
+			return nil, err
+		}
+		row := make(map[string]interface{}, len(fields))
+		for i, f := range fields {
+			if vals[i] == nil {
+				row[f.Name] = ""
+			} else {
+				row[f.Name] = vals[i]
+			}
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func respondAuditData(w http.ResponseWriter, payload interface{}) {
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+		"success": true,
+		"data":    payload,
+	})
+}
+
+// runAuditHistory executes the standard audit-history query pattern used by all cash masters.
+// auditTable and masterTable are hardcoded constants — no user input.
+func runAuditHistory(
+	w http.ResponseWriter,
+	r *http.Request,
+	pgxPool *pgxpool.Pool,
+	auditTable, masterTable, idCol, nameCol, entityID string,
+) {
+	if api.GetSessionFromCtx(r.Context()) == nil {
+		api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+		return
+	}
+	ctx := r.Context()
+
+	//nolint:gosec // table/column names are all hardcoded constants
+	baseQ := `SELECT
+		a.` + idCol + ` AS entity_id,
+		a.actiontype,
+		a.processing_status,
+		COALESCE(a.reason, '') AS reason,
+		COALESCE(a.requested_by, '') AS requested_by,
+		a.requested_at,
+		COALESCE(a.checker_by, '') AS checker_by,
+		a.checker_at,
+		COALESCE(a.checker_comment, '') AS checker_comment,
+		COALESCE(m.` + nameCol + `, '') AS display_name
+	FROM ` + auditTable + ` a
+	LEFT JOIN ` + masterTable + ` m ON m.` + idCol + ` = a.` + idCol
+
+	var q string
+	var args []interface{}
+	if strings.TrimSpace(entityID) != "" {
+		q = baseQ + ` WHERE a.` + idCol + ` = $1 ORDER BY COALESCE(a.requested_at, '1970-01-01'::timestamp) DESC`
+		args = append(args, entityID)
+	} else {
+		q = baseQ + ` ORDER BY COALESCE(a.requested_at, '1970-01-01'::timestamp) DESC LIMIT 200`
+	}
+
+	rows, err := pgxPool.Query(ctx, q, args...)
+	if err != nil {
+		api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+		return
+	}
+	payload, err := scanAuditRows(rows)
+	if err != nil {
+		api.RespondWithError(w, http.StatusInternalServerError, "failed to read audit history: "+err.Error())
+		return
+	}
+	respondAuditData(w, payload)
+}
+
+// ─── Bank ──────────────────────────────────────────────────────────────────────
+// POST /master/bank/audit-history   { bank_id? }
+
+func GetBankMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			BankID string `json:"bank_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		runAuditHistory(w, r, pgxPool, "auditactionbank", "masterbank", "bank_id", "bank_name", req.BankID)
+	}
+}
+
+// ─── Currency ─────────────────────────────────────────────────────────────────
+// POST /master/currency/audit-history   { currency_id? }
+
+func GetCurrencyMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			CurrencyID string `json:"currency_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		runAuditHistory(w, r, pgxPool, "auditactioncurrency", "mastercurrency", "currency_id", "currency_name", req.CurrencyID)
+	}
+}
+
+// ─── GL Account ───────────────────────────────────────────────────────────────
+// POST /master/glaccount/audit-history   { gl_account_id? }
+
+func GetGLAccountMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			GLAccountID string `json:"gl_account_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		runAuditHistory(w, r, pgxPool, "auditactionglaccount", "masterglaccount", "gl_account_id", "gl_account_name", req.GLAccountID)
+	}
+}
+
+// ─── Cash Flow Category ───────────────────────────────────────────────────────
+// POST /master/cashflow-category/audit-history   { category_id? }
+
+func GetCashFlowCategoryAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			CategoryID string `json:"category_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		runAuditHistory(w, r, pgxPool, "auditactioncashflowcategory", "mastercashflowcategory", "category_id", "category_name", req.CategoryID)
+	}
+}
+
+// ─── Cost Profit Center ───────────────────────────────────────────────────────
+// POST /master/costprofit-center/audit-history   { centre_id? }
+
+func GetCostProfitCenterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			CentreID string `json:"centre_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		runAuditHistory(w, r, pgxPool, "auditactioncostprofitcenter", "mastercostprofitcenter", "centre_id", "centre_name", req.CentreID)
+	}
+}
+
+// ─── Counterparty ─────────────────────────────────────────────────────────────
+// POST /master/counterparty/audit-history   { counterparty_id? }
+
+func GetCounterpartyAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			CounterpartyID string `json:"counterparty_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		runAuditHistory(w, r, pgxPool, "auditactioncounterparty", "mastercounterparty", "counterparty_id", "counterparty_name", req.CounterpartyID)
+	}
+}
+
+// ─── Bank Account ─────────────────────────────────────────────────────────────
+// POST /master/bankaccount/audit-history   { account_id? }
+
+func GetBankAccountAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			AccountID string `json:"account_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		runAuditHistory(w, r, pgxPool, "auditactionbankaccount", "masterbankaccount", "account_id", "account_number", req.AccountID)
+	}
+}
+
+// ─── Payable / Receivable ─────────────────────────────────────────────────────
+// POST /master/payablereceivable/audit-history   { type_id? }
+
+func GetPayableReceivableAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			TypeID string `json:"type_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		runAuditHistory(w, r, pgxPool, "auditactionpayablereceivable", "masterpayablereceivabletype", "type_id", "type_name", req.TypeID)
+	}
+}
+
+// ─── Entity Cash ──────────────────────────────────────────────────────────────
+// POST /master/entitycash/audit-history   { entity_id? }
+
+func GetEntityCashAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			EntityID string `json:"entity_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		runAuditHistory(w, r, pgxPool, "auditactionentity", "masterentitycash", "entity_id", "entity_name", req.EntityID)
+	}
+}

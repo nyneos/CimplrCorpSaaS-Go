@@ -17,6 +17,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/uploadutil"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
@@ -541,6 +542,19 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 				moduleKey = "fd-premature-closure"
 			}
 			if moduleKey != "" {
+				if err := uploadutil.EnsureUniqueMultipartUpload(ctx, pool, s3storage.CollectMultipartFiles(r.MultipartForm, "bank_advice", "bankAdviceDocument", "attachment", "file", "files"), `
+					SELECT upload_s3_key
+					FROM investment.fd_closure_request
+					WHERE COALESCE(is_deleted, false) = false
+					  AND COALESCE(upload_s3_key, '') <> ''
+				`); err != nil {
+					if errors.Is(err, uploadutil.ErrFileAlreadyUploaded) {
+						api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
+						return
+					}
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+err.Error())
+					return
+				}
 				var uploadErr error
 				uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, moduleKey, userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "bank_advice", "bankAdviceDocument", "attachment", "file", "files"))
 				if uploadErr != nil {
