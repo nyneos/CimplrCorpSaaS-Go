@@ -67,6 +67,7 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			LEFT JOIN public.masterbankaccount mba ON t.account_number = mba.account_number
 			LEFT JOIN public.mastercashflowcategory mc ON t.category_id = mc.category_id
 			WHERE (t.category_id IS NULL OR t.category_id = '')
+			  AND COALESCE(bs.is_deleted, false) = false
 			ORDER BY t.transaction_date DESC, t.transaction_id DESC
 		`
 
@@ -192,9 +193,11 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		// Get total count for pagination metadata
 		var totalCount int
 		countQuery := `
-			SELECT COUNT(*) 
+			SELECT COUNT(*)
 			FROM cimplrcorpsaas.bank_statement_transactions t
+			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
 			WHERE (t.category_id IS NULL OR t.category_id = '')
+			  AND COALESCE(bs.is_deleted, false) = false
 		`
 		db.QueryRow(countQuery).Scan(&totalCount)
 

@@ -41,7 +41,7 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 		if req.Status == "" {
 			req.Status = "PENDING"
 		}
-		if req.Limit <= 0 || req.Limit > 500 {
+		if req.Limit <= 0 {
 			req.Limit = 100
 		}
 
@@ -68,7 +68,8 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			    ON bs.bank_statement_id = t.bank_statement_id
 			LEFT JOIN public.masterbankaccount mba ON mba.account_number = bs.account_number
 			LEFT JOIN public.mastercashflowcategory mc ON mc.category_id::text = q.suggested_cat
-			WHERE q.status = $1`
+			WHERE q.status = $1
+			  AND COALESCE(bs.is_deleted, false) = false`
 
 		args := []interface{}{req.Status}
 		n := 2
@@ -141,7 +142,8 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			FROM cimplrcorpsaas.categorization_review_queue q
 			JOIN cimplrcorpsaas.bank_statement_transactions t ON t.transaction_id = q.transaction_id
 			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
-			WHERE q.status = $1`
+			WHERE q.status = $1
+			  AND COALESCE(bs.is_deleted, false) = false`
 		cntArgs := []interface{}{req.Status}
 		cn := 2
 		if req.EntityID != "" {
