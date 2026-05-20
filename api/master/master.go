@@ -49,6 +49,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/v2/costprofit-center/delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.DeleteCostProfitCenter(pgxPool)))
 	mux.Handle("/master/costprofit-center/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectCostProfitCenterActions(pgxPool)))
 	mux.Handle("/master/costprofit-center/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveCostProfitCenterActions(pgxPool)))
+	mux.Handle("/master/costprofit-center/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCostProfitCenterAuditHistory(pgxPool)))
 
 	mux.Handle("/master/costprofit-center/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCostProfitCenterSimple(pgxPool)))
 
@@ -61,6 +62,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/v2/payablereceivable/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectPayableReceivableActions(pgxPool)))
 	mux.Handle("/master/payablereceivable/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadPayableReceivable(pgxPool)))
 	mux.Handle("/master/v2/payablereceivable/approved-active", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetApprovedActivePayableReceivable(pgxPool)))
+	mux.Handle("/master/payablereceivable/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetPayableReceivableAuditHistory(pgxPool)))
 
 	// Counterparty Master routes
 	mux.Handle("/master/v2/counterparty/create", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateCounterparties(pgxPool)))
@@ -72,6 +74,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/v2/counterparty/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCounterparty(pgxPool)))
 
 	mux.Handle("/master/counterparty/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCounterpartySimple(pgxPool)))
+	mux.Handle("/master/counterparty/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCounterpartyAuditHistory(pgxPool)))
 	mux.Handle("/master/counterparty/banks/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCounterpartyBankSimple(pgxPool)))
 
 	mux.Handle("/master/counterparty/approved-active", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetApprovedActiveCounterparties(pgxPool)))
@@ -90,6 +93,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/glaccount/approved-active", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetApprovedActiveGLAccounts(pgxPool)))
 	mux.Handle("/master/v2/glaccount/find-parent-at-level", middlewares.PreValidationMiddleware(pgxPool)(allMaster.FindParentGLAccountAtLevel(pgxPool)))
 	mux.Handle("/master/glaccount/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadGLAccountSimple(pgxPool)))
+	mux.Handle("/master/glaccount/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetGLAccountMasterAuditHistory(pgxPool)))
 
 	// Cash Flow Category Master routes
 	mux.Handle("/master/cashflow-category/delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.DeleteCashFlowCategory(pgxPool)))
@@ -99,6 +103,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/v2/cashflow-category/updatebulk", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UpdateCashFlowCategoryBulk(pgxPool)))
 	mux.Handle("/master/cashflow-category/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectCashFlowCategoryActions(pgxPool)))
 	mux.Handle("/master/cashflow-category/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveCashFlowCategoryActions(pgxPool)))
+	mux.Handle("/master/cashflow-category/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCashFlowCategoryAuditHistory(pgxPool)))
 	mux.Handle("/master/v2/cashflow-category/bulk-create-sync", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateAndSyncCashFlowCategories(pgxPool)))
 	mux.Handle("/master/cashflow-category/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCashFlowCategory(pgxPool)))
 
@@ -110,6 +115,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/currency/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveAuditActions(pgxPool)))
 	mux.Handle("/master/currency/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectAuditActions(pgxPool)))
 	mux.Handle("/master/currency/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkDeleteCurrencyAudit(pgxPool)))
+	mux.Handle("/master/currency/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCurrencyMasterAuditHistory(pgxPool)))
 	mux.Handle("/master/currency/active-approved", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetActiveApprovedCurrencyCodes(pgxPool)))
 
 	// Bank Master routes (pgx-backed)
@@ -121,6 +127,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/bank/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveBankAuditActions(pgxPool)))
 	mux.Handle("/master/bank/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectBankAuditActions(pgxPool)))
 	mux.Handle("/master/bank/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkDeleteBankAudit(pgxPool)))
+	mux.Handle("/master/bank/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetBankMasterAuditHistory(pgxPool)))
 
 	// Bank Account Master routes
 	mux.Handle("/master/bankaccount/create", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateBankAccountMaster(pgxPool)))
@@ -128,6 +135,7 @@ func StartMasterService(db *sql.DB, port string) {
 	// mux.Handle("/master/bankaccount/all", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetAllBankAccountMaster(pgxPool)))
 	mux.Handle("/master/bankaccount/update", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UpdateBankAccountMasterBulk(pgxPool)))
 	mux.Handle("/master/bankaccount/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkDeleteBankAccountAudit(pgxPool)))
+	mux.Handle("/master/bankaccount/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetBankAccountAuditHistory(pgxPool)))
 	mux.Handle("/master/bankaccount/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectBankAccountAuditActions(pgxPool)))
 	mux.Handle("/master/bankaccount/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveBankAccountAuditActions(pgxPool)))
 	mux.Handle("/master/bankaccount/names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetBankNamesWithIDForAccount(pgxPool)))
@@ -158,6 +166,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/entitycash/delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.DeleteCashEntity(pgxPool)))
 	mux.Handle("/master/entitycash/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveCashEntityActions(pgxPool)))
 	mux.Handle("/master/entitycash/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectCashEntityActions(pgxPool)))
+	mux.Handle("/master/entitycash/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetEntityCashAuditHistory(pgxPool)))
 	mux.Handle("/master/entitycash/assigned-names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetAssignedCashEntityNamesWithID(pgxPool)))
 	mux.Handle("/master/entitycash/all-names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCashEntityNamesWithID(pgxPool)))
 
