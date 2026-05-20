@@ -412,6 +412,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 		}
 		defer rows.Close()
 
+		oldValues := auditutil.FetchRowSnapshot(r.Context(), db, "public.exposure_headers", "exposure_header_id", exposureHeaderID)
 		cols, _ := rows.Columns()
 		results := []map[string]interface{}{}
 		for rows.Next() {
@@ -450,7 +451,11 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			constants.ValueSuccess: true,
 			"data":                 results,
 		})
-		auditutil.RecordAction(r.Context(), db, auditutil.TableExposure, "exposure_header_id", exposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", auditutil.Actor(req.UserID), nil, req.Fields)
+		newValues := req.Fields
+		if len(results) > 0 {
+			newValues = results[0]
+		}
+		auditutil.RecordAction(r.Context(), db, auditutil.TableExposure, "exposure_header_id", exposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", auditutil.Actor(req.UserID), oldValues, newValues)
 	}
 }
 
