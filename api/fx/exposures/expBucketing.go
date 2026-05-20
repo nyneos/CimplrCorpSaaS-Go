@@ -242,11 +242,21 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
+		oldBucketing := auditutil.FetchRowSnapshot(r.Context(), db, "public.exposure_bucketing", "exposure_header_id", req.ExposureHeaderID)
+		oldHedging := auditutil.FetchRowSnapshot(r.Context(), db, "public.hedging_proposal", "exposure_header_id", req.ExposureHeaderID)
 		if len(req.BucketingFields) > 0 {
-			auditutil.RecordAction(r.Context(), db, auditutil.TableExposureBucketing, "exposure_header_id", req.ExposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", actor, nil, req.BucketingFields)
+			newValues := any(req.BucketingFields)
+			if bucketingRows, ok := updated["bucketing"]; ok {
+				newValues = bucketingRows
+			}
+			auditutil.RecordAction(r.Context(), db, auditutil.TableExposureBucketing, "exposure_header_id", req.ExposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", actor, oldBucketing, newValues)
 		}
 		if len(req.HedgingFields) > 0 {
-			auditutil.RecordAction(r.Context(), db, auditutil.TableHedgeProposal, "exposure_header_id", req.ExposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", actor, nil, req.HedgingFields)
+			newValues := any(req.HedgingFields)
+			if hedgingRows, ok := updated["hedging"]; ok {
+				newValues = hedgingRows
+			}
+			auditutil.RecordAction(r.Context(), db, auditutil.TableHedgeProposal, "exposure_header_id", req.ExposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", actor, oldHedging, newValues)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{

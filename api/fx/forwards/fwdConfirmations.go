@@ -55,7 +55,7 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Get valid columns for forward_bookings
-		colRows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'forward_bookings'`)
+		colRows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'forward_bookings'`)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch columns"})
@@ -83,6 +83,7 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "No valid fields to update"})
 			return
 		}
+		oldValues := auditutil.FetchRowSnapshot(r.Context(), db, "public.forward_bookings", "system_transaction_id", req.SystemTransactionID)
 		// Build dynamic SET clause
 		keys := make([]string, 0, len(updateFields))
 		values := make([]interface{}, 0, len(updateFields)+1)
@@ -95,38 +96,20 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 			values = append(values, updateFields[k])
 		}
 		values = append(values, req.SystemTransactionID)
-		updateQuery := fmt.Sprintf("UPDATE forward_bookings SET %s WHERE system_transaction_id = $%d RETURNING *", strings.Join(setClause, ", "), len(values))
-		row := db.QueryRow(updateQuery, values...)
-		// Return all columns
-		colRows2, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'forward_bookings'`)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch columns"})
-			return
-		}
-		var allCols []string
-		for colRows2.Next() {
-			var col string
-			if err := colRows2.Scan(&col); err == nil {
-				allCols = append(allCols, col)
-			}
-		}
-		colRows2.Close()
-		vals := make([]interface{}, len(allCols))
-		valPtrs := make([]interface{}, len(allCols))
-		for i := range vals {
-			valPtrs[i] = &vals[i]
-		}
-		if err := row.Scan(valPtrs...); err != nil {
+		updateQuery := fmt.Sprintf("UPDATE forward_bookings SET %s WHERE system_transaction_id = $%d RETURNING row_to_json(forward_bookings)", strings.Join(setClause, ", "), len(values))
+		var updatedRaw []byte
+		if err := db.QueryRow(updateQuery, values...).Scan(&updatedRaw); err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "No matching forward booking found after update"})
 			return
 		}
 		result := map[string]interface{}{}
-		for i, col := range allCols {
-			result[col] = vals[i]
+		if err := json.Unmarshal(updatedRaw, &result); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to parse updated forward booking"})
+			return
 		}
-		auditutil.RecordAction(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", req.SystemTransactionID, "EDIT", "PENDING_EDIT_APPROVAL", "", auditutil.ActorFromContext(r.Context()), nil, req.Fields)
+		auditutil.RecordAction(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", req.SystemTransactionID, "EDIT", "PENDING_EDIT_APPROVAL", "", auditutil.ActorFromContext(r.Context()), oldValues, result)
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": result})

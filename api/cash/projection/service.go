@@ -39,6 +39,7 @@ func existingProjectionUploadKeys(ctx context.Context, pgxPool *pgxpool.Pool) ([
 		SELECT DISTINCT upload_s3_key
 		FROM cimplrcorpsaas.cashflow_proposal
 		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
+		  AND COALESCE(is_deleted, false) = false
 	`)
 	if err != nil {
 		return nil, err

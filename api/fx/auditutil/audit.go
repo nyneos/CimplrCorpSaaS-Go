@@ -125,6 +125,44 @@ func JSONValue(value interface{}) interface{} {
 	return string(bytes)
 }
 
+func FetchRowSnapshot(ctx context.Context, db *sql.DB, tableName, parentColumn, parentID string) map[string]interface{} {
+	parentID = strings.TrimSpace(parentID)
+	if db == nil || tableName == "" || parentColumn == "" || parentID == "" {
+		return nil
+	}
+
+	query := fmt.Sprintf(`SELECT row_to_json(t) FROM (SELECT * FROM %s WHERE %s = $1 LIMIT 1) t`, tableName, parentColumn)
+	var raw []byte
+	if err := db.QueryRowContext(ctx, query, parentID).Scan(&raw); err != nil || len(raw) == 0 {
+		return nil
+	}
+
+	var snapshot map[string]interface{}
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return nil
+	}
+	return snapshot
+}
+
+func FetchRowSnapshotPGX(ctx context.Context, pool *pgxpool.Pool, tableName, parentColumn, parentID string) map[string]interface{} {
+	parentID = strings.TrimSpace(parentID)
+	if pool == nil || tableName == "" || parentColumn == "" || parentID == "" {
+		return nil
+	}
+
+	query := fmt.Sprintf(`SELECT row_to_json(t) FROM (SELECT * FROM %s WHERE %s = $1 LIMIT 1) t`, tableName, parentColumn)
+	var raw []byte
+	if err := pool.QueryRow(ctx, query, parentID).Scan(&raw); err != nil || len(raw) == 0 {
+		return nil
+	}
+
+	var snapshot map[string]interface{}
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return nil
+	}
+	return snapshot
+}
+
 func RecordAction(ctx context.Context, db *sql.DB, tableName, parentColumn, parentID, actionType, status, reason, requestedBy string, oldValues, newValues interface{}) {
 	parentID = strings.TrimSpace(parentID)
 	requestedBy = strings.TrimSpace(requestedBy)

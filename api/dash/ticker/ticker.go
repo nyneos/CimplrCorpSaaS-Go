@@ -165,7 +165,21 @@ func RateBetween(base, target string) (float64, error) {
 // the resulting payload (already ready to encode to JSON), an HTTP status
 // code and an error (nil on success). Call this directly from other handlers.
 func ProcessTicker(req TickerRequest) (interface{}, int, error) {
-	bases := []string{"INR"}
+	// normalize bases
+	base := strings.ToUpper(strings.TrimSpace(req.Base))
+	bases := make([]string, 0)
+	if len(req.Bases) > 0 {
+		for _, b := range req.Bases {
+			if s := strings.ToUpper(strings.TrimSpace(b)); s != "" {
+				bases = append(bases, s)
+			}
+		}
+	} else {
+		if base == "" {
+			base = "INR"
+		}
+		bases = append(bases, base)
+	}
 
 	// target case
 	if req.Target != "" {
@@ -259,7 +273,21 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bases := []string{"INR"}
+	// normalize bases
+	base := strings.ToUpper(strings.TrimSpace(req.Base))
+	bases := make([]string, 0)
+	if len(req.Bases) > 0 {
+		for _, b := range req.Bases {
+			if s := strings.ToUpper(strings.TrimSpace(b)); s != "" {
+				bases = append(bases, s)
+			}
+		}
+	} else {
+		if base == "" {
+			base = "INR"
+		}
+		bases = append(bases, base)
+	}
 
 	// single target case: support multiple bases -> return rate per base for the same target
 	if req.Target != "" {

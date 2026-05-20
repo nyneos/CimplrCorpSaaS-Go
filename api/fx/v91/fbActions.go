@@ -78,6 +78,7 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 				RETURNING exposure_header_id
 			`
 
+			oldValues := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.exposure_headers", "exposure_header_id", p.ExposureHeaderID)
 			row := pool.QueryRow(ctx, q, dt, requester, p.ExposureHeaderID)
 
 			var id string
@@ -87,7 +88,8 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			updated = append(updated, id)
-			auditutil.RecordActionPGX(ctx, pool, auditutil.TableExposure, "exposure_header_id", id, "EDIT", "PENDING_EDIT_APPROVAL", "", requester, nil, map[string]interface{}{"new_value_date": p.NewValueDate})
+			newValues := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.exposure_headers", "exposure_header_id", id)
+			auditutil.RecordActionPGX(ctx, pool, auditutil.TableExposure, "exposure_header_id", id, "EDIT", "PENDING_EDIT_APPROVAL", "", requester, oldValues, newValues)
 		}
 		api.RespondWithPayload(w, true, "value_date updated successfully", updated)
 	}

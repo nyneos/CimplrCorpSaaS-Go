@@ -6,6 +6,7 @@ import (
 	middlewares "CimplrCorpSaas/api/middlewares"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
+	"CimplrCorpSaas/internal/logger"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -15,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"CimplrCorpSaas/internal/logger"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -75,7 +75,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	// 1. Idempotency: Check if file hash already exists
 	var exists bool
-	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1)`, fileHash).Scan(&exists)
+	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1 AND COALESCE(is_deleted, false) = false)`, fileHash).Scan(&exists)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check file hash: %w", err)
 	}
@@ -640,7 +640,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	storedFileName := s3storage.BuildUploadedFilename(uploadFileName, uploadedBy, time.Now().UTC())
 	folder := s3storage.GetStoragePrefix(bankStatementUploadModule)
-	s3Key := s3storage.BuildNamedS3Key(folder,"",storedFileName)
+	s3Key := s3storage.BuildNamedS3Key(folder, "", storedFileName)
 	var uploadS3Key sql.NullString
 	var s3URL string
 	if s3storage.IsS3UploadEnabled() {
@@ -741,7 +741,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 						rows = newRows
 						txnHeaderIdx = i
 						logger.LogInfo("[BANK-UPLOAD-DEBUG] Headless SBI table detected. Inserted synthetic header at row %d", txnHeaderIdx)
-						
+
 						// Fix shifted columns in the data rows for this headless table
 						for r := txnHeaderIdx + 1; r < len(rows); r++ {
 							if len(rows[r]) >= 14 {
@@ -1760,7 +1760,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					if amtStr != "" {
 						var amt float64
 						fmt.Sscanf(amtStr, "%f", &amt)
-						
+
 						crIdx := -1
 						for k, v := range colIdx {
 							lk := strings.ToLower(k)
@@ -1772,7 +1772,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 								crIdx = v
 							}
 						}
-						
+
 						if crIdx >= 0 && crIdx < len(row) {
 							crdr := strings.ToLower(strings.TrimSpace(row[crIdx]))
 							if strings.HasPrefix(crdr, "cr") || strings.Contains(crdr, "credit") || strings.HasPrefix(crdr, "c") {
@@ -2500,13 +2500,21 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		logger.LogInfo("[BANK-UPLOAD-DEBUG] Recalculated balances starting from opening balance %.2f", openingBalance)
 	}
 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin db transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	// Preload existing transactions for this account so we can identify which
 	// rows from the uploaded file are truly new vs already present.
 	existingTxnKeys := make(map[string]bool)
-	rowsExisting, err := db.QueryContext(ctx, `
-			SELECT account_number, transaction_date, description, withdrawal_amount, deposit_amount
-			FROM cimplrcorpsaas.bank_statement_transactions
-			WHERE account_number = $1
+	rowsExisting, err := tx.QueryContext(ctx, `
+			SELECT t.account_number, t.transaction_date, t.description, t.withdrawal_amount, t.deposit_amount
+			FROM cimplrcorpsaas.bank_statement_transactions t
+			JOIN cimplrcorpsaas.bank_statements s ON s.bank_statement_id = t.bank_statement_id
+			WHERE t.account_number = $1
+			  AND COALESCE(s.is_deleted, false) = false
 		`, accountNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing transactions: %w", err)
@@ -2523,12 +2531,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		k := buildTxnKey(acc, txDate, desc, wAmt, dAmt)
 		existingTxnKeys[k] = true
 	}
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin db transaction: %w", err)
-	}
-	defer tx.Rollback()
 
 	var bankStatementID string
 	if !isFiniteNumber(openingBalance) {
@@ -2552,14 +2554,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
     closing_balance,
     upload_s3_key
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-
-ON CONFLICT (file_hash)
-DO UPDATE SET
-    opening_balance = EXCLUDED.opening_balance,
-    closing_balance = EXCLUDED.closing_balance,
-    statement_period_start = EXCLUDED.statement_period_start,
-    statement_period_end = EXCLUDED.statement_period_end,
-    upload_s3_key = EXCLUDED.upload_s3_key
 
 RETURNING bank_statement_id
 		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, uploadS3Key).Scan(&bankStatementID)
