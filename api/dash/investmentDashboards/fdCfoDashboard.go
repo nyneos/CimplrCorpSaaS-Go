@@ -32,6 +32,7 @@ package investmentdashboards
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"strings"
@@ -65,6 +66,487 @@ type fdCfoDashRequest struct {
 func fdRound(v float64, n int) float64 {
 	p := math.Pow(10, float64(n))
 	return math.Round(v*p) / p
+}
+
+type interestTrendRow struct {
+	Period   string  `json:"period"`
+	SortKey  string  `json:"sort_key"`
+	Accrued  float64 `json:"accrued"`
+	Received float64 `json:"received"`
+}
+
+func interestTrendGranularity(granularity string) (dateTrunc, interval string) {
+	switch strings.ToUpper(granularity) {
+	case "DAY", "DAILY":
+		return "day", "30 days"
+	case "YEAR", "YEARLY":
+		return "year", "5 years"
+	case "WEEK", "WEEKLY":
+		return "week", "8 weeks"
+	default:
+		return "month", "12 months"
+	}
+}
+
+// buildInterestTrendSeries buckets accrued vs received interest for the CFO trend chart.
+// Primary source: fd_cashflow_schedule (cashflow.go event types).
+// Fallback: fd_accrual_ledger + fd_interest_receipt (same sources as interest KPIs).
+func buildInterestTrendSeries(ctx context.Context, pool *pgxpool.Pool, entityFilter, granularity string) ([]interestTrendRow, error) {
+	dateTrunc, interval := interestTrendGranularity(granularity)
+	out, err := interestTrendFromCashflow(ctx, pool, entityFilter, dateTrunc, interval)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		out, err = interestTrendFromLedger(ctx, pool, entityFilter, dateTrunc, interval)
+	}
+	return out, err
+}
+
+// interestTrendFromCashflow aggregates ACCRUAL vs payout rows from fd_cashflow_schedule.
+func interestTrendFromCashflow(ctx context.Context, pool *pgxpool.Pool, entityFilter, dateTrunc, interval string) ([]interestTrendRow, error) {
+	entityJoin := `
+		FROM investment.fd_cashflow_schedule cf
+		INNER JOIN investment.fd_master m ON m.fd_id = cf.fd_id AND COALESCE(m.is_deleted, false) = false
+		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+		WHERE COALESCE(cf.is_deleted, false) = false
+		  AND cf.event_date >= CURRENT_DATE - INTERVAL '` + interval + `'
+		  AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)`
+
+	accrualSQL := `
+		SELECT
+		  TO_CHAR(DATE_TRUNC('` + dateTrunc + `', cf.event_date), 'YYYY-MM-DD') AS sort_key,
+		  COALESCE(SUM(COALESCE(cf.interest_accrued, 0)), 0) AS accrued
+		` + entityJoin + `
+		  AND cf.event_type = 'ACCRUAL'
+		GROUP BY 1
+		ORDER BY 1`
+
+	receivedSQL := `
+		SELECT
+		  TO_CHAR(DATE_TRUNC('` + dateTrunc + `', COALESCE(cf.value_date, cf.event_date)), 'YYYY-MM-DD') AS sort_key,
+		  COALESCE(SUM(COALESCE(cf.interest_accrued, 0)), 0) AS received
+		` + entityJoin + `
+		  AND cf.event_type IN ('INTEREST_RECEIPT', 'CAPITALIZATION', 'MATURITY')
+		  AND COALESCE(cf.interest_accrued, 0) <> 0
+		GROUP BY 1
+		ORDER BY 1`
+
+	return mergeInterestTrendBuckets(ctx, pool, entityFilter, dateTrunc, accrualSQL, receivedSQL)
+}
+
+// interestTrendFromLedger mirrors the interest KPI queries (posted accruals + receipts).
+func interestTrendFromLedger(ctx context.Context, pool *pgxpool.Pool, entityFilter, dateTrunc, interval string) ([]interestTrendRow, error) {
+	accrualSQL := `
+		SELECT
+		  TO_CHAR(DATE_TRUNC('` + dateTrunc + `', al.accrual_period_end), 'YYYY-MM-DD') AS sort_key,
+		  COALESCE(SUM(al.period_interest_accrued), 0) AS accrued
+		FROM investment.fd_accrual_ledger al
+		LEFT JOIN investment.fd_master m ON m.fd_id = al.fd_id
+		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+		WHERE COALESCE(al.is_deleted, false) = false
+		  AND al.accrual_period_end >= CURRENT_DATE - INTERVAL '` + interval + `'
+		  AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)
+		GROUP BY 1
+		ORDER BY 1`
+
+	receivedSQL := `
+		SELECT
+		  TO_CHAR(DATE_TRUNC('` + dateTrunc + `', ir.receipt_date), 'YYYY-MM-DD') AS sort_key,
+		  COALESCE(SUM(ir.gross_interest_received), 0) AS received
+		FROM investment.fd_interest_receipt ir
+		WHERE ir.is_deleted = false
+		  AND ir.receipt_date >= CURRENT_DATE - INTERVAL '` + interval + `'
+		  AND ($1::text = '' OR ir.entity_id = $1)
+		GROUP BY 1
+		ORDER BY 1`
+
+	return mergeInterestTrendBuckets(ctx, pool, entityFilter, dateTrunc, accrualSQL, receivedSQL)
+}
+
+func mergeInterestTrendBuckets(ctx context.Context, pool *pgxpool.Pool, entityFilter, dateTrunc, accrualSQL, receivedSQL string) ([]interestTrendRow, error) {
+	monthNames := []string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+	weekIdx := 0
+	accruedMap := map[string]float64{}
+	recvMap := map[string]float64{}
+	seen := map[string]bool{}
+	sortKeys := []string{}
+
+	accrRows, err := pool.Query(ctx, accrualSQL, entityFilter)
+	if err != nil {
+		return nil, err
+	}
+	defer accrRows.Close()
+	for accrRows.Next() {
+		var sortKey string
+		var accrued float64
+		if err := accrRows.Scan(&sortKey, &accrued); err != nil {
+			continue
+		}
+		accruedMap[sortKey] = fdRound(accrued, 2)
+		if !seen[sortKey] {
+			seen[sortKey] = true
+			sortKeys = append(sortKeys, sortKey)
+		}
+	}
+
+	recRows, rerr := pool.Query(ctx, receivedSQL, entityFilter)
+	if rerr != nil {
+		return nil, rerr
+	}
+	defer recRows.Close()
+	for recRows.Next() {
+		var sortKey string
+		var received float64
+		if err := recRows.Scan(&sortKey, &received); err != nil {
+			continue
+		}
+		recvMap[sortKey] = fdRound(received, 2)
+		if !seen[sortKey] {
+			seen[sortKey] = true
+			sortKeys = append(sortKeys, sortKey)
+		}
+	}
+
+	// sort keys chronologically
+	for i := 1; i < len(sortKeys); i++ {
+		for j := i; j > 0 && sortKeys[j-1] > sortKeys[j]; j-- {
+			sortKeys[j-1], sortKeys[j] = sortKeys[j], sortKeys[j-1]
+		}
+	}
+
+	out := make([]interestTrendRow, 0, len(sortKeys))
+	for _, sortKey := range sortKeys {
+		out = append(out, interestTrendRow{
+			Period:   interestTrendPeriodLabel(dateTrunc, sortKey, &weekIdx, monthNames),
+			SortKey:  sortKey,
+			Accrued:  accruedMap[sortKey],
+			Received: recvMap[sortKey],
+		})
+	}
+	return out, nil
+}
+
+func interestTrendPeriodLabel(dateTrunc, periodStart string, weekIdx *int, monthNames []string) string {
+	t, err := time.Parse("2006-01-02", periodStart)
+	if err != nil {
+		return periodStart
+	}
+	switch dateTrunc {
+	case "day":
+		return fmt.Sprintf("%02d %s", t.Day(), monthNames[int(t.Month())-1])
+	case "month":
+		return monthNames[int(t.Month())-1] + " " + t.Format("06")
+	case "year":
+		return t.Format("2006")
+	case "week":
+		*weekIdx++
+		return fmt.Sprintf("Wk %02d (%02d %s)", *weekIdx, t.Day(), monthNames[int(t.Month())-1])
+	default:
+		return periodStart
+	}
+}
+
+// ─── Governance: consolidated approvals + period-closing checklist ───────────
+
+type govFDItem struct {
+	FDID         string  `json:"fd_id"`
+	BookingID    string  `json:"booking_id"`
+	Entity       string  `json:"entity"`
+	EntityID     string  `json:"entity_id"`
+	Bank         string  `json:"bank"`
+	Principal    float64 `json:"principal"`
+	Rate         float64 `json:"rate"`
+	MaturityDate string  `json:"maturity_date"`
+	Status       string  `json:"status"`
+	Action       string  `json:"action"`
+	Source       string  `json:"source"`
+	SourcePage   string  `json:"source_page"`
+	RequestedBy  string  `json:"requested_by"`
+	RequestedAt  string  `json:"requested_at"`
+	Currency     string  `json:"currency"`
+}
+
+type govApprovalRow struct {
+	Type       string      `json:"type"`
+	Category   string      `json:"category"`
+	Status     string      `json:"status"`
+	Source     string      `json:"source"`
+	SourcePage string      `json:"source_page"`
+	Count      int         `json:"count"`
+	Value      float64     `json:"value"`
+	Priority   string      `json:"priority"`
+	Items      []govFDItem `json:"items"`
+}
+
+type govChecklistItem struct {
+	ID           string `json:"id"`
+	Label        string `json:"label"`
+	Category     string `json:"category"`
+	SourcePage   string `json:"source_page"`
+	Done         bool   `json:"done"`
+	Blocker      bool   `json:"blocker"`
+	PendingCount int    `json:"pending_count"`
+	Detail       string `json:"detail,omitempty"`
+}
+
+func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, sql, action, source, sourcePage string) []govFDItem {
+	rows, err := pool.Query(ctx, sql, entityFilter)
+	if err != nil {
+		api.LogError("[CfoDash] governance %s query error: %v", action, err)
+		return []govFDItem{}
+	}
+	defer rows.Close()
+	out := []govFDItem{}
+	for rows.Next() {
+		var f govFDItem
+		if scanErr := rows.Scan(
+			&f.BookingID, &f.FDID, &f.Entity, &f.EntityID, &f.Bank,
+			&f.Principal, &f.Rate, &f.MaturityDate, &f.Status,
+			&f.RequestedBy, &f.RequestedAt,
+		); scanErr != nil {
+			continue
+		}
+		f.Principal = fdRound(f.Principal, 2)
+		f.Rate = fdRound(f.Rate, 4)
+		f.Action = action
+		f.Source = source
+		f.SourcePage = sourcePage
+		f.Currency = "INR"
+		out = append(out, f)
+	}
+	return out
+}
+
+func govSumPrincipal(items []govFDItem) float64 {
+	s := 0.0
+	for _, x := range items {
+		s += x.Principal
+	}
+	return fdRound(s, 2)
+}
+
+func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter string, periodStart time.Time) map[string]interface{} {
+	pendingBookingSQL := `
+		SELECT
+		  COALESCE(b.booking_id,''), COALESCE(m.fd_id,''),
+		  COALESCE(b.entity_name, m.entity_name,''), COALESCE(b.entity_id, m.entity_id,''),
+		  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,''),
+		  COALESCE(b.principal_amount,0), COALESCE(b.interest_rate, m.interest_rate, 0),
+		  COALESCE(TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'), TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
+		  COALESCE(b.booking_status,''),
+		  COALESCE(b.created_by,''), COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD HH24:MI:SS'),'')
+		FROM investment.fd_booking_request b
+		LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
+		WHERE b.is_deleted=false
+		  AND b.booking_status IN ('PENDING_APPROVAL','APPROVAL_PENDING','SUBMITTED')
+		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		ORDER BY b.created_at DESC LIMIT 200`
+
+	pendingEditSQL := `
+		WITH latest_edit AS (
+		  SELECT DISTINCT ON (a.booking_id) a.booking_id, a.processing_status, a.requested_by, a.requested_at
+		  FROM investment.fd_audit_booking_request a
+		  WHERE a.action_type='EDIT'
+		  ORDER BY a.booking_id, a.requested_at DESC
+		)
+		SELECT
+		  COALESCE(b.booking_id,''), COALESCE(m.fd_id,''),
+		  COALESCE(b.entity_name, m.entity_name,''), COALESCE(b.entity_id, m.entity_id,''),
+		  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,''),
+		  COALESCE(b.principal_amount,0), COALESCE(b.interest_rate, m.interest_rate, 0),
+		  COALESCE(TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'), TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
+		  COALESCE(le.processing_status,'PENDING_EDIT_APPROVAL'),
+		  COALESCE(le.requested_by,''), COALESCE(TO_CHAR(le.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')
+		FROM latest_edit le
+		JOIN investment.fd_booking_request b ON b.booking_id = le.booking_id
+		LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
+		WHERE b.is_deleted=false AND le.processing_status='PENDING_EDIT_APPROVAL'
+		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		ORDER BY le.requested_at DESC LIMIT 200`
+
+	pendingDeleteSQL := `
+		WITH latest_del AS (
+		  SELECT DISTINCT ON (a.booking_id) a.booking_id, a.processing_status, a.requested_by, a.requested_at
+		  FROM investment.fd_audit_booking_request a
+		  WHERE a.action_type='DELETE'
+		  ORDER BY a.booking_id, a.requested_at DESC
+		)
+		SELECT
+		  COALESCE(b.booking_id,''), COALESCE(m.fd_id,''),
+		  COALESCE(b.entity_name, m.entity_name,''), COALESCE(b.entity_id, m.entity_id,''),
+		  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,''),
+		  COALESCE(b.principal_amount,0), COALESCE(b.interest_rate, m.interest_rate, 0),
+		  COALESCE(TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'), TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
+		  COALESCE(ld.processing_status,'PENDING_DELETE_APPROVAL'),
+		  COALESCE(ld.requested_by,''), COALESCE(TO_CHAR(ld.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')
+		FROM latest_del ld
+		JOIN investment.fd_booking_request b ON b.booking_id = ld.booking_id
+		LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
+		WHERE b.is_deleted=false AND ld.processing_status='PENDING_DELETE_APPROVAL'
+		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		ORDER BY ld.requested_at DESC LIMIT 200`
+
+	pendingConfirmSQL := `
+		SELECT
+		  COALESCE(b.booking_id,''), COALESCE(m.fd_id,''),
+		  COALESCE(b.entity_name, m.entity_name,''), COALESCE(b.entity_id, m.entity_id,''),
+		  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,''),
+		  COALESCE(b.principal_amount,0), COALESCE(b.interest_rate, m.interest_rate, 0),
+		  COALESCE(TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'), TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
+		  COALESCE(c.confirmation_status,''),
+		  COALESCE(c.created_by,''), COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')
+		FROM investment.fd_confirmation c
+		JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+		LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
+		WHERE COALESCE(c.is_deleted,false)=false AND c.confirmation_status='PENDING_APPROVAL'
+		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		ORDER BY c.created_at DESC LIMIT 200`
+
+	pendingActivationSQL := `
+		SELECT
+		  COALESCE(b.booking_id,''), COALESCE(m.fd_id,''),
+		  COALESCE(b.entity_name, m.entity_name,''), COALESCE(b.entity_id, m.entity_id,''),
+		  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,''),
+		  COALESCE(m.principal_amount, b.principal_amount,0), COALESCE(m.interest_rate, b.interest_rate, 0),
+		  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
+		  COALESCE(m.fd_status,''),
+		  COALESCE(m.created_by,''), COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD HH24:MI:SS'),'')
+		FROM investment.fd_master m
+		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+		WHERE COALESCE(m.is_deleted,false)=false
+		  AND m.fd_status IN ('PENDING_ACTIVATION','APPROVAL_PENDING')
+		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		ORDER BY m.created_at DESC LIMIT 200`
+
+	pendingClosureSQL := `
+		SELECT
+		  COALESCE(b.booking_id,''), COALESCE(m.fd_id, cr.fd_id,''),
+		  COALESCE(m.entity_name, b.entity_name,''), COALESCE(m.entity_id, b.entity_id,''),
+		  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,''),
+		  COALESCE(m.principal_amount, b.principal_amount,0), COALESCE(m.interest_rate, b.interest_rate, 0),
+		  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
+		  COALESCE(cr.closure_status,''),
+		  COALESCE(cr.created_by,''), COALESCE(TO_CHAR(cr.created_at,'YYYY-MM-DD HH24:MI:SS'),'')
+		FROM investment.fd_closure_request cr
+		LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id AND m.is_deleted=false
+		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+		WHERE COALESCE(cr.is_deleted,false)=false AND cr.closure_status='PENDING_APPROVAL'
+		  AND ($1::text='' OR COALESCE(m.entity_id, b.entity_id)=$1)
+		ORDER BY cr.created_at DESC LIMIT 200`
+
+	pendingNew := govFetchItems(ctx, pool, entityFilter, pendingBookingSQL, "PENDING_APPROVAL", "FD Booking", "fd-booking")
+	pendingEdit := govFetchItems(ctx, pool, entityFilter, pendingEditSQL, "PENDING_EDIT_APPROVAL", "FD Booking", "fd-booking")
+	pendingDelete := govFetchItems(ctx, pool, entityFilter, pendingDeleteSQL, "PENDING_DELETE_APPROVAL", "FD Booking", "fd-booking")
+	bookingItems := append(append(pendingNew, pendingEdit...), pendingDelete...)
+	confirmItems := govFetchItems(ctx, pool, entityFilter, pendingConfirmSQL, "PENDING_CONFIRMATION_APPROVAL", "FD Confirmation", "fd-confirmation")
+	activationItems := govFetchItems(ctx, pool, entityFilter, pendingActivationSQL, "PENDING_ACTIVATION_APPROVAL", "FD Activation", "fd-activation")
+	maturityItems := govFetchItems(ctx, pool, entityFilter, pendingClosureSQL, "PENDING_CLOSURE_APPROVAL", "FD Maturity", "fd-maturity")
+
+	var accrualRunCount int64
+	_ = pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM investment.fd_accrual_run
+		WHERE COALESCE(is_deleted,false)=false AND run_status='PENDING_APPROVAL'
+		  AND ($1::text='' OR entity_id=$1)`, entityFilter).Scan(&accrualRunCount)
+
+	var latestRunStatus string
+	_ = pool.QueryRow(ctx, `
+		SELECT COALESCE(run_status,'') FROM investment.fd_accrual_run
+		WHERE COALESCE(is_deleted,false)=false AND ($1::text='' OR entity_id=$1)
+		ORDER BY created_at DESC LIMIT 1`, entityFilter).Scan(&latestRunStatus)
+	accrualPosted := latestRunStatus == "POSTED" || latestRunStatus == "APPROVED"
+
+	var unprocessedMaturities int64
+	_ = pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM investment.fd_master m
+		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+		WHERE m.is_deleted=false AND m.maturity_date <= CURRENT_DATE
+		  AND m.maturity_date >= $2::date
+		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		  AND NOT EXISTS (
+		    SELECT 1 FROM investment.fd_closure_request cr
+		    WHERE cr.fd_id=m.fd_id AND cr.is_deleted=false
+		      AND cr.closure_status IN ('COMPLETED','POSTED','CLOSED'))`,
+		entityFilter, periodStart.Format(constants.DateFormat)).Scan(&unprocessedMaturities)
+
+	bookingPriority := "Low"
+	if len(pendingNew)+len(pendingDelete) > 0 {
+		bookingPriority = "High"
+	} else if len(pendingEdit) > 0 {
+		bookingPriority = "Medium"
+	}
+
+	approvals := []govApprovalRow{
+		{Type: "FD Booking", Category: "FD Booking", Status: "PENDING_APPROVAL",
+			Source: "FD Booking", SourcePage: "fd-booking",
+			Count: len(bookingItems), Value: govSumPrincipal(bookingItems),
+			Priority: bookingPriority, Items: bookingItems},
+		{Type: "FD Confirmation", Category: "FD Confirmation", Status: "PENDING_APPROVAL",
+			Source: "FD Confirmation", SourcePage: "fd-confirmation",
+			Count: len(confirmItems), Value: govSumPrincipal(confirmItems),
+			Priority: "Medium", Items: confirmItems},
+		{Type: "FD Activation", Category: "FD Activation", Status: "PENDING_APPROVAL",
+			Source: "FD Activation", SourcePage: "fd-activation",
+			Count: len(activationItems), Value: govSumPrincipal(activationItems),
+			Priority: "High", Items: activationItems},
+		{Type: "FD Maturity", Category: "FD Maturity", Status: "PENDING_APPROVAL",
+			Source: "FD Maturity", SourcePage: "fd-maturity",
+			Count: len(maturityItems), Value: govSumPrincipal(maturityItems),
+			Priority: "High", Items: maturityItems},
+		{Type: "Accrual Run", Category: "Accrual Run", Status: "PENDING_APPROVAL",
+			Source: "Accrual Engine", SourcePage: "fd-accrual-engine",
+			Count: int(accrualRunCount), Value: 0,
+			Priority: "Medium", Items: []govFDItem{}},
+	}
+
+	maturityPending := len(maturityItems) + int(unprocessedMaturities)
+	accrualPending := int(accrualRunCount)
+	if !accrualPosted && accrualPending == 0 {
+		accrualPending = 1
+	}
+
+	checklist := []govChecklistItem{
+		{ID: "fd_booking", Label: "FD Booking", Category: "FD Booking", SourcePage: "fd-booking",
+			PendingCount: len(bookingItems), Done: len(bookingItems) == 0, Blocker: len(bookingItems) > 0,
+			Detail: formatInt64(int64(len(bookingItems))) + " pending approval(s)"},
+		{ID: "fd_confirmation", Label: "FD Confirmation", Category: "FD Confirmation", SourcePage: "fd-confirmation",
+			PendingCount: len(confirmItems), Done: len(confirmItems) == 0, Blocker: len(confirmItems) > 0,
+			Detail: formatInt64(int64(len(confirmItems))) + " pending confirmation(s)"},
+		{ID: "fd_activation", Label: "FD Activation", Category: "FD Activation", SourcePage: "fd-activation",
+			PendingCount: len(activationItems), Done: len(activationItems) == 0, Blocker: len(activationItems) > 0,
+			Detail: formatInt64(int64(len(activationItems))) + " pending activation(s)"},
+		{ID: "fd_maturity", Label: "FD Maturity", Category: "FD Maturity", SourcePage: "fd-maturity",
+			PendingCount: maturityPending, Done: maturityPending == 0, Blocker: maturityPending > 0,
+			Detail: formatInt64(int64(len(maturityItems))) + " closure approval(s), " + formatInt64(unprocessedMaturities) + " unprocessed maturity"},
+		{ID: "accrual_run", Label: "Accrual Run", Category: "Accrual Run", SourcePage: "fd-accrual-engine",
+			PendingCount: accrualPending, Done: accrualPosted && accrualRunCount == 0, Blocker: !accrualPosted || accrualRunCount > 0,
+			Detail: "Latest run: " + latestRunStatus + "; " + formatInt64(accrualRunCount) + " pending approval(s)"},
+	}
+
+	completed, blockers := int64(0), int64(0)
+	for _, it := range checklist {
+		if it.Done {
+			completed++
+		} else if it.Blocker {
+			blockers++
+		}
+	}
+	total := int64(len(checklist))
+	pct := 0.0
+	if total > 0 {
+		pct = fdRound(float64(completed)/float64(total)*100, 2)
+	}
+
+	return map[string]interface{}{
+		"approvals": approvals,
+		"closing_status": map[string]interface{}{
+			"completed": completed,
+			"total":     total,
+			"pct":       pct,
+			"blockers":  blockers,
+		},
+		"closing_checklist": checklist,
+	}
 }
 
 // periodStartDate returns the start of the requested period (MTD / QTD / YTD).
@@ -731,72 +1213,26 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 7. interest_trend (chart — last 6 months) ─────────────────────────
+		// ── 7. interest_trend (daily / monthly / yearly — cashflow schedule + ledger fallback)
 		run("interest_trend", func(ctx context.Context) (interface{}, error) {
-			// Pull monthly accruals
-			accrualSQL := `
-				SELECT
-				  TO_CHAR(DATE_TRUNC('month', al.accrual_period_end),'Mon') AS month,
-				  TO_CHAR(DATE_TRUNC('month', al.accrual_period_end),'YYYY-MM') AS month_sort,
-				  COALESCE(SUM(al.period_interest_accrued),0) AS accrued
-				FROM investment.fd_accrual_ledger al
-				LEFT JOIN investment.fd_master m ON m.fd_id = al.fd_id
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE COALESCE(al.is_deleted,false)=false
-				  AND al.accrual_period_end >= CURRENT_DATE - INTERVAL '6 months'
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				GROUP BY 1, 2
-				ORDER BY 2`
-			accrRows, err := pool.Query(ctx, accrualSQL, entityFilter)
-			if err != nil {
-				return []interface{}{}, nil // graceful fallback
+			daily, dErr := buildInterestTrendSeries(ctx, pool, entityFilter, "DAY")
+			if dErr != nil {
+				daily = []interestTrendRow{}
 			}
-			defer accrRows.Close()
-
-			type trendRow struct {
-				Month    string  `json:"month"`
-				SortKey  string  `json:"-"`
-				Accrued  float64 `json:"accrued"`
-				Received float64 `json:"received"`
+			monthly, mErr := buildInterestTrendSeries(ctx, pool, entityFilter, "MONTH")
+			if mErr != nil {
+				monthly = []interestTrendRow{}
 			}
-			out := []trendRow{}
-			for accrRows.Next() {
-				var tr trendRow
-				if err := accrRows.Scan(&tr.Month, &tr.SortKey, &tr.Accrued); err != nil {
-					continue
-				}
-				tr.Accrued = fdRound(tr.Accrued, 2)
-				out = append(out, tr)
+			yearly, yErr := buildInterestTrendSeries(ctx, pool, entityFilter, "YEAR")
+			if yErr != nil {
+				yearly = []interestTrendRow{}
 			}
-			accrRows.Close()
-
-			// Pull monthly interest receipts and merge
-			recSQL := `
-				SELECT
-				  TO_CHAR(DATE_TRUNC('month', ir.receipt_date),'Mon') AS month,
-				  TO_CHAR(DATE_TRUNC('month', ir.receipt_date),'YYYY-MM') AS month_sort,
-				  COALESCE(SUM(ir.gross_interest_received),0) AS received
-				FROM investment.fd_interest_receipt ir
-				WHERE ir.is_deleted=false
-				  AND ir.receipt_date >= CURRENT_DATE - INTERVAL '6 months'
-				  AND ($1::text='' OR ir.entity_id=$1)
-				GROUP BY 1, 2
-				ORDER BY 2`
-			recvMap := map[string]float64{}
-			if recRows, rerr := pool.Query(ctx, recSQL, entityFilter); rerr == nil {
-				defer recRows.Close()
-				for recRows.Next() {
-					var mon, sortK string
-					var recv float64
-					if err2 := recRows.Scan(&mon, &sortK, &recv); err2 == nil {
-						recvMap[sortK] = fdRound(recv, 2)
-					}
-				}
-			}
-			for i := range out {
-				out[i].Received = recvMap[out[i].SortKey]
-			}
-			return out, nil
+			return map[string]interface{}{
+				"daily":   daily,
+				"monthly": monthly,
+				"yearly":  yearly,
+				"weekly":  daily, // backward-compatible alias
+			}, nil
 		})
 
 		// ── 8. rate_distribution (chart) ──────────────────────────────────────
@@ -844,393 +1280,11 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return out, nil
 		})
 
-		// ── 9. governance — approvals pending ─────────────────────────────────
-		// Returns the three pending approval categories the CFO actually needs
-		// to action against FDs:
-		//   - Pending Approval        (new bookings awaiting approval)
-		//   - Pending Edit Approval   (booking edits awaiting approval)
-		//   - Pending Delete Approval (booking deletes awaiting approval)
-		// Each category includes its own FD detail rows so the frontend can
-		// open a drawer populated with the right records.
-		run("governance_approvals", func(ctx context.Context) (interface{}, error) {
-			// fdItem now also carries `Source` (which FD page the approval
-			// originated from — Booking, Confirmation, Closure, Accrual…).
-			type fdItem struct {
-				FDID          string  `json:"fd_id"`
-				BookingID     string  `json:"booking_id"`
-				Entity        string  `json:"entity"`
-				EntityID      string  `json:"entity_id"`
-				Bank          string  `json:"bank"`
-				Principal     float64 `json:"principal"`
-				Rate          float64 `json:"rate"`
-				MaturityDate  string  `json:"maturity_date"`
-				Status        string  `json:"status"`
-				Action        string  `json:"action"`
-				Source        string  `json:"source"` // FD page label
-				SourcePage    string  `json:"source_page"` // url-safe page id
-				RequestedBy   string  `json:"requested_by"`
-				RequestedAt   string  `json:"requested_at"`
-				Currency      string  `json:"currency"`
-			}
-
-			// 1. Pending new bookings (booking_status reflects pending approval)
-			pendingBookingSQL := `
-				SELECT
-				  COALESCE(b.booking_id,'')                                AS booking_id,
-				  COALESCE(m.fd_id,'')                                     AS fd_id,
-				  COALESCE(b.entity_name, m.entity_name,'')                AS entity,
-				  COALESCE(b.entity_id, m.entity_id,'')                    AS entity_id,
-				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
-				  COALESCE(b.principal_amount,0)                           AS principal,
-				  COALESCE(b.interest_rate, m.interest_rate, 0)            AS rate,
-				  COALESCE(TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'), TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'') AS maturity_date,
-				  COALESCE(b.booking_status,'')                            AS status,
-				  COALESCE(b.created_by,'')                                AS requested_by,
-				  COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at
-				FROM investment.fd_booking_request b
-				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
-				WHERE b.is_deleted=false
-				  AND b.booking_status IN ('PENDING_APPROVAL','APPROVAL_PENDING','SUBMITTED')
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				ORDER BY b.created_at DESC
-				LIMIT 200`
-
-			// 2. Pending edits — most recent EDIT audit row per booking still pending
-			pendingEditSQL := `
-				WITH latest_edit AS (
-				  SELECT DISTINCT ON (a.booking_id)
-				    a.booking_id, a.processing_status,
-				    a.requested_by, a.requested_at
-				  FROM investment.fd_audit_booking_request a
-				  WHERE a.action_type='EDIT'
-				  ORDER BY a.booking_id, a.requested_at DESC
-				)
-				SELECT
-				  COALESCE(b.booking_id,'')                                AS booking_id,
-				  COALESCE(m.fd_id,'')                                     AS fd_id,
-				  COALESCE(b.entity_name, m.entity_name,'')                AS entity,
-				  COALESCE(b.entity_id, m.entity_id,'')                    AS entity_id,
-				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
-				  COALESCE(b.principal_amount,0)                           AS principal,
-				  COALESCE(b.interest_rate, m.interest_rate, 0)            AS rate,
-				  COALESCE(TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'), TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'') AS maturity_date,
-				  COALESCE(le.processing_status,'PENDING_EDIT_APPROVAL')   AS status,
-				  COALESCE(le.requested_by,'')                             AS requested_by,
-				  COALESCE(TO_CHAR(le.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at
-				FROM latest_edit le
-				JOIN investment.fd_booking_request b ON b.booking_id = le.booking_id
-				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
-				WHERE b.is_deleted=false
-				  AND le.processing_status='PENDING_EDIT_APPROVAL'
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				ORDER BY le.requested_at DESC
-				LIMIT 200`
-
-			// 3. Pending deletes
-			pendingDeleteSQL := `
-				WITH latest_del AS (
-				  SELECT DISTINCT ON (a.booking_id)
-				    a.booking_id, a.processing_status,
-				    a.requested_by, a.requested_at
-				  FROM investment.fd_audit_booking_request a
-				  WHERE a.action_type='DELETE'
-				  ORDER BY a.booking_id, a.requested_at DESC
-				)
-				SELECT
-				  COALESCE(b.booking_id,'')                                AS booking_id,
-				  COALESCE(m.fd_id,'')                                     AS fd_id,
-				  COALESCE(b.entity_name, m.entity_name,'')                AS entity,
-				  COALESCE(b.entity_id, m.entity_id,'')                    AS entity_id,
-				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
-				  COALESCE(b.principal_amount,0)                           AS principal,
-				  COALESCE(b.interest_rate, m.interest_rate, 0)            AS rate,
-				  COALESCE(TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'), TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'') AS maturity_date,
-				  COALESCE(ld.processing_status,'PENDING_DELETE_APPROVAL') AS status,
-				  COALESCE(ld.requested_by,'')                             AS requested_by,
-				  COALESCE(TO_CHAR(ld.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at
-				FROM latest_del ld
-				JOIN investment.fd_booking_request b ON b.booking_id = ld.booking_id
-				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
-				WHERE b.is_deleted=false
-				  AND ld.processing_status='PENDING_DELETE_APPROVAL'
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				ORDER BY ld.requested_at DESC
-				LIMIT 200`
-
-			fetch := func(sql, action, source, sourcePage string) []fdItem {
-				rows, err := pool.Query(ctx, sql, entityFilter)
-				if err != nil {
-					api.LogError("[CfoDash] approvals %s query error: %v", action, err)
-					return []fdItem{}
-				}
-				defer rows.Close()
-				out := []fdItem{}
-				for rows.Next() {
-					var f fdItem
-					if scanErr := rows.Scan(
-						&f.BookingID, &f.FDID, &f.Entity, &f.EntityID, &f.Bank,
-						&f.Principal, &f.Rate, &f.MaturityDate, &f.Status,
-						&f.RequestedBy, &f.RequestedAt,
-					); scanErr != nil {
-						api.LogError("[CfoDash] approvals %s scan error: %v", action, scanErr)
-						continue
-					}
-					f.Principal = fdRound(f.Principal, 2)
-					f.Rate = fdRound(f.Rate, 4)
-					f.Action = action
-					f.Source = source
-					f.SourcePage = sourcePage
-					f.Currency = "INR"
-					out = append(out, f)
-				}
-				return out
-			}
-
-			// 4. Pending bank confirmation captures (Bank Confirmation page)
-			pendingConfirmSQL := `
-				SELECT
-				  COALESCE(b.booking_id,'')                                AS booking_id,
-				  COALESCE(m.fd_id,'')                                     AS fd_id,
-				  COALESCE(b.entity_name, m.entity_name,'')                AS entity,
-				  COALESCE(b.entity_id, m.entity_id,'')                    AS entity_id,
-				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
-				  COALESCE(b.principal_amount,0)                           AS principal,
-				  COALESCE(b.interest_rate, m.interest_rate, 0)            AS rate,
-				  COALESCE(TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'), TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'') AS maturity_date,
-				  COALESCE(c.confirmation_status,'')                       AS status,
-				  COALESCE(c.created_by,'')                                AS requested_by,
-				  COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at
-				FROM investment.fd_confirmation c
-				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
-				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
-				WHERE COALESCE(c.is_deleted,false)=false
-				  AND c.confirmation_status='PENDING_APPROVAL'
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				ORDER BY c.created_at DESC
-				LIMIT 200`
-
-			// 5. Pending closures (FD Maturity / Closure page)
-			pendingClosureSQL := `
-				SELECT
-				  COALESCE(b.booking_id,'')                                AS booking_id,
-				  COALESCE(m.fd_id, cr.fd_id,'')                           AS fd_id,
-				  COALESCE(m.entity_name, b.entity_name,'')                AS entity,
-				  COALESCE(m.entity_id, b.entity_id,'')                    AS entity_id,
-				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
-				  COALESCE(m.principal_amount, b.principal_amount,0)       AS principal,
-				  COALESCE(m.interest_rate, b.interest_rate, 0)            AS rate,
-				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'')       AS maturity_date,
-				  COALESCE(cr.closure_status,'')                           AS status,
-				  COALESCE(cr.created_by,'')                               AS requested_by,
-				  COALESCE(TO_CHAR(cr.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at
-				FROM investment.fd_closure_request cr
-				LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id AND m.is_deleted=false
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE COALESCE(cr.is_deleted,false)=false
-				  AND cr.closure_status='PENDING_APPROVAL'
-				  AND ($1::text='' OR COALESCE(m.entity_id, b.entity_id)=$1)
-				ORDER BY cr.created_at DESC
-				LIMIT 200`
-
-			// 6. Pending accrual run approvals (Accrual Engine page) — these
-			// don't map to a single FD so we expose a single aggregate row.
-			var accrualRunCount int64
-			_ = pool.QueryRow(ctx, `
-				SELECT COUNT(*) FROM investment.fd_accrual_run
-				WHERE COALESCE(is_deleted,false)=false
-				  AND run_status='PENDING_APPROVAL'
-				  AND ($1::text='' OR entity_id=$1)`,
-				entityFilter).Scan(&accrualRunCount)
-
-			pendingNew := fetch(pendingBookingSQL, "PENDING_APPROVAL",
-				"FD Booking", "fd-booking")
-			pendingEdit := fetch(pendingEditSQL, "PENDING_EDIT_APPROVAL",
-				"FD Master (Edit)", "fd-master")
-			pendingDelete := fetch(pendingDeleteSQL, "PENDING_DELETE_APPROVAL",
-				"FD Master (Delete)", "fd-master")
-			pendingConfirm := fetch(pendingConfirmSQL, "PENDING_CONFIRMATION_APPROVAL",
-				"Bank Confirmation", "fd-confirmation")
-			pendingClosure := fetch(pendingClosureSQL, "PENDING_CLOSURE_APPROVAL",
-				"FD Maturity / Closure", "fd-maturity")
-
-			sumValue := func(items []fdItem) float64 {
-				s := 0.0
-				for _, x := range items {
-					s += x.Principal
-				}
-				return fdRound(s, 2)
-			}
-
-			type approvalRow struct {
-				Type       string   `json:"type"`
-				Status     string   `json:"status"`
-				Source     string   `json:"source"`
-				SourcePage string   `json:"source_page"`
-				Count      int      `json:"count"`
-				Value      float64  `json:"value"`
-				Priority   string   `json:"priority"`
-				Items      []fdItem `json:"items"`
-			}
-
-			out := []approvalRow{
-				{Type: "FD Booking — New", Status: "PENDING_APPROVAL",
-					Source: "FD Booking", SourcePage: "fd-booking",
-					Count: len(pendingNew), Value: sumValue(pendingNew),
-					Priority: "High", Items: pendingNew},
-				{Type: "FD Booking — Edit", Status: "PENDING_EDIT_APPROVAL",
-					Source: "FD Master", SourcePage: "fd-master",
-					Count: len(pendingEdit), Value: sumValue(pendingEdit),
-					Priority: "Medium", Items: pendingEdit},
-				{Type: "FD Booking — Delete", Status: "PENDING_DELETE_APPROVAL",
-					Source: "FD Master", SourcePage: "fd-master",
-					Count: len(pendingDelete), Value: sumValue(pendingDelete),
-					Priority: "High", Items: pendingDelete},
-				{Type: "Bank Confirmation", Status: "PENDING_APPROVAL",
-					Source: "Bank Confirmation", SourcePage: "fd-confirmation",
-					Count: len(pendingConfirm), Value: sumValue(pendingConfirm),
-					Priority: "Medium", Items: pendingConfirm},
-				{Type: "FD Closure / Maturity", Status: "PENDING_APPROVAL",
-					Source: "FD Maturity", SourcePage: "fd-maturity",
-					Count: len(pendingClosure), Value: sumValue(pendingClosure),
-					Priority: "High", Items: pendingClosure},
-				{Type: "Accrual Run", Status: "PENDING_APPROVAL",
-					Source: "Accrual Engine", SourcePage: "fd-accrual-engine",
-					Count: int(accrualRunCount), Value: 0,
-					Priority: "Medium", Items: []fdItem{}},
-			}
-			return out, nil
+		// ── 9. governance — approvals + period closing (5 categories) ─────────
+		run("governance", func(ctx context.Context) (interface{}, error) {
+			return buildGovernanceBundle(ctx, pool, entityFilter, periodStart), nil
 		})
 
-		// ── 10. governance — closing_status + closing_checklist (TC-79) ───────
-		// Period Closing Readiness: real, deterministic checklist derived from
-		// the operational state — not just a count of fd_closure_request rows.
-		// `completed/total/pct` reflects how many checklist items are done.
-		run("closing_status", func(ctx context.Context) (interface{}, error) {
-			type ckItem struct {
-				ID       string `json:"id"`
-				Label    string `json:"label"`
-				Done     bool   `json:"done"`
-				Blocker  bool   `json:"blocker"`
-				Detail   string `json:"detail,omitempty"`
-			}
-
-			// 1. Latest accrual run for the period is COMPLETED/POSTED
-			var latestRunStatus string
-			_ = pool.QueryRow(ctx, `
-				SELECT COALESCE(run_status,'')
-				FROM investment.fd_accrual_run
-				WHERE COALESCE(is_deleted,false)=false
-				  AND ($1::text='' OR entity_id=$1)
-				ORDER BY created_at DESC LIMIT 1`,
-				entityFilter).Scan(&latestRunStatus)
-			accrualDone := latestRunStatus == "POSTED" || latestRunStatus == "APPROVED"
-
-			// 2. All bookings approved (no PENDING_APPROVAL/SUBMITTED in period)
-			var pendingBookings int64
-			_ = pool.QueryRow(ctx, `
-				SELECT COUNT(*)
-				FROM investment.fd_booking_request b
-				WHERE b.is_deleted=false
-				  AND b.booking_status IN ('PENDING_APPROVAL','SUBMITTED')
-				  AND b.created_at >= $2::date
-				  AND ($1::text='' OR b.entity_id=$1)`,
-				entityFilter, periodStart.Format(constants.DateFormat)).Scan(&pendingBookings)
-
-			// 3. All matured FDs in period have closure completed
-			var unprocessedMaturities int64
-			_ = pool.QueryRow(ctx, `
-				SELECT COUNT(*)
-				FROM investment.fd_master m
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE m.is_deleted=false
-				  AND m.maturity_date <= CURRENT_DATE
-				  AND m.maturity_date >= $2::date
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				  AND NOT EXISTS (
-				    SELECT 1 FROM investment.fd_closure_request cr
-				    WHERE cr.fd_id=m.fd_id
-				      AND cr.is_deleted=false
-				      AND cr.closure_status IN ('COMPLETED','POSTED','CLOSED')
-				  )`,
-				entityFilter, periodStart.Format(constants.DateFormat)).Scan(&unprocessedMaturities)
-
-			// 4. Confirmations received for active FDs
-			var pendingConfirmations int64
-			_ = pool.QueryRow(ctx, `
-				SELECT COUNT(*)
-				FROM investment.fd_booking_request b
-				WHERE b.is_deleted=false
-				  AND b.booking_status IN ('APPROVED','PENDING_CONFIRMATION')
-				  AND b.created_at >= $2::date
-				  AND ($1::text='' OR b.entity_id=$1)
-				  AND NOT EXISTS (
-				    SELECT 1 FROM investment.fd_master m
-				    WHERE m.booking_id=b.booking_id AND m.is_deleted=false
-				  )`,
-				entityFilter, periodStart.Format(constants.DateFormat)).Scan(&pendingConfirmations)
-
-			// 5. Open accrual exceptions
-			var openExceptions int64
-			_ = pool.QueryRow(ctx, `
-				SELECT COUNT(*) FROM investment.fd_accrual_exception ae
-				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
-				WHERE COALESCE(ae.is_deleted,false)=false
-				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				  AND ($1::text='' OR m.entity_id=$1)`,
-				entityFilter).Scan(&openExceptions)
-
-			// 6. Open variance exceptions
-			var openVariances int64
-			_ = pool.QueryRow(ctx, `
-				SELECT COUNT(*) FROM public.variance_log
-				WHERE module_code LIKE 'FD_%' AND status='OPEN'
-				  AND ($1::text='' OR entity_id=$1)`,
-				entityFilter).Scan(&openVariances)
-
-			// 7. Interest receipts reconciled (no UNMATCHED for the period)
-			var unmatchedReceipts int64
-			_ = pool.QueryRow(ctx, `
-				SELECT COUNT(*)
-				FROM investment.fd_interest_receipt ir
-				WHERE ir.is_deleted=false
-				  AND ir.receipt_date >= $2::date
-				  AND COALESCE(ir.reconciliation_status,'UNMATCHED') IN ('UNMATCHED','PENDING','')
-				  AND ($1::text='' OR ir.entity_id=$1)`,
-				entityFilter, periodStart.Format(constants.DateFormat)).Scan(&unmatchedReceipts)
-
-			items := []ckItem{
-				{ID: "C1", Label: "Latest accrual run posted", Done: accrualDone, Blocker: !accrualDone, Detail: "Status: " + latestRunStatus},
-				{ID: "C2", Label: "All booking approvals processed", Done: pendingBookings == 0, Blocker: pendingBookings > 0, Detail: formatInt64(pendingBookings) + " pending"},
-				{ID: "C3", Label: "Bank confirmations captured for new bookings", Done: pendingConfirmations == 0, Blocker: false, Detail: formatInt64(pendingConfirmations) + " pending"},
-				{ID: "C4", Label: "Matured FDs closed in period", Done: unprocessedMaturities == 0, Blocker: unprocessedMaturities > 0, Detail: formatInt64(unprocessedMaturities) + " unprocessed"},
-				{ID: "C5", Label: "Accrual exceptions resolved", Done: openExceptions == 0, Blocker: openExceptions > 0, Detail: formatInt64(openExceptions) + " open"},
-				{ID: "C6", Label: "Policy variances cleared", Done: openVariances == 0, Blocker: false, Detail: formatInt64(openVariances) + " open"},
-				{ID: "C7", Label: "Interest receipts reconciled", Done: unmatchedReceipts == 0, Blocker: false, Detail: formatInt64(unmatchedReceipts) + " unmatched"},
-			}
-
-			completed := int64(0)
-			blockers := int64(0)
-			for _, it := range items {
-				if it.Done {
-					completed++
-				} else if it.Blocker {
-					blockers++
-				}
-			}
-			total := int64(len(items))
-			pct := 0.0
-			if total > 0 {
-				pct = fdRound(float64(completed)/float64(total)*100, 1)
-			}
-
-			return map[string]interface{}{
-				"completed": completed,
-				"total":     total,
-				"pct":       pct,
-				"blockers":  blockers,
-				"checklist": items,
-			}, nil
-		})
 
 		// ── 11. fd_list ───────────────────────────────────────────────────────
 		// Build dynamic WHERE for optional secondary filters (bank, fd_status,
@@ -1450,13 +1504,19 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return nil
 		}
 
-		// ── extract closing_checklist from closing_status sub-result ────────
-		// The closing_status goroutine returns the checklist embedded in the
-		// same map; surface it under governance for the frontend.
+		// ── extract governance bundle (approvals + closing status + checklist) ─
+		var govApprovals interface{} = []interface{}{}
+		var closingStatus interface{} = map[string]interface{}{}
 		var closingChecklist interface{} = []interface{}{}
-		if csRes, ok := results["closing_status"]; ok && csRes.err == nil {
-			if csMap, ok2 := csRes.data.(map[string]interface{}); ok2 {
-				if cl, ok3 := csMap["checklist"]; ok3 {
+		if govRes, ok := results["governance"]; ok && govRes.err == nil {
+			if govMap, ok2 := govRes.data.(map[string]interface{}); ok2 {
+				if a, ok3 := govMap["approvals"]; ok3 {
+					govApprovals = a
+				}
+				if cs, ok3 := govMap["closing_status"]; ok3 {
+					closingStatus = cs
+				}
+				if cl, ok3 := govMap["closing_checklist"]; ok3 {
 					closingChecklist = cl
 				}
 			}
@@ -1486,8 +1546,8 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"bank_concentration": bankConcChart,
 			},
 			"governance": map[string]interface{}{
-				"approvals":         get("governance_approvals"),
-				"closing_status":    get("closing_status"),
+				"approvals":         govApprovals,
+				"closing_status":    closingStatus,
 				"closing_checklist": closingChecklist,
 			},
 			"fd_list": get("fd_list"),
