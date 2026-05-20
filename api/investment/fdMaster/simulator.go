@@ -718,7 +718,10 @@ type SimulateSummary struct {
 	// Workbook header cells (FD_Scenarios_v7.xlsx C17/C16) — compound formula totals.
 	// Differs from total_interest_accrued which is the sum of schedule CAP rows (ACT/365 path).
 	WorkbookTotalInterest float64 `json:"workbook_total_interest,omitempty"`
-	WorkbookTotalTDS      float64 `json:"workbook_total_tds,omitempty"`
+	// WorkbookTotalTDS equals Σ TDSAmount from CAPITALIZATION rows (per-period rounded TDS,
+	// i.e. Σ TDS Rev L from the schedule), matching what the bank actually deducts and
+	// what appears on Form 16A. For SIMPLE FDs it is computed from WorkbookTotalInterest.
+	WorkbookTotalTDS float64 `json:"workbook_total_tds,omitempty"`
 	// Maturity gross interest (CO MATURITY row G = closing J − original principal).
 	MaturityGrossInterest float64 `json:"maturity_gross_interest,omitempty"`
 }
@@ -983,7 +986,7 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 				tdsPct = tds.TDSRate
 			}
 			if isCompound {
-				enrichCompoundWorkbookSummary(&sum, fd, cfg, firstNonEmpty(capFreq.FrequencyType, capFreq.FrequencyCode), tdsPct)
+				enrichCompoundWorkbookSummary(&sum, fd, cfg, firstNonEmpty(capFreq.FrequencyType, capFreq.FrequencyCode), tdsPct, rawRows)
 			} else {
 				enrichSimpleWorkbookSummary(&sum, fd, cfg, tdsPct)
 			}
@@ -1424,15 +1427,23 @@ func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConf
 }
 
 // enrichCompoundWorkbookSummary fills workbook C17-style header totals on a summary.
-func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, capFreqType string, tdsRatePct float64) {
+// WorkbookTotalInterest uses the closed-form compound formula for Excel parity.
+// WorkbookTotalTDS is sourced from the schedule: Σ TDSAmount across CAPITALIZATION rows,
+// matching the per-period rounded TDS the bank actually deducts (Σ TDS Rev L on Form 16A).
+func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, capFreqType string, tdsRatePct float64, rawRows []CashflowRow) {
 	if fd == nil || s == nil {
 		return
 	}
 	n := capPeriodsPerYear(capFreqType)
 	s.WorkbookTotalInterest = compoundFormulaInterest(fd.PrincipalAmount, fd.InterestRate, n, fd.TenorDays, cfg)
-	if tdsRatePct > 0 && s.WorkbookTotalInterest > 0 {
-		rnd := engRoundingFromCfg(cfg)
-		s.WorkbookTotalTDS = rnd.RoundFinal(s.WorkbookTotalInterest * tdsRatePct / 100.0)
+	if tdsRatePct > 0 {
+		var tdsSum float64
+		for _, row := range rawRows {
+			if row.EventType == "CAPITALIZATION" {
+				tdsSum += row.TDSAmount
+			}
+		}
+		s.WorkbookTotalTDS = tdsSum
 	}
 }
 
