@@ -1256,41 +1256,17 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errors []string
 
 		for _, bID := range req.BookingIDs {
-			// Try engine path first: find the active eye this user can act on.
-			var instanceEyeID string
-			engineErr := pgxPool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, bID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", bID, req.UserID, userEmail, "", approvalengine.ActionApproved, req.Comment)
+			if actionErr != nil {
+				api.LogError("[FDBooking] RecordAction approve failed for booking %s: %v", bID, actionErr)
+				errors = append(errors, bID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
 				// Engine path: RecordAction handles audit stamp + status flip for final eye.
-				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID,
-					ActorUserID:   req.UserID,
-					ActorEmail:    userEmail,
-					ActionType:    approvalengine.ActionApproved,
-					Comment:       req.Comment,
-				}); err != nil {
-					api.LogError("[FDBooking] RecordAction approve failed for booking %s: %v", bID, err)
-					errors = append(errors, bID+": "+err.Error())
-					continue
-				}
 				engineActed++
 				// If the engine fully approved (last eye done), flip booking status.
-				// Check if instance is now APPROVED.
-				var instStatus string
-				_ = pgxPool.QueryRow(ctx, `
-					SELECT i.status FROM uam.approval_instance i
-					JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
-					WHERE ie.instance_eye_id = $1`, instanceEyeID).Scan(&instStatus)
-				if instStatus == "APPROVED" {
+				if actionRes.InstanceStatus == "APPROVED" {
 					if _, execErr := pgxPool.Exec(ctx,
 						`UPDATE investment.fd_booking_request
 						 SET booking_status = 'SENT_TO_BANK'
@@ -1310,15 +1286,10 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				}
 			} else {
-				// No active eye for this user — check if any engine instance exists at all.
-				var anyInstance int
-				_ = pgxPool.QueryRow(ctx, `
-					SELECT COUNT(*) FROM uam.approval_instance
-					WHERE record_id = $1 AND module_code = 'FIXED_DEPOSIT' AND status = 'PENDING'`, bID,
-				).Scan(&anyInstance)
-				if anyInstance > 0 {
-					// Instance exists but this user is not the current eye — don't allow out-of-sequence approve.
-					errors = append(errors, bID+": not your turn in approval sequence")
+				if actionRes.CancelledStale {
+					api.LogInfo("[FDBooking] Cancelled stale approval instance for booking=%s: %s", bID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errors = append(errors, bID+": "+actionRes.Reason)
 					continue
 				}
 				// No matrix/instance — direct stamp (legacy / no-matrix path).
@@ -1415,30 +1386,13 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errors []string
 
 		for _, bID := range req.BookingIDs {
-			var instanceEyeID string
-			engineErr := pgxPool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, bID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
-				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID,
-					ActorUserID:   req.UserID,
-					ActorEmail:    userEmail,
-					ActionType:    approvalengine.ActionRejected,
-					Comment:       req.Comment,
-				}); err != nil {
-					api.LogError("[FDBooking] RecordAction reject failed for booking %s: %v", bID, err)
-					errors = append(errors, bID+": "+err.Error())
-					continue
-				}
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", bID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			if actionErr != nil {
+				api.LogError("[FDBooking] RecordAction reject failed for booking %s: %v", bID, actionErr)
+				errors = append(errors, bID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
 				// finalizeRecord already set processing_status=REJECTED; flip booking status.
 				if _, execErr := pgxPool.Exec(ctx,
 					`UPDATE investment.fd_booking_request SET booking_status='REJECTED'
@@ -1448,11 +1402,10 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				engineActed++
 			} else {
-				var anyInstance int
-				_ = pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM uam.approval_instance
-					WHERE record_id=$1 AND module_code='FIXED_DEPOSIT' AND status='PENDING'`, bID).Scan(&anyInstance)
-				if anyInstance > 0 {
-					errors = append(errors, bID+": not your turn in approval sequence")
+				if actionRes.CancelledStale {
+					api.LogInfo("[FDBooking] Cancelled stale approval instance for booking=%s: %s", bID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errors = append(errors, bID+": "+actionRes.Reason)
 					continue
 				}
 				tx, err := pgxPool.Begin(ctx)

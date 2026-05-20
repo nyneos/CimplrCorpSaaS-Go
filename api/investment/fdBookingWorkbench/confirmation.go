@@ -1639,38 +1639,16 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// Try engine path first.
-			var instanceEyeID string
-			engineErr := pgxPool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, cID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
-				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID,
-					ActorUserID:   req.UserID,
-					ActorEmail:    userEmail,
-					ActionType:    approvalengine.ActionApproved,
-					Comment:       req.Comment,
-				}); err != nil {
-					api.LogError("[FDConfirmation] RecordAction approve failed for %s: %v", cID, err)
-					errors = append(errors, cID+": "+err.Error())
-					continue
-				}
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", cID, req.UserID, userEmail, "", approvalengine.ActionApproved, req.Comment)
+			if actionErr != nil {
+				api.LogError("[FDConfirmation] RecordAction approve failed for %s: %v", cID, actionErr)
+				errors = append(errors, cID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
 				engineActed++
 				// If the instance is now fully APPROVED, flip statuses.
-				var instStatus string
-				_ = pgxPool.QueryRow(ctx, `SELECT i.status FROM uam.approval_instance i
-					JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
-					WHERE ie.instance_eye_id = $1`, instanceEyeID).Scan(&instStatus)
-				if instStatus == "APPROVED" {
+				if actionRes.InstanceStatus == "APPROVED" {
 					if _, execErr := pgxPool.Exec(ctx,
 						`UPDATE investment.fd_confirmation
 						 SET confirmation_status = 'CONFIRMED'
@@ -1713,11 +1691,10 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				}
 			} else {
-				var anyInstance int
-				_ = pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM uam.approval_instance
-					WHERE record_id=$1 AND module_code='FIXED_DEPOSIT' AND status='PENDING'`, cID).Scan(&anyInstance)
-				if anyInstance > 0 {
-					errors = append(errors, cID+": not your turn in approval sequence")
+				if actionRes.CancelledStale {
+					api.LogInfo("[FDConfirmation] Cancelled stale approval instance for confirmation=%s: %s", cID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errors = append(errors, cID+": "+actionRes.Reason)
 					continue
 				}
 				// No matrix — direct stamp.
@@ -1867,30 +1844,13 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			var instanceEyeID string
-			engineErr := pgxPool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, cID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
-				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID,
-					ActorUserID:   req.UserID,
-					ActorEmail:    userEmail,
-					ActionType:    approvalengine.ActionRejected,
-					Comment:       req.Comment,
-				}); err != nil {
-					api.LogError("[FDConfirmation] RecordAction reject failed for %s: %v", cID, err)
-					errors = append(errors, cID+": "+err.Error())
-					continue
-				}
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", cID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			if actionErr != nil {
+				api.LogError("[FDConfirmation] RecordAction reject failed for %s: %v", cID, actionErr)
+				errors = append(errors, cID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
 				// finalizeRecord already set processing_status=REJECTED; flip confirmation status.
 				if _, execErr := pgxPool.Exec(ctx,
 					`UPDATE investment.fd_confirmation SET confirmation_status='REJECTED',
@@ -1907,11 +1867,10 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				engineActed++
 			} else {
-				var anyInstance int
-				_ = pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM uam.approval_instance
-					WHERE record_id=$1 AND module_code='FIXED_DEPOSIT' AND status='PENDING'`, cID).Scan(&anyInstance)
-				if anyInstance > 0 {
-					errors = append(errors, cID+": not your turn in approval sequence")
+				if actionRes.CancelledStale {
+					api.LogInfo("[FDConfirmation] Cancelled stale approval instance for confirmation=%s: %s", cID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errors = append(errors, cID+": "+actionRes.Reason)
 					continue
 				}
 				tx, err := pgxPool.Begin(ctx)

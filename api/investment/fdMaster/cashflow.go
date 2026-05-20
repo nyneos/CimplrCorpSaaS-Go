@@ -11,7 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 type FDRecord struct {
 	FDID                    string
@@ -2898,9 +2899,28 @@ func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
 	if deletedBy == "" {
 		deletedBy = createdBy
 	}
-	_, _ = exec.Exec(ctx, fmt.Sprintf(
-		"UPDATE %s SET is_deleted=true, deleted_at=now(), deleted_by=$2 WHERE %s=$1 AND COALESCE(is_deleted,false)=false",
-		table, fdCol), fdID, deletedBy)
+	if cols["is_deleted"] {
+		setParts := []string{"is_deleted=true"}
+		args := []interface{}{fdID}
+		if cols["deleted_at"] {
+			setParts = append(setParts, "deleted_at=now()")
+		}
+		if cols["deleted_by"] {
+			args = append(args, deletedBy)
+			setParts = append(setParts, fmt.Sprintf("deleted_by=$%d", len(args)))
+		}
+		_, err := exec.Exec(ctx, fmt.Sprintf(
+			"UPDATE %s SET %s WHERE %s=$1 AND COALESCE(is_deleted,false)=false",
+			table, strings.Join(setParts, ", "), fdCol), args...)
+		if err != nil {
+			return fmt.Errorf("soft-delete existing cashflow schedule: %w", err)
+		}
+	} else {
+		_, err := exec.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s=$1", table, fdCol), fdID)
+		if err != nil {
+			return fmt.Errorf("delete existing cashflow schedule: %w", err)
+		}
+	}
 
 	// ── Determine the fixed column list for the batch INSERT ───────────────
 	// We resolve which columns exist ONCE here, then reuse for every row.

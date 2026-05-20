@@ -33,6 +33,29 @@ func nullStr(v string) interface{} {
 	return v
 }
 
+type receiptSchemaQueryer interface {
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}
+
+func fdReceiptTableColumns(ctx context.Context, q receiptSchemaQueryer, tableName string) (map[string]bool, error) {
+	var raw []byte
+	err := q.QueryRow(ctx, `
+		SELECT COALESCE(jsonb_object_agg(column_name, true), '{}'::jsonb)
+		FROM information_schema.columns
+		WHERE table_schema='investment' AND table_name=$1`, tableName).Scan(&raw)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	if len(raw) == 0 {
+		return out, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func nullTime(t time.Time) interface{} {
 	if t.IsZero() {
 		return nil
@@ -705,6 +728,44 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		directReceiptIDs := make([]string, 0, len(req.ReceiptIDs))
+		engineActed := 0
+		var approvalErrors []string
+		for _, receiptID := range req.ReceiptIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", receiptID, req.UserID, userEmail, "", approvalengine.ActionApproved, req.Comment)
+			if actionErr != nil {
+				approvalErrors = append(approvalErrors, receiptID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
+				engineActed++
+				continue
+			}
+			if actionRes.CancelledStale {
+				api.LogInfo("[FDReceipt] Cancelled stale approval instance for receipt=%s: %s", receiptID, actionRes.Reason)
+			} else if actionRes.Reason != "" {
+				approvalErrors = append(approvalErrors, receiptID+": "+actionRes.Reason)
+				continue
+			}
+			directReceiptIDs = append(directReceiptIDs, receiptID)
+		}
+		if len(directReceiptIDs) == 0 {
+			success := engineActed > 0
+			resp := map[string]interface{}{
+				"success":        engineActed > 0,
+				"approved_count": engineActed,
+				"engine_acted":   engineActed,
+				"direct_acted":   0,
+				"errors":         approvalErrors,
+				"checker":        userEmail,
+			}
+			if !success {
+				resp["error"] = api.BulkActionErrorMessage("No receipts were approved", approvalErrors)
+			}
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
@@ -731,7 +792,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			SET processing_status='APPROVED', checker_by=$1,
 			    checker_at=now(), checker_comment=$2
 			FROM latest_pending lp
-			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, req.ReceiptIDs)
+			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, directReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit update failed: "+err.Error())
 			return
@@ -758,7 +819,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			  AND r.receipt_id = ANY($1)
 			  AND la.action_type <> 'DELETE'
 			  AND la.processing_status = 'APPROVED'
-			  AND r.receipt_status='CAPTURED'`, req.ReceiptIDs)
+			  AND r.receipt_status='CAPTURED'`, directReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Receipt update failed: "+err.Error())
 			return
@@ -785,7 +846,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			SET processing_status='APPROVED', checker_by=$1,
 			    checker_at=now(), checker_comment=$2
 			FROM latest_pending_tds lp
-			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, req.ReceiptIDs)
+			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, directReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "TDS audit update failed: "+err.Error())
 			return
@@ -813,7 +874,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			  AND t.receipt_id = ANY($1)
 			  AND lta.action_type <> 'DELETE'
 			  AND lta.processing_status = 'APPROVED'
-			  AND t.tds_status='CAPTURED'`, req.ReceiptIDs)
+			  AND t.tds_status='CAPTURED'`, directReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "TDS status update failed: "+err.Error())
 			return
@@ -826,7 +887,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				SELECT DISTINCT a.receipt_id FROM investment.fd_interest_receipt_audit a
 				WHERE a.receipt_id=ANY($1) AND a.action_type='DELETE'
 				  AND a.processing_status='APPROVED'
-			)`, req.ReceiptIDs)
+			)`, directReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Delete flip failed: "+err.Error())
 			return
@@ -837,41 +898,15 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.LogInfo("[FDReceipt] BulkApprove: %d receipts by %s", len(req.ReceiptIDs), userEmail)
-
-		// Step 4: Engine RecordAction
-		if approvalengine.IsEngineEnabled(ctx, pool, "FIXED_DEPOSIT") {
-			rows, qErr := pool.Query(ctx, `
-				SELECT ie.instance_eye_id, i.record_id
-				FROM uam.approval_instance_eye ie
-				JOIN uam.approval_instance i ON i.instance_id=ie.instance_id
-				WHERE i.record_id=ANY($1)
-				  AND i.module_code='FIXED_DEPOSIT'
-				  AND i.status='PENDING' AND ie.status='ACTIVE'
-				  AND i.is_deleted=false`, req.ReceiptIDs)
-			if qErr == nil {
-				defer rows.Close()
-				for rows.Next() {
-					var eyeID, recordID string
-					if sErr := rows.Scan(&eyeID, &recordID); sErr != nil {
-						continue
-					}
-					if rErr := approvalengine.RecordAction(ctx, pool, approvalengine.ActionRequest{
-						InstanceEyeID: eyeID,
-						ActorEmail:    userEmail,
-						ActionType:    approvalengine.ActionApproved,
-						Comment:       req.Comment,
-					}); rErr != nil {
-						api.LogError("[FDReceipt] RecordAction APPROVED failed eye=%s: %v", eyeID, rErr)
-					}
-				}
-			}
-		}
+		api.LogInfo("[FDReceipt] BulkApprove: direct=%d engine=%d errors=%d by=%s", len(directReceiptIDs), engineActed, len(approvalErrors), userEmail)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":        true,
-			"approved_count": len(req.ReceiptIDs),
+			"approved_count": len(directReceiptIDs) + engineActed,
+			"engine_acted":   engineActed,
+			"direct_acted":   len(directReceiptIDs),
+			"errors":         approvalErrors,
 			"checker":        userEmail,
 		})
 		for _, rID := range req.ReceiptIDs {
@@ -906,6 +941,44 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		directReceiptIDs := make([]string, 0, len(req.ReceiptIDs))
+		engineActed := 0
+		var approvalErrors []string
+		for _, receiptID := range req.ReceiptIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", receiptID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			if actionErr != nil {
+				approvalErrors = append(approvalErrors, receiptID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
+				engineActed++
+				continue
+			}
+			if actionRes.CancelledStale {
+				api.LogInfo("[FDReceipt] Cancelled stale approval instance for receipt=%s: %s", receiptID, actionRes.Reason)
+			} else if actionRes.Reason != "" {
+				approvalErrors = append(approvalErrors, receiptID+": "+actionRes.Reason)
+				continue
+			}
+			directReceiptIDs = append(directReceiptIDs, receiptID)
+		}
+		if len(directReceiptIDs) == 0 {
+			success := engineActed > 0
+			resp := map[string]interface{}{
+				"success":        engineActed > 0,
+				"rejected_count": engineActed,
+				"engine_acted":   engineActed,
+				"direct_acted":   0,
+				"errors":         approvalErrors,
+				"checker":        userEmail,
+			}
+			if !success {
+				resp["error"] = api.BulkActionErrorMessage("No receipts were rejected", approvalErrors)
+			}
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
@@ -931,7 +1004,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			SET processing_status='REJECTED', checker_by=$1,
 			    checker_at=now(), checker_comment=$2
 			FROM latest_pending lp
-			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, req.ReceiptIDs)
+			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, directReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit update failed: "+err.Error())
 			return
@@ -957,7 +1030,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			  AND r.receipt_id = ANY($1)
 			  AND la.action_type <> 'DELETE'
 			  AND la.processing_status = 'REJECTED'
-			  AND r.receipt_status='CAPTURED'`, req.ReceiptIDs)
+			  AND r.receipt_status='CAPTURED'`, directReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Receipt update failed: "+err.Error())
 			return
@@ -968,38 +1041,13 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if approvalengine.IsEngineEnabled(ctx, pool, "FIXED_DEPOSIT") {
-			rows, qErr := pool.Query(ctx, `
-				SELECT ie.instance_eye_id, i.record_id
-				FROM uam.approval_instance_eye ie
-				JOIN uam.approval_instance i ON i.instance_id=ie.instance_id
-				WHERE i.record_id=ANY($1)
-				  AND i.module_code='FIXED_DEPOSIT'
-				  AND i.status='PENDING' AND ie.status='ACTIVE'
-				  AND i.is_deleted=false`, req.ReceiptIDs)
-			if qErr == nil {
-				defer rows.Close()
-				for rows.Next() {
-					var eyeID, recordID string
-					if sErr := rows.Scan(&eyeID, &recordID); sErr != nil {
-						continue
-					}
-					if rErr := approvalengine.RecordAction(ctx, pool, approvalengine.ActionRequest{
-						InstanceEyeID: eyeID,
-						ActorEmail:    userEmail,
-						ActionType:    approvalengine.ActionRejected,
-						Comment:       req.Comment,
-					}); rErr != nil {
-						api.LogError("[FDReceipt] RecordAction REJECTED failed eye=%s: %v", eyeID, rErr)
-					}
-				}
-			}
-		}
-
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":        true,
-			"rejected_count": len(req.ReceiptIDs),
+			"rejected_count": len(directReceiptIDs) + engineActed,
+			"engine_acted":   engineActed,
+			"direct_acted":   len(directReceiptIDs),
+			"errors":         approvalErrors,
 			"checker":        userEmail,
 		})
 		for _, rID := range req.ReceiptIDs {
@@ -2303,11 +2351,11 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 			ExceptionID     string  `json:"exception_id,omitempty"`
 			CreatedAt       string  `json:"created_at"`
 			// Live receipt/TDS posting status (not frozen at reconcile time)
-			ReceiptStatus       string `json:"receipt_status,omitempty"`
-			ReconcileStatus     string `json:"reconcile_status,omitempty"`
-			JournalEntryID      string `json:"journal_entry_id,omitempty"`
-			TDSStatus           string `json:"tds_status,omitempty"`
-			TDSJournalEntryID   string `json:"tds_journal_entry_id,omitempty"`
+			ReceiptStatus     string `json:"receipt_status,omitempty"`
+			ReconcileStatus   string `json:"reconcile_status,omitempty"`
+			JournalEntryID    string `json:"journal_entry_id,omitempty"`
+			TDSStatus         string `json:"tds_status,omitempty"`
+			TDSJournalEntryID string `json:"tds_journal_entry_id,omitempty"`
 			// Detail arrays — same shape as preview
 			Cashflows     []CashflowLine      `json:"cashflows"`
 			AccrualLedger []AccrualLedgerLine `json:"accrual_ledger"`
@@ -3106,14 +3154,29 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
 
-		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_receipt_exception SET
-				exception_status='IN_REVIEW',
-				proposed_resolution=$1, reason_code=$2, resolution_remarks=$3, attachment=$4,
-				reviewed_by=$5, reviewed_at=now(), updated_at=now()
-			WHERE exception_id=$6 AND exception_status IN ('OPEN','IN_REVIEW')`,
-			req.ProposedResolution, req.ReasonCode, req.ResolutionRemarks, nullStr(req.Attachment),
-			userEmail, req.ExceptionID)
+		cols, err := fdReceiptTableColumns(ctx, tx, "fd_receipt_exception")
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "schema lookup failed: "+err.Error())
+			return
+		}
+		sets := []string{"exception_status='IN_REVIEW'", "proposed_resolution=$1", "reason_code=$2", "resolution_remarks=$3", "attachment=$4"}
+		args := []interface{}{req.ProposedResolution, req.ReasonCode, req.ResolutionRemarks, nullStr(req.Attachment)}
+		if cols["reviewed_by"] {
+			args = append(args, userEmail)
+			sets = append(sets, fmt.Sprintf("reviewed_by=$%d", len(args)))
+		}
+		if cols["reviewed_at"] {
+			sets = append(sets, "reviewed_at=now()")
+		}
+		if cols["updated_at"] {
+			sets = append(sets, "updated_at=now()")
+		}
+		args = append(args, req.ExceptionID)
+		updateSQL := fmt.Sprintf(`
+			UPDATE investment.fd_receipt_exception SET %s
+			WHERE exception_id=$%d AND exception_status IN ('OPEN','IN_REVIEW')`,
+			strings.Join(sets, ", "), len(args))
+		_, err = tx.Exec(ctx, updateSQL, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
@@ -3158,9 +3221,18 @@ func ApproveException(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		var exStatus, reviewedBy string
-		err := pool.QueryRow(ctx, `
-			SELECT exception_status, COALESCE(reviewed_by,'')
-			FROM investment.fd_receipt_exception WHERE exception_id=$1 AND is_deleted=false`, req.ExceptionID).Scan(&exStatus, &reviewedBy)
+		cols, colErr := fdReceiptTableColumns(ctx, pool, "fd_receipt_exception")
+		if colErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "schema lookup failed: "+colErr.Error())
+			return
+		}
+		reviewedByExpr := "''"
+		if cols["reviewed_by"] {
+			reviewedByExpr = "COALESCE(reviewed_by,'')"
+		}
+		err := pool.QueryRow(ctx, fmt.Sprintf(`
+			SELECT exception_status, %s
+			FROM investment.fd_receipt_exception WHERE exception_id=$1 AND is_deleted=false`, reviewedByExpr), req.ExceptionID).Scan(&exStatus, &reviewedBy)
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrExceptionNotFound)
 			return
@@ -3181,12 +3253,27 @@ func ApproveException(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
 
-		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_receipt_exception SET
-				exception_status='APPROVED',
-				approved_by=$1, approved_at=now(),
-				checker_comment=$2, updated_at=now()
-			WHERE exception_id=$3 AND exception_status='IN_REVIEW'`, userEmail, req.Comment, req.ExceptionID)
+		sets := []string{"exception_status='APPROVED'"}
+		args := []interface{}{}
+		if cols["approved_by"] {
+			args = append(args, userEmail)
+			sets = append(sets, fmt.Sprintf("approved_by=$%d", len(args)))
+		}
+		if cols["approved_at"] {
+			sets = append(sets, "approved_at=now()")
+		}
+		if cols["checker_comment"] {
+			args = append(args, req.Comment)
+			sets = append(sets, fmt.Sprintf("checker_comment=$%d", len(args)))
+		}
+		if cols["updated_at"] {
+			sets = append(sets, "updated_at=now()")
+		}
+		args = append(args, req.ExceptionID)
+		updateSQL := fmt.Sprintf(`
+			UPDATE investment.fd_receipt_exception SET %s
+			WHERE exception_id=$%d AND exception_status='IN_REVIEW'`, strings.Join(sets, ", "), len(args))
+		_, err = tx.Exec(ctx, updateSQL, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
@@ -3380,13 +3467,39 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 			}(rID, userEmail)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+		resultErrors := make([]string, 0)
+		for _, result := range results {
+			if ok, _ := result["success"].(bool); ok {
+				continue
+			}
+			receiptID, _ := result["receipt_id"].(string)
+			errMsg, _ := result["error"].(string)
+			if strings.TrimSpace(errMsg) == "" {
+				continue
+			}
+			if strings.TrimSpace(receiptID) != "" {
+				resultErrors = append(resultErrors, receiptID+": "+errMsg)
+			} else {
+				resultErrors = append(resultErrors, errMsg)
+			}
+		}
+
+		success := posted > 0
+		resp := map[string]interface{}{
+			"success": success,
 			"posted":  posted,
 			"skipped": skipped,
 			"results": results,
-		})
+		}
+		if len(resultErrors) > 0 {
+			summary := "Some receipt journals were not posted"
+			if posted == 0 {
+				summary = "No receipt journals were posted"
+			}
+			resp["error"] = api.BulkActionErrorMessage(summary, resultErrors)
+		}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(resp)
 	}
 }
 

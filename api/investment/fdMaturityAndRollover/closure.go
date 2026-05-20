@@ -1964,46 +1964,26 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			var instanceEyeID string
-			engineErr := pool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id=i.instance_id AND ie.status='ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id=ie.matrix_eye_id
-				  AND m.member_type='APPROVER' AND m.is_active=true AND m.is_deleted=false
-				  AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id=$2
-				WHERE i.record_id=$1 AND i.module_code='FIXED_DEPOSIT' AND i.status='PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, crID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
-				if err := approvalengine.RecordAction(ctx, pool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID, ActorUserID: req.UserID, ActorEmail: userEmail,
-					ActionType: approvalengine.ActionApproved,
-					Comment:    firstNonEmpty(req.Comment, "Bulk approved FD closure"),
-				}); err != nil {
-					errors = append(errors, crID+": "+err.Error())
-					continue
-				}
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", crID, req.UserID, userEmail, "", approvalengine.ActionApproved, firstNonEmpty(req.Comment, "Bulk approved FD closure"))
+			if actionErr != nil {
+				errors = append(errors, crID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
 				engineActed++ // action recorded; count regardless of whether this is the final eye
-				var instStatus, instTransactionType string
-				_ = pool.QueryRow(ctx, `
-					SELECT i.status, i.transaction_type
-					FROM uam.approval_instance i
-					JOIN uam.approval_instance_eye ie ON ie.instance_id=i.instance_id
-					WHERE ie.instance_eye_id=$1`, instanceEyeID,
-				).Scan(&instStatus, &instTransactionType)
-				if instStatus == "APPROVED" && instTransactionType != "FD_CLOSURE_DELETE" && !isDeleteApproval {
+				var instTransactionType string
+				_ = pool.QueryRow(ctx, `SELECT transaction_type FROM uam.approval_instance WHERE instance_id=$1`, actionRes.InstanceID).Scan(&instTransactionType)
+				if actionRes.InstanceStatus == "APPROVED" && instTransactionType != "FD_CLOSURE_DELETE" && !isDeleteApproval {
 					if postErr := postClosureJournals(ctx, PostClosureJournalsParams{Pool: pool, ClosureRequestID: crID, FDID: fdID, ClosureType: closureType, EntityID: entityID, EntityName: entityName, PrincipalAmt: principalAmt, AccruedInterest: accruedInt, TDSAmt: tdsAmt, PenaltyAmt: penaltyAmt, NetPayout: netPayout, ApprovedBy: req.UserID, ApprovedByEmail: userEmail}); postErr != nil {
 						api.LogError("[FDClosure] postClosureJournals failed for %s: %v", crID, postErr)
 						errors = append(errors, crID+": journal posting failed: "+postErr.Error())
 					}
 				}
 			} else {
-				var anyInstance int
-				_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM uam.approval_instance WHERE record_id=$1 AND module_code='FIXED_DEPOSIT' AND status='PENDING'`, crID).Scan(&anyInstance)
-				if anyInstance > 0 {
-					errors = append(errors, crID+": not your turn in approval sequence")
+				if actionRes.CancelledStale {
+					api.LogInfo("[FDClosure] Cancelled stale approval instance for closure=%s: %s", crID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errors = append(errors, crID+": "+actionRes.Reason)
 					continue
 				}
 				if isDeleteApproval {
@@ -2032,25 +2012,17 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 						errors = append(errors, crID+": delete approval instance created but linking failed: "+updErr.Error())
 						continue
 					}
-					if retryErr := pool.QueryRow(ctx, `
-						SELECT ie.instance_eye_id
-						FROM uam.approval_instance i
-						JOIN uam.approval_instance_eye ie ON ie.instance_id=i.instance_id AND ie.status='ACTIVE'
-						JOIN uam.approval_matrix_eye_member m ON m.eye_id=ie.matrix_eye_id
-						  AND m.member_type='APPROVER' AND m.is_active=true AND m.is_deleted=false
-						  AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id=$2
-						WHERE i.record_id=$1 AND i.module_code='FIXED_DEPOSIT' AND i.status='PENDING'
-						ORDER BY ie.position ASC LIMIT 1`, crID, req.UserID,
-					).Scan(&instanceEyeID); retryErr != nil || instanceEyeID == "" {
-						errors = append(errors, crID+": delete approval instance recreated, but it is not your turn in approval sequence")
+					retryRes, retryErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", crID, req.UserID, userEmail, "", approvalengine.ActionApproved, firstNonEmpty(req.Comment, "Bulk approved FD closure delete"))
+					if retryErr != nil {
+						errors = append(errors, crID+": "+retryErr.Error())
 						continue
 					}
-					if err := approvalengine.RecordAction(ctx, pool, approvalengine.ActionRequest{
-						InstanceEyeID: instanceEyeID, ActorUserID: req.UserID, ActorEmail: userEmail,
-						ActionType: approvalengine.ActionApproved,
-						Comment:    firstNonEmpty(req.Comment, "Bulk approved FD closure delete"),
-					}); err != nil {
-						errors = append(errors, crID+": "+err.Error())
+					if !retryRes.Acted {
+						reason := retryRes.Reason
+						if reason == "" {
+							reason = "delete approval instance recreated, but it is not your turn in approval sequence"
+						}
+						errors = append(errors, crID+": "+reason)
 						continue
 					}
 					engineActed++
@@ -2128,32 +2100,23 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			var instanceEyeID string
-			engineErr := pool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id=i.instance_id AND ie.status='ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id=ie.matrix_eye_id
-				  AND m.member_type='APPROVER' AND m.is_active=true AND m.is_deleted=false
-				  AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id=$2
-				WHERE i.record_id=$1 AND i.module_code='FIXED_DEPOSIT' AND i.status='PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, crID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", crID, req.UserID, userEmail, "", approvalengine.ActionRejected, firstNonEmpty(req.Comment, "Bulk rejected FD closure"))
+			if actionErr != nil {
+				errors = append(errors, crID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
 				// Engine instance found — RecordAction will trigger finalizeRecord which:
 				//   1. Updates processing_status → REJECTED on the audit table
 				//   2. Fires postFinalizeHook which sets closure_status='REJECTED' + clears fd_master
-				if err := approvalengine.RecordAction(ctx, pool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID, ActorUserID: req.UserID, ActorEmail: userEmail,
-					ActionType: approvalengine.ActionRejected,
-					Comment:    firstNonEmpty(req.Comment, "Bulk rejected FD closure"),
-				}); err != nil {
-					errors = append(errors, crID+": "+err.Error())
-					continue
-				}
 				acted++
 			} else {
+				if actionRes.CancelledStale {
+					api.LogInfo("[FDClosure] Cancelled stale approval instance for closure=%s: %s", crID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errors = append(errors, crID+": "+actionRes.Reason)
+					continue
+				}
 				// No engine instance — handle rejection directly with audit row.
 				tx, txErr := pool.Begin(ctx)
 				if txErr != nil {

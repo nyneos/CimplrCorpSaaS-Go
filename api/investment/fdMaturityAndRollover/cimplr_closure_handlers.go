@@ -1789,31 +1789,19 @@ func cimplrRejectConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string,
 }
 
 func cimplrActOnApproval(ctx context.Context, pool *pgxpool.Pool, recordID, userID, userEmail, action, comment string) (bool, error) {
-	var eyeID string
-	err := pool.QueryRow(ctx, `
-		SELECT ie.instance_eye_id
-		FROM uam.approval_instance i
-		JOIN uam.approval_instance_eye ie ON ie.instance_id=i.instance_id AND ie.status='ACTIVE'
-		JOIN uam.approval_matrix_eye_member m ON m.eye_id=ie.matrix_eye_id
-		  AND m.member_type='APPROVER' AND m.is_active=true AND m.is_deleted=false
-		  AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id=$2
-		WHERE i.record_id=$1 AND i.module_code=$3 AND i.status='PENDING'
-		ORDER BY ie.position ASC LIMIT 1`,
-		recordID, userID, cimplrClosureModule,
-	).Scan(&eyeID)
-	if err == nil && eyeID != "" {
-		return true, approvalengine.RecordAction(ctx, pool, approvalengine.ActionRequest{
-			InstanceEyeID: eyeID,
-			ActorUserID:   userID,
-			ActorEmail:    userEmail,
-			ActionType:    action,
-			Comment:       comment,
-		})
+	res, err := approvalengine.ActOnPendingOrDiagnose(ctx, pool, cimplrClosureModule, recordID, userID, userEmail, "", action, comment)
+	if err != nil {
+		return false, err
 	}
-	var pending int
-	_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM uam.approval_instance WHERE record_id=$1 AND module_code=$2 AND status='PENDING'`, recordID, cimplrClosureModule).Scan(&pending)
-	if pending > 0 {
-		return false, fmt.Errorf("not your turn in approval sequence")
+	if res.Acted {
+		return true, nil
+	}
+	if res.CancelledStale {
+		api.LogInfo("[CimplrClosure] Cancelled stale approval instance for record=%s: %s", recordID, res.Reason)
+		return false, nil
+	}
+	if res.Reason != "" {
+		return false, fmt.Errorf("%s", res.Reason)
 	}
 	return false, nil
 }
