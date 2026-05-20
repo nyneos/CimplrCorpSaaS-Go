@@ -40,9 +40,13 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 	// Maturity Summary — pivot-table view of all FDs
 	mux.Handle("/investment/fd/maturity/summary",
 		mid(http.HandlerFunc(GetFDMaturitySummary(pool))))
+	mux.Handle("/investment/fd/closure/maturity-summary",
+		mid(http.HandlerFunc(CimplrMaturitySummary(pool))))
 
 	mux.Handle("/investment/fd/closure/audit",
 		mid(http.HandlerFunc(GetClosureAuditHandler(pool))))
+	mux.Handle("/investment/fd/closure/cimplr/audit",
+		mid(http.HandlerFunc(CimplrClosureAudit(pool))))
 
 	// New cimplr-schema Maturity & Rollover workflow.
 	mux.Handle("/investment/fd/closure/initiate/validate",
@@ -90,4 +94,21 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 		mid(http.HandlerFunc(CimplrConfirmAll(pool))))
 	mux.Handle("/investment/fd/closure/confirm/approved-active",
 		mid(http.HandlerFunc(CimplrConfirmApprovedActive(pool))))
+
+	mux.Handle("/investment/fd/closure/premature/validate",
+		mid(http.HandlerFunc(CimplrPrematureValidate(pool))))
+	mux.Handle("/investment/fd/closure/premature/create",
+		mid(http.HandlerFunc(CimplrPrematureCreate(pool))))
+	mux.Handle("/investment/fd/closure/premature/detail",
+		mid(http.HandlerFunc(CimplrConfirmDetail(pool))))
+	mux.Handle("/investment/fd/closure/premature/upload",
+		mid(http.HandlerFunc(CimplrClosureUpload(pool))))
+	mux.Handle("/investment/fd/closure/premature/download",
+		mid(http.HandlerFunc(CimplrClosureDownload(pool))))
+	mux.Handle("/investment/fd/closure/premature/approve",
+		mid(http.HandlerFunc(CimplrConfirmApprove(pool))))
+	mux.Handle("/investment/fd/closure/premature/reject",
+		mid(http.HandlerFunc(CimplrConfirmReject(pool))))
+	mux.Handle("/investment/fd/closure/premature/all",
+		mid(http.HandlerFunc(CimplrPrematureAll(pool))))
 }

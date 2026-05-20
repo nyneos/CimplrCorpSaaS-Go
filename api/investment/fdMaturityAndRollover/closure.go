@@ -142,6 +142,11 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			  WHERE ncr.fd_id = m.fd_id
 			    AND ncr.is_deleted = false
 			)`,
+			`NOT EXISTS (
+			  SELECT 1 FROM cimplr.fd_closure_confirm ncc
+			  WHERE ncc.fd_id = m.fd_id
+			    AND ncc.is_deleted = false
+			)`,
 		}
 		args := []interface{}{}
 		argIdx := 1
@@ -273,6 +278,11 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			    SELECT 1 FROM cimplr.fd_closure_initiate ncr
 			    WHERE ncr.fd_id = m.fd_id
 			      AND ncr.is_deleted = false
+			  )
+			  AND NOT EXISTS (
+			    SELECT 1 FROM cimplr.fd_closure_confirm ncc
+			    WHERE ncc.fd_id = m.fd_id
+			      AND ncc.is_deleted = false
 			  )`
 			var totalAll int
 			_ = pool.QueryRow(ctx,
