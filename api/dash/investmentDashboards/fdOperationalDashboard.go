@@ -295,6 +295,10 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// Total/impact figures use COUNT(*)/SUM aggregated separately so the
 		// KPI matches the table even when the row list is paginated.
 		run("exceptions", func(ctx context.Context) (interface{}, error) {
+			// Row shape is aligned with the variance engine
+			// (see CimplrCorpSaaS-Go/api/varianceengine/engine.go) so the UI can render
+			// engine-native fields (variance_type, priority, expected vs actual, system_comment)
+			// directly from this payload.
 			type excRow struct {
 				ExceptionID    string  `json:"exception_id"`
 				FDRef          string  `json:"fd_ref"`
@@ -308,6 +312,17 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				ReasonRequired bool    `json:"reason_required"`
 				FieldName      string  `json:"field_name,omitempty"`
 				CreatedAt      string  `json:"created_at,omitempty"`
+
+				// Variance-engine native fields
+				VarianceID    string  `json:"variance_id,omitempty"`
+				VarianceType  string  `json:"variance_type,omitempty"`
+				Priority      string  `json:"priority,omitempty"`
+				ExpectedValue string  `json:"expected_value,omitempty"`
+				ActualValue   string  `json:"actual_value,omitempty"`
+				VarianceDelta float64 `json:"variance_delta,omitempty"`
+				SystemComment string  `json:"system_comment,omitempty"`
+				ModuleCode    string  `json:"module_code,omitempty"`
+				IsException   bool    `json:"is_exception,omitempty"`
 			}
 
 			out := []excRow{}
@@ -343,6 +358,9 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 						er.VarianceAmount = fdRound(er.VarianceAmount, 2)
 						er.VariancePct = fdRound(er.VariancePct, 2)
 						er.Source = "accrual_exception"
+						er.VarianceType = "AMOUNT"
+						er.VarianceDelta = er.VarianceAmount
+						er.Priority = "MEDIUM"
 						totalImpact += er.VarianceAmount
 						out = append(out, er)
 					}
@@ -352,17 +370,24 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[OperationalDash] exceptions accrual query error: %v", err)
 			}
 
-			// (b) variance engine entries (open) — joined to fd_master where possible
+			// (b) variance engine entries (OPEN) — joined to fd_master where possible.
+			// Pulls the full variance-engine row so the UI can present the same
+			// expected/actual/delta context the engine writes into public.variance_log.
 			varRows, vErr := pool.Query(ctx, `
 				SELECT
-				  COALESCE(vl.variance_id,'')                                  AS exception_id,
+				  COALESCE(vl.variance_id,'')                                  AS variance_id,
 				  COALESCE(vl.record_id,'')                                    AS fd_ref,
 				  COALESCE(m.bank_name, m.bank_id,'')                          AS bank,
 				  COALESCE(b.entity_name, m.entity_name, vl.entity_id,'')      AS entity,
 				  COALESCE(ABS(vl.variance_delta),0)                           AS variance_amount,
-				  0::numeric                                                   AS variance_pct,
+				  COALESCE(vl.variance_delta,0)                                AS variance_delta,
 				  COALESCE(NULLIF(vl.variance_type,''),'OTHER')                AS variance_type,
 				  COALESCE(vl.field_name,'')                                   AS field_name,
+				  COALESCE(NULLIF(vl.priority,''),'MEDIUM')                    AS priority,
+				  COALESCE(vl.expected_value,'')                               AS expected_value,
+				  COALESCE(vl.actual_value,'')                                 AS actual_value,
+				  COALESCE(vl.system_comment,'')                               AS system_comment,
+				  COALESCE(vl.module_code,'')                                  AS module_code,
 				  COALESCE(vl.status,'OPEN')                                   AS status,
 				  COALESCE(vl.is_exception,false)                              AS reason_required,
 				  COALESCE(TO_CHAR(vl.created_at,'YYYY-MM-DD HH24:MI:SS'),'')  AS created_at
@@ -377,23 +402,28 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			if vErr == nil {
 				for varRows.Next() {
 					var er excRow
-					var vType string
-					if scanErr := varRows.Scan(&er.ExceptionID, &er.FDRef, &er.Bank, &er.Entity,
-						&er.VarianceAmount, &er.VariancePct, &vType, &er.FieldName,
-						&er.Status, &er.ReasonRequired, &er.CreatedAt); scanErr == nil {
+					if scanErr := varRows.Scan(&er.VarianceID, &er.FDRef, &er.Bank, &er.Entity,
+						&er.VarianceAmount, &er.VarianceDelta, &er.VarianceType, &er.FieldName,
+						&er.Priority, &er.ExpectedValue, &er.ActualValue, &er.SystemComment,
+						&er.ModuleCode, &er.Status, &er.ReasonRequired, &er.CreatedAt); scanErr == nil {
+						er.ExceptionID = er.VarianceID
 						er.VarianceAmount = fdRound(er.VarianceAmount, 2)
-						er.ExceptionType = "Variance: " + vType
+						er.VarianceDelta = fdRound(er.VarianceDelta, 4)
+						er.ExceptionType = "Variance: " + er.VarianceType
 						if er.FieldName != "" {
 							er.ExceptionType += " (" + er.FieldName + ")"
 						}
 						er.Source = "variance_log"
-						if vType == "AMOUNT" {
+						er.IsException = er.ReasonRequired
+						if er.VarianceType == "AMOUNT" {
 							totalImpact += er.VarianceAmount
 						}
 						out = append(out, er)
 					}
 				}
 				varRows.Close()
+			} else {
+				api.LogError("[OperationalDash] exceptions variance_log query error: %v", vErr)
 			}
 
 			// True totals (independent of LIMIT) for KPI accuracy (TC-145)
