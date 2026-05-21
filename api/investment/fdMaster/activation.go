@@ -34,6 +34,10 @@ type InsertFDAuditParams struct {
 	Reason           string
 }
 
+// cashflowAuditStatusPending must match investment.fd_audit_cashflow_schedule
+// check constraint fd_audit_cashflow_status_chk (not fd_master PENDING_ACTIVATION).
+const cashflowAuditStatusPending = "PENDING_APPROVAL"
+
 type activateFDRequest struct {
 	UserID         string `json:"user_id"`
 	ConfirmationID string `json:"confirmation_id"`
@@ -230,11 +234,20 @@ func getFDMasterError(err error, contextMessage string) (string, int) {
 	if strings.Contains(errStr, "fd_master_status_chk") {
 		return "Invalid FD master status.", http.StatusOK
 	}
+	if strings.Contains(errStr, "fd_audit_cashflow_status_chk") {
+		return "Invalid cashflow audit status. Contact support if activation was just deployed.", http.StatusInternalServerError
+	}
 	if strings.Contains(errStr, "fd_master_fdno_not_empty") {
 		return "FD number / certificate number is required.", http.StatusOK
 	}
 	if strings.Contains(errStr, "duplicate key") || strings.Contains(errStr, "unique constraint") {
 		return "Duplicate entry detected. Please check for existing records.", http.StatusConflict
+	}
+	if strings.Contains(errStr, "25p02") || strings.Contains(errStr, "current transaction is aborted") {
+		return contextMessage + ": a previous database step in this activation failed. Please retry; if it persists, check server logs for the first SQL error.", http.StatusInternalServerError
+	}
+	if strings.Contains(errStr, "no unique or exclusion constraint") && strings.Contains(errStr, "on conflict") {
+		return "Cashflow audit setup failed (database constraint configuration). Please contact support.", http.StatusInternalServerError
 	}
 	if strings.Contains(errStr, "invalid") || strings.Contains(errStr, "required") {
 		return err.Error(), http.StatusBadRequest
@@ -494,11 +507,45 @@ func updateFDMasterStatusBy(ctx context.Context, exec queryExecutor, fdIDs []str
 	return err
 }
 
-// insertCashflowAuditRowsPending writes one PENDING_ACTIVATION audit entry per cashflow row
+func cashflowAuditScheduleTableExists(ctx context.Context, exec queryExecutor) bool {
+	var exists bool
+	_ = exec.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = 'investment' AND table_name = 'fd_audit_cashflow_schedule'
+		)`).Scan(&exists)
+	return exists
+}
+
+func updateFDMasterCashflowGenerated(ctx context.Context, exec queryExecutor, fdID string) error {
+	masterCols, err := loadTableColumns(ctx, exec, "investment", "fd_master")
+	if err != nil {
+		return err
+	}
+	if !masterCols["cashflow_generated"] {
+		return nil
+	}
+	setParts := []string{"cashflow_generated = true"}
+	if masterCols["cashflow_generated_at"] {
+		setParts = append(setParts, "cashflow_generated_at = now()")
+	}
+	keyCol := pickFirstExistingColumn(masterCols, "fd_id", "master_id")
+	if keyCol == "" {
+		return fmt.Errorf("fd_master key column not found")
+	}
+	q := fmt.Sprintf("UPDATE investment.fd_master SET %s WHERE %s = $1", strings.Join(setParts, ", "), keyCol)
+	_, err = exec.Exec(ctx, q, fdID)
+	return err
+}
+
+// insertCashflowAuditRowsPending writes one pending-approval audit entry per cashflow row
 // into fd_audit_cashflow_schedule. Called at FD activation to seed the audit trail.
 // Status is promoted to APPROVED later via markCashflowAuditApproved when the checker
 // approves the FD activation request (see BulkApproveActivation).
 func insertCashflowAuditRowsPending(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow, createdBy string) error {
+	if !cashflowAuditScheduleTableExists(ctx, exec) {
+		return nil
+	}
 	table := resolveFirstExistingTable(ctx, exec, []string{
 		constants.QuerryCashflowSchedule,
 		constants.QuerryCashflow,
@@ -551,6 +598,22 @@ func insertCashflowAuditRowsPending(ctx context.Context, exec queryExecutor, fdI
 
 	reason := "System generated at FD activation"
 	for _, cf := range cfList {
+		var already bool
+		if err := exec.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM investment.fd_audit_cashflow_schedule
+				WHERE cashflow_id = $1::text
+				  AND fd_id = $2::text
+				  AND action_type = 'CREATE'
+				  AND processing_status = $3::text
+			)`,
+			cf.id, fdID, cashflowAuditStatusPending,
+		).Scan(&already); err != nil {
+			return fmt.Errorf("cashflow audit lookup for %s: %w", cf.id, err)
+		}
+		if already {
+			continue
+		}
 		_, insErr := exec.Exec(ctx, `
 			INSERT INTO investment.fd_audit_cashflow_schedule (
 				cashflow_id, fd_id,
@@ -558,21 +621,21 @@ func insertCashflowAuditRowsPending(ctx context.Context, exec queryExecutor, fdI
 				reason,
 				requested_by, requested_at
 			) VALUES (
-				$1, $2,
-				'CREATE', 'PENDING_ACTIVATION',
-				$3,
-				$4, now()
-			) ON CONFLICT DO NOTHING`,
-			cf.id, fdID, reason, createdBy,
+				$1::text, $2::text,
+				'CREATE', $5::text,
+				$3::text,
+				$4::text, now()
+			)`,
+			cf.id, fdID, reason, createdBy, cashflowAuditStatusPending,
 		)
 		if insErr != nil {
-			return insErr
+			return fmt.Errorf("cashflow audit insert for %s: %w", cf.id, insErr)
 		}
 	}
 	return nil
 }
 
-// markCashflowAuditApproved promotes all PENDING_ACTIVATION cashflow audit rows for an FD
+// markCashflowAuditApproved promotes activation-seeded cashflow audit rows for an FD
 // to APPROVED, recording the checker email. Called from BulkApproveActivation inside the
 // same transaction as fd_status → ACTIVE so the promotion is atomic.
 func markCashflowAuditApproved(ctx context.Context, exec queryExecutor, fdID, checkerEmail string) {
@@ -582,8 +645,10 @@ func markCashflowAuditApproved(ctx context.Context, exec queryExecutor, fdID, ch
 		    checker_by = $2,
 		    checker_at = now(),
 		    checker_comment = 'Auto-approved on FD activation approval'
-		WHERE fd_id = $1 AND processing_status = 'PENDING_ACTIVATION'`,
-		fdID, checkerEmail,
+		WHERE fd_id = $1
+		  AND action_type = 'CREATE'
+		  AND processing_status = $3`,
+		fdID, checkerEmail, cashflowAuditStatusPending,
 	)
 }
 
@@ -622,12 +687,14 @@ func softDeleteFDCashflowForRejection(ctx context.Context, exec queryExecutor, f
 			}
 		}
 	}
-	// Mark cashflow audit rows as REJECTED.
+	// Mark activation-seeded cashflow audit rows as REJECTED.
 	_, _ = exec.Exec(ctx, `
 		UPDATE investment.fd_audit_cashflow_schedule
 		SET processing_status = 'REJECTED', checker_by = $2, checker_at = now(), checker_comment = $3
-		WHERE fd_id = $1 AND processing_status = 'PENDING_ACTIVATION'`,
-		fdID, userEmail, comment,
+		WHERE fd_id = $1
+		  AND action_type = 'CREATE'
+		  AND processing_status = $4`,
+		fdID, userEmail, comment, cashflowAuditStatusPending,
 	)
 	// Clear cashflow_generated flag on fd_master.
 	_, _ = exec.Exec(ctx, `
@@ -748,18 +815,16 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Write one PENDING_ACTIVATION audit row per cashflow row to seed the audit trail.
+		// Write one pending-approval audit row per cashflow row to seed the audit trail.
 		// These will be promoted to APPROVED by BulkApproveActivation when the checker approves.
 		if auditErr := insertCashflowAuditRowsPending(ctx, tx, fdID, cashflows, userEmail); auditErr != nil {
-			// Non-fatal: log but don't block activation
-			api.LogError("[FDMaster] cashflow audit insert failed fd=%s: %v", fdID, auditErr)
+			msg, status := getFDMasterError(auditErr, "Cashflow audit setup failed")
+			api.RespondWithError(w, status, msg)
+			return
 		}
 
 		// Mark cashflow_generated=true so the accrual engine picks this FD up in scope.
-		if _, err := tx.Exec(ctx,
-			`UPDATE investment.fd_master SET cashflow_generated=true, cashflow_generated_at=now() WHERE fd_id=$1`,
-			fdID,
-		); err != nil {
+		if err := updateFDMasterCashflowGenerated(ctx, tx, fdID); err != nil {
 			msg, status := getFDMasterError(err, "Cashflow flag update failed")
 			api.RespondWithError(w, status, msg)
 			return
@@ -844,7 +909,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	// Cashflow audit lifecycle on approval:
-	//   PENDING_ACTIVATION (written at FD activation by insertCashflowAuditRowsPending)
+	//   PENDING_APPROVAL on cashflow audit (written at FD activation by insertCashflowAuditRowsPending)
 	//   → APPROVED (written here by markCashflowAuditApproved)
 	// Both the engine-driven path (approval-matrix) and the direct-stamp path (no matrix)
 	// call markCashflowAuditApproved inside their respective transactions so the promotion
@@ -907,7 +972,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					auditTable := resolveFDAuditTable(ctx, tx)
 					_ = updateFDMasterStatusBy(ctx, tx, []string{fdID}, "ACTIVE", userEmail)
 					_ = updateFDAuditStatus(ctx, tx, auditTable, []string{fdID}, userEmail, "APPROVED", req.Comment)
-					markCashflowAuditApproved(ctx, tx, fdID, userEmail) // promote PENDING_ACTIVATION → APPROVED
+					markCashflowAuditApproved(ctx, tx, fdID, userEmail) // promote cashflow audit CREATE rows → APPROVED
 					rec, err := loadFDRecordByFDID(ctx, tx, fdID)
 					if err == nil {
 						activityID, err := CreateFDAccountingActivity(ctx, tx, fdID, rec.ValueDate, userEmail)
@@ -1010,7 +1075,7 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	// On rejection, three cleanup steps run inside the same transaction as fd_status → REJECTED:
 	//  1. Soft-delete all cashflow rows (is_deleted=true, is_active=false) so the accrual engine
 	//     cannot pick up cashflow for a rejected FD.
-	//  2. Mark cashflow audit rows REJECTED so they no longer appear as PENDING_ACTIVATION.
+	//  2. Mark activation cashflow audit rows REJECTED.
 	//  3. Clear cashflow_generated=false on fd_master so the generation flag stays consistent.
 	// Implemented via softDeleteFDCashflowForRejection, called in both engine and direct paths.
 	return func(w http.ResponseWriter, r *http.Request) {
