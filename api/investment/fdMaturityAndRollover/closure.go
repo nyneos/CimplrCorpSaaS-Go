@@ -2112,6 +2112,7 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 		acted := 0
+		var actedIDs []string
 		var errors []string
 
 		for _, crID := range req.ClosureRequestIDs {
@@ -2120,7 +2121,17 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, crID+": not found")
 				continue
 			}
-			if curStatus != "PENDING_APPROVAL" {
+			var latestActionType, latestProcessingStatus string
+			_ = pool.QueryRow(ctx, `
+				SELECT action_type, processing_status
+				FROM investment.fd_audit_closure_request
+				WHERE closure_request_id=$1
+				ORDER BY created_at DESC, audit_id DESC
+				LIMIT 1`, crID,
+			).Scan(&latestActionType, &latestProcessingStatus)
+			isDeleteApproval := latestActionType == "DELETE" && latestProcessingStatus == "PENDING_DELETE_APPROVAL"
+
+			if !isDeleteApproval && curStatus != "PENDING_APPROVAL" {
 				errors = append(errors, crID+": status is "+curStatus)
 				continue
 			}
@@ -2150,8 +2161,14 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				acted++
+				actedIDs = append(actedIDs, crID)
 			} else {
 				// No engine instance — handle rejection directly with audit row.
+				if isDeleteApproval {
+					errors = append(errors, crID+": delete approval is pending but it is not your turn in approval sequence")
+					continue
+				}
+
 				tx, txErr := pool.Begin(ctx)
 				if txErr != nil {
 					errors = append(errors, crID+": tx begin failed")
@@ -2170,10 +2187,11 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				acted++
+				actedIDs = append(actedIDs, crID)
 			}
 		}
 
-		for _, crID := range req.ClosureRequestIDs {
+		for _, crID := range actedIDs {
 			go func(id, uEmail string) {
 				defer func() { recover() }() //nolint:errcheck
 				notifcatalog.TriggerNotification(context.Background(), pool,
@@ -2190,6 +2208,20 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			msg = "No closures were rejected"
 		}
 		api.LogInfo("[FDClosure] BulkRejectClosureRequest: acted=%d errors=%d by=%s", acted, len(errors), userEmail)
+		if !success {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: false,
+				constants.ValueError:   msg,
+				"rows": map[string]interface{}{
+					"acted":   acted,
+					"errors":  errors,
+					"checker": userEmail,
+				},
+			})
+			return
+		}
 		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"acted": acted, "errors": errors, "checker": userEmail,
 		})
