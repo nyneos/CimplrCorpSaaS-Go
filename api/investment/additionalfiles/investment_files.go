@@ -198,6 +198,83 @@ var (
 
 const investmentAdditionalFilesAuditTable = "investment.additional_file_audit"
 
+func recordFDClosureMainUploadAudit(ctx context.Context, tx pgx.Tx, closureRequestID string, payload cashfiles.MainUploadAuditPayload) error {
+	reason, err := cashfiles.MainUploadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO investment.fd_audit_closure_request (
+			closure_request_id,
+			action_type,
+			processing_status,
+			action_reason,
+			performed_by,
+			performed_by_email,
+			created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		closureRequestID,
+		"UPLOAD_FILE",
+		"COMPLETED",
+		reason,
+		payload.UploadedBy,
+		payload.UploadedBy,
+		payload.UploadedAt,
+	)
+	return err
+}
+
+func recordFDInterestReceiptMainUploadAudit(ctx context.Context, tx pgx.Tx, receiptID string, payload cashfiles.MainUploadAuditPayload) error {
+	reason, err := cashfiles.MainUploadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO investment.fd_interest_receipt_audit (
+			receipt_id,
+			action_type,
+			processing_status,
+			reason,
+			requested_by,
+			requested_at
+		) VALUES ($1, $2, $3, $4, $5, $6)`,
+		receiptID,
+		"EDIT",
+		"APPROVED",
+		reason,
+		payload.UploadedBy,
+		payload.UploadedAt,
+	)
+	return err
+}
+
+func recordFDTDSReceiptMainUploadAudit(ctx context.Context, tx pgx.Tx, tdsID string, payload cashfiles.MainUploadAuditPayload) error {
+	reason, err := cashfiles.MainUploadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO investment.fd_tds_receipt_audit (
+			tds_id,
+			action_type,
+			processing_status,
+			reason,
+			requested_by,
+			requested_at
+		) VALUES ($1, $2, $3, $4, $5, $6)`,
+		tdsID,
+		"EDIT",
+		"APPROVED",
+		reason,
+		payload.UploadedBy,
+		payload.UploadedAt,
+	)
+	return err
+}
+
 func ListOnboardAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(onboardingFilesDefinition))
 }
@@ -839,7 +916,7 @@ func RejectDeleteFDAccountingJournalAdditionalFileHandler(pool *pgxpool.Pool) ht
 }
 
 func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Config {
-	return cashfiles.Config{
+	cfg := cashfiles.Config{
 		Module:         def.Module,
 		AuditSource:    strings.ToUpper(strings.ReplaceAll(def.Module, "-", "_")),
 		AuditTableName: investmentAdditionalFilesAuditTable,
@@ -869,6 +946,17 @@ func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Con
 			return deleteInvestmentAdditionalFile(ctx, tx, def, parentID, fileID, deletedBy, deletedAt)
 		},
 	}
+
+	switch def.Module {
+	case fdClosureFilesDefinition.Module, fdRolloverFilesDefinition.Module:
+		cfg.RecordMainUploadAudit = recordFDClosureMainUploadAudit
+	case fdInterestReceiptFilesDefinition.Module:
+		cfg.RecordMainUploadAudit = recordFDInterestReceiptMainUploadAudit
+	case fdTDSReceiptFilesDefinition.Module:
+		cfg.RecordMainUploadAudit = recordFDTDSReceiptMainUploadAudit
+	}
+
+	return cfg
 }
 
 func listInvestmentAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, def investmentFileDefinition, parentID string) ([]cashfiles.FileRecord, error) {

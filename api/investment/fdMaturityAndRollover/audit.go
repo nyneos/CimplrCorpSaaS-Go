@@ -85,7 +85,7 @@ func GetClosureAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(old_interest_credited, 0)                                      AS old_interest_credited,
 				COALESCE(old_rollover_tenor_days, 0)                                    AS old_rollover_tenor_days,
 				COALESCE(old_rollover_interest_rate, 0)                                 AS old_rollover_interest_rate,
-				COALESCE(old_partial_withdrawal, false)                                 AS old_partial_withdrawal,
+				COALESCE(old_partial_withdrawal::text, '')                              AS old_partial_withdrawal,
 				COALESCE(TO_CHAR(old_new_maturity_date, 'YYYY-MM-DD'), '')              AS old_new_maturity_date,
 				COALESCE(old_closure_reason, '')                                        AS old_closure_reason,
 				COALESCE(old_closure_notes, '')                                         AS old_closure_notes,
