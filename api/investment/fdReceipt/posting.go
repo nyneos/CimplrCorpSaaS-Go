@@ -215,16 +215,22 @@ func markReceiptSchedulePosted(ctx context.Context, tx pgx.Tx, rec ReceiptForPos
 		}
 	}
 	// Best-effort: junction tables may not exist in all environments.
-	_, _ = tx.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 		UPDATE investment.fd_receipt_cashflow_map
 		SET match_status='POSTED'
 		WHERE receipt_id=$1 AND COALESCE(is_deleted,false)=false`,
 		rec.ReceiptID)
-	_, _ = tx.Exec(ctx, `
+	if err != nil {
+		return fmt.Errorf("cashflow map update: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
 		UPDATE investment.fd_receipt_accrual_map
 		SET match_status='POSTED'
 		WHERE receipt_id=$1 AND COALESCE(is_deleted,false)=false`,
 		rec.ReceiptID)
+	if err != nil {
+		return fmt.Errorf("accrual map update: %w", err)
+	}
 	return nil
 }
 

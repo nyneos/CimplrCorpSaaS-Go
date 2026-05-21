@@ -2103,8 +2103,8 @@ func postCimplrClosureJournals(ctx context.Context, pool *pgxpool.Pool, closureC
 	if closureType == "PREMATURE" {
 		newFDStatus = "PREMATURELY_CLOSED"
 	}
-	_, err = tx.Exec(ctx, `UPDATE investment.fd_master SET fd_status=$1, closed_at=NOW(), closed_by=$2, accounting_posted=true, closure_request_id=$3, updated_by=$2, updated_at=NOW() WHERE fd_id=$4`,
-		newFDStatus, actorEmail, closureConfirmID, fdID)
+	_, err = tx.Exec(ctx, `UPDATE investment.fd_master SET fd_status=$1, closed_at=NOW(), closed_by=$2, accounting_posted=true, closure_request_id=$3, updated_by=$4, updated_at=NOW() WHERE fd_id=$5`,
+		newFDStatus, actorEmail, closureConfirmID, actorEmail, fdID)
 	if err != nil {
 		return err
 	}
@@ -2260,7 +2260,7 @@ func createCimplrRolloverBooking(ctx context.Context, pool *pgxpool.Pool, closur
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE investment.fd_master SET fd_status='ROLLED_OVER', closed_at=NOW(), closed_by=$1, accounting_posted=true, closure_request_id=$2, updated_by=$1, updated_at=NOW() WHERE fd_id=$3`, actorEmail, closureConfirmID, fdID)
+	_, err = tx.Exec(ctx, `UPDATE investment.fd_master SET fd_status='ROLLED_OVER', closed_at=NOW(), closed_by=$1, accounting_posted=true, closure_request_id=$2, updated_by=$3, updated_at=NOW() WHERE fd_id=$4`, actorEmail, closureConfirmID, actorEmail, fdID)
 	if err != nil {
 		return err
 	}
