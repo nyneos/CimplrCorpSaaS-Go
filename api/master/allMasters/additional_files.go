@@ -46,8 +46,8 @@ type masterFilesHandlers struct {
 //   - parentTable  – fully-qualified parent table (e.g. "public.masterbank")
 //   - parentCol    – primary-key column on the parent table (e.g. "bank_id")
 //   - filesTable   – fully-qualified files table (e.g. "cimplrcorpsaas.master_bank_files")
-func newMasterFilesHandlers(pool *pgxpool.Pool, moduleKey, parentField, parentTable, parentCol, filesTable string) masterFilesHandlers {
-	cfg := buildMasterFilesConfig(moduleKey, parentField, parentTable, parentCol, filesTable)
+func newMasterFilesHandlers(pool *pgxpool.Pool, moduleKey, parentField, parentTable, parentCol, filesTable, auditTable, actionCol string) masterFilesHandlers {
+	cfg := buildMasterFilesConfig(moduleKey, parentField, parentTable, parentCol, filesTable, auditTable, actionCol)
 	return masterFilesHandlers{
 		List:          additionalfiles.NewListHandler(pool, cfg),
 		Upload:        additionalfiles.NewUploadHandler(pool, cfg),
@@ -60,7 +60,7 @@ func newMasterFilesHandlers(pool *pgxpool.Pool, moduleKey, parentField, parentTa
 	}
 }
 
-func buildMasterFilesConfig(moduleKey, parentField, parentTable, parentCol, filesTable string) additionalfiles.Config {
+func buildMasterFilesConfig(moduleKey, parentField, parentTable, parentCol, filesTable, auditTable, actionCol string) additionalfiles.Config {
 	return additionalfiles.Config{
 		AuditSource:   strings.ToUpper(strings.ReplaceAll(moduleKey, "-", "_")),
 		Module:        moduleKey,
@@ -103,6 +103,9 @@ func buildMasterFilesConfig(moduleKey, parentField, parentTable, parentCol, file
 		SoftDeleteTx: func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 			return deleteMasterAdditionalFile(ctx, tx, parentID, fileID, deletedBy, deletedAt, parentCol, filesTable)
 		},
+		RecordMainUploadAudit: func(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+			return additionalfiles.InsertMainUploadAudit(ctx, tx, auditTable, parentCol, actionCol, parentID, payload)
+		},
 	}
 }
 
@@ -143,43 +146,43 @@ func deleteMasterAdditionalFile(ctx context.Context, exec masterFileExec, parent
 // ── allMasters handler sets ─────────────────────────────────────────────────
 
 func BankMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
-	return newMasterFilesHandlers(pool, "master-bank", "bank_id", "public.masterbank", "bank_id", "cimplrcorpsaas.master_bank_files")
+	return newMasterFilesHandlers(pool, "master-bank", "bank_id", "public.masterbank", "bank_id", "cimplrcorpsaas.master_bank_files", "public.auditactionbank", "actiontype")
 }
 
 func CurrencyMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
-	return newMasterFilesHandlers(pool, "master-currency", "currency_id", "public.mastercurrency", "currency_id", "cimplrcorpsaas.master_currency_files")
+	return newMasterFilesHandlers(pool, "master-currency", "currency_id", "public.mastercurrency", "currency_id", "cimplrcorpsaas.master_currency_files", "public.auditactioncurrency", "actiontype")
 }
 
 func BankAccountMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
-	return newMasterFilesHandlers(pool, "master-bank-account", "account_id", "public.masterbankaccount", "account_id", "cimplrcorpsaas.master_bank_account_files")
+	return newMasterFilesHandlers(pool, "master-bank-account", "account_id", "public.masterbankaccount", "account_id", "cimplrcorpsaas.master_bank_account_files", "public.auditactionbankaccount", "actiontype")
 }
 
 func CounterpartyMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
-	return newMasterFilesHandlers(pool, "master-counterparty", "counterparty_id", "public.mastercounterparty", "counterparty_id", "cimplrcorpsaas.master_counterparty_files")
+	return newMasterFilesHandlers(pool, "master-counterparty", "counterparty_id", "public.mastercounterparty", "counterparty_id", "cimplrcorpsaas.master_counterparty_files", "public.auditactioncounterparty", "actiontype")
 }
 
 func GLAccountMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
-	return newMasterFilesHandlers(pool, "master-gl-account", "gl_account_id", "public.masterglaccount", "gl_account_id", "cimplrcorpsaas.master_gl_account_files")
+	return newMasterFilesHandlers(pool, "master-gl-account", "gl_account_id", "public.masterglaccount", "gl_account_id", "cimplrcorpsaas.master_gl_account_files", "public.auditactionglaccount", "actiontype")
 }
 
 func CashFlowCategoryMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
-	return newMasterFilesHandlers(pool, "master-cashflow-category", "category_id", "public.mastercashflowcategory", "category_id", "cimplrcorpsaas.master_cashflow_category_files")
+	return newMasterFilesHandlers(pool, "master-cashflow-category", "category_id", "public.mastercashflowcategory", "category_id", "cimplrcorpsaas.master_cashflow_category_files", "public.auditactioncashflowcategory", "actiontype")
 }
 
 func CostProfitCenterMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
-	return newMasterFilesHandlers(pool, "master-costprofit-center", "centre_id", "public.mastercostprofitcenter", "centre_id", "cimplrcorpsaas.master_cost_profit_center_files")
+	return newMasterFilesHandlers(pool, "master-costprofit-center", "centre_id", "public.mastercostprofitcenter", "centre_id", "cimplrcorpsaas.master_cost_profit_center_files", "public.auditactioncostprofitcenter", "actiontype")
 }
 
 func PayableReceivableMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
-	return newMasterFilesHandlers(pool, "master-payable-receivable", "type_id", "public.masterpayablereceivabletype", "type_id", "cimplrcorpsaas.master_payable_receivable_files")
+	return newMasterFilesHandlers(pool, "master-payable-receivable", "type_id", "public.masterpayablereceivabletype", "type_id", "cimplrcorpsaas.master_payable_receivable_files", "public.auditactionpayablereceivable", "actiontype")
 }
 
 func EntityCashMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
-	return newMasterFilesHandlers(pool, "master-entity-cash", "entity_id", "public.masterentitycash", "entity_id", "cimplrcorpsaas.master_entity_cash_files")
+	return newMasterFilesHandlers(pool, "master-entity-cash", "entity_id", "public.masterentitycash", "entity_id", "cimplrcorpsaas.master_entity_cash_files", "public.auditactionentity", "actiontype")
 }
 
 func EntityMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
-	return newMasterFilesHandlers(pool, "master-entity", "entity_id", "public.masterentity", "entity_id", "cimplrcorpsaas.master_entity_files")
+	return newMasterFilesHandlers(pool, "master-entity", "entity_id", "public.masterentity", "entity_id", "cimplrcorpsaas.master_entity_files", "public.auditactionentity", "actiontype")
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

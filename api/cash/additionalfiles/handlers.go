@@ -1127,7 +1127,7 @@ func InsertMainUploadAudit(ctx context.Context, tx pgx.Tx, tableName, parentColu
 		parentColumn,
 		actionColumn,
 	)
-	_, err = tx.Exec(ctx, query, parentID, "UPLOAD_FILE", fileAuditCompletedStatus, reason, payload.UploadedBy, payload.UploadedAt)
+	_, err = tx.Exec(ctx, query, parentID, "UPLOAD_FILE", fileAuditApprovedStatus, reason, payload.UploadedBy, payload.UploadedAt)
 	return err
 }
 
