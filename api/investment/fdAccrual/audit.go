@@ -183,6 +183,68 @@ func GetAccrualLedgerAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
+// ─── GetScheduleConfigAuditHandler ───────────────────────────────────────────
+// POST /investment/fd/accrual/schedule/audit
+// Body: { user_id, config_id }
+// Response: { success: true, data: [...] }
+
+func GetScheduleConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			UserID   string `json:"user_id"`
+			ConfigID string `json:"config_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
+			strings.TrimSpace(req.ConfigID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "config_id is required")
+			return
+		}
+
+		ctx := r.Context()
+
+		rows, err := pgxPool.Query(ctx, `
+			SELECT
+				audit_id,
+				config_id,
+				action_type,
+				processing_status,
+				COALESCE(requested_by, '')                                        AS requested_by,
+				COALESCE(TO_CHAR(requested_at, 'YYYY-MM-DD HH24:MI:SS'), '')      AS requested_at,
+				COALESCE(checker_by, '')                                          AS checker_by,
+				COALESCE(TO_CHAR(checker_at, 'YYYY-MM-DD HH24:MI:SS'), '')        AS checker_at,
+				COALESCE(checker_comment, '')                                     AS checker_comment,
+				COALESCE(old_schedule_frequency, '')                              AS old_schedule_frequency,
+				COALESCE(old_run_day_of_month, 0)                                 AS old_run_day_of_month,
+				COALESCE(old_run_time, '')                                        AS old_run_time,
+				COALESCE(old_default_run_mode, '')                                AS old_default_run_mode,
+				COALESCE(old_default_bank_id_filter, '')                          AS old_default_bank_id_filter,
+				COALESCE(old_default_fd_status_filter, '')                        AS old_default_fd_status_filter,
+				COALESCE(old_auto_submit_for_approval, false)                     AS old_auto_submit_for_approval,
+				COALESCE(old_is_active, false)                                    AS old_is_active
+			FROM investment.fd_accrual_schedule_config_audit
+			WHERE config_id = $1
+			ORDER BY requested_at DESC
+		`, req.ConfigID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+
+		payload, err := collectAccrualPgxRows(rows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read schedule config audit history")
+			return
+		}
+
+		respondFDAccrualAuditPayload(w, payload)
+	}
+}
+
 func collectAccrualPgxRows(rows pgx.Rows) ([]map[string]interface{}, error) {
 	defer rows.Close()
 	fields := rows.FieldDescriptions()

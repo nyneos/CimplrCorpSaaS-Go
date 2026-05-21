@@ -149,4 +149,8 @@ func RegisterFDAccrualRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 		"/investment/fd/accrual/schedule/recalc-next-run",
 		mid(http.HandlerFunc(RecalcScheduleNextRun(pool))),
 	)
+	mux.Handle(
+		"/investment/fd/accrual/schedule/audit",
+		mid(http.HandlerFunc(GetScheduleConfigAuditHandler(pool))),
+	)
 }

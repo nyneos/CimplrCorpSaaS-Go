@@ -742,3 +742,524 @@ func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		respondMasterAuditPayload(w, payload)
 	}
 }
+
+// ─── GetAMCAuditHistory ──────────────────────────────────────────────────────
+// POST /master/amc/audit-history
+// Body: { user_id, amc_id? }
+
+type amcAuditReq struct {
+	UserID string `json:"user_id"`
+	AMCID  string `json:"amc_id"`
+}
+
+func GetAMCAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+		var req amcAuditReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+		if !validateMasterAuditSession(r.Context()) {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		baseQ := `
+			SELECT
+				a.action_id,
+				a.amc_id,
+				a.actiontype,
+				a.processing_status,
+				COALESCE(a.reason,'') AS reason,
+				COALESCE(a.requested_by,'') AS requested_by,
+				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				COALESCE(a.checker_by,'') AS checker_by,
+				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				COALESCE(a.checker_comment,'') AS checker_comment,
+				COALESCE(m.amc_name,'') AS amc_name,
+				COALESCE(m.old_amc_name,'') AS old_amc_name,
+				COALESCE(m.internal_amc_code,'') AS internal_amc_code,
+				COALESCE(m.old_internal_amc_code,'') AS old_internal_amc_code,
+				COALESCE(m.status,'') AS status,
+				COALESCE(m.old_status,'') AS old_status,
+				COALESCE(m.primary_contact_name,'') AS primary_contact_name,
+				COALESCE(m.old_primary_contact_name,'') AS old_primary_contact_name,
+				COALESCE(m.primary_contact_email,'') AS primary_contact_email,
+				COALESCE(m.old_primary_contact_email,'') AS old_primary_contact_email,
+				COALESCE(m.sebi_registration_no,'') AS sebi_registration_no,
+				COALESCE(m.old_sebi_registration_no,'') AS old_sebi_registration_no,
+				COALESCE(m.amc_beneficiary_name,'') AS amc_beneficiary_name,
+				COALESCE(m.old_amc_beneficiary_name,'') AS old_amc_beneficiary_name,
+				COALESCE(m.amc_bank_account_no,'') AS amc_bank_account_no,
+				COALESCE(m.old_amc_bank_account_no,'') AS old_amc_bank_account_no,
+				COALESCE(m.amc_bank_name,'') AS amc_bank_name,
+				COALESCE(m.old_amc_bank_name,'') AS old_amc_bank_name,
+				COALESCE(m.amc_bank_ifsc,'') AS amc_bank_ifsc,
+				COALESCE(m.old_amc_bank_ifsc,'') AS old_amc_bank_ifsc,
+				COALESCE(m.mfu_amc_code,'') AS mfu_amc_code,
+				COALESCE(m.old_mfu_amc_code,'') AS old_mfu_amc_code,
+				COALESCE(m.cams_amc_code,'') AS cams_amc_code,
+				COALESCE(m.old_cams_amc_code,'') AS old_cams_amc_code,
+				COALESCE(m.erp_vendor_code,'') AS erp_vendor_code,
+				COALESCE(m.old_erp_vendor_code,'') AS old_erp_vendor_code,
+				COALESCE(m.source,'') AS source,
+				COALESCE(m.is_deleted,false) AS is_deleted
+			FROM investment.auditactionamc a
+			LEFT JOIN investment.masteramc m ON m.amc_id = a.amc_id`
+
+		var (
+			q    string
+			args []interface{}
+		)
+		if strings.TrimSpace(req.AMCID) != "" {
+			q = baseQ + `
+			WHERE a.amc_id = $1
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`
+			args = append(args, req.AMCID)
+		} else {
+			q = baseQ + `
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
+			LIMIT 1000`
+		}
+
+		rows, err := pgxPool.Query(ctx, q, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		payload, err := collectMasterPgxRows(rows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read AMC audit history")
+			return
+		}
+		api.LogInfo("AMC AuditHistory: returned %d records", len(payload))
+		respondMasterAuditPayload(w, payload)
+	}
+}
+
+// ─── GetSchemeAuditHistory ───────────────────────────────────────────────────
+// POST /master/scheme/audit-history
+// Body: { user_id, scheme_id? }
+
+type schemeAuditHistReq struct {
+	UserID   string `json:"user_id"`
+	SchemeID string `json:"scheme_id"`
+}
+
+func GetSchemeAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+		var req schemeAuditHistReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+		if !validateMasterAuditSession(r.Context()) {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		baseQ := `
+			SELECT
+				a.action_id,
+				a.scheme_id,
+				a.actiontype,
+				a.processing_status,
+				COALESCE(a.reason,'') AS reason,
+				COALESCE(a.requested_by,'') AS requested_by,
+				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				COALESCE(a.checker_by,'') AS checker_by,
+				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				COALESCE(a.checker_comment,'') AS checker_comment,
+				COALESCE(m.scheme_name,'') AS scheme_name,
+				COALESCE(m.isin,'') AS isin,
+				COALESCE(m.amc_name,'') AS amc_name,
+				COALESCE(m.internal_scheme_code,'') AS internal_scheme_code,
+				COALESCE(m.internal_risk_rating,'') AS internal_risk_rating,
+				COALESCE(m.erp_gl_account,'') AS erp_gl_account,
+				COALESCE(m.amfi_scheme_code,'') AS amfi_scheme_code,
+				COALESCE(m.status,'') AS status,
+				COALESCE(m.method,'') AS method,
+				COALESCE(m.source,'') AS source,
+				COALESCE(m.is_deleted,false) AS is_deleted
+			FROM investment.auditactionscheme a
+			LEFT JOIN investment.masterscheme m ON m.scheme_id = a.scheme_id`
+
+		var (
+			q    string
+			args []interface{}
+		)
+		if strings.TrimSpace(req.SchemeID) != "" {
+			q = baseQ + `
+			WHERE a.scheme_id = $1
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`
+			args = append(args, req.SchemeID)
+		} else {
+			q = baseQ + `
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
+			LIMIT 1000`
+		}
+
+		rows, err := pgxPool.Query(ctx, q, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		payload, err := collectMasterPgxRows(rows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read scheme audit history")
+			return
+		}
+		api.LogInfo("Scheme AuditHistory: returned %d records", len(payload))
+		respondMasterAuditPayload(w, payload)
+	}
+}
+
+// ─── GetDPAuditHistory ───────────────────────────────────────────────────────
+// POST /master/dp/audit-history
+// Body: { user_id, dp_id? }
+
+type dpAuditHistReq struct {
+	UserID string `json:"user_id"`
+	DPID   string `json:"dp_id"`
+}
+
+func GetDPAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+		var req dpAuditHistReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+		if !validateMasterAuditSession(r.Context()) {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		baseQ := `
+			SELECT
+				a.action_id,
+				a.dp_id,
+				a.actiontype,
+				a.processing_status,
+				COALESCE(a.reason,'') AS reason,
+				COALESCE(a.requested_by,'') AS requested_by,
+				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				COALESCE(a.checker_by,'') AS checker_by,
+				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				COALESCE(a.checker_comment,'') AS checker_comment,
+				COALESCE(m.dp_name,'') AS dp_name,
+				COALESCE(m.dp_code,'') AS dp_code,
+				COALESCE(m.depository,'') AS depository,
+				COALESCE(m.status,'') AS status,
+				COALESCE(m.source,'') AS source,
+				COALESCE(m.is_deleted,false) AS is_deleted
+			FROM investment.auditactiondp a
+			LEFT JOIN investment.masterdepositoryparticipant m ON m.dp_id = a.dp_id`
+
+		var (
+			q    string
+			args []interface{}
+		)
+		if strings.TrimSpace(req.DPID) != "" {
+			q = baseQ + `
+			WHERE a.dp_id = $1
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`
+			args = append(args, req.DPID)
+		} else {
+			q = baseQ + `
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
+			LIMIT 1000`
+		}
+
+		rows, err := pgxPool.Query(ctx, q, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		payload, err := collectMasterPgxRows(rows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read DP audit history")
+			return
+		}
+		api.LogInfo("DP AuditHistory: returned %d records", len(payload))
+		respondMasterAuditPayload(w, payload)
+	}
+}
+
+// ─── GetFolioAuditHistory ────────────────────────────────────────────────────
+// POST /master/folio/audit-history
+// Body: { user_id, folio_id? }
+
+type folioAuditHistReq struct {
+	UserID  string `json:"user_id"`
+	FolioID string `json:"folio_id"`
+}
+
+func GetFolioAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+		var req folioAuditHistReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+		if !validateMasterAuditSession(r.Context()) {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		baseQ := `
+			SELECT
+				a.action_id,
+				a.folio_id,
+				a.actiontype,
+				a.processing_status,
+				COALESCE(a.reason,'') AS reason,
+				COALESCE(a.requested_by,'') AS requested_by,
+				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				COALESCE(a.checker_by,'') AS checker_by,
+				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				COALESCE(a.checker_comment,'') AS checker_comment,
+				COALESCE(m.entity_name,'') AS entity_name,
+				COALESCE(m.old_entity_name,'') AS old_entity_name,
+				COALESCE(m.amc_name,'') AS amc_name,
+				COALESCE(m.old_amc_name,'') AS old_amc_name,
+				COALESCE(m.folio_number,'') AS folio_number,
+				COALESCE(m.old_folio_number,'') AS old_folio_number,
+				COALESCE(m.first_holder_name,'') AS first_holder_name,
+				COALESCE(m.old_first_holder_name,'') AS old_first_holder_name,
+				COALESCE(m.default_subscription_account,'') AS default_subscription_account,
+				COALESCE(m.old_default_subscription_account,'') AS old_default_subscription_account,
+				COALESCE(m.default_redemption_account,'') AS default_redemption_account,
+				COALESCE(m.old_default_redemption_account,'') AS old_default_redemption_account,
+				COALESCE(m.status,'') AS status,
+				COALESCE(m.old_status,'') AS old_status,
+				COALESCE(m.source,'') AS source,
+				COALESCE(m.is_deleted,false) AS is_deleted
+			FROM investment.auditactionfolio a
+			LEFT JOIN investment.masterfolio m ON m.folio_id = a.folio_id`
+
+		var (
+			q    string
+			args []interface{}
+		)
+		if strings.TrimSpace(req.FolioID) != "" {
+			q = baseQ + `
+			WHERE a.folio_id = $1
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`
+			args = append(args, req.FolioID)
+		} else {
+			q = baseQ + `
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
+			LIMIT 1000`
+		}
+
+		rows, err := pgxPool.Query(ctx, q, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		payload, err := collectMasterPgxRows(rows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read folio audit history")
+			return
+		}
+		api.LogInfo("Folio AuditHistory: returned %d records", len(payload))
+		respondMasterAuditPayload(w, payload)
+	}
+}
+
+// ─── GetDematAuditHistory ────────────────────────────────────────────────────
+// POST /master/demat/audit-history
+// Body: { user_id, demat_id? }
+
+type dematAuditHistReq struct {
+	UserID  string `json:"user_id"`
+	DematID string `json:"demat_id"`
+}
+
+func GetDematAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+		var req dematAuditHistReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+		if !validateMasterAuditSession(r.Context()) {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		baseQ := `
+			SELECT
+				a.action_id,
+				a.demat_id,
+				a.actiontype,
+				a.processing_status,
+				COALESCE(a.reason,'') AS reason,
+				COALESCE(a.requested_by,'') AS requested_by,
+				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				COALESCE(a.checker_by,'') AS checker_by,
+				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				COALESCE(a.checker_comment,'') AS checker_comment,
+				COALESCE(m.entity_name,'') AS entity_name,
+				COALESCE(m.old_entity_name,'') AS old_entity_name,
+				COALESCE(m.depository,'') AS depository,
+				COALESCE(m.old_depository,'') AS old_depository,
+				COALESCE(m.demat_account_number,'') AS demat_account_number,
+				COALESCE(m.old_demat_account_number,'') AS old_demat_account_number,
+				COALESCE(m.depository_participant,'') AS depository_participant,
+				COALESCE(m.old_depository_participant,'') AS old_depository_participant,
+				COALESCE(m.client_id,'') AS client_id,
+				COALESCE(m.old_client_id,'') AS old_client_id,
+				COALESCE(m.default_settlement_account,'') AS default_settlement_account,
+				COALESCE(m.old_default_settlement_account,'') AS old_default_settlement_account,
+				COALESCE(m.status,'') AS status,
+				COALESCE(m.old_status,'') AS old_status,
+				COALESCE(m.source,'') AS source,
+				COALESCE(m.is_deleted,false) AS is_deleted
+			FROM investment.auditactiondemat a
+			LEFT JOIN investment.masterdemataccount m ON m.demat_id = a.demat_id`
+
+		var (
+			q    string
+			args []interface{}
+		)
+		if strings.TrimSpace(req.DematID) != "" {
+			q = baseQ + `
+			WHERE a.demat_id = $1
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`
+			args = append(args, req.DematID)
+		} else {
+			q = baseQ + `
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
+			LIMIT 1000`
+		}
+
+		rows, err := pgxPool.Query(ctx, q, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		payload, err := collectMasterPgxRows(rows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read demat audit history")
+			return
+		}
+		api.LogInfo("Demat AuditHistory: returned %d records", len(payload))
+		respondMasterAuditPayload(w, payload)
+	}
+}
+
+// ─── GetCalendarAuditHistory ─────────────────────────────────────────────────
+// POST /master/calendar/audit-history
+// Body: { user_id, calendar_id? }
+
+type calendarAuditHistReq struct {
+	UserID     string `json:"user_id"`
+	CalendarID string `json:"calendar_id"`
+}
+
+func GetCalendarAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+		var req calendarAuditHistReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+		if !validateMasterAuditSession(r.Context()) {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		baseQ := `
+			SELECT
+				a.action_id,
+				a.calendar_id,
+				a.actiontype,
+				a.processing_status,
+				COALESCE(a.reason,'') AS reason,
+				COALESCE(a.requested_by,'') AS requested_by,
+				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				COALESCE(a.checker_by,'') AS checker_by,
+				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				COALESCE(a.checker_comment,'') AS checker_comment,
+				COALESCE(m.calendar_code,'') AS calendar_code,
+				COALESCE(m.old_calendar_code,'') AS old_calendar_code,
+				COALESCE(m.calendar_name,'') AS calendar_name,
+				COALESCE(m.old_calendar_name,'') AS old_calendar_name,
+				COALESCE(m.scope,'') AS scope,
+				COALESCE(m.old_scope,'') AS old_scope,
+				COALESCE(m.country,'') AS country,
+				COALESCE(m.old_country,'') AS old_country,
+				COALESCE(m.timezone,'') AS timezone,
+				COALESCE(m.old_timezone,'') AS old_timezone,
+				COALESCE(m.weekend_pattern,'') AS weekend_pattern,
+				COALESCE(m.old_weekend_pattern,'') AS old_weekend_pattern,
+				COALESCE(m.status,'') AS status,
+				COALESCE(m.old_status,'') AS old_status,
+				COALESCE(m.source,'') AS source,
+				TO_CHAR(m.eff_from,'YYYY-MM-DD') AS eff_from,
+				TO_CHAR(m.eff_to,'YYYY-MM-DD') AS eff_to,
+				COALESCE(m.is_deleted,false) AS is_deleted
+			FROM investment.auditactioncalendar a
+			LEFT JOIN investment.mastercalendar m ON m.calendar_id = a.calendar_id`
+
+		var (
+			q    string
+			args []interface{}
+		)
+		if strings.TrimSpace(req.CalendarID) != "" {
+			q = baseQ + `
+			WHERE a.calendar_id = $1
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`
+			args = append(args, req.CalendarID)
+		} else {
+			q = baseQ + `
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
+			LIMIT 1000`
+		}
+
+		rows, err := pgxPool.Query(ctx, q, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		payload, err := collectMasterPgxRows(rows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read calendar audit history")
+			return
+		}
+		api.LogInfo("Calendar AuditHistory: returned %d records", len(payload))
+		respondMasterAuditPayload(w, payload)
+	}
+}
