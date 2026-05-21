@@ -442,7 +442,10 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		    COALESCE(la.processing_status, ci.closure_status, 'PENDING_APPROVAL') AS status,
 		    COALESCE(la.requested_by, '') AS created_by,
 		    COALESCE(TO_CHAR(la.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS created_at,
-		    COALESCE(la.requested_at, ci.created_at) AS sort_ts
+		    -- cimplr.fd_closure_initiate has no created_at column; fall back to
+		    -- NOW() so brand-new initiate rows without an audit entry still sort
+		    -- to the top instead of erroring out the whole query.
+		    COALESCE(la.requested_at, NOW()) AS sort_ts
 		  FROM cimplr.fd_closure_initiate ci
 		  LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id AND m.is_deleted = false
 		  LEFT JOIN investment.fd_booking_request b ON b.booking_id = COALESCE(ci.booking_id, m.booking_id)
@@ -1454,6 +1457,9 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				interestFreqFilter,
 			)
 			if err != nil {
+				// Log loudly — `run()` swallows the error and a silent failure
+				// shows up on the frontend as a mysterious `"fd_list": null`.
+				api.LogError("[CfoDash] fd_list query error: %v", err)
 				return nil, err
 			}
 			defer rows.Close()

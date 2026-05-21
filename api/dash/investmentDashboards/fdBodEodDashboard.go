@@ -446,12 +446,14 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(ci.bank_name, m.bank_name, '') AS bank,
 				  COALESCE(ci.principal_amount, m.principal_amount, 0)::float8 AS amount,
 				  COALESCE(la.processing_status, ci.closure_status, '') AS status,
-				  COALESCE(EXTRACT(DAY FROM NOW() - ci.created_at)::int, 0) AS aging_days,
+				  -- cimplr.fd_closure_initiate has no created_at column; age the
+				  -- task off the latest audit requested_at instead.
+				  COALESCE(EXTRACT(DAY FROM NOW() - la.requested_at)::int, 0) AS aging_days,
 				  COALESCE(la.requested_by, '') AS owner
 				FROM cimplr.fd_closure_initiate ci
 				JOIN investment.fd_master m ON m.fd_id = ci.fd_id AND m.is_deleted = false
 				LEFT JOIN LATERAL (
-				  SELECT processing_status, requested_by
+				  SELECT processing_status, requested_by, requested_at
 				  FROM cimplr.fd_closure_initiate_audit a
 				  WHERE a.closure_initiate_id = ci.closure_initiate_id
 				  ORDER BY a.requested_at DESC

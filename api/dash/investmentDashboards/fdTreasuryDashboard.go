@@ -899,16 +899,26 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    COALESCE(ci.closure_type, '') AS closure_type,
 				    COALESCE((m.maturity_date - CURRENT_DATE)::int, 0) AS days_to_maturity,
 				    COALESCE(m.maturity_instructions, '') AS maturity_instructions,
-				    COALESCE(ci.created_at, NOW()) AS sort_ts
+				    -- cimplr.fd_closure_initiate has no created_at column; pull
+				    -- the timestamp from the latest audit row instead so newest
+				    -- pending decisions surface at the top.
+				    COALESCE(ia.requested_at, NOW()) AS sort_ts
 				  FROM cimplr.fd_closure_initiate ci
 				  JOIN investment.fd_master m ON m.fd_id = ci.fd_id AND m.is_deleted = false
 				  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				  LEFT JOIN LATERAL (
+				    SELECT requested_at
+				    FROM cimplr.fd_closure_initiate_audit ia
+				    WHERE ia.closure_initiate_id = ci.closure_initiate_id
+				    ORDER BY ia.requested_at DESC
+				    LIMIT 1
+				  ) ia ON true
 				  LEFT JOIN LATERAL (
 				    SELECT cc.closure_status
 				    FROM cimplr.fd_closure_confirm cc
 				    WHERE cc.closure_initiate_id = ci.closure_initiate_id
 				      AND COALESCE(cc.is_deleted, false) = false
-				    ORDER BY cc.created_at DESC
+				    ORDER BY cc.closure_confirm_id DESC
 				    LIMIT 1
 				  ) cc ON true
 				  WHERE COALESCE(ci.is_deleted, false) = false

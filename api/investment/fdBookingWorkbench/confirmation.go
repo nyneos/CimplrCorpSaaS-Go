@@ -258,16 +258,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			cleanupUpload()
 			out := make([]map[string]interface{}, 0, len(varItems))
 			for _, v := range varItems {
-				out = append(out, map[string]interface{}{
-					"field_name":     v.FieldName,
-					"variance_type":  v.VarianceType,
-					"expected_value": v.ExpectedValue,
-					"actual_value":   v.ActualValue,
-					"variance_delta": v.VarianceDelta,
-					"priority":       v.Priority,
-					"has_variance":   v.HasVariance,
-					"system_comment": v.SystemComment,
-				})
+				out = append(out, serializeVarianceItem(ctx, pgxPool, v))
 			}
 			// Use 422 so axios throws (enabling the catch block on the frontend)
 			// while avoiding misleading HTTP 500 / [ERROR] log noise for a normal
@@ -992,12 +983,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		varOut := make([]map[string]interface{}, 0, len(varItems))
 		for _, v := range varItems {
 			if v.HasVariance {
-				varOut = append(varOut, map[string]interface{}{
-					"field_name": v.FieldName, "variance_type": v.VarianceType,
-					"expected_value": v.ExpectedValue, "actual_value": v.ActualValue,
-					"variance_delta": v.VarianceDelta, "priority": v.Priority,
-					"system_comment": v.SystemComment,
-				})
+				varOut = append(varOut, serializeVarianceItem(ctx, pgxPool, v))
 			}
 		}
 
@@ -1430,16 +1416,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Build variance items response — return ALL fields so UI can render full comparison table
 		varOut := make([]map[string]interface{}, 0, len(varItems))
 		for _, v := range varItems {
-			varOut = append(varOut, map[string]interface{}{
-				"field_name":     v.FieldName,
-				"variance_type":  v.VarianceType,
-				"expected_value": v.ExpectedValue,
-				"actual_value":   v.ActualValue,
-				"variance_delta": v.VarianceDelta,
-				"priority":       v.Priority,
-				"has_variance":   v.HasVariance,
-				"system_comment": v.SystemComment,
-			})
+			varOut = append(varOut, serializeVarianceItem(ctx, pgxPool, v))
 		}
 
 		confirmMsg := "Confirmation updated successfully"

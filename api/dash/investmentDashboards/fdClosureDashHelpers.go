@@ -5,6 +5,9 @@ package investmentdashboards
 // Legacy fallback: investment.fd_closure_request (older environments).
 
 // sqlLatestCimplrInitiate joins the latest non-deleted closure initiate per FD.
+// NOTE: cimplr.fd_closure_initiate has no `created_at` column in production, so
+// we order by the (monotonic, sequential) primary key — matching the pattern
+// used in cimplr_closure_handlers.go (ORDER BY i.closure_initiate_id DESC).
 const sqlLatestCimplrInitiate = `
 LEFT JOIN LATERAL (
   SELECT
@@ -12,15 +15,16 @@ LEFT JOIN LATERAL (
     ci.closure_type,
     ci.closure_status,
     COALESCE(ci.action_at_maturity, '') AS action_at_maturity,
-    COALESCE(ci.net_expected_amount, 0) AS net_expected_amount,
-    ci.created_at
+    COALESCE(ci.net_expected_amount, 0) AS net_expected_amount
   FROM cimplr.fd_closure_initiate ci
   WHERE ci.fd_id = m.fd_id AND COALESCE(ci.is_deleted, false) = false
-  ORDER BY ci.created_at DESC
+  ORDER BY ci.closure_initiate_id DESC
   LIMIT 1
 ) cimplr_ci ON true`
 
 // sqlLatestCimplrConfirm joins the latest non-deleted closure confirm per FD.
+// Same caveat as above — cimplr.fd_closure_confirm has no `created_at`, so we
+// order by the primary key.
 const sqlLatestCimplrConfirm = `
 LEFT JOIN LATERAL (
   SELECT
@@ -32,7 +36,7 @@ LEFT JOIN LATERAL (
     COALESCE(cc.accounting_posted, false) AS accounting_posted
   FROM cimplr.fd_closure_confirm cc
   WHERE cc.fd_id = m.fd_id AND COALESCE(cc.is_deleted, false) = false
-  ORDER BY cc.created_at DESC
+  ORDER BY cc.closure_confirm_id DESC
   LIMIT 1
 ) cimplr_cc ON true`
 
