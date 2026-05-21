@@ -183,6 +183,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var bookedPrincipal, bookedRate float64
 		var bookedTenorDays, bookedTenorMonths, bookedTenorYears int
 		var bookedValueDate, bookedMaturityDate, bookedInterestTypeCode, bookedFrequencyID, bookedTenorType, entityID, bookingStatus string
+		var bookedAccrualFreqCode, bookedResetType, bookedPayoutFreqID string
 		err := pgxPool.QueryRow(ctx, `
 			SELECT
 				COALESCE(principal_amount,0),
@@ -196,13 +197,17 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(frequency_id,''),
 				COALESCE(tenor_type,''),
 				COALESCE(entity_id,''),
-				COALESCE(booking_status,'')
+				COALESCE(booking_status,''),
+				COALESCE(accrual_frequency_code,''),
+				COALESCE(reset_type,''),
+				COALESCE(NULLIF(payout_frequency_id,''), frequency_id, '')
 			FROM investment.fd_booking_request
 			WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false`,
 			req.BookingID,
 		).Scan(&bookedPrincipal, &bookedRate, &bookedTenorDays, &bookedTenorMonths, &bookedTenorYears,
 			&bookedValueDate, &bookedMaturityDate, &bookedInterestTypeCode, &bookedFrequencyID, &bookedTenorType,
-			&entityID, &bookingStatus)
+			&entityID, &bookingStatus,
+			&bookedAccrualFreqCode, &bookedResetType, &bookedPayoutFreqID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				api.RespondWithError(w, http.StatusBadRequest,
@@ -211,6 +216,17 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			api.RespondWithError(w, http.StatusInternalServerError, "Fetch booking failed: "+err.Error())
 			return
+		}
+
+		// Inherit booking values when the confirmation request omits these fields.
+		if req.AccrualFrequencyCode == "" {
+			req.AccrualFrequencyCode = bookedAccrualFreqCode
+		}
+		if req.ResetType == "" {
+			req.ResetType = bookedResetType
+		}
+		if req.ConfirmedFrequencyID == "" {
+			req.ConfirmedFrequencyID = bookedPayoutFreqID
 		}
 
 		// ── Run variance engine ───────────────────────────────────────────────
@@ -694,6 +710,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var bookedPrincipal, bookedRate float64
 		var bookedTenorDays, bookedTenorMonths, bookedTenorYears int
 		var bookedValueDate, bookedMaturityDate, bookedInterestType, bookedFrequencyID, bookedTenorType, entityID, bookingStatus string
+		var bookedAccrualFreqCode, bookedResetType, bookedPayoutFreqID string
 		err := pgxPool.QueryRow(ctx, `
 			SELECT
 				COALESCE(principal_amount,0), COALESCE(interest_rate,0),
@@ -701,12 +718,16 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(value_date,'YYYY-MM-DD'),''),
 				COALESCE(TO_CHAR(expected_maturity_date,'YYYY-MM-DD'),''),
 				COALESCE(interest_type_code,''), COALESCE(frequency_id,''), COALESCE(tenor_type,''),
-				COALESCE(entity_id,''), COALESCE(booking_status,'')
+				COALESCE(entity_id,''), COALESCE(booking_status,''),
+				COALESCE(accrual_frequency_code,''),
+				COALESCE(reset_type,''),
+				COALESCE(NULLIF(payout_frequency_id,''), frequency_id, '')
 			FROM investment.fd_booking_request
 			WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false`, bookingID,
 		).Scan(&bookedPrincipal, &bookedRate, &bookedTenorDays, &bookedTenorMonths, &bookedTenorYears,
 			&bookedValueDate, &bookedMaturityDate, &bookedInterestType, &bookedFrequencyID, &bookedTenorType,
-			&entityID, &bookingStatus)
+			&entityID, &bookingStatus,
+			&bookedAccrualFreqCode, &bookedResetType, &bookedPayoutFreqID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				api.RespondWithError(w, http.StatusBadRequest,
@@ -720,6 +741,16 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tenorType := strings.ToUpper(strings.TrimSpace(req.ConfirmedTenorType))
 		if tenorType == "" {
 			tenorType = bookedTenorType
+		}
+		// Inherit booking values when the confirmation request omits these fields.
+		if req.AccrualFrequencyCode == "" {
+			req.AccrualFrequencyCode = bookedAccrualFreqCode
+		}
+		if req.ResetType == "" {
+			req.ResetType = bookedResetType
+		}
+		if req.ConfirmedFrequencyID == "" {
+			req.ConfirmedFrequencyID = bookedPayoutFreqID
 		}
 
 		runID := varianceengine.NewRunID()
@@ -1054,7 +1085,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Load current confirmation + linked booking (FOR UPDATE) ─────────────
 		var bookingID, entityID, currentStatus, oldTenorType, oldPenaltyID string
-		var oldInterestTypeCode, oldFrequencyID string
+		var oldInterestTypeCode, oldFrequencyID, oldAccrualFreqCode, oldResetType string
 		var oldPrincipal, oldRate float64
 		var oldTenorDays, oldTenorMonths, oldTenorYears int
 		var oldValueDate, oldMaturityDate, oldFirstCapDate, oldFirstPayoutDate string
@@ -1069,7 +1100,9 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.actual_start_date,'YYYY-MM-DD'),''),
 				COALESCE(TO_CHAR(c.actual_maturity_date,'YYYY-MM-DD'),''),
 				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),''),
-				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')
+				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),''),
+				COALESCE(c.accrual_frequency_code,''),
+				COALESCE(c.reset_type,'')
 			FROM investment.fd_confirmation c
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false
@@ -1078,7 +1111,8 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldInterestTypeCode, &oldFrequencyID,
 				&oldPrincipal, &oldRate,
 				&oldTenorDays, &oldTenorMonths, &oldTenorYears,
-				&oldValueDate, &oldMaturityDate, &oldFirstCapDate, &oldFirstPayoutDate)
+				&oldValueDate, &oldMaturityDate, &oldFirstCapDate, &oldFirstPayoutDate,
+				&oldAccrualFreqCode, &oldResetType)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				api.RespondWithError(w, http.StatusNotFound,
@@ -1102,6 +1136,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var bookedPrincipal, bookedRate float64
 		var bookedTenorDays, bookedTenorMonths, bookedTenorYears int
 		var bookedValueDate, bookedMaturityDate, bookedInterestTypeCode, bookedFrequencyID, bookedTenorType string
+		var bookedAccrualFreqCode, bookedResetType, bookedPayoutFreqID string
 		if bookingID != "" {
 			_ = pgxPool.QueryRow(ctx, `
 				SELECT
@@ -1109,11 +1144,27 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(tenure_days,0), COALESCE(tenure_months,0), COALESCE(tenure_years,0),
 					COALESCE(TO_CHAR(value_date,'YYYY-MM-DD'),''),
 					COALESCE(TO_CHAR(expected_maturity_date,'YYYY-MM-DD'),''),
-					COALESCE(interest_type_code,''), COALESCE(frequency_id,''), COALESCE(tenor_type,'')
+					COALESCE(interest_type_code,''), COALESCE(frequency_id,''), COALESCE(tenor_type,''),
+					COALESCE(accrual_frequency_code,''),
+					COALESCE(reset_type,''),
+					COALESCE(NULLIF(payout_frequency_id,''), frequency_id, '')
 				FROM investment.fd_booking_request
 				WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false`, bookingID).
 				Scan(&bookedPrincipal, &bookedRate, &bookedTenorDays, &bookedTenorMonths, &bookedTenorYears,
-					&bookedValueDate, &bookedMaturityDate, &bookedInterestTypeCode, &bookedFrequencyID, &bookedTenorType)
+					&bookedValueDate, &bookedMaturityDate, &bookedInterestTypeCode, &bookedFrequencyID, &bookedTenorType,
+					&bookedAccrualFreqCode, &bookedResetType, &bookedPayoutFreqID)
+
+			// Inject booking fallbacks into req.Fields for fields the caller omitted
+			// that are also empty on the current confirmation.
+			if _, sent := req.Fields["accrual_frequency_code"]; !sent && oldAccrualFreqCode == "" && bookedAccrualFreqCode != "" {
+				req.Fields["accrual_frequency_code"] = bookedAccrualFreqCode
+			}
+			if _, sent := req.Fields["reset_type"]; !sent && oldResetType == "" && bookedResetType != "" {
+				req.Fields["reset_type"] = bookedResetType
+			}
+			if _, sent := req.Fields["confirmed_frequency_id"]; !sent && oldFrequencyID == "" && bookedPayoutFreqID != "" {
+				req.Fields["confirmed_frequency_id"] = bookedPayoutFreqID
+			}
 		}
 
 		// ── Merge req.Fields into effective new values ────────────────────────

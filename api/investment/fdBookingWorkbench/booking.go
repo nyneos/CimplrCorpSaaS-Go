@@ -2082,7 +2082,8 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')          AS first_payout_date,
 				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'') AS first_capitalization_date,
 				COALESCE(c.accrual_frequency_code,'')                          AS confirmed_accrual_frequency_code,
-				COALESCE(c.reset_type,'')                                      AS confirmed_reset_type,
+				COALESCE(NULLIF(c.payout_frequency_id,''), c.confirmed_frequency_id, '')  AS confirmed_payout_frequency_id,
+				COALESCE(NULLIF(c.reset_type,''),'AT_MATURITY')                AS confirmed_reset_type,
 				COALESCE(c.confirmed_frequency_id,'')                          AS confirmed_frequency_id
 			FROM investment.fd_booking_request m
 			LEFT JOIN investment.fd_confirmation c
