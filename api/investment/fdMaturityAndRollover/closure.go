@@ -2222,13 +2222,13 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 
-		var curStatus, fdID, entityID string
+		var curStatus, fdID, entityID, approvalInstanceID string
 		err := pool.QueryRow(ctx, `
-			SELECT closure_status, fd_id, COALESCE(entity_id,'')
+			SELECT closure_status, fd_id, COALESCE(entity_id,''), COALESCE(approval_instance_id, '')
 			FROM investment.fd_closure_request
 			WHERE closure_request_id=$1 AND is_deleted=false`,
 			req.ClosureRequestID,
-		).Scan(&curStatus, &fdID, &entityID)
+		).Scan(&curStatus, &fdID, &entityID, &approvalInstanceID)
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				api.RespondWithError(w, http.StatusNotFound, constants.ErrClosureRequestNotFound)
@@ -2251,33 +2251,11 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			LIMIT 1`,
 			req.ClosureRequestID,
 		).Scan(&latestActionType, &latestProcessingStatus)
-		if latestErr == nil && latestActionType == "DELETE" && latestProcessingStatus == "PENDING_DELETE_APPROVAL" {
+		if latestErr == nil &&
+			latestActionType == "DELETE" &&
+			latestProcessingStatus == "PENDING_DELETE_APPROVAL" &&
+			strings.TrimSpace(approvalInstanceID) != "" {
 			api.RespondWithError(w, http.StatusBadRequest, "Delete approval is already pending for this closure request")
-			return
-		}
-
-		tx, txErr := pool.Begin(ctx)
-		if txErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
-			return
-		}
-		defer tx.Rollback(ctx) //nolint:errcheck
-
-		snapshotJSON, _ := json.Marshal(map[string]interface{}{"closure_status": curStatus, "fd_id": fdID, "delete_reason": req.Reason})
-		_ = insertClosureAudit(ctx, ClosureAuditParams{
-			Exec:             tx,
-			ClosureRequestID: req.ClosureRequestID,
-			PerformedBy:      req.UserID,
-			PerformedByEmail: userEmail,
-			ActionType:       "DELETE",
-			ProcessingStatus: "PENDING_DELETE_APPROVAL",
-			Reason:           req.Reason,
-			Snapshot:         snapshotJSON,
-			OldValues:        map[string]interface{}{"closure_status": curStatus},
-		})
-
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
 			return
 		}
 
@@ -2303,9 +2281,37 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "No approval matrix configured for delete request")
 			return
 		}
-		if _, updErr := pool.Exec(ctx, `UPDATE investment.fd_closure_request SET approval_instance_id=$1, updated_at=NOW() WHERE closure_request_id=$2`, instID, req.ClosureRequestID); updErr != nil {
+
+		tx, txErr := pool.Begin(ctx)
+		if txErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
+			return
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		snapshotJSON, _ := json.Marshal(map[string]interface{}{"closure_status": curStatus, "fd_id": fdID, "delete_reason": req.Reason})
+		if err := insertClosureAudit(ctx, ClosureAuditParams{
+			Exec:             tx,
+			ClosureRequestID: req.ClosureRequestID,
+			PerformedBy:      req.UserID,
+			PerformedByEmail: userEmail,
+			ActionType:       "DELETE",
+			ProcessingStatus: "PENDING_DELETE_APPROVAL",
+			Reason:           req.Reason,
+			Snapshot:         snapshotJSON,
+			OldValues:        map[string]interface{}{"closure_status": curStatus},
+		}); err != nil {
+			api.LogError("[FDClosure] insert delete audit failed: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to create delete audit trail")
+			return
+		}
+		if _, updErr := tx.Exec(ctx, `UPDATE investment.fd_closure_request SET approval_instance_id=$1, updated_at=NOW() WHERE closure_request_id=$2`, instID, req.ClosureRequestID); updErr != nil {
 			api.LogError("[FDClosure] Update approval_instance_id for DELETE failed: %v", updErr)
 			api.RespondWithError(w, http.StatusInternalServerError, "Delete approval instance created, but request linking failed")
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
 			return
 		}
 		api.LogInfo("[FDClosure] CreateInstance DELETE created instance=%s", instID)
