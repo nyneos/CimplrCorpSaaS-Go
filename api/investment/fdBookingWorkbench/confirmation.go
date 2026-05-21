@@ -634,6 +634,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ConfirmedValueDate       string           `json:"confirmed_value_date"`
 			ConfirmedMaturityDate    string           `json:"confirmed_maturity_date"`
 			BankFDReference          string           `json:"bank_fd_reference"`
+			BankReferenceNumber      string           `json:"bank_reference_number"`
 			ReceiptDate              string           `json:"receipt_date"`
 			ConfirmedInterestType    string           `json:"confirmed_interest_type"`
 			ConfirmedFrequencyID     string           `json:"confirmed_frequency_id"`
@@ -834,6 +835,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					first_capitalization_date    = $22,
 					accrual_frequency_code       = NULLIF($23,''),
 					reset_type                   = NULLIF($24,''),
+					bank_reference_number        = NULLIF($25,''),
 					updated_by                   = $19,
 					updated_at                   = now()
 				WHERE confirmation_id = $20`,
@@ -848,6 +850,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				coerceDateValue(req.FirstPayoutDate), coerceDateValue(req.FirstCapitalizationDate),
 				strings.ToUpper(strings.TrimSpace(req.AccrualFrequencyCode)),
 				strings.ToUpper(strings.TrimSpace(req.ResetType)),
+				strings.TrimSpace(req.BankReferenceNumber),
 			); err != nil {
 				api.LogError("[VarianceResolve] UPDATE fd_confirmation error: %v", err)
 				msg, status := getUserFriendlyFDError(err, constants.ErrUpdateConfirmationFailed)
@@ -893,6 +896,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					first_capitalization_date,
 					accrual_frequency_code,
 					reset_type,
+					bank_reference_number,
 					created_by
 				) VALUES (
 					$1,
@@ -911,6 +915,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					$22,
 					NULLIF($23,''),
 					NULLIF($24,''),
+					NULLIF($25,''),
 					$20
 				) RETURNING confirmation_id`,
 				bookingID,
@@ -925,6 +930,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				coerceDateValue(req.FirstPayoutDate), coerceDateValue(req.FirstCapitalizationDate),
 				strings.ToUpper(strings.TrimSpace(req.AccrualFrequencyCode)),
 				strings.ToUpper(strings.TrimSpace(req.ResetType)),
+				strings.TrimSpace(req.BankReferenceNumber),
 			).Scan(&confirmationID)
 			if err != nil {
 				msg, status := getUserFriendlyFDError(err, "Insert confirmation failed")
@@ -2052,6 +2058,8 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.actual_start_date,'YYYY-MM-DD'),'')                AS confirmed_value_date,
 				COALESCE(TO_CHAR(c.actual_maturity_date,'YYYY-MM-DD'),'')             AS confirmed_maturity_date,
 				COALESCE(c.bank_fd_ref_no,'')                                          AS bank_fd_reference,
+				COALESCE(NULLIF(BTRIM(c.bank_reference_number::text),''),
+				         c.bank_fd_ref_no, '')                                        AS bank_reference_number,
 				COALESCE(TO_CHAR(c.confirmation_received_date,'YYYY-MM-DD'),'')       AS receipt_date,
 				COALESCE(c.tenor_type,'')                                              AS confirmed_tenor_type,
 				COALESCE(c.tenor_days,0)                                               AS confirmed_tenor_days,
@@ -2365,7 +2373,8 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.actual_start_date,'YYYY-MM-DD'),'') AS confirmed_value_date,
 				COALESCE(TO_CHAR(c.actual_maturity_date,'YYYY-MM-DD'),'') AS confirmed_maturity_date,
 				COALESCE(c.bank_fd_ref_no,'') AS bank_fd_reference,
-				COALESCE(c.bank_fd_ref_no,'') AS bank_reference_number,
+				COALESCE(NULLIF(BTRIM(c.bank_reference_number::text),''),
+				         c.bank_fd_ref_no, '') AS bank_reference_number,
 				COALESCE(c.tenor_type,'') AS confirmed_tenor_type,
 				COALESCE(c.tenor_days,0) AS confirmed_tenor_days,
 				COALESCE(c.tenor_months,0) AS confirmed_tenor_months,

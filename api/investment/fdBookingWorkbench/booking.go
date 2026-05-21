@@ -688,6 +688,8 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"notes":           "booking_remarks", // alias → DB column
 			"booking_remarks": "booking_remarks",
 			"bank_config_id":  "bank_config_id",
+			// offer_valid_till is a date column on fd_booking_request
+			"offer_valid_till": "offer_valid_till",
 		}
 
 		setClauses := make([]string, 0)
@@ -703,7 +705,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue // already added this DB column via another alias
 			}
 			usedColumns[colName] = true
-			if k == "value_date" || k == "expected_maturity_date" {
+			if k == "value_date" || k == "expected_maturity_date" || k == "offer_valid_till" {
 				v = coerceDateValue(v)
 			}
 			setClauses = append(setClauses, fmt.Sprintf("%s = $%d", colName, argIdx))
@@ -2035,6 +2037,8 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				-- confirmation data (NULL until CONFIRMED)
 				COALESCE(c.confirmation_id,'')                                 AS confirmation_id,
 				COALESCE(c.bank_fd_ref_no,'')                                  AS bank_fd_ref_no,
+				COALESCE(NULLIF(BTRIM(c.bank_reference_number::text),''),
+				         c.bank_fd_ref_no, '')                                 AS bank_reference_number,
 				COALESCE(c.actual_principal,0)                                 AS actual_principal,
 				COALESCE(c.confirmed_rate,0)                                   AS confirmed_rate,
 				COALESCE(c.confirmed_interest_type_code,'')                    AS confirmed_interest_type,
