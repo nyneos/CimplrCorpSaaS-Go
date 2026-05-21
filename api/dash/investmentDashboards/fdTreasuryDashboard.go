@@ -66,25 +66,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		entityFilter := req.EntityID
 
-		// Resolve period start / end for date-range filtering
-		var periodStart time.Time
-		if req.Period == "CUSTOM" && req.StartDate != "" {
-			if parsed, err := time.Parse(constants.DateFormat, req.StartDate); err == nil {
-				periodStart = parsed
-			} else {
-				periodStart = periodStartDate("MTD", now)
-			}
-		} else {
-			periodStart = periodStartDate(req.Period, now)
-		}
-		periodEnd := now
-		if req.Period == "CUSTOM" && req.EndDate != "" {
-			if parsed, err := time.Parse(constants.DateFormat, req.EndDate); err == nil {
-				periodEnd = parsed
-			}
-		}
-		startDateStr := periodStart.Format(constants.DateFormat)
-		endDateStr := periodEnd.Format(constants.DateFormat)
+		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
+		startDateStr := periodBounds.StartStr
+		endDateStr := periodBounds.EndStr
 
 		type subResult struct {
 			data interface{}
@@ -774,28 +758,63 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return map[string]interface{}{"rows": out, "total": len(out)}, nil
 		})
 
-		// ── 9c. rollover / closure decisions pending (closure.go: PENDING_APPROVAL) ──
+		// ── 9c. rollover / closure decisions pending (cimplr initiate/confirm + legacy request) ──
 		run("rollover_pending", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
-				SELECT
-				  COALESCE(cr.closure_request_id::text, ''),
-				  COALESCE(cr.fd_id,''),
-				  COALESCE(b.entity_name, m.entity_name,''),
-				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,''),
-				  COALESCE(m.principal_amount, 0),
-				  COALESCE(m.interest_rate, 0),
-				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
-				  COALESCE(cr.closure_status,''),
-				  COALESCE(cr.closure_type,''),
-				  COALESCE((m.maturity_date - CURRENT_DATE)::int, 0),
-				  COALESCE(m.maturity_instructions,'')
-				FROM investment.fd_closure_request cr
-				LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id AND m.is_deleted=false
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE COALESCE(cr.is_deleted,false)=false
-				  AND cr.closure_status = 'PENDING_APPROVAL'
-				  AND ($1::text='' OR COALESCE(m.entity_id, cr.entity_id, b.entity_id)=$1)
-				ORDER BY m.maturity_date ASC NULLS LAST
+				SELECT ref_id, fd_id, entity, bank, principal, rate, maturity_date,
+				       closure_status, closure_type, days_to_maturity, maturity_instructions
+				FROM (
+				  SELECT
+				    COALESCE(ci.closure_initiate_id, '') AS ref_id,
+				    COALESCE(ci.fd_id, '') AS fd_id,
+				    COALESCE(ci.entity_name, b.entity_name, m.entity_name, '') AS entity,
+				    COALESCE(ci.bank_name, m.bank_id, b.bank_name, b.bank_id, '') AS bank,
+				    COALESCE(ci.principal_amount, m.principal_amount, 0) AS principal,
+				    COALESCE(ci.interest_rate, m.interest_rate, 0) AS rate,
+				    COALESCE(TO_CHAR(ci.maturity_date, 'YYYY-MM-DD'), TO_CHAR(m.maturity_date, 'YYYY-MM-DD'), '') AS maturity_date,
+				    COALESCE(cc.closure_status, ci.closure_status, '') AS closure_status,
+				    COALESCE(ci.closure_type, '') AS closure_type,
+				    COALESCE((m.maturity_date - CURRENT_DATE)::int, 0) AS days_to_maturity,
+				    COALESCE(m.maturity_instructions, '') AS maturity_instructions,
+				    COALESCE(ci.created_at, NOW()) AS sort_ts
+				  FROM cimplr.fd_closure_initiate ci
+				  JOIN investment.fd_master m ON m.fd_id = ci.fd_id AND m.is_deleted = false
+				  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				  LEFT JOIN LATERAL (
+				    SELECT cc.closure_status
+				    FROM cimplr.fd_closure_confirm cc
+				    WHERE cc.closure_initiate_id = ci.closure_initiate_id
+				      AND COALESCE(cc.is_deleted, false) = false
+				    ORDER BY cc.created_at DESC
+				    LIMIT 1
+				  ) cc ON true
+				  WHERE COALESCE(ci.is_deleted, false) = false
+				    AND UPPER(COALESCE(ci.closure_type, '')) IN ('ROLLOVER', 'PAYOUT')
+				    AND COALESCE(cc.closure_status, ci.closure_status, '') NOT IN ('POSTED', 'REJECTED', 'DELETED')
+				    AND NOT (`+sqlCimplrClosureProcessed+`)
+				    AND ($1::text = '' OR COALESCE(ci.entity_id, m.entity_id, b.entity_id) = $1)
+				  UNION ALL
+				  SELECT
+				    COALESCE(cr.closure_request_id::text, ''),
+				    COALESCE(cr.fd_id, ''),
+				    COALESCE(b.entity_name, m.entity_name, ''),
+				    COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id, ''),
+				    COALESCE(m.principal_amount, 0),
+				    COALESCE(m.interest_rate, 0),
+				    COALESCE(TO_CHAR(m.maturity_date, 'YYYY-MM-DD'), ''),
+				    COALESCE(cr.closure_status, ''),
+				    COALESCE(cr.closure_type, ''),
+				    COALESCE((m.maturity_date - CURRENT_DATE)::int, 0),
+				    COALESCE(m.maturity_instructions, ''),
+				    COALESCE(cr.created_at, NOW())
+				  FROM investment.fd_closure_request cr
+				  LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id AND m.is_deleted = false
+				  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				  WHERE COALESCE(cr.is_deleted, false) = false
+				    AND cr.closure_status = 'PENDING_APPROVAL'
+				    AND ($1::text = '' OR COALESCE(m.entity_id, cr.entity_id, b.entity_id) = $1)
+				) pending
+				ORDER BY sort_ts ASC, maturity_date ASC NULLS LAST
 				LIMIT 100`, entityFilter)
 			if err != nil {
 				api.LogError("[TreasuryDash] rollover_pending query error: %v", err)
@@ -1258,7 +1277,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"filters": map[string]interface{}{
 				"entity_id":  entityFilter,
 				"currency":   req.Currency,
-				"period":     req.Period,
+				"period":     periodBounds.Period,
 				"start_date": startDateStr,
 				"end_date":   endDateStr,
 			},
@@ -1293,7 +1312,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"rollover_pending":        get("rollover_pending"),
 			"approval_workflow": get("approval_workflow"),
 			"lifecycle_summary": get("lifecycle_summary"),
-			"period_start":      periodStart.Format(constants.DateFormat),
+			"period_start":      periodBounds.StartStr,
 		}
 
 		api.RespondWithPayload(w, true, "", payload)

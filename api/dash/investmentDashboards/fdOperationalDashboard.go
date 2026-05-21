@@ -64,25 +64,9 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		entityFilter := req.EntityID
 
-		// ── period resolution (supports CUSTOM start/end dates) ──────────────────
-		var opPeriodStart time.Time
-		if req.Period == "CUSTOM" && req.StartDate != "" {
-			if parsed, pErr := time.Parse(constants.DateFormat, req.StartDate); pErr == nil {
-				opPeriodStart = parsed
-			} else {
-				opPeriodStart = periodStartDate("MTD", now)
-			}
-		} else {
-			opPeriodStart = periodStartDate(req.Period, now)
-		}
-		opPeriodEnd := now
-		if req.Period == "CUSTOM" && req.EndDate != "" {
-			if parsed, pErr := time.Parse(constants.DateFormat, req.EndDate); pErr == nil {
-				opPeriodEnd = parsed
-			}
-		}
-		startDateStr := opPeriodStart.Format(constants.DateFormat)
-		endDateStr := opPeriodEnd.Format(constants.DateFormat)
+		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
+		startDateStr := periodBounds.StartStr
+		endDateStr := periodBounds.EndStr
 
 		type subResult struct {
 			data interface{}
@@ -1307,7 +1291,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"filters": map[string]interface{}{
 				"entity_id":  entityFilter,
 				"currency":   req.Currency,
-				"period":     req.Period,
+				"period":     periodBounds.Period,
 				"start_date": startDateStr,
 				"end_date":   endDateStr,
 			},

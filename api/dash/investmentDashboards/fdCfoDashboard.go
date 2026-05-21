@@ -56,10 +56,10 @@ type fdCfoDashRequest struct {
 	EndDate           string `json:"end_date"`   // YYYY-MM-DD — used when Period=="CUSTOM"
 	AsOnDate          string `json:"as_on_date"` // optional snapshot date (default = today)
 	Bank              string `json:"bank"`
-	FDStatus          string `json:"fd_status"`           // ACTIVE | NEAR_MATURITY | MATURED | CLOSED
-	FDType            string `json:"fd_type"`             // SIMPLE | COMPOUNDING
-	InterestFrequency string `json:"interest_frequency"`  // PAYOUT | COMPOUNDING
-	LadderView        string `json:"ladder_view"`         // WEEK | MONTH | YEAR — Maturity Ladder bucket size (default WEEK)
+	FDStatus          string `json:"fd_status"`          // ACTIVE | NEAR_MATURITY | MATURED | CLOSED
+	FDType            string `json:"fd_type"`            // SIMPLE | COMPOUNDING
+	InterestFrequency string `json:"interest_frequency"` // PAYOUT | COMPOUNDING
+	LadderView        string `json:"ladder_view"`        // WEEK | MONTH | YEAR — Maturity Ladder bucket size (default WEEK)
 }
 
 // roundN rounds v to n decimal places.
@@ -420,20 +420,53 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		ORDER BY m.created_at DESC LIMIT 200`
 
 	pendingClosureSQL := `
-		SELECT
-		  COALESCE(b.booking_id,''), COALESCE(m.fd_id, cr.fd_id,''),
-		  COALESCE(m.entity_name, b.entity_name,''), COALESCE(m.entity_id, b.entity_id,''),
-		  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,''),
-		  COALESCE(m.principal_amount, b.principal_amount,0), COALESCE(m.interest_rate, b.interest_rate, 0),
-		  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
-		  COALESCE(cr.closure_status,''),
-		  COALESCE(cr.created_by,''), COALESCE(TO_CHAR(cr.created_at,'YYYY-MM-DD HH24:MI:SS'),'')
-		FROM investment.fd_closure_request cr
-		LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id AND m.is_deleted=false
-		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-		WHERE COALESCE(cr.is_deleted,false)=false AND cr.closure_status='PENDING_APPROVAL'
-		  AND ($1::text='' OR COALESCE(m.entity_id, b.entity_id)=$1)
-		ORDER BY cr.created_at DESC LIMIT 200`
+		SELECT booking_id, fd_id, entity, entity_id, bank, principal, rate, maturity_date, status, created_by, created_at
+		FROM (
+		  SELECT
+		    COALESCE(m.booking_id, ci.booking_id, '') AS booking_id,
+		    COALESCE(ci.fd_id, '') AS fd_id,
+		    COALESCE(ci.entity_name, m.entity_name, b.entity_name, '') AS entity,
+		    COALESCE(ci.entity_id, m.entity_id, b.entity_id, '') AS entity_id,
+		    COALESCE(ci.bank_name, m.bank_id, b.bank_name, b.bank_id, '') AS bank,
+		    COALESCE(ci.principal_amount, m.principal_amount, b.principal_amount, 0) AS principal,
+		    COALESCE(ci.interest_rate, m.interest_rate, b.interest_rate, 0) AS rate,
+		    COALESCE(TO_CHAR(ci.maturity_date, 'YYYY-MM-DD'), TO_CHAR(m.maturity_date, 'YYYY-MM-DD'), '') AS maturity_date,
+		    COALESCE(la.processing_status, ci.closure_status, 'PENDING_APPROVAL') AS status,
+		    COALESCE(la.requested_by, '') AS created_by,
+		    COALESCE(TO_CHAR(la.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS created_at,
+		    COALESCE(la.requested_at, ci.created_at) AS sort_ts
+		  FROM cimplr.fd_closure_initiate ci
+		  LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id AND m.is_deleted = false
+		  LEFT JOIN investment.fd_booking_request b ON b.booking_id = COALESCE(ci.booking_id, m.booking_id)
+		  LEFT JOIN LATERAL (
+		    SELECT processing_status, requested_by, requested_at
+		    FROM cimplr.fd_closure_initiate_audit a
+		    WHERE a.closure_initiate_id = ci.closure_initiate_id
+		    ORDER BY a.requested_at DESC
+		    LIMIT 1
+		  ) la ON true
+		  WHERE COALESCE(ci.is_deleted, false) = false
+		    AND COALESCE(la.processing_status, '') LIKE 'PENDING%'
+		    AND ($1::text = '' OR COALESCE(ci.entity_id, m.entity_id, b.entity_id) = $1)
+		  UNION ALL
+		  SELECT
+		    COALESCE(b.booking_id, ''), COALESCE(m.fd_id, cr.fd_id, ''),
+		    COALESCE(m.entity_name, b.entity_name, ''), COALESCE(m.entity_id, b.entity_id, ''),
+		    COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id, ''),
+		    COALESCE(m.principal_amount, b.principal_amount, 0), COALESCE(m.interest_rate, b.interest_rate, 0),
+		    COALESCE(TO_CHAR(m.maturity_date, 'YYYY-MM-DD'), ''),
+		    COALESCE(cr.closure_status, ''),
+		    COALESCE(cr.created_by, ''), COALESCE(TO_CHAR(cr.created_at, 'YYYY-MM-DD HH24:MI:SS'), ''),
+		    cr.created_at
+		  FROM investment.fd_closure_request cr
+		  LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id AND m.is_deleted = false
+		  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+		  WHERE COALESCE(cr.is_deleted, false) = false
+		    AND cr.closure_status = 'PENDING_APPROVAL'
+		    AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)
+		) q
+		ORDER BY sort_ts DESC
+		LIMIT 200`
 
 	pendingNew := govFetchItems(ctx, pool, entityFilter, pendingBookingSQL, "PENDING_APPROVAL", "FD Booking", "fd-booking")
 	pendingEdit := govFetchItems(ctx, pool, entityFilter, pendingEditSQL, "PENDING_EDIT_APPROVAL", "FD Booking", "fd-booking")
@@ -462,11 +495,9 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 		WHERE m.is_deleted=false AND m.maturity_date <= CURRENT_DATE
 		  AND m.maturity_date >= $2::date
+		  AND m.fd_status IN ('ACTIVE','MATURED')
 		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-		  AND NOT EXISTS (
-		    SELECT 1 FROM investment.fd_closure_request cr
-		    WHERE cr.fd_id=m.fd_id AND cr.is_deleted=false
-		      AND cr.closure_status IN ('COMPLETED','POSTED','CLOSED'))`,
+		  AND NOT (`+sqlAnyClosureProcessed+`)`,
 		entityFilter, periodStart.Format(constants.DateFormat)).Scan(&unprocessedMaturities)
 
 	bookingPriority := "Low"
@@ -549,35 +580,6 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 	}
 }
 
-// periodStartDate returns the start of the requested period (MTD / QTD / YTD).
-func periodStartDate(period string, now time.Time) time.Time {
-	switch period {
-	case "QTD":
-		// Financial quarter: Apr–Jun, Jul–Sep, Oct–Dec, Jan–Mar
-		m := int(now.Month())
-		var qStart int
-		switch {
-		case m >= 4 && m <= 6:
-			qStart = 4
-		case m >= 7 && m <= 9:
-			qStart = 7
-		case m >= 10 && m <= 12:
-			qStart = 10
-		default:
-			qStart = 1
-		}
-		return time.Date(now.Year(), time.Month(qStart), 1, 0, 0, 0, 0, now.Location())
-	case "YTD":
-		fy := now.Year()
-		if now.Month() < time.April {
-			fy--
-		}
-		return time.Date(fy, time.April, 1, 0, 0, 0, 0, now.Location())
-	default: // MTD
-		return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
-	}
-}
-
 // ─── handler ─────────────────────────────────────────────────────────────────
 
 // GetFDCfoDashboard returns the full FD CFO dashboard payload in a single call.
@@ -599,16 +601,8 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
-		var periodStart time.Time
-		if req.Period == "CUSTOM" && req.StartDate != "" {
-			if parsed, err2 := time.Parse(constants.DateFormat, req.StartDate); err2 == nil {
-				periodStart = parsed
-			} else {
-				periodStart = periodStartDate("MTD", now)
-			}
-		} else {
-			periodStart = periodStartDate(req.Period, now)
-		}
+		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
+		periodStart := periodBounds.Start
 		ctx := r.Context()
 
 		// Build optional entity filter SQL fragment (used across many queries)
@@ -712,14 +706,14 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY exposure DESC`
 
 			type bcRow struct {
-				Bank             string  `json:"bank"`
-				Exposure         float64 `json:"exposure"`
-				Limit            float64 `json:"limit"`
-				Pct              float64 `json:"pct"`
-				UtilizationPct   float64 `json:"utilization_pct"`
-				RemainingLimit   float64 `json:"remaining_limit"`
-				LimitSource      string  `json:"limit_source"`
-				Breach           bool    `json:"breach"`
+				Bank           string  `json:"bank"`
+				Exposure       float64 `json:"exposure"`
+				Limit          float64 `json:"limit"`
+				Pct            float64 `json:"pct"`
+				UtilizationPct float64 `json:"utilization_pct"`
+				RemainingLimit float64 `json:"remaining_limit"`
+				LimitSource    string  `json:"limit_source"`
+				Breach         bool    `json:"breach"`
 			}
 
 			rows, err := pool.Query(ctx, sqlStr, entityFilter)
@@ -1121,16 +1115,16 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			return map[string]interface{}{
-				"open_count":         openCnt,
-				"high_count":         highCnt,
-				"exception_count":    excCnt,
-				"amount_impact":      fdRound(amtImpact, 2),
-				"avg_rate_delta":     fdRound(avgRateDelta, 4),
-				"avg_day_delta":      fdRound(avgDayDelta, 1),
-				"distinct_fd_count":  len(seen),
-				"distinct_fd_value":  fdRound(distinctFDValue, 2),
-				"breakup":            breakup,
-				"items":              items,
+				"open_count":        openCnt,
+				"high_count":        highCnt,
+				"exception_count":   excCnt,
+				"amount_impact":     fdRound(amtImpact, 2),
+				"avg_rate_delta":    fdRound(avgRateDelta, 4),
+				"avg_day_delta":     fdRound(avgDayDelta, 1),
+				"distinct_fd_count": len(seen),
+				"distinct_fd_value": fdRound(distinctFDValue, 2),
+				"breakup":           breakup,
+				"items":             items,
 			}, nil
 		})
 
@@ -1284,7 +1278,6 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		run("governance", func(ctx context.Context) (interface{}, error) {
 			return buildGovernanceBundle(ctx, pool, entityFilter, periodStart), nil
 		})
-
 
 		// ── 11. fd_list ───────────────────────────────────────────────────────
 		// Build dynamic WHERE for optional secondary filters (bank, fd_status,
@@ -1526,9 +1519,11 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		payload := map[string]interface{}{
 			"generated_at": now.Format(time.RFC3339),
 			"filters": map[string]interface{}{
-				"entity_id": entityFilter,
-				"currency":  req.Currency,
-				"period":    req.Period,
+				"entity_id":  entityFilter,
+				"currency":   req.Currency,
+				"period":     periodBounds.Period,
+				"start_date": periodBounds.StartStr,
+				"end_date":   periodBounds.EndStr,
 			},
 			"kpis": map[string]interface{}{
 				"total_exposure":     get("total_exposure"),

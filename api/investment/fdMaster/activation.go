@@ -37,11 +37,11 @@ type InsertFDAuditParams struct {
 type activateFDRequest struct {
 	UserID         string `json:"user_id"`
 	ConfirmationID string `json:"confirmation_id"`
-	// Deprecated: activation uses the bank FD reference captured on confirmation.
-	// Kept only as a fallback for old confirmations that do not have bank_fd_ref_no.
-	FDNumber    string `json:"fd_number"`
+	// Deprecated: legacy clients sent bank ref here; use confirmation bank_fd_ref_no instead.
+	FDNumber string `json:"fd_number"`
 	ReceiptDate string `json:"receipt_date"`
-	Reason      string `json:"reason"`
+	// Ops activation comment (preferred over fd_number in UI).
+	Reason string `json:"reason"`
 	Notes       string `json:"notes"`
 }
 

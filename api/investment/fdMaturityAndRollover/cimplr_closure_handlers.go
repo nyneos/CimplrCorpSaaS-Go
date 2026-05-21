@@ -5,7 +5,9 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/api/investment/fdMaster"
 	"CimplrCorpSaas/api/varianceengine"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -30,6 +32,10 @@ const (
 	txCimplrConfirmDelete  = "FD_CLOSURE_CONFIRM_DELETE"
 )
 
+type cimplrRowQuerier interface {
+	QueryRow(ctx context.Context, sql string, arguments ...interface{}) pgx.Row
+}
+
 type cimplrClosureInitiateRequest struct {
 	UserID                  string  `json:"user_id"`
 	ClosureInitiateID       string  `json:"closure_initiate_id"`
@@ -47,6 +53,8 @@ type cimplrClosureInitiateRequest struct {
 	ActionRequired          *bool   `json:"action_required"`
 	RolloverType            string  `json:"rollover_type"`
 	RolloverBankType        string  `json:"rollover_bank_type"`
+	NewBankID               string  `json:"new_bank_id"`
+	NewBankName             string  `json:"new_bank_name"`
 	TentativeNewTenorDays   int     `json:"tentative_new_tenor_days"`
 	Remarks                 string  `json:"remarks"`
 	Reason                  string  `json:"reason"`
@@ -170,10 +178,32 @@ type cimplrClosureCalc struct {
 	PenaltyAmount         float64
 	ApplicableRate        float64
 	NoInterestFlag        bool
+	PenaltyApplicable     bool
 	ExpectedMaturityValue float64
 	RevisedInterestAmount float64
 	RevisedMaturityValue  float64
 	NetPayout             float64
+}
+
+func cimplrCalcToMap(c cimplrClosureCalc) map[string]interface{} {
+	return map[string]interface{}{
+		"closure_type":            c.ClosureType,
+		"calculation_date":        c.CalculationDate,
+		"accrued_days":            c.AccruedDays,
+		"accrued_interest":        c.AccruedInterest,
+		"tds_amount":              c.TDSAmount,
+		"penalty_id":              c.PenaltyID,
+		"penalty_type":            c.PenaltyType,
+		"penalty_value":           c.PenaltyValue,
+		"penalty_amount":          c.PenaltyAmount,
+		"applicable_rate":         c.ApplicableRate,
+		"no_interest_flag":        c.NoInterestFlag,
+		"penalty_applicable":      c.PenaltyApplicable,
+		"expected_maturity_value": c.ExpectedMaturityValue,
+		"revised_interest_amount": c.RevisedInterestAmount,
+		"revised_maturity_value":  c.RevisedMaturityValue,
+		"net_payout":              c.NetPayout,
+	}
 }
 
 func init() {
@@ -221,7 +251,7 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, "FD not found")
 			return
 		}
-		calc, err := calculateCimplrClosure(ctx, pool, src, req.ClosureType, req.RequestedClosureDate)
+		calc, err := calculateCimplrClosure(ctx, pool, src, req.ClosureType, cimplrDefaultCalcDate(src, req.ClosureType, req.RequestedClosureDate), false)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "closure calculation failed: "+err.Error())
 			return
@@ -241,6 +271,7 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.AutoRenewalFlag != nil {
 			autoRenewal = *req.AutoRenewalFlag
 		}
+		rolloverNewBankID, rolloverNewBankName := cimplrResolveInitiateRolloverBank(ctx, pool, req, src)
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -258,10 +289,11 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				principal_amount, interest_type_code, interest_rate, expected_maturity_value,
 				accrued_interest_till_date, tds_expected, net_expected_amount,
 				auto_renewal_flag, maturity_status, action_required,
-				rollover_type, rollover_bank_type, tentative_new_tenor_days, remarks
+				rollover_type, rollover_bank_type, rollover_new_bank_id, rollover_new_bank_name,
+				tentative_new_tenor_days, remarks
 			) VALUES (
 				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULLIF($11,''),$12,$13::date,
-				$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,NULLIF($24,''),NULLIF($25,''),NULLIF($26,0),$27
+				$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,NULLIF($24,''),NULLIF($25,''),NULLIF($26,''),NULLIF($27,''),NULLIF($28,0),$29
 			) RETURNING closure_initiate_id`,
 			src.FDID, nullStrOrNil(src.BookingID), nullStrOrNil(src.ConfirmationID), nullStrOrNil(src.EntityID), nullStrOrNil(src.EntityName),
 			nullStrOrNil(src.BankID), nullStrOrNil(src.BankName), nullStrOrNil(src.FDRefNo), nullStrOrNil(src.BankFDRefNo),
@@ -269,7 +301,8 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			principal, src.InterestTypeCode, src.InterestRate, expectedMaturity,
 			accrued, tds, netExpected,
 			autoRenewal, maturityStatus, actionRequired,
-			strings.ToUpper(strings.TrimSpace(req.RolloverType)), strings.ToUpper(strings.TrimSpace(req.RolloverBankType)), req.TentativeNewTenorDays, req.Remarks,
+			strings.ToUpper(strings.TrimSpace(req.RolloverType)), strings.ToUpper(strings.TrimSpace(req.RolloverBankType)),
+			nullStrOrNil(rolloverNewBankID), nullStrOrNil(rolloverNewBankName), req.TentativeNewTenorDays, req.Remarks,
 		).Scan(&closureInitiateID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "initiate create failed: "+err.Error())
@@ -305,7 +338,7 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"closure_initiate_id":  closureInitiateID,
 			"approval_instance_id": instanceID,
-			"calculation":          calc,
+			"calculation":          cimplrCalcToMap(calc),
 			"variance":             varianceSummary,
 		})
 	}
@@ -354,7 +387,7 @@ func CimplrInitiateValidate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, "FD not found")
 			return
 		}
-		calc, err := calculateCimplrClosure(r.Context(), pool, src, req.ClosureType, req.RequestedClosureDate)
+		calc, err := calculateCimplrClosure(r.Context(), pool, src, req.ClosureType, cimplrDefaultCalcDate(src, req.ClosureType, req.RequestedClosureDate), false)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "closure calculation failed: "+err.Error())
 			return
@@ -363,7 +396,7 @@ func CimplrInitiateValidate(pool *pgxpool.Pool) http.HandlerFunc {
 		summary := previewCimplrInitiateVariance(recordID, req, src, calc)
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"fd_source":         src,
-			"calculation":       calc,
+			"calculation":       cimplrCalcToMap(calc),
 			"initiate_prefill":  buildCimplrInitiatePrefill(src, calc, req.ClosureType),
 			"variance":          summary,
 			"can_create":        true,
@@ -412,7 +445,13 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			req.ClosureType = fmt.Sprint(oldRow["closure_type"])
 		}
 		req.ClosureType = normalizeCimplrClosureType(req.ClosureType, req.ActionAtMaturity)
-		calc, err := calculateCimplrClosure(ctx, pool, src, req.ClosureType, req.RequestedClosureDate)
+		oldClosureType := strings.ToUpper(strings.TrimSpace(fmt.Sprint(oldRow["closure_type"])))
+		if oldClosureType != "" && oldClosureType != req.ClosureType {
+			api.RespondWithError(w, http.StatusBadRequest,
+				"closure type cannot be changed after initiate; use PREMATURE closure for early exit")
+			return
+		}
+		calc, err := calculateCimplrClosure(ctx, pool, src, req.ClosureType, cimplrDefaultCalcDate(src, req.ClosureType, req.RequestedClosureDate), false)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "closure calculation failed: "+err.Error())
 			return
@@ -423,6 +462,7 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		tds := chooseFloat(req.TDSExpected, calc.TDSAmount)
 		expectedMaturity := chooseFloat(req.ExpectedMaturityValue, calc.ExpectedMaturityValue)
 		netExpected := chooseFloat(req.NetExpectedAmount, calc.NetPayout)
+		rolloverNewBankID, rolloverNewBankName := cimplrResolveInitiateRolloverBank(ctx, pool, req, src)
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -436,12 +476,14 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			    principal_amount=$4, interest_type_code=$5, interest_rate=$6,
 			    expected_maturity_value=$7, accrued_interest_till_date=$8, tds_expected=$9,
 			    net_expected_amount=$10, maturity_status=$11, rollover_type=NULLIF($12,''),
-			    rollover_bank_type=NULLIF($13,''), tentative_new_tenor_days=NULLIF($14,0), remarks=$15
-			WHERE closure_initiate_id=$16 AND is_deleted=false`,
+			    rollover_bank_type=NULLIF($13,''), rollover_new_bank_id=NULLIF($14,''),
+			    rollover_new_bank_name=NULLIF($15,''), tentative_new_tenor_days=NULLIF($16,0), remarks=$17
+			WHERE closure_initiate_id=$18 AND is_deleted=false`,
 			req.ClosureType, strings.ToUpper(strings.TrimSpace(req.ActionAtMaturity)), nullDateArg(req.RequestedClosureDate),
 			principal, src.InterestTypeCode, src.InterestRate, expectedMaturity, accrued, tds, netExpected,
 			firstNonEmpty(strings.ToUpper(strings.TrimSpace(req.MaturityStatus)), deriveCimplrMaturityStatus(src.MaturityDate)),
-			strings.ToUpper(strings.TrimSpace(req.RolloverType)), strings.ToUpper(strings.TrimSpace(req.RolloverBankType)), req.TentativeNewTenorDays, req.Remarks,
+			strings.ToUpper(strings.TrimSpace(req.RolloverType)), strings.ToUpper(strings.TrimSpace(req.RolloverBankType)),
+			nullStrOrNil(rolloverNewBankID), nullStrOrNil(rolloverNewBankName), req.TentativeNewTenorDays, req.Remarks,
 			req.ClosureInitiateID,
 		)
 		if err != nil {
@@ -509,15 +551,18 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			if fmt.Sprint(oldRow["closure_status"]) == "CONFIRM" {
+			if strings.ToUpper(fmt.Sprint(oldRow["closure_status"])) == "CONFIRM" {
 				var confirmCount int
 				_ = pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM cimplr.fd_closure_confirm WHERE closure_initiate_id=$1 AND is_deleted=false`, id).Scan(&confirmCount)
 				if confirmCount > 0 {
 					res["success"] = false
-					res["error"] = "cannot delete initiate after confirm has been created"
-					results = append(results, res)
-					continue
+					res["error"] = "cannot delete approved initiate after confirmation exists; delete confirmation first"
+				} else {
+					res["success"] = false
+					res["error"] = "cannot delete approved initiate record"
 				}
+				results = append(results, res)
+				continue
 			}
 			if err := insertCimplrInitiateAudit(r.Context(), pool, id, "DELETE", "PENDING_DELETE_APPROVAL", firstNonEmpty(req.Comment, "Delete FD closure initiate"), req.UserID, oldRow); err != nil {
 				res["success"] = false
@@ -609,6 +654,7 @@ func CimplrInitiateApprovedActive(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch approved-active initiate records: "+err.Error())
 			return
 		}
+		rows = enrichCimplrInitiateListFromCalculation(r.Context(), pool, rows, true)
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"records": rows, "total": total})
 	}
 }
@@ -649,8 +695,13 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		closureType := fmt.Sprint(initiate["closure_type"])
-		calc, err := calculateCimplrClosure(ctx, pool, src, closureType, firstNonEmpty(req.RequestedClosureDate, fmt.Sprint(initiate["requested_closure_date"])))
+		enforceMaturity := closureType == "PAYOUT" || closureType == "ROLLOVER"
+		calc, err := calculateCimplrClosure(ctx, pool, src, closureType, firstNonEmpty(req.RequestedClosureDate, fmt.Sprint(initiate["requested_closure_date"])), enforceMaturity)
 		if err != nil {
+			if enforceMaturity {
+				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			api.RespondWithError(w, http.StatusInternalServerError, "closure calculation failed: "+err.Error())
 			return
 		}
@@ -732,7 +783,7 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"closure_confirm_id":   closureConfirmID,
 			"approval_instance_id": instanceID,
-			"calculation":          calc,
+			"calculation":          cimplrCalcToMap(calc),
 			"variance":             varianceSummary,
 		})
 	}
@@ -769,7 +820,7 @@ func CimplrPrematureValidate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, "FD not found")
 			return
 		}
-		calc, err := calculateCimplrClosure(r.Context(), pool, src, "PREMATURE", req.RequestedClosureDate)
+		calc, err := calculateCimplrClosure(r.Context(), pool, src, "PREMATURE", req.RequestedClosureDate, false)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "premature calculation failed: "+err.Error())
 			return
@@ -777,7 +828,7 @@ func CimplrPrematureValidate(pool *pgxpool.Pool) http.HandlerFunc {
 		recordID := firstNonEmpty(req.ClosureConfirmID, "PREVIEW-"+varianceengine.NewRunID())
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"fd_source":         src,
-			"calculation":       calc,
+			"calculation":       cimplrCalcToMap(calc),
 			"premature_prefill": buildCimplrConfirmPrefill(src, calc, "PREMATURE"),
 			"variance":          previewCimplrConfirmVariance(recordID, req, src, calc),
 			"can_create":        true,
@@ -817,7 +868,7 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, "FD not found")
 			return
 		}
-		calc, err := calculateCimplrClosure(ctx, pool, src, "PREMATURE", req.RequestedClosureDate)
+		calc, err := calculateCimplrClosure(ctx, pool, src, "PREMATURE", req.RequestedClosureDate, false)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "premature calculation failed: "+err.Error())
 			return
@@ -890,7 +941,7 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"closure_confirm_id":   closureConfirmID,
 			"approval_instance_id": instanceID,
-			"calculation":          calc,
+			"calculation":          cimplrCalcToMap(calc),
 			"variance":             varianceSummary,
 		})
 	}
@@ -932,7 +983,8 @@ func CimplrConfirmValidate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		closureType := fmt.Sprint(initiate["closure_type"])
-		calc, err := calculateCimplrClosure(r.Context(), pool, src, closureType, firstNonEmpty(req.RequestedClosureDate, fmt.Sprint(initiate["requested_closure_date"])))
+		calcDate := cimplrDefaultCalcDate(src, closureType, firstNonEmpty(req.RequestedClosureDate, fmt.Sprint(initiate["requested_closure_date"])))
+		calc, err := calculateCimplrClosure(r.Context(), pool, src, closureType, calcDate, false)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "closure calculation failed: "+err.Error())
 			return
@@ -942,7 +994,7 @@ func CimplrConfirmValidate(pool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"fd_source":         src,
 			"initiate":          initiate,
-			"calculation":       calc,
+			"calculation":       cimplrCalcToMap(calc),
 			"confirm_prefill":   buildCimplrConfirmPrefill(src, calc, closureType),
 			"variance":          summary,
 			"can_create":        fmt.Sprint(initiate["closure_status"]) == "CONFIRM",
@@ -986,7 +1038,7 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		closureType := fmt.Sprint(oldRow["closure_type"])
-		calc, err := calculateCimplrClosure(ctx, pool, src, closureType, firstNonEmpty(req.RequestedClosureDate, fmt.Sprint(oldRow["requested_closure_date"])))
+		calc, err := calculateCimplrClosure(ctx, pool, src, closureType, firstNonEmpty(req.RequestedClosureDate, fmt.Sprint(oldRow["requested_closure_date"])), false)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "closure calculation failed: "+err.Error())
 			return
@@ -1285,7 +1337,10 @@ func CimplrMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN LATERAL (
 				SELECT * FROM cimplr.fd_closure_confirm c
 				WHERE c.fd_id=m.fd_id AND COALESCE(c.is_deleted,false)=false
-				ORDER BY c.closure_confirm_id DESC LIMIT 1
+				ORDER BY
+					CASE WHEN c.closure_type='PREMATURE' THEN 0 ELSE 1 END,
+					c.closure_confirm_id DESC
+				LIMIT 1
 			) cc ON true
 			LEFT JOIN LATERAL (
 				SELECT * FROM cimplr.fd_closure_initiate i
@@ -1353,6 +1408,7 @@ func CimplrMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"records":     records,
+			"data":        records,
 			"summary":     summary,
 			"grand_total": grand,
 			"source":      "cimplr",
@@ -1625,7 +1681,10 @@ func cimplrInitiatePostFinalizeHook(ctx context.Context, pool *pgxpool.Pool, rec
 	}
 	switch transactionType {
 	case txCimplrInitiateDelete:
-		_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_initiate SET closure_status='DELETED', is_deleted=true, is_active=false WHERE closure_initiate_id=$1`, recordID)
+		_, _ = pool.Exec(ctx, `
+			UPDATE cimplr.fd_closure_initiate
+			SET closure_status='DELETED', is_deleted=true, is_active=false, approval_instance_id=NULL
+			WHERE closure_initiate_id=$1`, recordID)
 	case txCimplrInitiateCreate, txCimplrInitiateEdit:
 		_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_initiate SET closure_status='CONFIRM' WHERE closure_initiate_id=$1 AND is_deleted=false`, recordID)
 	}
@@ -1640,13 +1699,42 @@ func cimplrConfirmPostFinalizeHook(ctx context.Context, pool *pgxpool.Pool, reco
 	}
 	switch transactionType {
 	case txCimplrConfirmDelete:
-		_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET closure_status='DELETED', is_deleted=true, is_active=false WHERE closure_confirm_id=$1`, recordID)
+		var initiateID string
+		_ = pool.QueryRow(ctx, `SELECT COALESCE(closure_initiate_id,'') FROM cimplr.fd_closure_confirm WHERE closure_confirm_id=$1`, recordID).Scan(&initiateID)
+		_, _ = pool.Exec(ctx, `
+			UPDATE cimplr.fd_closure_confirm
+			SET closure_status='DELETED', is_deleted=true, is_active=false,
+			    posting_status='', accounting_posted=false, approval_instance_id=NULL
+			WHERE closure_confirm_id=$1`, recordID)
+		if initiateID != "" {
+			_, _ = pool.Exec(ctx, `
+				UPDATE cimplr.fd_closure_initiate
+				SET closure_status='CONFIRM'
+				WHERE closure_initiate_id=$1 AND is_deleted=false`, initiateID)
+		}
 	case txCimplrConfirmCreate, txCimplrConfirmEdit:
 		if err := finalizeCimplrConfirmApproval(ctx, pool, recordID, actorEmail, comment); err != nil {
 			api.LogError("[CimplrFDClosure] confirm finalize failed confirm_id=%s: %v", recordID, err)
 			_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET posting_status='FAILED' WHERE closure_confirm_id=$1`, recordID)
 		}
 	}
+}
+
+func cimplrLatestPendingAuditAction(ctx context.Context, q cimplrRowQuerier, auditTable, idColumn, recordID string) (string, error) {
+	var actionType string
+	err := q.QueryRow(ctx, fmt.Sprintf(`
+		SELECT COALESCE(action_type,'')
+		FROM %s
+		WHERE %s=$1 AND processing_status LIKE 'PENDING%%'
+		ORDER BY requested_at DESC NULLS LAST, audit_id DESC
+		LIMIT 1`, auditTable, idColumn), recordID).Scan(&actionType)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.ToUpper(strings.TrimSpace(actionType)), nil
 }
 
 func cimplrApproveInitiates(ctx context.Context, pool *pgxpool.Pool, ids []string, userID, userEmail, comment string) []map[string]interface{} {
@@ -1660,6 +1748,13 @@ func cimplrApproveInitiates(ctx context.Context, pool *pgxpool.Pool, ids []strin
 			res["success"] = true
 			res["approval_engine"] = true
 		} else {
+			pendingAction, pendingErr := cimplrLatestPendingAuditAction(ctx, pool, "cimplr.fd_closure_initiate_audit", "closure_initiate_id", id)
+			if pendingErr != nil {
+				res["success"] = false
+				res["error"] = pendingErr.Error()
+				results = append(results, res)
+				continue
+			}
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				res["success"] = false
@@ -1669,7 +1764,15 @@ func cimplrApproveInitiates(ctx context.Context, pool *pgxpool.Pool, ids []strin
 			}
 			_, err = tx.Exec(ctx, `UPDATE cimplr.fd_closure_initiate_audit SET processing_status='APPROVED', checker_by=$1, checker_at=NOW(), checker_comment=$2 WHERE closure_initiate_id=$3 AND processing_status LIKE 'PENDING%'`, userEmail, comment, id)
 			if err == nil {
-				_, err = tx.Exec(ctx, `UPDATE cimplr.fd_closure_initiate SET closure_status='CONFIRM' WHERE closure_initiate_id=$1 AND is_deleted=false`, id)
+				switch pendingAction {
+				case "DELETE":
+					_, err = tx.Exec(ctx, `
+						UPDATE cimplr.fd_closure_initiate
+						SET closure_status='DELETED', is_deleted=true, is_active=false, approval_instance_id=NULL
+						WHERE closure_initiate_id=$1`, id)
+				default:
+					_, err = tx.Exec(ctx, `UPDATE cimplr.fd_closure_initiate SET closure_status='CONFIRM' WHERE closure_initiate_id=$1 AND is_deleted=false`, id)
+				}
 			}
 			if err == nil {
 				err = tx.Commit(ctx)
@@ -1724,20 +1827,90 @@ func cimplrRejectInitiates(ctx context.Context, pool *pgxpool.Pool, ids []string
 	return results
 }
 
+func cimplrAssertConfirmApprovable(ctx context.Context, pool *pgxpool.Pool, closureConfirmID string) error {
+	var hasUnresolved, hasVariance bool
+	var resolutionAction string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(has_unresolved_variance,false), COALESCE(has_variance,false),
+		       COALESCE(resolution_action,'')
+		FROM cimplr.fd_closure_confirm
+		WHERE closure_confirm_id=$1 AND COALESCE(is_deleted,false)=false`, closureConfirmID,
+	).Scan(&hasUnresolved, &hasVariance, &resolutionAction)
+	if err != nil {
+		return fmt.Errorf("confirm record not found")
+	}
+	resolutionAction = strings.ToUpper(strings.TrimSpace(resolutionAction))
+	if hasUnresolved && resolutionAction != "ACCEPT" {
+		return fmt.Errorf("cannot approve: unresolved variance exists — validate amounts, resolve variances, or set resolution_action to ACCEPT")
+	}
+	var openCount int
+	_ = pool.QueryRow(ctx, `
+		SELECT COUNT(*)::int FROM investment.variance_log
+		WHERE module_code=$1 AND record_id=$2 AND status='OPEN'`,
+		"FD_CLOSURE", closureConfirmID,
+	).Scan(&openCount)
+	if openCount > 0 && resolutionAction != "ACCEPT" {
+		return fmt.Errorf("cannot approve: %d open variance(s) — edit to align with system calculation or set resolution_action=ACCEPT", openCount)
+	}
+	if hasVariance && openCount > 0 && resolutionAction != "ACCEPT" {
+		return fmt.Errorf("cannot approve: variance flag is set with %d open item(s)", openCount)
+	}
+	return nil
+}
+
 func cimplrApproveConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string, userID, userEmail, comment string) []map[string]interface{} {
 	results := make([]map[string]interface{}, 0, len(ids))
 	for _, id := range ids {
 		res := map[string]interface{}{"closure_confirm_id": id}
+		if err := cimplrAssertConfirmApprovable(ctx, pool, id); err != nil {
+			res["success"] = false
+			res["error"] = err.Error()
+			results = append(results, res)
+			continue
+		}
 		if acted, err := cimplrActOnApproval(ctx, pool, id, userID, userEmail, approvalengine.ActionApproved, firstNonEmpty(comment, "Approved FD closure confirm")); err != nil {
 			res["success"] = false
 			res["error"] = err.Error()
 		} else if acted {
-			res["success"] = true
-			res["approval_engine"] = true
+			// Post-finalize hook runs async in approval engine; call finalize here too so
+			// journals/posting_status update even if the hook is delayed or fails silently.
+			if finErr := finalizeCimplrConfirmApproval(ctx, pool, id, userEmail, comment); finErr != nil {
+				api.LogError("[CimplrFDClosure] confirm finalize after approval engine failed confirm_id=%s: %v", id, finErr)
+				_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET posting_status='FAILED' WHERE closure_confirm_id=$1`, id)
+				res["success"] = false
+				res["error"] = finErr.Error()
+			} else {
+				res["success"] = true
+				res["approval_engine"] = true
+			}
 		} else {
+			pendingAction, pendingErr := cimplrLatestPendingAuditAction(ctx, pool, "cimplr.fd_closure_confirm_audit", "closure_confirm_id", id)
+			if pendingErr != nil {
+				res["success"] = false
+				res["error"] = pendingErr.Error()
+				results = append(results, res)
+				continue
+			}
 			_, err := pool.Exec(ctx, `UPDATE cimplr.fd_closure_confirm_audit SET processing_status='APPROVED', checker_by=$1, checker_at=NOW(), checker_comment=$2 WHERE closure_confirm_id=$3 AND processing_status LIKE 'PENDING%'`, userEmail, comment, id)
 			if err == nil {
-				err = finalizeCimplrConfirmApproval(ctx, pool, id, userEmail, comment)
+				switch pendingAction {
+				case "DELETE":
+					var initiateID string
+					_ = pool.QueryRow(ctx, `SELECT COALESCE(closure_initiate_id,'') FROM cimplr.fd_closure_confirm WHERE closure_confirm_id=$1`, id).Scan(&initiateID)
+					_, err = pool.Exec(ctx, `
+						UPDATE cimplr.fd_closure_confirm
+						SET closure_status='DELETED', is_deleted=true, is_active=false,
+						    posting_status='', accounting_posted=false, approval_instance_id=NULL
+						WHERE closure_confirm_id=$1`, id)
+					if err == nil && initiateID != "" {
+						_, err = pool.Exec(ctx, `
+							UPDATE cimplr.fd_closure_initiate
+							SET closure_status='CONFIRM'
+							WHERE closure_initiate_id=$1 AND is_deleted=false`, initiateID)
+					}
+				default:
+					err = finalizeCimplrConfirmApproval(ctx, pool, id, userEmail, comment)
+				}
 			}
 			if err != nil {
 				res["success"] = false
@@ -1807,20 +1980,20 @@ func cimplrActOnApproval(ctx context.Context, pool *pgxpool.Pool, recordID, user
 }
 
 func finalizeCimplrConfirmApproval(ctx context.Context, pool *pgxpool.Pool, closureConfirmID, actorEmail, comment string) error {
-	var closureType, resolutionAction string
-	var hasUnresolved, accountingPosted bool
+	var closureType string
+	var accountingPosted bool
 	if err := pool.QueryRow(ctx, `
-		SELECT closure_type, COALESCE(resolution_action,''), has_unresolved_variance, accounting_posted
+		SELECT closure_type, accounting_posted
 		FROM cimplr.fd_closure_confirm
 		WHERE closure_confirm_id=$1 AND is_deleted=false`, closureConfirmID,
-	).Scan(&closureType, &resolutionAction, &hasUnresolved, &accountingPosted); err != nil {
+	).Scan(&closureType, &accountingPosted); err != nil {
 		return err
 	}
 	if accountingPosted {
 		return nil
 	}
-	if hasUnresolved && resolutionAction != "ACCEPT" {
-		return fmt.Errorf("confirm has unresolved variance; set resolution_action=ACCEPT before approval")
+	if err := cimplrAssertConfirmApprovable(ctx, pool, closureConfirmID); err != nil {
+		return err
 	}
 	if closureType == "ROLLOVER" {
 		return createCimplrRolloverBooking(ctx, pool, closureConfirmID, actorEmail, comment)
@@ -2119,7 +2292,161 @@ func loadCimplrFDSource(ctx context.Context, q interface {
 	return src, err
 }
 
-func calculateCimplrClosure(ctx context.Context, pool *pgxpool.Pool, src cimplrFDSource, closureType, requestedDate string) (cimplrClosureCalc, error) {
+func cimplrResolvePenalty(ctx context.Context, pool *pgxpool.Pool, src cimplrFDSource, accruedDays int, accruedInterest float64) (penaltyID, penaltyType string, penaltyValue, penaltyAmount float64, noInterest bool, applicable bool) {
+	var minHeldDays int
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(penalty_id,''), COALESCE(penalty_type,''), COALESCE(penalty_value,0),
+		       COALESCE(no_interest_if_withdrawn_before,0)
+		FROM investment.fd_penalty_structure_master
+		WHERE bank_code=$1 AND COALESCE(is_deleted,false)=false
+		  AND (effective_from IS NULL OR effective_from <= CURRENT_DATE)
+		  AND (effective_to IS NULL OR effective_to >= CURRENT_DATE)
+		  AND (min_held_days IS NULL OR $2 >= min_held_days)
+		  AND (max_held_days IS NULL OR $2 <= max_held_days)
+		  AND (min_amount_range IS NULL OR $3 >= min_amount_range)
+		  AND (max_amount_range IS NULL OR $3 <= max_amount_range)
+		ORDER BY COALESCE(min_held_days,0) DESC, penalty_value DESC
+		LIMIT 1`,
+		src.BankID, accruedDays, src.Principal,
+	).Scan(&penaltyID, &penaltyType, &penaltyValue, &minHeldDays)
+	if err != nil || penaltyID == "" {
+		return "", "", 0, 0, false, false
+	}
+	applicable = true
+	noInterest = minHeldDays > 0 && accruedDays < minHeldDays
+	revisedInterest := accruedInterest
+	if noInterest {
+		revisedInterest = 0
+	}
+	switch strings.ToUpper(penaltyType) {
+	case "FLAT_AMOUNT":
+		penaltyAmount = roundToFour(penaltyValue)
+	case "RATE_REDUCTION":
+		rate := roundToFour(src.InterestRate - penaltyValue)
+		if rate < 0 {
+			rate = 0
+		}
+		if accruedDays > 0 && src.Principal > 0 {
+			revisedInterest = roundToFour(src.Principal * rate * float64(accruedDays) / 36500)
+		}
+		if noInterest {
+			revisedInterest = 0
+		}
+		penaltyAmount = roundToFour(accruedInterest - revisedInterest)
+		if penaltyAmount < 0 {
+			penaltyAmount = 0
+		}
+	default:
+		penaltyAmount = roundToFour(revisedInterest * penaltyValue / 100)
+	}
+	return penaltyID, penaltyType, penaltyValue, penaltyAmount, noInterest, applicable
+}
+
+func cimplrTDSTill(ctx context.Context, pool *pgxpool.Pool, fdID string, periodStart, periodEnd time.Time) float64 {
+	if fdID == "" || periodStart.IsZero() || periodEnd.IsZero() {
+		return 0
+	}
+	var tds float64
+	_ = pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(tds_deducted_in_period),0)
+		FROM investment.fd_accrual_ledger
+		WHERE fd_id=$1 AND COALESCE(is_deleted,false)=false
+		  AND period_end <= $2::date`, fdID, periodEnd,
+	).Scan(&tds)
+	if tds == 0 {
+		_ = pool.QueryRow(ctx, `
+			SELECT COALESCE(SUM(tds_amount),0)
+			FROM investment.fd_cashflow_schedule
+			WHERE fd_id=$1 AND COALESCE(is_deleted,false)=false
+			  AND event_date >= $2::date AND event_date <= $3::date`,
+			fdID, periodStart, periodEnd,
+		).Scan(&tds)
+	}
+	return roundToFour(tds)
+}
+
+func cimplrAccruedInterestTill(ctx context.Context, pool *pgxpool.Pool, src cimplrFDSource, asOf time.Time) (accrued, tds float64) {
+	if src.FDID == "" || src.StartDate.IsZero() || asOf.Before(src.StartDate) {
+		return 0, 0
+	}
+	periodEnd := asOf
+	if !src.MaturityDate.IsZero() && periodEnd.After(src.MaturityDate) {
+		periodEnd = src.MaturityDate
+	}
+	if interest, _, found := fdMaster.PeriodInterestFromSchedule(ctx, pool, src.FDID, src.StartDate, periodEnd, src.InterestTypeCode); found && interest > 0 {
+		accrued = roundToFour(interest)
+	}
+	if accrued == 0 {
+		_ = pool.QueryRow(ctx, `
+			SELECT COALESCE(SUM(period_interest_accrued),0), COALESCE(SUM(tds_deducted_in_period),0)
+			FROM investment.fd_accrual_ledger
+			WHERE fd_id=$1 AND COALESCE(is_deleted,false)=false
+			  AND period_end <= $2::date`, src.FDID, periodEnd,
+		).Scan(&accrued, &tds)
+	}
+	if accrued == 0 {
+		_ = pool.QueryRow(ctx, `
+			SELECT COALESCE(SUM(interest_accrued),0), COALESCE(SUM(tds_amount),0)
+			FROM investment.fd_cashflow_schedule
+			WHERE fd_id=$1 AND COALESCE(is_deleted,false)=false
+			  AND event_date >= $2::date AND event_date <= $3::date`,
+			src.FDID, src.StartDate, periodEnd,
+		).Scan(&accrued, &tds)
+	}
+	if accrued == 0 && src.Principal > 0 && src.InterestRate > 0 {
+		days := int(periodEnd.Sub(src.StartDate).Hours() / 24)
+		if days < 0 {
+			days = 0
+		}
+		if days > 0 {
+			divisor := 36500.0
+			if strings.Contains(strings.ToUpper(src.DayCountCode), "360") {
+				divisor = 36000.0
+			}
+			accrued = roundToFour(src.Principal * src.InterestRate * float64(days) / divisor)
+		}
+	}
+	if tds == 0 {
+		tds = cimplrTDSTill(ctx, pool, src.FDID, src.StartDate, periodEnd)
+	}
+	return roundToFour(accrued), roundToFour(tds)
+}
+
+func cimplrDefaultCalcDate(src cimplrFDSource, closureType, requestedDate string) string {
+	if t, ok := parseCimplrDate(requestedDate); ok {
+		return t.Format(constants.DateFormat)
+	}
+	ct := strings.ToUpper(strings.TrimSpace(closureType))
+	if (ct == "ROLLOVER" || ct == "PAYOUT") && !src.MaturityDate.IsZero() {
+		return src.MaturityDate.Format(constants.DateFormat)
+	}
+	return ""
+}
+
+func validateCimplrMaturityTiming(src cimplrFDSource, closureType string) error {
+	ct := strings.ToUpper(strings.TrimSpace(closureType))
+	if ct != "PAYOUT" && ct != "ROLLOVER" {
+		return nil
+	}
+	if src.MaturityDate.IsZero() {
+		return nil
+	}
+	today := time.Now().Truncate(24 * time.Hour)
+	mat := src.MaturityDate.Truncate(24 * time.Hour)
+	if mat.After(today) {
+		return fmt.Errorf(
+			"Payout and rollover are only allowed on or after maturity date. Use Premature Closure before maturity",
+		)
+	}
+	return nil
+}
+
+func calculateCimplrClosure(ctx context.Context, pool *pgxpool.Pool, src cimplrFDSource, closureType, requestedDate string, enforceMaturityTiming bool) (cimplrClosureCalc, error) {
+	if enforceMaturityTiming {
+		if err := validateCimplrMaturityTiming(src, closureType); err != nil {
+			return cimplrClosureCalc{}, err
+		}
+	}
 	calcDate := time.Now()
 	if t, ok := parseCimplrDate(requestedDate); ok {
 		calcDate = t
@@ -2127,65 +2454,64 @@ func calculateCimplrClosure(ctx context.Context, pool *pgxpool.Pool, src cimplrF
 	if closureType == "PAYOUT" && !src.MaturityDate.IsZero() {
 		calcDate = src.MaturityDate
 	}
+	if closureType == "ROLLOVER" {
+		_, explicitDate := parseCimplrDate(requestedDate)
+		if !explicitDate {
+			if !src.MaturityDate.IsZero() && !src.MaturityDate.After(time.Now()) {
+				calcDate = src.MaturityDate
+			} else if calcDate.After(time.Now()) {
+				calcDate = time.Now()
+			}
+		}
+	}
 	accruedDays := int(calcDate.Sub(src.StartDate).Hours() / 24)
 	if accruedDays < 0 {
 		accruedDays = 0
 	}
-	var accrued, tds float64
-	_ = pool.QueryRow(ctx, `
-		SELECT COALESCE(SUM(period_interest_accrued),0), COALESCE(SUM(tds_deducted_in_period),0)
-		FROM investment.fd_accrual_ledger
-		WHERE fd_id=$1 AND COALESCE(is_deleted,false)=false`, src.FDID,
-	).Scan(&accrued, &tds)
-	if accrued == 0 && src.Principal > 0 && src.InterestRate > 0 && accruedDays > 0 {
-		accrued = roundToFour(src.Principal * src.InterestRate * float64(accruedDays) / 36500)
-	}
+	accrued, tds := cimplrAccruedInterestTill(ctx, pool, src, calcDate)
+	revisedInterest := accrued
 	calc := cimplrClosureCalc{
 		ClosureType:           closureType,
 		CalculationDate:       calcDate,
 		AccruedDays:           accruedDays,
-		AccruedInterest:       roundToFour(accrued),
-		TDSAmount:             roundToFour(tds),
+		AccruedInterest:       accrued,
+		TDSAmount:             tds,
 		ApplicableRate:        src.InterestRate,
 		ExpectedMaturityValue: roundToFour(src.Principal + accrued),
-		RevisedInterestAmount: roundToFour(accrued),
-		RevisedMaturityValue:  roundToFour(src.Principal + accrued),
-		NetPayout:             roundToFour(src.Principal + accrued - tds),
+		RevisedInterestAmount: revisedInterest,
+		RevisedMaturityValue:  roundToFour(src.Principal + revisedInterest),
+		NetPayout:             roundToFour(src.Principal + revisedInterest - tds),
 	}
 	if closureType == "PREMATURE" {
-		var minHeldDays int
-		_ = pool.QueryRow(ctx, `
-			SELECT COALESCE(penalty_id,''), COALESCE(penalty_type,''), COALESCE(penalty_value,0),
-			       COALESCE(no_interest_if_withdrawn_before,0)
-			FROM investment.fd_penalty_structure_master
-			WHERE bank_code=$1 AND COALESCE(is_deleted,false)=false
-			  AND (min_held_days IS NULL OR $2 >= min_held_days)
-			  AND (max_held_days IS NULL OR $2 <= max_held_days)
-			  AND (min_amount_range IS NULL OR $3 >= min_amount_range)
-			  AND (max_amount_range IS NULL OR $3 <= max_amount_range)
-			ORDER BY COALESCE(min_held_days,0) DESC, penalty_value DESC
-			LIMIT 1`,
-			src.BankID, accruedDays, src.Principal,
-		).Scan(&calc.PenaltyID, &calc.PenaltyType, &calc.PenaltyValue, &minHeldDays)
-		calc.NoInterestFlag = minHeldDays > 0 && accruedDays < minHeldDays
-		if calc.NoInterestFlag {
+		pID, pType, pVal, pAmt, noInt, pApp := cimplrResolvePenalty(ctx, pool, src, accruedDays, accrued)
+		calc.PenaltyID = pID
+		calc.PenaltyType = pType
+		calc.PenaltyValue = pVal
+		calc.PenaltyAmount = pAmt
+		calc.NoInterestFlag = noInt
+		calc.PenaltyApplicable = pApp
+		if noInt {
 			calc.RevisedInterestAmount = 0
-		}
-		switch calc.PenaltyType {
-		case "FLAT_AMOUNT":
-			calc.PenaltyAmount = roundToFour(calc.PenaltyValue)
-		case "RATE_REDUCTION":
-			calc.ApplicableRate = roundToFour(src.InterestRate - calc.PenaltyValue)
-			if calc.ApplicableRate < 0 {
-				calc.ApplicableRate = 0
+		} else {
+			calc.RevisedInterestAmount = revisedInterest
+			if pType == "RATE_REDUCTION" && pApp {
+				rate := roundToFour(src.InterestRate - pVal)
+				if rate < 0 {
+					rate = 0
+				}
+				calc.ApplicableRate = rate
+				if accruedDays > 0 {
+					divisor := 36500.0
+					if strings.Contains(strings.ToUpper(src.DayCountCode), "360") {
+						divisor = 36000.0
+					}
+					calc.RevisedInterestAmount = roundToFour(src.Principal * rate * float64(accruedDays) / divisor)
+				}
 			}
-			calc.RevisedInterestAmount = roundToFour(src.Principal * calc.ApplicableRate * float64(accruedDays) / 36500)
-			calc.PenaltyAmount = roundToFour(accrued - calc.RevisedInterestAmount)
-		default:
-			calc.PenaltyAmount = roundToFour(calc.RevisedInterestAmount * calc.PenaltyValue / 100)
 		}
 		calc.RevisedMaturityValue = roundToFour(src.Principal + calc.RevisedInterestAmount - calc.PenaltyAmount)
 		calc.NetPayout = roundToFour(src.Principal + calc.RevisedInterestAmount - calc.TDSAmount - calc.PenaltyAmount)
+		calc.ExpectedMaturityValue = calc.RevisedMaturityValue
 	}
 	return calc, nil
 }
@@ -2229,7 +2555,7 @@ func persistCimplrConfirmVariances(ctx context.Context, pool *pgxpool.Pool, reco
 	}
 	if calc.ClosureType == "ROLLOVER" {
 		rules = append(rules,
-			varianceengine.Rule{FieldName: "new_fd_amount", VarianceType: varianceengine.TypeAmount, ExpectedValue: ff(calc.NetPayout), ActualValue: ff(req.NewFDAmount), Priority: varianceengine.PriorityHigh, Tolerance: 1.0},
+			varianceengine.Rule{FieldName: "new_fd_amount", VarianceType: varianceengine.TypeAmount, ExpectedValue: ff(cimplrExpectedRolloverNewFD(src, calc, req.RolloverAmountBasis)), ActualValue: ff(req.NewFDAmount), Priority: varianceengine.PriorityHigh, Tolerance: 1.0},
 			varianceengine.Rule{FieldName: "new_interest_rate", VarianceType: varianceengine.TypeRate, ExpectedValue: ff(src.InterestRate), ActualValue: ff(chooseFloat(req.NewInterestRate, src.InterestRate)), Priority: varianceengine.PriorityHigh, Tolerance: 0.001},
 		)
 	}
@@ -2406,11 +2732,12 @@ func insertCimplrInitiateAudit(ctx context.Context, exec dbExec, id, action, sta
 			old_interest_rate, old_expected_maturity_value, old_accrued_interest_till_date,
 			old_tds_expected, old_net_expected_amount, old_auto_renewal_flag,
 			old_maturity_status, old_action_required, old_rollover_type, old_rollover_bank_type,
+			old_rollover_new_bank_id, old_rollover_new_bank_name,
 			old_tentative_new_tenor_days, old_remarks, old_has_variance,
 			old_has_unresolved_variance, old_variance_run_id, old_approval_instance_id,
 			old_is_active, old_is_deleted
 		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,$9::date,$10::date,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30
+			$1,$2,$3,$4,$5,$6,$7,$8,$9::date,$10::date,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32
 		)`,
 		id, action, status, reason, requestedBy,
 		oldValue(old, "closure_type"), oldValue(old, "closure_status"), oldValue(old, "action_at_maturity"), oldValue(old, "maturity_date"),
@@ -2418,11 +2745,53 @@ func insertCimplrInitiateAudit(ctx context.Context, exec dbExec, id, action, sta
 		oldValue(old, "interest_rate"), oldValue(old, "expected_maturity_value"), oldValue(old, "accrued_interest_till_date"),
 		oldValue(old, "tds_expected"), oldValue(old, "net_expected_amount"), oldValue(old, "auto_renewal_flag"),
 		oldValue(old, "maturity_status"), oldValue(old, "action_required"), oldValue(old, "rollover_type"), oldValue(old, "rollover_bank_type"),
+		oldValue(old, "rollover_new_bank_id"), oldValue(old, "rollover_new_bank_name"),
 		oldValue(old, "tentative_new_tenor_days"), oldValue(old, "remarks"), oldValue(old, "has_variance"),
 		oldValue(old, "has_unresolved_variance"), oldValue(old, "variance_run_id"), oldValue(old, "approval_instance_id"),
 		oldValue(old, "is_active"), oldValue(old, "is_deleted"),
 	)
 	return err
+}
+
+func cimplrLookupBankName(ctx context.Context, q cimplrRowQuerier, bankID string) string {
+	bankID = strings.TrimSpace(bankID)
+	if bankID == "" {
+		return ""
+	}
+	for _, sql := range []string{
+		`SELECT bank_name FROM masterbank WHERE bank_id = $1 LIMIT 1`,
+		`SELECT bank_name FROM master_bank WHERE bank_id = $1 LIMIT 1`,
+		`SELECT bank_name FROM public.bank_master WHERE bank_id = $1 LIMIT 1`,
+	} {
+		var name string
+		if err := q.QueryRow(ctx, sql, bankID).Scan(&name); err == nil && strings.TrimSpace(name) != "" {
+			return strings.TrimSpace(name)
+		}
+	}
+	return ""
+}
+
+func cimplrResolveInitiateRolloverBank(ctx context.Context, q cimplrRowQuerier, req cimplrClosureInitiateRequest, src cimplrFDSource) (string, string) {
+	ct := strings.ToUpper(strings.TrimSpace(req.ClosureType))
+	if ct != "ROLLOVER" {
+		return "", ""
+	}
+	rolloverBank := strings.ToUpper(strings.TrimSpace(req.RolloverBankType))
+	if rolloverBank == "" {
+		rolloverBank = "SAME_BANK"
+	}
+	if rolloverBank == "SAME_BANK" {
+		return strings.TrimSpace(src.BankID), strings.TrimSpace(src.BankName)
+	}
+	if rolloverBank == "NEW_BANK" {
+		id := strings.TrimSpace(req.NewBankID)
+		name := strings.TrimSpace(req.NewBankName)
+		if name == "" && id != "" {
+			name = cimplrLookupBankName(ctx, q, id)
+		}
+		return id, name
+	}
+	return strings.TrimSpace(src.BankID), strings.TrimSpace(src.BankName)
 }
 
 func insertCimplrConfirmAudit(ctx context.Context, exec dbExec, confirmID, initiateID, action, status, reason, requestedBy string, old map[string]interface{}) error {
@@ -2526,8 +2895,42 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 		return nil, 0, err
 	}
 	args = append(args, req.PageSize, offset)
+	tenureExpr := `COALESCE(NULLIF(t.tentative_new_tenor_days, 0), m.tenure_days, 0)`
+	penaltyExpr := `COALESCE(calc.penalty_amount, 0)`
+	prematureJoins := `
+		LEFT JOIN LATERAL (
+			SELECT accrued_days, penalty_amount, accrued_interest, tds_amount, net_payout, expected_maturity_value
+			FROM cimplr.fd_closure_calculation c
+			WHERE c.closure_initiate_id = t.closure_initiate_id AND COALESCE(c.is_deleted, false) = false
+			ORDER BY c.calculation_date DESC NULLS LAST
+			LIMIT 1
+		) calc ON true`
+	if stage == "confirm" {
+		tenureExpr = `COALESCE(NULLIF(pc.days_held, 0), NULLIF(calc.accrued_days, 0), m.tenure_days, 0)`
+		penaltyExpr = `COALESCE(pc.penalty_amount, calc.penalty_amount, 0)`
+		prematureJoins = `
+		LEFT JOIN cimplr.fd_closure_premature_confirm pc
+			ON pc.closure_confirm_id = t.closure_confirm_id AND COALESCE(pc.is_deleted, false) = false
+		LEFT JOIN LATERAL (
+			SELECT accrued_days, penalty_amount, accrued_interest, tds_amount, net_payout, expected_maturity_value
+			FROM cimplr.fd_closure_calculation c
+			WHERE c.closure_confirm_id = t.closure_confirm_id AND COALESCE(c.is_deleted, false) = false
+			ORDER BY c.calculation_date DESC NULLS LAST
+			LIMIT 1
+		) calc ON true`
+	}
+	interestRateExpr := `COALESCE(t.interest_rate, m.interest_rate, 0)`
+	maturityDateExpr := `COALESCE(m.maturity_date::text, '')`
+	if stage == "confirm" {
+		interestRateExpr = `COALESCE(m.interest_rate, 0)`
+		maturityDateExpr = `COALESCE(m.maturity_date::text, '')`
+	}
 	listSQL := fmt.Sprintf(`
 		SELECT t.*,
+		       %s AS tenure_days,
+		       %s AS interest_rate,
+		       %s AS maturity_date,
+		       %s AS penalty_amount,
 		       COALESCE(a.processing_status,'') AS latest_processing_status,
 		       COALESCE(a.action_type,'') AS latest_action_type,
 		       COALESCE(a.requested_by,'') AS latest_requested_by,
@@ -2535,13 +2938,15 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 		       COALESCE(a.checker_by,'') AS latest_checker_by,
 		       a.checker_at AS latest_checker_at
 		FROM %s t
+		LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id
+		%s
 		LEFT JOIN LATERAL (
 			SELECT * FROM %s a WHERE a.%s=t.%s ORDER BY requested_at DESC, audit_id DESC LIMIT 1
 		) a ON true
 		WHERE %s
 		ORDER BY t.%s DESC
 		LIMIT $%d OFFSET $%d`,
-		table, auditTable, idCol, idCol, whereSQL, idCol, len(args)-1, len(args),
+		tenureExpr, interestRateExpr, maturityDateExpr, penaltyExpr, table, prematureJoins, auditTable, idCol, idCol, whereSQL, idCol, len(args)-1, len(args),
 	)
 	rows, err := pool.Query(ctx, listSQL, args...)
 	if err != nil {
@@ -2583,12 +2988,19 @@ func previewCimplrConfirmVariance(recordID string, req cimplrClosureConfirmReque
 	}
 	if calc.ClosureType == "ROLLOVER" {
 		rules = append(rules,
-			varianceengine.Rule{FieldName: "new_fd_amount", VarianceType: varianceengine.TypeAmount, ExpectedValue: ff(calc.NetPayout), ActualValue: ff(req.NewFDAmount), Priority: varianceengine.PriorityHigh, Tolerance: 1.0},
+			varianceengine.Rule{FieldName: "new_fd_amount", VarianceType: varianceengine.TypeAmount, ExpectedValue: ff(cimplrExpectedRolloverNewFD(src, calc, req.RolloverAmountBasis)), ActualValue: ff(req.NewFDAmount), Priority: varianceengine.PriorityHigh, Tolerance: 1.0},
 			varianceengine.Rule{FieldName: "new_interest_rate", VarianceType: varianceengine.TypeRate, ExpectedValue: ff(src.InterestRate), ActualValue: ff(chooseFloat(req.NewInterestRate, src.InterestRate)), Priority: varianceengine.PriorityHigh, Tolerance: 0.001},
 		)
 	}
 	items := varianceengine.Compare("FD_CLOSURE", recordID, src.EntityID, runID, rules)
 	return cimplrVarianceSummary(runID, items)
+}
+
+func cimplrExpectedRolloverNewFD(src cimplrFDSource, calc cimplrClosureCalc, basis string) float64 {
+	if strings.ToUpper(strings.TrimSpace(basis)) == "PRINCIPAL_ONLY" {
+		return src.Principal
+	}
+	return calc.NetPayout
 }
 
 func buildCimplrInitiatePrefill(src cimplrFDSource, calc cimplrClosureCalc, closureType string) map[string]interface{} {
@@ -2645,6 +3057,7 @@ func buildCimplrConfirmPrefill(src cimplrFDSource, calc cimplrClosureCalc, closu
 		prefill["penalty_value"] = calc.PenaltyValue
 		prefill["penalty_amount"] = calc.PenaltyAmount
 		prefill["no_interest_flag"] = calc.NoInterestFlag
+		prefill["penalty_applicable"] = calc.PenaltyApplicable
 		prefill["revised_interest_amount"] = calc.RevisedInterestAmount
 		prefill["revised_maturity_value"] = calc.RevisedMaturityValue
 		prefill["net_payout"] = calc.NetPayout
@@ -2663,6 +3076,95 @@ func buildCimplrConfirmPrefill(src cimplrFDSource, calc cimplrClosureCalc, closu
 	return prefill
 }
 
+// enrichCimplrInitiateListFromCalculation fills interest/TDS/net on list rows.
+// When forceSystemCalc is true (approved-active for confirm), always overlay fresh
+// maturity calculation so confirm prefill matches /confirm/validate.
+func enrichCimplrInitiateListFromCalculation(ctx context.Context, pool *pgxpool.Pool, records []map[string]interface{}, forceSystemCalc bool) []map[string]interface{} {
+	for _, row := range records {
+		initiateID := strings.TrimSpace(fmt.Sprint(row["closure_initiate_id"]))
+		fdID := strings.TrimSpace(fmt.Sprint(row["fd_id"]))
+		if initiateID == "" || fdID == "" {
+			continue
+		}
+		src, srcErr := loadCimplrFDSource(ctx, pool, fdID)
+		if srcErr != nil {
+			continue
+		}
+		closureType := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["closure_type"])))
+		reqDate := cimplrDefaultCalcDate(src, closureType, strings.TrimSpace(fmt.Sprint(row["requested_closure_date"])))
+		calc, calcErr := calculateCimplrClosure(ctx, pool, src, closureType, reqDate, false)
+		if calcErr != nil {
+			continue
+		}
+		if forceSystemCalc {
+			row["accrued_interest_till_date"] = calc.AccruedInterest
+			row["tds_expected"] = calc.TDSAmount
+			row["net_expected_amount"] = calc.NetPayout
+			row["expected_maturity_value"] = calc.ExpectedMaturityValue
+			continue
+		}
+		var accrued, tds, net, expected float64
+		err := pool.QueryRow(ctx, `
+			SELECT COALESCE(accrued_interest,0), COALESCE(tds_amount,0),
+			       COALESCE(net_payout,0), COALESCE(expected_maturity_value,0)
+			FROM cimplr.fd_closure_calculation
+			WHERE closure_initiate_id=$1 AND COALESCE(is_deleted,false)=false
+			ORDER BY calculation_date DESC NULLS LAST, calculation_id DESC
+			LIMIT 1`, initiateID).Scan(&accrued, &tds, &net, &expected)
+		if err != nil || tds == 0 {
+			if err != nil {
+				accrued = calc.AccruedInterest
+				tds = calc.TDSAmount
+				net = calc.NetPayout
+				expected = calc.ExpectedMaturityValue
+			} else if tds == 0 && calc.TDSAmount > 0 {
+				tds = calc.TDSAmount
+			}
+		}
+		if chooseFloat(parseFloatMap(row, "accrued_interest_till_date"), 0) == 0 && accrued > 0 {
+			row["accrued_interest_till_date"] = accrued
+		}
+		if chooseFloat(parseFloatMap(row, "tds_expected"), 0) == 0 && tds > 0 {
+			row["tds_expected"] = tds
+			if chooseFloat(parseFloatMap(row, "net_expected_amount"), 0) > 0 && tds > 0 {
+				principal := chooseFloat(parseFloatMap(row, "principal_amount"), 0)
+				interest := chooseFloat(parseFloatMap(row, "accrued_interest_till_date"), accrued)
+				row["net_expected_amount"] = roundToFour(principal + interest - tds)
+			}
+		}
+		if chooseFloat(parseFloatMap(row, "net_expected_amount"), 0) == 0 && net > 0 {
+			row["net_expected_amount"] = net
+		}
+		if chooseFloat(parseFloatMap(row, "expected_maturity_value"), 0) == 0 && expected > 0 {
+			row["expected_maturity_value"] = expected
+		}
+	}
+	return records
+}
+
+func parseFloatMap(row map[string]interface{}, key string) float64 {
+	v, ok := row[key]
+	if !ok || v == nil {
+		return 0
+	}
+	switch t := v.(type) {
+	case float64:
+		return t
+	case float32:
+		return float64(t)
+	case int:
+		return float64(t)
+	case int64:
+		return float64(t)
+	case string:
+		f, _ := strconv.ParseFloat(strings.TrimSpace(t), 64)
+		return f
+	default:
+		f, _ := strconv.ParseFloat(strings.TrimSpace(fmt.Sprint(v)), 64)
+		return f
+	}
+}
+
 func enrichCimplrMaturityDashboardRecords(ctx context.Context, pool *pgxpool.Pool, records []map[string]interface{}) []map[string]interface{} {
 	for _, row := range records {
 		fdID := strings.TrimSpace(fmt.Sprint(row["fd_id"]))
@@ -2673,12 +3175,12 @@ func enrichCimplrMaturityDashboardRecords(ctx context.Context, pool *pgxpool.Poo
 		if err != nil {
 			continue
 		}
-		payoutCalc, err := calculateCimplrClosure(ctx, pool, src, "PAYOUT", "")
+		payoutCalc, err := calculateCimplrClosure(ctx, pool, src, "PAYOUT", "", false)
 		if err != nil {
 			continue
 		}
-		prematureCalc, _ := calculateCimplrClosure(ctx, pool, src, "PREMATURE", time.Now().Format(constants.DateFormat))
-		rolloverCalc, _ := calculateCimplrClosure(ctx, pool, src, "ROLLOVER", "")
+		prematureCalc, _ := calculateCimplrClosure(ctx, pool, src, "PREMATURE", time.Now().Format(constants.DateFormat), false)
+		rolloverCalc, _ := calculateCimplrClosure(ctx, pool, src, "ROLLOVER", "", false)
 
 		row["accrued_interest_till_date"] = payoutCalc.AccruedInterest
 		row["tds_expected"] = payoutCalc.TDSAmount
@@ -2691,8 +3193,11 @@ func enrichCimplrMaturityDashboardRecords(ctx context.Context, pool *pgxpool.Poo
 			"ROLLOVER": buildCimplrInitiatePrefill(src, rolloverCalc, "ROLLOVER"),
 		}
 		row["premature_prefill"] = buildCimplrConfirmPrefill(src, prematureCalc, "PREMATURE")
-		row["premature_calculation"] = prematureCalc
-		row["rollover_calculation"] = rolloverCalc
+		row["premature_calculation"] = cimplrCalcToMap(prematureCalc)
+		row["rollover_calculation"] = cimplrCalcToMap(rolloverCalc)
+		row["total_interest_accrued"] = payoutCalc.AccruedInterest
+		row["total_tds_accrued"] = payoutCalc.TDSAmount
+		row["maturity_amount"] = payoutCalc.ExpectedMaturityValue
 	}
 	return records
 }
@@ -2722,9 +3227,15 @@ func fetchCimplrFiles(ctx context.Context, pool *pgxpool.Pool, col, id string) [
 
 func fetchCimplrAudit(ctx context.Context, pool *pgxpool.Pool, stage, id string) []map[string]interface{} {
 	if stage == "confirm" {
-		return fetchCimplrSubRows(ctx, pool, `SELECT * FROM cimplr.fd_closure_confirm_audit WHERE closure_confirm_id=$1 ORDER BY requested_at DESC, audit_id DESC`, id)
+		return fetchCimplrSubRows(ctx, pool, `
+			SELECT * FROM cimplr.fd_closure_confirm_audit
+			WHERE closure_confirm_id=$1
+			ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, audit_id DESC`, id)
 	}
-	return fetchCimplrSubRows(ctx, pool, `SELECT * FROM cimplr.fd_closure_initiate_audit WHERE closure_initiate_id=$1 ORDER BY requested_at DESC, audit_id DESC`, id)
+	return fetchCimplrSubRows(ctx, pool, `
+		SELECT * FROM cimplr.fd_closure_initiate_audit
+		WHERE closure_initiate_id=$1
+		ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, audit_id DESC`, id)
 }
 
 func fetchCimplrApprovalWorkflow(ctx context.Context, pool *pgxpool.Pool, recordID string) []map[string]interface{} {
@@ -2841,11 +3352,22 @@ func parseCimplrDate(s string) (time.Time, bool) {
 	if s == "" || s == "<nil>" {
 		return time.Time{}, false
 	}
-	t, err := time.Parse(constants.DateFormat, s)
-	if err != nil {
-		return time.Time{}, false
+	for _, layout := range []string{
+		time.RFC3339,
+		constants.DateFormatISO,
+		"2006-01-02T15:04:05Z07:00",
+		constants.DateFormat,
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
+		}
 	}
-	return t, true
+	if len(s) >= 10 {
+		if t, err := time.Parse(constants.DateFormat, s[:10]); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func nullDateArg(s string) interface{} {
@@ -2882,13 +3404,21 @@ func cimplrFloat(v interface{}) float64 {
 	case int32:
 		return float64(t)
 	case string:
-		f, _ := strconv.ParseFloat(t, 64)
+		f, _ := strconv.ParseFloat(strings.TrimSpace(t), 64)
+		return f
+	case []byte:
+		f, _ := strconv.ParseFloat(strings.TrimSpace(string(t)), 64)
 		return f
 	case fmt.Stringer:
-		f, _ := strconv.ParseFloat(t.String(), 64)
+		f, _ := strconv.ParseFloat(strings.TrimSpace(t.String()), 64)
 		return f
 	default:
-		return 0
+		s := strings.TrimSpace(fmt.Sprint(v))
+		if s == "" || s == "<nil>" {
+			return 0
+		}
+		f, _ := strconv.ParseFloat(s, 64)
+		return f
 	}
 }
 
@@ -2913,4 +3443,450 @@ func oldValue(m map[string]interface{}, key string) interface{} {
 		return v
 	}
 	return nil
+}
+
+type cimplrJournalLinePreview struct {
+	LineNumber  int     `json:"line_number"`
+	AccountNo   string  `json:"account_number"`
+	AccountName string  `json:"account_name"`
+	AccountType string  `json:"account_type"`
+	Debit       float64 `json:"debit_amount"`
+	Credit      float64 `json:"credit_amount"`
+	Narration   string  `json:"narration"`
+}
+
+func buildCimplrJournalPreview(closureType, fdID, bankAcctNum, bankAcctName string, principal, interest, tds, penalty, netPayout float64) map[string]interface{} {
+	bankAcctNum = firstNonEmpty(bankAcctNum, "SETTLEMENT")
+	bankAcctName = firstNonEmpty(bankAcctName, "Settlement Account")
+	lines := []cimplrJournalLinePreview{}
+	lineNum := 1
+	add := func(acctNum, acctName, acctType string, debit, credit float64, narration string) {
+		if debit == 0 && credit == 0 {
+			return
+		}
+		lines = append(lines, cimplrJournalLinePreview{
+			LineNumber: lineNum, AccountNo: acctNum, AccountName: acctName, AccountType: acctType,
+			Debit: roundToFour(debit), Credit: roundToFour(credit), Narration: narration,
+		})
+		lineNum++
+	}
+	activitySubtype := "FD_MATURITY_PAYOUT"
+	if closureType == "PREMATURE" {
+		activitySubtype = "FD_PREMATURE_CLOSURE"
+	} else if closureType == "ROLLOVER" {
+		activitySubtype = "FD_ROLLOVER"
+	}
+	totalDebit := roundToFour(netPayout + tds + penalty)
+	totalCredit := roundToFour(principal + interest)
+	if totalDebit != totalCredit {
+		totalCredit = totalDebit
+	}
+	add(bankAcctNum, bankAcctName, "ASSET", netPayout, 0, "Cash / settlement on FD closure")
+	if tds > 0 {
+		add("TDS-RECEIVABLE", "TDS Receivable", "ASSET", tds, 0, "TDS withheld at source")
+	}
+	if penalty > 0 {
+		add("PENALTY-EXP", "Premature Withdrawal Penalty", "EXPENSE", penalty, 0, "Premature withdrawal penalty")
+	}
+	add("FD-INVEST-"+fdID, "FD Investment - "+fdID, "ASSET", 0, principal, "Close FD investment asset")
+	interestCredit := roundToFour(totalCredit - principal)
+	if interestCredit > 0 {
+		add("FD-INT-INC-"+fdID, "Interest Income - FD", "INCOME", 0, interestCredit, "Interest recognised on closure")
+	}
+	newFDStatus := "MATURED"
+	if closureType == "PREMATURE" {
+		newFDStatus = "PREMATURELY_CLOSED"
+	} else if closureType == "ROLLOVER" {
+		newFDStatus = "ROLLED_OVER"
+	}
+	entryDate := time.Now().Format(constants.DateFormat)
+	return map[string]interface{}{
+		"activity_subtype":  activitySubtype,
+		"entry_type":        "CLOSURE",
+		"entry_date":        entryDate,
+		"accounting_period": time.Now().Format("2006-01"),
+		"total_debit":       totalDebit,
+		"total_credit":      totalCredit,
+		"principal":        roundToFour(principal),
+		"interest":         roundToFour(interest),
+		"tds":              roundToFour(tds),
+		"penalty":          roundToFour(penalty),
+		"net_payout":       roundToFour(netPayout),
+		"new_fd_status":    newFDStatus,
+		"lines":            lines,
+	}
+}
+
+func CimplrJournalPreview(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req cimplrClosureIDsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		ctx := r.Context()
+		if strings.TrimSpace(req.ClosureConfirmID) != "" {
+			id := strings.TrimSpace(req.ClosureConfirmID)
+			var fdID, closureType, sourceAccountID, journalEntryID string
+			var principal, interest, tds, penalty, netPayout float64
+			var accountingPosted bool
+			err := pool.QueryRow(ctx, `
+				SELECT c.fd_id, c.closure_type, COALESCE(b.source_account_id,''),
+				       COALESCE(c.principal_received, c.principal_expected, 0),
+				       COALESCE(c.interest_received, c.interest_expected, 0),
+				       COALESCE(c.tds_deducted, c.tds_expected, 0),
+				       CASE WHEN c.closure_type='PREMATURE' THEN COALESCE(pc.penalty_amount,0) ELSE 0 END,
+				       COALESCE(c.net_amount_received, c.net_expected, 0),
+				       COALESCE(c.journal_entry_id,''), COALESCE(c.accounting_posted,false)
+				FROM cimplr.fd_closure_confirm c
+				LEFT JOIN cimplr.fd_closure_premature_confirm pc ON pc.closure_confirm_id=c.closure_confirm_id AND pc.is_deleted=false
+				LEFT JOIN investment.fd_master m ON m.fd_id=c.fd_id
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id=m.booking_id
+				WHERE c.closure_confirm_id=$1 AND c.is_deleted=false`, id,
+			).Scan(&fdID, &closureType, &sourceAccountID, &principal, &interest, &tds, &penalty, &netPayout, &journalEntryID, &accountingPosted)
+			if err != nil {
+				api.RespondWithError(w, http.StatusNotFound, "confirm record not found")
+				return
+			}
+			bankNum, bankName := "", ""
+			if sourceAccountID != "" {
+				_ = pool.QueryRow(ctx, `SELECT COALESCE(account_number,''), COALESCE(account_nickname,'') FROM public.masterbankaccount WHERE account_id=$1 LIMIT 1`, sourceAccountID).Scan(&bankNum, &bankName)
+			}
+			preview := buildCimplrJournalPreview(closureType, fdID, bankNum, bankName, principal, interest, tds, penalty, netPayout)
+			preview["closure_confirm_id"] = id
+			preview["accounting_posted"] = accountingPosted
+			preview["journal_entry_id"] = journalEntryID
+			if accountingPosted && journalEntryID != "" {
+				preview["posted_lines"] = fetchCimplrPostedJournalLines(ctx, pool, journalEntryID)
+			}
+			api.RespondWithPayload(w, true, "", preview)
+			return
+		}
+		if strings.TrimSpace(req.ClosureInitiateID) != "" {
+			initiate, err := loadCimplrInitiateOld(ctx, pool, strings.TrimSpace(req.ClosureInitiateID))
+			if err != nil {
+				api.RespondWithError(w, http.StatusNotFound, "initiate record not found")
+				return
+			}
+			src, err := loadCimplrFDSource(ctx, pool, fmt.Sprint(initiate["fd_id"]))
+			if err != nil {
+				api.RespondWithError(w, http.StatusNotFound, "FD not found")
+				return
+			}
+			closureType := fmt.Sprint(initiate["closure_type"])
+			calc, err := calculateCimplrClosure(ctx, pool, src, closureType, fmt.Sprint(initiate["requested_closure_date"]), false)
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			bankNum, bankName := "", ""
+			if src.SourceAccountID != "" {
+				_ = pool.QueryRow(ctx, `SELECT COALESCE(account_number,''), COALESCE(account_nickname,'') FROM public.masterbankaccount WHERE account_id=$1 LIMIT 1`, src.SourceAccountID).Scan(&bankNum, &bankName)
+			}
+			penalty := calc.PenaltyAmount
+			preview := buildCimplrJournalPreview(closureType, src.FDID, bankNum, bankName, src.Principal, calc.RevisedInterestAmount, calc.TDSAmount, penalty, calc.NetPayout)
+			preview["closure_initiate_id"] = req.ClosureInitiateID
+			preview["calculation"] = cimplrCalcToMap(calc)
+			api.RespondWithPayload(w, true, "", preview)
+			return
+		}
+		api.RespondWithError(w, http.StatusBadRequest, "closure_confirm_id or closure_initiate_id is required")
+	}
+}
+
+func fetchCimplrPostedJournalLines(ctx context.Context, pool *pgxpool.Pool, entryID string) []map[string]interface{} {
+	rows, err := pool.Query(ctx, `
+		SELECT line_number, account_number, account_name, account_type,
+		       debit_amount, credit_amount, narration
+		FROM investment.accounting_journal_entry_line
+		WHERE entry_id=$1 ORDER BY line_number`, entryID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out, err := pgx.CollectRows(rows, pgx.RowToMap)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+func enrichCimplrAccountingListItem(ctx context.Context, pool *pgxpool.Pool, item map[string]interface{}) {
+	principal := cimplrFloat(item["principal_received"])
+	if principal == 0 {
+		principal = cimplrFloat(item["principal_expected"])
+	}
+	if principal == 0 {
+		principal = cimplrFloat(item["principal_amount"])
+	}
+	interest := cimplrFloat(item["interest_received"])
+	if interest == 0 {
+		interest = cimplrFloat(item["interest_expected"])
+	}
+	if interest == 0 {
+		interest = cimplrFloat(item["accrued_interest_till_date"])
+	}
+	tds := cimplrFloat(item["tds_deducted"])
+	if tds == 0 {
+		tds = cimplrFloat(item["tds_expected"])
+	}
+	penalty := cimplrFloat(item["penalty_amount"])
+	confirmID := strings.TrimSpace(fmt.Sprint(item["closure_confirm_id"]))
+	if confirmID != "" {
+		var calcNet, calcInterest, calcPenalty float64
+		if err := pool.QueryRow(ctx, `
+			SELECT COALESCE(net_payout,0), COALESCE(accrued_interest,0), COALESCE(penalty_amount,0)
+			FROM cimplr.fd_closure_calculation
+			WHERE closure_confirm_id=$1 AND COALESCE(is_deleted,false)=false
+			ORDER BY calculation_date DESC NULLS LAST, calculation_id DESC
+			LIMIT 1`, confirmID,
+		).Scan(&calcNet, &calcInterest, &calcPenalty); err == nil {
+			if calcNet > 0 {
+				item["net_expected"] = calcNet
+			}
+			if calcInterest > 0 && interest == 0 {
+				interest = calcInterest
+				item["interest_received"] = calcInterest
+			}
+			if calcPenalty > 0 {
+				penalty = calcPenalty
+			}
+		}
+	}
+	closureAmount := roundToFour(principal + interest - tds - penalty)
+	netRecv := cimplrFloat(item["net_amount_received"])
+	netExp := cimplrFloat(item["net_expected"])
+	displayNet := netRecv
+	if displayNet <= 0 || (interest > 0 && displayNet == principal) {
+		displayNet = netExp
+	}
+	if displayNet <= 0 {
+		displayNet = closureAmount
+	}
+	item["display_closure_amount"] = closureAmount
+	item["display_net_payout"] = roundToFour(displayNet)
+	item["display_interest"] = roundToFour(interest)
+
+	posted := false
+	switch v := item["accounting_posted"].(type) {
+	case bool:
+		posted = v
+	}
+	postingStatus := strings.ToUpper(strings.TrimSpace(fmt.Sprint(item["posting_status"])))
+	closureStatus := strings.ToUpper(strings.TrimSpace(fmt.Sprint(item["closure_status"])))
+	switch {
+	case posted || postingStatus == "POSTED" || closureStatus == "POSTED":
+		item["posting_display"] = "POSTED"
+	case postingStatus == "FAILED":
+		item["posting_display"] = "FAILED"
+	default:
+		item["posting_display"] = "PENDING"
+	}
+}
+
+func cimplrBuildEmbeddedPostedPreview(ctx context.Context, pool *pgxpool.Pool, journalEntryID, closureType, fdID string, row map[string]interface{}) map[string]interface{} {
+	lines := fetchCimplrPostedJournalLines(ctx, pool, journalEntryID)
+	var totalDebit, totalCredit float64
+	for _, ln := range lines {
+		totalDebit += cimplrFloat(ln["debit_amount"])
+		totalCredit += cimplrFloat(ln["credit_amount"])
+	}
+	preview := buildCimplrJournalPreview(
+		closureType, fdID, "", "",
+		cimplrFloat(row["principal_received"]),
+		cimplrFloat(row["interest_received"]),
+		cimplrFloat(row["tds_deducted"]),
+		cimplrFloat(row["penalty_amount"]),
+		cimplrFloat(row["net_amount_received"]),
+	)
+	preview["lines"] = lines
+	preview["posted_lines"] = lines
+	preview["total_debit"] = roundToFour(totalDebit)
+	preview["total_credit"] = roundToFour(totalCredit)
+	preview["accounting_posted"] = true
+	preview["journal_entry_id"] = journalEntryID
+	return preview
+}
+
+func cimplrAccountingApprovedActiveRecords(ctx context.Context, pool *pgxpool.Pool, req cimplrClosureListRequest) ([]map[string]interface{}, error) {
+	if req.PageSize <= 0 || req.PageSize > 200 {
+		req.PageSize = 100
+	}
+	out := make([]map[string]interface{}, 0)
+
+	// Accounting queue = checker-approved confirm rows (payout/rollover + premature), including POSTED.
+	// Do not use approvedActive=true (filters closure_status='CONFIRM' only and hides posted rows).
+	listReq := req
+	listReq.ClosureType = ""
+	confirmRows, _, err := listCimplrRecords(ctx, pool, "confirm", listReq, false)
+	if err != nil {
+		return nil, err
+	}
+	premReq := req
+	premReq.ClosureType = "PREMATURE"
+	premRows, _, err := listCimplrRecords(ctx, pool, "confirm", premReq, false)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	allConfirm := make([]map[string]interface{}, 0, len(confirmRows)+len(premRows))
+	for _, row := range append(confirmRows, premRows...) {
+		id := strings.TrimSpace(fmt.Sprint(row["closure_confirm_id"]))
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		allConfirm = append(allConfirm, row)
+	}
+	for _, row := range allConfirm {
+		status := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["closure_status"])))
+		if status == "REJECTED" || status == "DELETED" {
+			continue
+		}
+		proc := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["latest_processing_status"])))
+		if proc != "" && proc != "APPROVED" {
+			continue
+		}
+		posted := false
+		switch v := row["accounting_posted"].(type) {
+		case bool:
+			posted = v
+		}
+		item := map[string]interface{}{}
+		for k, v := range row {
+			item[k] = v
+		}
+		ct := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["closure_type"])))
+		item["record_kind"] = "CONFIRM"
+		if ct == "PREMATURE" {
+			item["queue_type"] = "PREMATURE_CONFIRM"
+		} else {
+			item["queue_type"] = "CONFIRM"
+		}
+		if posted || status == "POSTED" {
+			item["workflow_stage"] = "POSTED"
+		} else {
+			item["workflow_stage"] = "APPROVED_PENDING_POST"
+		}
+		item["can_generate_journals"] = true
+		item["can_post"] = !posted
+		journalEntryID := strings.TrimSpace(fmt.Sprint(row["journal_entry_id"]))
+		if posted && journalEntryID != "" {
+			item["embedded_preview"] = cimplrBuildEmbeddedPostedPreview(ctx, pool, journalEntryID, fmt.Sprint(row["closure_type"]), fmt.Sprint(row["fd_id"]), row)
+		}
+		enrichCimplrAccountingListItem(ctx, pool, item)
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+func CimplrExecutionLogsAll(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req cimplrClosureListRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.PageSize <= 0 || req.PageSize > 200 {
+			req.PageSize = 50
+		}
+		offset := 0
+		if req.Page > 0 {
+			offset = (req.Page - 1) * req.PageSize
+		}
+		_ = ensureCimplrExecutionLogTable(r.Context(), pool)
+		rows, err := pool.Query(r.Context(), `
+			SELECT log_id, closure_initiate_id, fd_id, closure_type, closure_confirm_id,
+			       execution_source, status, message, created_at
+			FROM cimplr.fd_closure_execution_log
+			ORDER BY created_at DESC, log_id DESC
+			LIMIT $1 OFFSET $2`, req.PageSize, offset)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch execution logs: "+err.Error())
+			return
+		}
+		defer rows.Close()
+		records, err := pgx.CollectRows(rows, pgx.RowToMap)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read execution logs: "+err.Error())
+			return
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"records": records, "total": len(records)})
+	}
+}
+
+func CimplrAccountingApprovedActive(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req cimplrClosureListRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		records, err := cimplrAccountingApprovedActiveRecords(r.Context(), pool, req)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch accounting approved-active: "+err.Error())
+			return
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"records": records,
+			"total":   len(records),
+		})
+	}
+}
+
+func CimplrAccountingQueue(pool *pgxpool.Pool) http.HandlerFunc {
+	return CimplrAccountingApprovedActive(pool)
+}
+
+// CimplrClosureDetailCompat routes legacy /closure/detail to cimplr initiate/confirm detail by ID prefix.
+func CimplrClosureDetailCompat(pool *pgxpool.Pool) http.HandlerFunc {
+	initiateH := CimplrInitiateDetail(pool)
+	confirmH := CimplrConfirmDetail(pool)
+	legacyH := GetClosureDetail(pool)
+	return func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		id := strings.TrimSpace(firstNonEmpty(
+			fmt.Sprint(raw["closure_confirm_id"]),
+			fmt.Sprint(raw["closure_initiate_id"]),
+			fmt.Sprint(raw["closure_request_id"]),
+		))
+		if id == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "closure_request_id, closure_initiate_id or closure_confirm_id is required")
+			return
+		}
+		var target http.Handler
+		switch {
+		case strings.HasPrefix(id, "FCI-"):
+			raw["closure_initiate_id"] = id
+			target = initiateH
+		case strings.HasPrefix(id, "FCC-"):
+			raw["closure_confirm_id"] = id
+			target = confirmH
+		default:
+			raw["closure_request_id"] = id
+			target = legacyH
+		}
+		b, _ := json.Marshal(raw)
+		r2 := r.Clone(r.Context())
+		r2.Body = io.NopCloser(bytes.NewReader(b))
+		r2.ContentLength = int64(len(b))
+		target.ServeHTTP(w, r2)
+	}
+}
+
+func cimplrVarianceOpenCount(summary map[string]interface{}) int {
+	if summary == nil {
+		return 0
+	}
+	switch v := summary["open_count"].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return int(cimplrFloat(v))
+	}
 }

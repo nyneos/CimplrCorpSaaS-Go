@@ -27,7 +27,7 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 	mux.Handle("/investment/fd/closure/all",
 		mid(http.HandlerFunc(GetAllClosureRequests(pool))))
 	mux.Handle("/investment/fd/closure/detail",
-		mid(http.HandlerFunc(GetClosureDetail(pool))))
+		mid(http.HandlerFunc(CimplrClosureDetailCompat(pool))))
 	mux.Handle("/investment/fd/closure/bulk-approve",
 		mid(http.HandlerFunc(BulkApproveClosureRequest(pool))))
 	mux.Handle("/investment/fd/closure/bulk-reject",
@@ -111,4 +111,13 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 		mid(http.HandlerFunc(CimplrConfirmReject(pool))))
 	mux.Handle("/investment/fd/closure/premature/all",
 		mid(http.HandlerFunc(CimplrPrematureAll(pool))))
+
+	mux.Handle("/investment/fd/closure/accounting/queue",
+		mid(http.HandlerFunc(CimplrAccountingQueue(pool))))
+	mux.Handle("/investment/fd/closure/accounting/approved-active",
+		mid(http.HandlerFunc(CimplrAccountingApprovedActive(pool))))
+	mux.Handle("/investment/fd/closure/execution-logs/all",
+		mid(http.HandlerFunc(CimplrExecutionLogsAll(pool))))
+	mux.Handle("/investment/fd/closure/accounting/preview",
+		mid(http.HandlerFunc(CimplrJournalPreview(pool))))
 }
