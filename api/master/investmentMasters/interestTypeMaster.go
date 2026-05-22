@@ -1567,10 +1567,10 @@ func GetInterestTypesApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.interest_type_code,
 				m.interest_type_name,
 				m.calculation_method,
-				m.min_tenor_days,
-				m.max_tenor_days,
+				COALESCE(m.min_tenor_days, 0) AS min_tenor_days,
+				COALESCE(m.max_tenor_days, 0) AS max_tenor_days,
 				m.is_default,
-				m.description,
+				COALESCE(m.description, '') AS description,
 				m.is_active
 			FROM investment.fd_interest_type_master m
 			INNER JOIN investment.fd_audit_interest_type a ON a.interest_id = m.interest_id
@@ -1592,7 +1592,7 @@ func GetInterestTypesApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for rows.Next() {
 			var id, code, name, method, desc string
-			var minTenor, maxTenor *int
+			var minTenor, maxTenor int
 			var isDefault, isActive bool
 
 			if err := rows.Scan(&id, &code, &name, &method, &minTenor, &maxTenor, &isDefault, &desc, &isActive); err != nil {
