@@ -1,4 +1,4 @@
-﻿package allMaster
+package allMaster
 
 import (
 	"CimplrCorpSaas/api"
@@ -1276,6 +1276,7 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE a.day_count_code = ANY($1::text[])
 				  AND a.action_type='DELETE'
 				  AND a.processing_status='APPROVED'
+				  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			)
 		`, req.DayCountCodes)
 		if err != nil {
@@ -1374,7 +1375,7 @@ func GetDayCountConventionsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFun
 				   m.is_active
 			FROM investment.fd_day_count_convention_master m
 			INNER JOIN investment.fd_audit_day_count_convention a ON a.day_count_code = m.day_count_code
-			WHERE a.processing_status='APPROVED' AND m.is_active=true AND COALESCE(m.is_deleted,false)=false
+			WHERE a.processing_status='APPROVED' AND a.action_type IN ('CREATE','EDIT','DELETE') AND m.is_active=true AND COALESCE(m.is_deleted,false)=false
 			ORDER BY m.day_count_name
 		`)
 		if err != nil {
@@ -1432,6 +1433,7 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_formula_example,
 					a.old_is_active
 				FROM investment.fd_audit_day_count_convention a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.day_count_code,
 				         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
 			),

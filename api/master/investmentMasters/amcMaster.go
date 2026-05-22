@@ -1048,7 +1048,7 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (amc_id) action_id, amc_id, processing_status
 			FROM investment.auditactionamc
-			WHERE amc_id = ANY($1)
+			WHERE amc_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY amc_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.AmcIDs)
 		if err != nil {
@@ -1123,7 +1123,7 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (amc_id) 
 				action_id, amc_id, actiontype, processing_status
 			FROM investment.auditactionamc
-			WHERE amc_id = ANY($1)
+			WHERE amc_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY amc_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.AmcIDs)
 		if err != nil {
@@ -1222,6 +1222,7 @@ func GetApprovedActiveAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH latest AS (
 				SELECT DISTINCT ON (amc_id) amc_id, processing_status,requested_at,checker_at
 				FROM investment.auditactionamc
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY amc_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 			)
 			SELECT m.amc_id, m.amc_name, m.internal_amc_code
@@ -1273,6 +1274,7 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 					FROM investment.auditactionamc a
+					WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
 					ORDER BY a.amc_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (

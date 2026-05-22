@@ -801,7 +801,7 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (scheme_id) action_id, scheme_id, actiontype, processing_status
 			FROM investment.auditactionscheme
-			WHERE scheme_id = ANY($1)
+			WHERE scheme_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY scheme_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.SchemeIDs)
@@ -930,7 +930,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (scheme_id) action_id, scheme_id, processing_status
 			FROM investment.auditactionscheme
-			WHERE scheme_id = ANY($1)
+			WHERE scheme_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY scheme_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.SchemeIDs)
@@ -1002,12 +1002,14 @@ func GetApprovedActiveSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH latest_scheme AS (
 				SELECT DISTINCT ON (scheme_id) scheme_id, processing_status
 				FROM investment.auditactionscheme
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY scheme_id, requested_at DESC
 			),
 			latest_amc AS (
 				SELECT DISTINCT ON (amc.amc_id) amc.amc_id, m.amc_name, amc.processing_status, m.status
 				FROM investment.auditactionamc amc
 				JOIN investment.masteramc m ON amc.amc_id = m.amc_id
+				WHERE amc.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY amc.amc_id, amc.requested_at DESC
 			)
 			SELECT m.scheme_id, m.scheme_name, m.isin, m.internal_scheme_code, m.amc_name, m.amfi_scheme_code, COALESCE(m.method,'') AS method
@@ -1060,12 +1062,14 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH latest_scheme AS (
 				SELECT DISTINCT ON (scheme_id) scheme_id, processing_status
 				FROM investment.auditactionscheme
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY scheme_id, requested_at DESC
 			),
 			latest_amc AS (
 				SELECT DISTINCT ON (amc.amc_id) amc.amc_id, m.amc_name, amc.processing_status, m.status
 				FROM investment.auditactionamc amc
 				JOIN investment.masteramc m ON amc.amc_id = m.amc_id
+				WHERE amc.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY amc.amc_id, amc.requested_at DESC
 			)
 			SELECT 
@@ -1134,6 +1138,7 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.scheme_id, a.actiontype, a.processing_status, a.action_id,
 					a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason
 				FROM investment.auditactionscheme a
+				WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.scheme_id, a.requested_at DESC
 			),
 			history AS (

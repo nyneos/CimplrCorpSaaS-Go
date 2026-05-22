@@ -916,6 +916,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 					aa.requested_at,
 					aa.checker_at
 				FROM auditactionbankaccount aa
+				WHERE aa.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY aa.account_id, aa.requested_at DESC
 			),
 			clearing AS (
@@ -1751,6 +1752,7 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM auditactionbankaccount aa
 				WHERE aa.account_id = a.account_id
+				  AND aa.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) astatus ON TRUE
@@ -2100,7 +2102,7 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		} // fetch audit info for this account
 		auditMap := make(map[string]map[string]interface{})
-		auditQuery := `SELECT DISTINCT ON (account_id) account_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankaccount WHERE account_id=$1 ORDER BY account_id, requested_at DESC`
+		auditQuery := `SELECT DISTINCT ON (account_id) account_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankaccount WHERE account_id=$1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY account_id, requested_at DESC`
 		arows, err := pgxPool.Query(ctx, auditQuery, req.AccountID)
 		if err == nil {
 			defer arows.Close()
@@ -2470,6 +2472,7 @@ LEFT JOIN LATERAL (
     SELECT *
     FROM auditactionbankaccount aa
     WHERE aa.account_id = a.account_id
+      AND aa.actiontype IN ('CREATE','EDIT','DELETE')
     ORDER BY aa.requested_at DESC
     LIMIT 1
 ) aa ON TRUE

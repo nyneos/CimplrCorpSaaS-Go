@@ -773,7 +773,7 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (dp_id) action_id, dp_id, actiontype, processing_status
 			FROM investment.auditactiondp
-			WHERE dp_id = ANY($1)
+			WHERE dp_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY dp_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.DPIDs)
@@ -900,7 +900,7 @@ func BulkRejectDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (dp_id) action_id, dp_id, processing_status
 			FROM investment.auditactiondp
-			WHERE dp_id = ANY($1)
+			WHERE dp_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY dp_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.DPIDs)
@@ -976,6 +976,7 @@ func GetApprovedActiveDPs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH latest AS (
 				SELECT DISTINCT ON (dp_id) dp_id, processing_status
 				FROM investment.auditactiondp
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY dp_id, requested_at DESC
 			)
 			SELECT m.dp_id, m.dp_name, m.dp_code, m.depository
@@ -1018,6 +1019,7 @@ func GetDPsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.dp_id, a.actiontype, a.processing_status, a.action_id,
 					a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason
 				FROM investment.auditactiondp a
+				WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.dp_id, a.requested_at DESC
 			),
 			history AS (

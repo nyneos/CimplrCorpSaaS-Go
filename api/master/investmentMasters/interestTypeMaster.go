@@ -1,4 +1,4 @@
-﻿package allMaster
+package allMaster
 
 import (
 	"CimplrCorpSaas/api"
@@ -1575,6 +1575,7 @@ func GetInterestTypesApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_interest_type_master m
 			INNER JOIN investment.fd_audit_interest_type a ON a.interest_id = m.interest_id
 			WHERE a.processing_status = 'APPROVED' 
+				AND a.action_type IN ('CREATE','EDIT','DELETE')
 				AND m.is_active = true 
 				AND COALESCE(m.is_deleted, false) = false
 			ORDER BY m.interest_type_name
@@ -1645,6 +1646,7 @@ func GetInterestTypesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_description,
 					a.old_is_active
 				FROM investment.fd_audit_interest_type a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.interest_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (

@@ -1,4 +1,4 @@
-﻿package allMaster
+package allMaster
 
 import (
 	"CimplrCorpSaas/api"
@@ -12,10 +12,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-	"path/filepath"
 
 	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v5"
@@ -1183,7 +1183,7 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
             SELECT audit_id, penalty_id, action_type, processing_status
             FROM investment.fd_audit_penalty_structure
-            WHERE penalty_id = ANY($1::text[]) AND processing_status LIKE 'PENDING%'
+            WHERE penalty_id = ANY($1::text[]) AND processing_status LIKE 'PENDING%' AND action_type IN ('CREATE','EDIT','DELETE')
             FOR UPDATE
         `
 
@@ -1343,9 +1343,9 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		 ctx := r.Context()
-		 // Cast date columns to text (YYYY-MM-DD) so pgx can scan into string vars
-		 baseQuery := `
+		ctx := r.Context()
+		// Cast date columns to text (YYYY-MM-DD) so pgx can scan into string vars
+		baseQuery := `
 		     SELECT m.penalty_id, m.bank_code,
 			     COALESCE(mb.bank_name,'') AS bank_name,
 			     COALESCE(mb.bank_short_name,'') AS bank_short_name,
@@ -1473,6 +1473,7 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_effective_to,
 					a.old_is_active
 				FROM investment.fd_audit_penalty_structure a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.penalty_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (

@@ -1,4 +1,4 @@
-﻿package allMaster
+package allMaster
 
 import (
 	"CimplrCorpSaas/api"
@@ -1262,6 +1262,7 @@ func BulkApproveBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE a.rate_card_id = ANY($1::text[])
 				  AND a.action_type='DELETE'
 				  AND a.processing_status='APPROVED'
+				  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			)
 		`, req.RateCardIDs)
 		if err != nil {
@@ -1365,7 +1366,7 @@ func GetBankRateCardsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_bank_rate_card_master m
 			INNER JOIN investment.fd_audit_bank_rate_card a ON a.rate_card_id = m.rate_card_id
 			LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
-			WHERE a.processing_status='APPROVED' AND m.is_active=true AND COALESCE(m.is_deleted,false)=false
+			WHERE a.processing_status='APPROVED' AND a.action_type IN ('CREATE','EDIT','DELETE') AND m.is_active=true AND COALESCE(m.is_deleted,false)=false
 			ORDER BY m.rate_card_id, m.bank_code
 		`)
 		if err != nil {
@@ -1460,6 +1461,7 @@ func GetBankRateCardsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_offer_details,
 					a.old_is_active
 				FROM investment.fd_audit_bank_rate_card a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.rate_card_id,
 				         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
 			),

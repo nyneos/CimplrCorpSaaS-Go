@@ -198,6 +198,7 @@ func FindParentGLAccountAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM auditactionglaccount a
 				WHERE a.gl_account_id = m.gl_account_id
+				  AND a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
@@ -302,6 +303,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					LEFT JOIN LATERAL (
 						SELECT processing_status FROM auditactionglaccount
 						WHERE gl_account_id = m.gl_account_id
+						  AND actiontype IN ('CREATE','EDIT','DELETE')
 						ORDER BY requested_at DESC LIMIT 1
 					) a ON TRUE
 					WHERE m.gl_account_code = $1
@@ -505,6 +507,7 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason
 				FROM auditactionglaccount a
 				WHERE a.gl_account_id = m.gl_account_id
+				  AND a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) l ON TRUE
@@ -811,6 +814,7 @@ func GetApprovedActiveGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
             WITH latest AS (
                 SELECT DISTINCT ON (gl_account_id) gl_account_id, processing_status
                 FROM auditactionglaccount
+                WHERE actiontype IN ('CREATE','EDIT','DELETE')
                 ORDER BY gl_account_id, requested_at DESC
             )
             SELECT m.gl_account_id, m.gl_account_code, m.gl_account_name, m.gl_account_type
@@ -924,6 +928,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							LEFT JOIN LATERAL (
 								SELECT processing_status FROM auditactionglaccount
 								WHERE gl_account_id = m.gl_account_id
+								  AND actiontype IN ('CREATE','EDIT','DELETE')
 								ORDER BY requested_at DESC LIMIT 1
 							) a ON TRUE
 							WHERE m.gl_account_code = $1

@@ -324,6 +324,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						processing_status
 					FROM auditactioncashflowcategory
 					WHERE processing_status = 'APPROVED'
+					  AND actiontype IN ('CREATE','EDIT','DELETE')
 					ORDER BY category_id, requested_at DESC
 				)
 				SELECT 
@@ -586,6 +587,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				       checker_by, checker_at, checker_comment, reason
 				FROM auditactioncashflowcategory a
 				WHERE a.category_id = m.category_id
+				  AND a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
@@ -974,7 +976,7 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT m.category_id, m.category_name, m.category_type, m.is_deleted, a.processing_status
 			FROM mastercashflowcategory m
 			LEFT JOIN LATERAL (
-		SELECT processing_status FROM auditactioncashflowcategory a WHERE a.category_id = m.category_id ORDER BY requested_at DESC LIMIT 1
+		SELECT processing_status FROM auditactioncashflowcategory a WHERE a.category_id = m.category_id AND a.actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC LIMIT 1
 		) a ON TRUE
 	`)
 		if err != nil {

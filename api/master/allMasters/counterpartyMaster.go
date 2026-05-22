@@ -326,6 +326,7 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH latest AS (
 				SELECT DISTINCT ON (counterparty_id) counterparty_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason
 				FROM auditactioncounterparty
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY counterparty_id, requested_at DESC
 			)
 	     SELECT m.counterparty_id, m.input_method, m.counterparty_name, m.old_counterparty_name, m.counterparty_code, m.old_counterparty_code, m.counterparty_type, m.old_counterparty_type, m.address, m.old_address, m.status, m.old_status, m.country, m.old_country, m.contact, m.old_contact, m.email, m.old_email, m.eff_from, m.old_eff_from, m.eff_to, m.old_eff_to, m.tags, m.old_tags, m.is_deleted,
@@ -626,6 +627,7 @@ func GetApprovedActiveCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH latest AS (
 				SELECT DISTINCT ON (counterparty_id) counterparty_id, processing_status
 				FROM auditactioncounterparty
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY counterparty_id, requested_at DESC
 			)
 			SELECT m.counterparty_id, m.counterparty_name, m.counterparty_code, m.counterparty_type
@@ -1047,7 +1049,7 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) ORDER BY counterparty_id, requested_at DESC`
+		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY counterparty_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.CounterpartyIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
@@ -1141,7 +1143,7 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, actiontype, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) ORDER BY counterparty_id, requested_at DESC`
+		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, actiontype, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY counterparty_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.CounterpartyIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())

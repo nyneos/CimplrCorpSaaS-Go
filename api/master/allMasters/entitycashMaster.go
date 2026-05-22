@@ -549,6 +549,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.actiontype, a.action_id, a.checker_by, a.checker_at,
 					a.checker_comment, a.reason
 				FROM auditactionentity a
+				WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.entity_id, a.requested_at DESC
 			)
 			SELECT
@@ -1035,6 +1036,7 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						LEFT JOIN LATERAL (
 							SELECT processing_status FROM auditactionentity
 							WHERE entity_id = m.entity_id
+							AND actiontype IN ('CREATE','EDIT','DELETE')
 							ORDER BY requested_at DESC LIMIT 1
 						) a ON TRUE
 						WHERE m.entity_name = $1
@@ -1931,7 +1933,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var anyError error
 		for _, eid := range req.EntityIDs {
 			var status string
-			err := tx.QueryRow(ctx, `SELECT processing_status FROM auditactionentity WHERE entity_id = $1 ORDER BY requested_at DESC LIMIT 1`, eid).Scan(&status)
+			err := tx.QueryRow(ctx, `SELECT processing_status FROM auditactionentity WHERE entity_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC LIMIT 1`, eid).Scan(&status)
 			if err == pgx.ErrNoRows {
 				continue
 			} else if err != nil {
@@ -2192,13 +2194,13 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 										SELECT m.entity_id, m.entity_name, m.entity_short_name, m.unique_identifier
 										FROM masterentitycash m
 										LEFT JOIN LATERAL (
-											SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = m.entity_id ORDER BY a.requested_at DESC LIMIT 1
+											SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = m.entity_id AND a.actiontype IN ('CREATE','EDIT','DELETE') ORDER BY a.requested_at DESC LIMIT 1
 										) ma ON TRUE
 										LEFT JOIN LATERAL (
 											SELECT p.entity_id, a.processing_status
 											FROM masterentitycash p
 											JOIN LATERAL (
-												SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = p.entity_id ORDER BY a.requested_at DESC LIMIT 1
+												SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = p.entity_id AND a.actiontype IN ('CREATE','EDIT','DELETE') ORDER BY a.requested_at DESC LIMIT 1
 											) a ON TRUE
 											WHERE p.entity_name = m.parent_entity_name
 											LIMIT 1
@@ -2284,11 +2286,11 @@ func GetAssignedCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT m.entity_id, m.entity_name, m.entity_short_name, m.unique_identifier
 			FROM masterentitycash m
 			LEFT JOIN LATERAL (
-				SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = m.entity_id ORDER BY a.requested_at DESC LIMIT 1
+				SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = m.entity_id AND a.actiontype IN ('CREATE','EDIT','DELETE') ORDER BY a.requested_at DESC LIMIT 1
 			) ma ON TRUE
 			LEFT JOIN masterentitycash p ON m.parent_entity_name = p.entity_name
 			LEFT JOIN LATERAL (
-				SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = p.entity_id ORDER BY a.requested_at DESC LIMIT 1
+				SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = p.entity_id AND a.actiontype IN ('CREATE','EDIT','DELETE') ORDER BY a.requested_at DESC LIMIT 1
 			) pa ON TRUE
 			WHERE m.entity_id = ANY($1::text[])
 				AND m.active_status = 'Active'

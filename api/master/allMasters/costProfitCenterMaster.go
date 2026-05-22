@@ -263,6 +263,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					LEFT JOIN LATERAL (
 						SELECT processing_status FROM auditactioncostprofitcenter
 						WHERE centre_id = m.centre_id
+						AND actiontype IN ('CREATE','EDIT','DELETE')
 						ORDER BY requested_at DESC LIMIT 1
 					) a ON TRUE
 					WHERE m.centre_code = $1
@@ -1223,6 +1224,7 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
             WITH latest AS (
                 SELECT DISTINCT ON (centre_id) centre_id, processing_status
                 FROM auditactioncostprofitcenter
+                WHERE actiontype IN ('CREATE','EDIT','DELETE')
                 ORDER BY centre_id, requested_at DESC
             )
             SELECT m.centre_id, m.centre_code, m.centre_name, m.centre_type
@@ -1361,6 +1363,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
                 SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason
                 FROM auditactioncostprofitcenter a
                 WHERE a.centre_id = m.centre_id
+                AND a.actiontype IN ('CREATE','EDIT','DELETE')
                 ORDER BY requested_at DESC
                 LIMIT 1
             ) a ON TRUE

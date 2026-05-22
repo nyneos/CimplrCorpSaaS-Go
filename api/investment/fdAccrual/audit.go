@@ -220,7 +220,7 @@ func GetScheduleConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(checker_comment, '')                                     AS checker_comment,
 				COALESCE(old_schedule_frequency, '')                              AS old_schedule_frequency,
 				COALESCE(old_run_day_of_month, 0)                                 AS old_run_day_of_month,
-				COALESCE(old_run_time, '')                                        AS old_run_time,
+				COALESCE(TO_CHAR(old_run_time, 'HH24:MI:SS'), '')                 AS old_run_time,
 				COALESCE(old_default_run_mode, '')                                AS old_default_run_mode,
 				COALESCE(old_default_bank_id_filter, '')                          AS old_default_bank_id_filter,
 				COALESCE(old_default_fd_status_filter, '')                        AS old_default_fd_status_filter,
@@ -274,4 +274,3 @@ func respondFDAccrualAuditPayload(w http.ResponseWriter, payload interface{}) {
 		"data":    payload,
 	})
 }
-

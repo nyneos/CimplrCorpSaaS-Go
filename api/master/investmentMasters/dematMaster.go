@@ -1046,7 +1046,7 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (demat_id) action_id, demat_id, actiontype, processing_status
 			FROM investment.auditactiondemat
-			WHERE demat_id = ANY($1)
+			WHERE demat_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY demat_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.DematIDs)
@@ -1167,7 +1167,7 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (demat_id) action_id, demat_id, processing_status
 			FROM investment.auditactiondemat
-			WHERE demat_id = ANY($1)
+			WHERE demat_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY demat_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.DematIDs)
@@ -1272,6 +1272,7 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactiondemat a
+				WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.demat_id, a.requested_at DESC
 			),
 			history AS (

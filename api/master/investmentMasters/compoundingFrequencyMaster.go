@@ -1,4 +1,4 @@
-﻿package allMaster
+package allMaster
 
 import (
 	"CimplrCorpSaas/api"
@@ -97,6 +97,7 @@ func GetCompoundingFrequenciesApprovedActive(pgxPool *pgxpool.Pool) http.Handler
 			FROM investment.fd_compounding_frequency_master m
 			INNER JOIN investment.fd_audit_compounding_frequency a ON a.frequency_id = m.frequency_id
 			WHERE a.processing_status = 'APPROVED'
+			  AND a.action_type IN ('CREATE','EDIT','DELETE')
 				AND m.is_active = true
 				AND COALESCE(m.is_deleted, false) = false
 			ORDER BY m.frequency_name
@@ -943,6 +944,7 @@ func GetCompoundingFrequenciesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc 
 					a.old_description,
 					a.old_is_active
 				FROM investment.fd_audit_compounding_frequency a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.frequency_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (
@@ -1217,6 +1219,7 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE a.frequency_id = ANY($1::text[]) 
 				  AND a.action_type = 'DELETE' 
 				  AND a.processing_status = 'APPROVED'
+				  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			)
 		`, req.FrequencyIDs)
 
