@@ -761,6 +761,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			  penalty_amount, net_payout_amount,
 			  settlement_account_id, maturity_instructions,
 			  rollover_amount, rollover_tenor_days,
+			  rollover_interest_rate,
 			  closure_reason, closure_notes,
 			  variance_remark,
 			  submitted_by, submitted_by_email,
@@ -772,11 +773,13 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			  $6,'PENDING_APPROVAL',
 			  CURRENT_DATE,$7::date,$8::date,
 			  $9,$10,$11,$12,$13,
-			  $14,$15,$16,$17,$18,$19,
-			  $20,
-			  $21,$22,false,false,
-			  NULLIF($23,''),
-			  $22,NOW(),$22,NOW()
+			  $14,$15,$16,$17,
+			  $18,
+			  $19,$20,
+			  $21,
+			  $22,$23,false,false,
+			  NULLIF($24,''),
+			  $23,NOW(),$23,NOW()
 			) RETURNING closure_request_id`,
 			req.FDID, nullStrOrNil(bookingID), nullStrOrNil(confirmationID),
 			nullStrOrNil(firstNonEmpty(req.EntityID, entityID)),
@@ -787,6 +790,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			roundToFour(penaltyAmount), netPayout,
 			nullStrOrNil(req.SettlementAccountID), nullStrOrNil(req.MaturityInstructions),
 			req.RolloverAmount, req.RolloverTenorDays,
+			req.RolloverInterestRate,
 			nullStrOrNil(req.ClosureReason), nullStrOrNil(req.ClosureNotes),
 			nullStrOrNil(req.VarianceRemark),
 			req.UserID, userEmail,
@@ -867,8 +871,20 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 				closureRequestID, req.FDID, effectiveDateStr, daysHeld, contractedRate, roundToFour(contractedRate-penaltyRate),
 				roundToFour(accruedInterest), penaltyRate, roundToFour(penaltyAmount), noInterestFlag, roundToFour(tdsDeducted), netPayout, userEmail)
 		case "ROLLOVER":
-			_, _ = tx.Exec(ctx, `INSERT INTO investment.fd_closure_rollover (closure_request_id,source_fd_id,rollover_date,rollover_amount,rollover_principal,interest_credited,tds_deducted,new_tenor_days,rollover_type,created_by) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,'FULL',$9)`,
-				closureRequestID, req.FDID, effectiveDateStr, netPayout, principalAmount, roundToFour(accruedInterest), roundToFour(tdsDeducted), req.RolloverTenorDays, userEmail)
+			rolloverType := firstNonEmpty(req.RolloverType, "FULL")
+			var newMatDate interface{}
+			if req.NewMaturityDate != "" {
+				newMatDate = req.NewMaturityDate
+			}
+			rolloverInterestRate := req.RolloverInterestRate
+			if rolloverInterestRate <= 0 {
+				// Fallback to source FD interest rate so postClosureJournals can find a valid rate.
+				var srcRate float64
+				_ = tx.QueryRow(ctx, `SELECT COALESCE(interest_rate,0) FROM investment.fd_master WHERE fd_id=$1`, req.FDID).Scan(&srcRate)
+				rolloverInterestRate = srcRate
+			}
+			_, _ = tx.Exec(ctx, `INSERT INTO investment.fd_closure_rollover (closure_request_id,source_fd_id,rollover_date,rollover_amount,rollover_principal,interest_credited,tds_deducted,new_tenor_days,new_interest_rate,new_maturity_date,rollover_type,partial_withdrawal,created_by) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10::date,$11,$12,$13)`,
+				closureRequestID, req.FDID, effectiveDateStr, netPayout, principalAmount, roundToFour(accruedInterest), roundToFour(tdsDeducted), req.RolloverTenorDays, rolloverInterestRate, newMatDate, rolloverType, req.PartialWithdrawal, userEmail)
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -2928,6 +2944,20 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 			} else {
 				api.LogInfo("[FDClosure] ROLLOVER: new booking=%s linked on fd_closure_rollover for closure=%s (fd_master will be created after confirmation)", newBookingID, closureRequestID)
 			}
+
+			// 5. Add journal lines showing the outflow for the new FD booking.
+			//    DR New FD Investment  = rolloverAmt  (new FD investment created)
+			//    CR Settlement Account = rolloverAmt  (cash reinvested from old FD)
+			// These lines are self-balancing (DR = CR = rolloverAmt) so they
+			// don't disturb the closure journal's balance.
+			_, _ = tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+				entryID, lineNum, "FD-INVEST-NEW-"+newBookingID, "New FD Investment (Rollover)", "ASSET",
+				roundToFour(rolloverAmt), float64(0), "New FD booking from rollover — "+newBookingID, fdID)
+			lineNum++
+			_, _ = tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+				entryID, lineNum, bankAccountNumber, bankAccountName, "ASSET",
+				float64(0), roundToFour(rolloverAmt), "Cash reinvested into new FD rollover — "+newBookingID, fdID)
+			lineNum++ //nolint:ineffassign
 		}
 	}
 

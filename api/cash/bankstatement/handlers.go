@@ -202,7 +202,7 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				COALESCE(t.payment_channel, '')                  AS payment_channel,
 				t.confidence_score,
 				COALESCE(t.classification_step, '')              AS classification_step,
-				-- Review queue fields
+				-- Review queue fields (only the latest PENDING entry, if any)
 				COALESCE(q.status, '')                           AS review_status,
 				COALESCE(q.suggested_cat::text, '')              AS suggested_cat_id,
 				COALESCE(sq.category_name, '')                   AS suggested_cat_name
@@ -213,8 +213,14 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				ON s.entity_id = e.entity_id
 			LEFT JOIN public.mastercashflowcategory c
 				ON t.category_id = c.category_id
-			LEFT JOIN cimplrcorpsaas.categorization_review_queue q
-				ON q.transaction_id = t.transaction_id
+			LEFT JOIN LATERAL (
+				SELECT status, suggested_cat
+				FROM cimplrcorpsaas.categorization_review_queue
+				WHERE transaction_id = t.transaction_id
+				  AND status = 'PENDING'
+				ORDER BY queue_id DESC
+				LIMIT 1
+			) q ON TRUE
 			LEFT JOIN public.mastercashflowcategory sq
 				ON sq.category_id::text = q.suggested_cat::text
 			WHERE t.bank_statement_id = $1
@@ -1097,7 +1103,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 						SELECT action_id
 						FROM cimplrcorpsaas.auditactionbankstatement
 						WHERE bankstatementid = $1
-						  AND actiontype IN ('CREATE', 'EDIT')
+						  AND actiontype IN ('CREATE', 'EDIT', 'RECAT')
 						  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL')
 						ORDER BY requested_at DESC, action_id DESC
 						LIMIT 1

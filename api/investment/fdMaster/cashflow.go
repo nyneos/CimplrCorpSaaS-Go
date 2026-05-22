@@ -56,6 +56,7 @@ type FDRecord struct {
 	// Stored as accrual_frequency_code on fd_booking_request / fd_master.
 	// Used to derive AccrualFreqMonths for generateCashflowSchedule.
 	AccrualFrequencyCode string
+	AutoRenewal          bool
 }
 
 // InterestType is an alias kept for backward compat inside cashflow calculations.
@@ -297,6 +298,7 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			COALESCE(b.frequency_id, '') AS interest_payout_frequency,
 			'' AS compounding_frequency,
 			COALESCE(b.day_count_code, '') AS day_count_convention,
+			COALESCE(b.auto_renewal, false) AS auto_renewal,
 			%s AS currency,
 			COALESCE(b.tds_plan_id, ''),
 			COALESCE(c.bank_fd_ref_no, ''),
@@ -327,6 +329,7 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 		&rec.InterestPayoutFrequency,
 		&rec.CompoundingFrequency,
 		&rec.DayCountConvention,
+		&rec.AutoRenewal,
 		&rec.Currency,
 		&rec.TDSPlanID,
 		&rec.BankFDReference,
