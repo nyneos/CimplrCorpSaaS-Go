@@ -97,12 +97,21 @@ type maturityDashboardRequest struct {
 	PageSize    int    `json:"page_size"`
 }
 
+type maturityDashboardEnvelope struct {
+	Rows *maturityDashboardRequest `json:"rows"`
+	maturityDashboardRequest
+}
+
 func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req maturityDashboardRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var env maturityDashboardEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
+		}
+		req := env.maturityDashboardRequest
+		if env.Rows != nil {
+			req = *env.Rows
 		}
 		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
@@ -112,13 +121,6 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.DaysAhead <= 0 {
 			req.DaysAhead = 30
 		}
-		if req.Page <= 0 {
-			req.Page = 1
-		}
-		if req.PageSize <= 0 || req.PageSize > 200 {
-			req.PageSize = 50
-		}
-		offset := (req.Page - 1) * req.PageSize
 		ctx := r.Context()
 
 		// Maturity-dashboard eligibility rules:
@@ -135,6 +137,16 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			  SELECT 1 FROM investment.fd_closure_request xcr
 			  WHERE xcr.fd_id = m.fd_id
 			    AND xcr.is_deleted = false
+			)`,
+			`NOT EXISTS (
+			  SELECT 1 FROM cimplr.fd_closure_initiate ncr
+			  WHERE ncr.fd_id = m.fd_id
+			    AND ncr.is_deleted = false
+			)`,
+			`NOT EXISTS (
+			  SELECT 1 FROM cimplr.fd_closure_confirm ncc
+			  WHERE ncc.fd_id = m.fd_id
+			    AND ncc.is_deleted = false
 			)`,
 		}
 		args := []interface{}{}
@@ -163,8 +175,6 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = pool.QueryRow(ctx,
 			fmt.Sprintf("SELECT COUNT(DISTINCT m.fd_id) FROM investment.fd_master m LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id WHERE %s", where),
 			args...).Scan(&totalCount)
-
-		limitArgs := append(args, req.PageSize, offset)
 
 		dataSQL := fmt.Sprintf(`
 			SELECT
@@ -233,10 +243,9 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			  FROM investment.fd_cashflow_schedule WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
 			) cf ON true
 			WHERE %s
-			ORDER BY m.maturity_date ASC
-			LIMIT $%d OFFSET $%d`, where, argIdx, argIdx+1)
+			ORDER BY m.maturity_date ASC`, where)
 
-		rows, err := pool.Query(ctx, dataSQL, limitArgs...)
+		rows, err := pool.Query(ctx, dataSQL, args...)
 		if err != nil {
 			api.LogError("[FDClosure] GetFDsNearMaturity query error: %v", err)
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch maturity dashboard")
@@ -254,6 +263,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			records = append(records, row)
 		}
+		records = enrichCimplrMaturityDashboardRecords(ctx, pool, records)
 
 		// If no records found, and no entity/bank filter was provided, return all ACTIVE FDs (ignore date window).
 		if len(records) == 0 && req.EntityID == "" && req.BankID == "" {
@@ -264,6 +274,16 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			    WHERE xcr.fd_id = m.fd_id
 			      AND xcr.is_deleted = false
 			      AND xcr.closure_status IN ('PENDING_APPROVAL','APPROVED','POSTED')
+			  )
+			  AND NOT EXISTS (
+			    SELECT 1 FROM cimplr.fd_closure_initiate ncr
+			    WHERE ncr.fd_id = m.fd_id
+			      AND ncr.is_deleted = false
+			  )
+			  AND NOT EXISTS (
+			    SELECT 1 FROM cimplr.fd_closure_confirm ncc
+			    WHERE ncc.fd_id = m.fd_id
+			      AND ncc.is_deleted = false
 			  )`
 			var totalAll int
 			_ = pool.QueryRow(ctx,
@@ -336,10 +356,9 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_cashflow_schedule WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
 				) cf ON true
 				WHERE ` + allWhere + `
-				ORDER BY m.maturity_date ASC
-				LIMIT $1 OFFSET $2`
+				ORDER BY m.maturity_date ASC`
 
-			rowsAll, err := pool.Query(ctx, allSQL, req.PageSize, offset)
+			rowsAll, err := pool.Query(ctx, allSQL)
 			if err != nil {
 				api.LogError("[FDClosure] GetFDsNearMaturity (all) query error: %v", err)
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch maturity dashboard")
@@ -357,10 +376,10 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				records = append(records, row)
 			}
+			records = enrichCimplrMaturityDashboardRecords(ctx, pool, records)
 
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"records": records, "total": totalAll, "page": req.Page,
-				"page_size": req.PageSize, "days_ahead": req.DaysAhead,
+				"records": records, "total": totalAll, "days_ahead": req.DaysAhead,
 			})
 			api.LogInfo("[FDClosure] GetFDsNearMaturity (all active) returned %d/%d by %s", len(records), totalAll, userEmail)
 			return
@@ -370,16 +389,14 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			// No results for the provided filters / window — return clear human-readable message
 			msg := fmt.Sprintf("No FDs found in the maturity window of %d day(s) for entity=%s bank=%s", req.DaysAhead, firstNonEmpty(req.EntityID, "ALL"), firstNonEmpty(req.BankID, "ALL"))
 			api.RespondWithPayload(w, false, msg, map[string]interface{}{
-				"records": records, "total": totalCount, "page": req.Page,
-				"page_size": req.PageSize, "days_ahead": req.DaysAhead,
+				"records": records, "total": totalCount, "days_ahead": req.DaysAhead,
 			})
 			api.LogInfo("[FDClosure] GetFDsNearMaturity: no records for %s — by %s", msg, userEmail)
 			return
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"records": records, "total": totalCount, "page": req.Page,
-			"page_size": req.PageSize, "days_ahead": req.DaysAhead,
+			"records": records, "total": totalCount, "days_ahead": req.DaysAhead,
 		})
 		api.LogInfo("[FDClosure] GetFDsNearMaturity: %d/%d by %s", len(records), totalCount, userEmail)
 	}
@@ -1961,46 +1978,26 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			var instanceEyeID string
-			engineErr := pool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id=i.instance_id AND ie.status='ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id=ie.matrix_eye_id
-				  AND m.member_type='APPROVER' AND m.is_active=true AND m.is_deleted=false
-				  AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id=$2
-				WHERE i.record_id=$1 AND i.module_code='FIXED_DEPOSIT' AND i.status='PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, crID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
-				if err := approvalengine.RecordAction(ctx, pool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID, ActorUserID: req.UserID, ActorEmail: userEmail,
-					ActionType: approvalengine.ActionApproved,
-					Comment:    firstNonEmpty(req.Comment, "Bulk approved FD closure"),
-				}); err != nil {
-					errors = append(errors, crID+": "+err.Error())
-					continue
-				}
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", crID, req.UserID, userEmail, "", approvalengine.ActionApproved, firstNonEmpty(req.Comment, "Bulk approved FD closure"))
+			if actionErr != nil {
+				errors = append(errors, crID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
 				engineActed++ // action recorded; count regardless of whether this is the final eye
-				var instStatus, instTransactionType string
-				_ = pool.QueryRow(ctx, `
-					SELECT i.status, i.transaction_type
-					FROM uam.approval_instance i
-					JOIN uam.approval_instance_eye ie ON ie.instance_id=i.instance_id
-					WHERE ie.instance_eye_id=$1`, instanceEyeID,
-				).Scan(&instStatus, &instTransactionType)
-				if instStatus == "APPROVED" && instTransactionType != "FD_CLOSURE_DELETE" && !isDeleteApproval {
+				var instTransactionType string
+				_ = pool.QueryRow(ctx, `SELECT transaction_type FROM uam.approval_instance WHERE instance_id=$1`, actionRes.InstanceID).Scan(&instTransactionType)
+				if actionRes.InstanceStatus == "APPROVED" && instTransactionType != "FD_CLOSURE_DELETE" && !isDeleteApproval {
 					if postErr := postClosureJournals(ctx, PostClosureJournalsParams{Pool: pool, ClosureRequestID: crID, FDID: fdID, ClosureType: closureType, EntityID: entityID, EntityName: entityName, PrincipalAmt: principalAmt, AccruedInterest: accruedInt, TDSAmt: tdsAmt, PenaltyAmt: penaltyAmt, NetPayout: netPayout, ApprovedBy: req.UserID, ApprovedByEmail: userEmail}); postErr != nil {
 						api.LogError("[FDClosure] postClosureJournals failed for %s: %v", crID, postErr)
 						errors = append(errors, crID+": journal posting failed: "+postErr.Error())
 					}
 				}
 			} else {
-				var anyInstance int
-				_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM uam.approval_instance WHERE record_id=$1 AND module_code='FIXED_DEPOSIT' AND status='PENDING'`, crID).Scan(&anyInstance)
-				if anyInstance > 0 {
-					errors = append(errors, crID+": not your turn in approval sequence")
+				if actionRes.CancelledStale {
+					api.LogInfo("[FDClosure] Cancelled stale approval instance for closure=%s: %s", crID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errors = append(errors, crID+": "+actionRes.Reason)
 					continue
 				}
 				if isDeleteApproval {
@@ -2029,25 +2026,17 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 						errors = append(errors, crID+": delete approval instance created but linking failed: "+updErr.Error())
 						continue
 					}
-					if retryErr := pool.QueryRow(ctx, `
-						SELECT ie.instance_eye_id
-						FROM uam.approval_instance i
-						JOIN uam.approval_instance_eye ie ON ie.instance_id=i.instance_id AND ie.status='ACTIVE'
-						JOIN uam.approval_matrix_eye_member m ON m.eye_id=ie.matrix_eye_id
-						  AND m.member_type='APPROVER' AND m.is_active=true AND m.is_deleted=false
-						  AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id=$2
-						WHERE i.record_id=$1 AND i.module_code='FIXED_DEPOSIT' AND i.status='PENDING'
-						ORDER BY ie.position ASC LIMIT 1`, crID, req.UserID,
-					).Scan(&instanceEyeID); retryErr != nil || instanceEyeID == "" {
-						errors = append(errors, crID+": delete approval instance recreated, but it is not your turn in approval sequence")
+					retryRes, retryErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", crID, req.UserID, userEmail, "", approvalengine.ActionApproved, firstNonEmpty(req.Comment, "Bulk approved FD closure delete"))
+					if retryErr != nil {
+						errors = append(errors, crID+": "+retryErr.Error())
 						continue
 					}
-					if err := approvalengine.RecordAction(ctx, pool, approvalengine.ActionRequest{
-						InstanceEyeID: instanceEyeID, ActorUserID: req.UserID, ActorEmail: userEmail,
-						ActionType: approvalengine.ActionApproved,
-						Comment:    firstNonEmpty(req.Comment, "Bulk approved FD closure delete"),
-					}); err != nil {
-						errors = append(errors, crID+": "+err.Error())
+					if !retryRes.Acted {
+						reason := retryRes.Reason
+						if reason == "" {
+							reason = "delete approval instance recreated, but it is not your turn in approval sequence"
+						}
+						errors = append(errors, crID+": "+reason)
 						continue
 					}
 					engineActed++
@@ -2136,33 +2125,24 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			var instanceEyeID string
-			engineErr := pool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id=i.instance_id AND ie.status='ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id=ie.matrix_eye_id
-				  AND m.member_type='APPROVER' AND m.is_active=true AND m.is_deleted=false
-				  AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id=$2
-				WHERE i.record_id=$1 AND i.module_code='FIXED_DEPOSIT' AND i.status='PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, crID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", crID, req.UserID, userEmail, "", approvalengine.ActionRejected, firstNonEmpty(req.Comment, "Bulk rejected FD closure"))
+			if actionErr != nil {
+				errors = append(errors, crID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
 				// Engine instance found — RecordAction will trigger finalizeRecord which:
 				//   1. Updates processing_status → REJECTED on the audit table
 				//   2. Fires postFinalizeHook which sets closure_status='REJECTED' + clears fd_master
-				if err := approvalengine.RecordAction(ctx, pool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID, ActorUserID: req.UserID, ActorEmail: userEmail,
-					ActionType: approvalengine.ActionRejected,
-					Comment:    firstNonEmpty(req.Comment, "Bulk rejected FD closure"),
-				}); err != nil {
-					errors = append(errors, crID+": "+err.Error())
-					continue
-				}
 				acted++
 				actedIDs = append(actedIDs, crID)
 			} else {
+				if actionRes.CancelledStale {
+					api.LogInfo("[FDClosure] Cancelled stale approval instance for closure=%s: %s", crID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errors = append(errors, crID+": "+actionRes.Reason)
+					continue
+				}
 				// No engine instance — handle rejection directly with audit row.
 				if isDeleteApproval {
 					errors = append(errors, crID+": delete approval is pending but it is not your turn in approval sequence")

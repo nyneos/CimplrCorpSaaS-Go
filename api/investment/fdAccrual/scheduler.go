@@ -503,21 +503,63 @@ func ApproveScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
-			return
+		directConfigIDs := make([]string, 0, len(configIDs))
+		approved := []string{}
+		deleted := []string{}
+		var errors []string
+		for _, configID := range configIDs {
+			comment := req.Comment
+			if strings.TrimSpace(comment) == "" {
+				comment = "Approved FD accrual schedule"
+			}
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", configID, req.UserID, userEmail, "", approvalengine.ActionApproved, comment)
+			if actionErr != nil {
+				errors = append(errors, configID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
+				if actionRes.InstanceStatus == approvalengine.InstStatusApproved {
+					isDeleted, applyErr := applyApprovedScheduleConfig(ctx, pgxPool, configID, userEmail)
+					if applyErr != nil {
+						errors = append(errors, configID+": apply failed: "+applyErr.Error())
+						continue
+					}
+					if isDeleted {
+						deleted = append(deleted, configID)
+					} else {
+						approved = append(approved, configID)
+					}
+				}
+				continue
+			}
+			if actionRes.CancelledStale {
+				api.LogInfo("[FDAccrual] Cancelled stale schedule approval instance for config=%s: %s", configID, actionRes.Reason)
+			} else if actionRes.Reason != "" {
+				errors = append(errors, configID+": "+actionRes.Reason)
+				continue
+			}
+			directConfigIDs = append(directConfigIDs, configID)
 		}
-		defer tx.Rollback(ctx) //nolint:errcheck
 
-		approved, deleted, err := finalizeScheduleConfigAudits(ctx, tx, configIDs, userEmail, req.Comment, true)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
-			return
+		if len(directConfigIDs) > 0 {
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+				return
+			}
+			defer tx.Rollback(ctx) //nolint:errcheck
+
+			directApproved, directDeleted, err := finalizeScheduleConfigAudits(ctx, tx, directConfigIDs, userEmail, req.Comment, true)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if err := tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				return
+			}
+			approved = append(approved, directApproved...)
+			deleted = append(deleted, directDeleted...)
 		}
 
 		for _, id := range approved {
@@ -529,6 +571,7 @@ func ApproveScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"deleted_config_ids":  deleted,
 			"approved_count":      len(approved),
 			"deleted_count":       len(deleted),
+			"errors":              errors,
 			"checker":             userEmail,
 		})
 		api.LogInfo("[FDAccrual] ApproveScheduleConfig: approved=%d deleted=%d by=%s", len(approved), len(deleted), userEmail)
@@ -567,29 +610,65 @@ func RejectScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
-			return
+		directConfigIDs := make([]string, 0, len(configIDs))
+		rejected := []string{}
+		var errors []string
+		for _, configID := range configIDs {
+			comment := req.Comment
+			if strings.TrimSpace(comment) == "" {
+				comment = "Rejected FD accrual schedule"
+			}
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", configID, req.UserID, userEmail, "", approvalengine.ActionRejected, comment)
+			if actionErr != nil {
+				errors = append(errors, configID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
+				if _, execErr := pgxPool.Exec(ctx, `
+					UPDATE investment.fd_accrual_schedule_config
+					SET is_active=false, updated_by=$1, updated_at=now()
+					WHERE config_id=$2`, userEmail, configID); execErr != nil {
+					errors = append(errors, configID+": status update failed: "+execErr.Error())
+					continue
+				}
+				rejected = append(rejected, configID)
+				continue
+			}
+			if actionRes.CancelledStale {
+				api.LogInfo("[FDAccrual] Cancelled stale schedule rejection instance for config=%s: %s", configID, actionRes.Reason)
+			} else if actionRes.Reason != "" {
+				errors = append(errors, configID+": "+actionRes.Reason)
+				continue
+			}
+			directConfigIDs = append(directConfigIDs, configID)
 		}
-		defer tx.Rollback(ctx) //nolint:errcheck
 
-		_, _, err = finalizeScheduleConfigAudits(ctx, tx, configIDs, userEmail, req.Comment, false)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
-			return
+		if len(directConfigIDs) > 0 {
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+				return
+			}
+			defer tx.Rollback(ctx) //nolint:errcheck
+
+			if _, _, err = finalizeScheduleConfigAudits(ctx, tx, directConfigIDs, userEmail, req.Comment, false); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if err := tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				return
+			}
+			rejected = append(rejected, directConfigIDs...)
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rejected_config_ids": configIDs,
-			"rejected_count":      len(configIDs),
+			"rejected_config_ids": rejected,
+			"rejected_count":      len(rejected),
+			"errors":              errors,
 			"checker":             userEmail,
 		})
-		api.LogInfo("[FDAccrual] RejectScheduleConfig: count=%d by=%s", len(configIDs), userEmail)
+		api.LogInfo("[FDAccrual] RejectScheduleConfig: count=%d errors=%d by=%s", len(rejected), len(errors), userEmail)
 	}
 }
 
@@ -693,6 +772,30 @@ func finalizeScheduleConfigAudits(
 		}
 	}
 	return approved, deleted, nil
+}
+
+func applyApprovedScheduleConfig(ctx context.Context, pool *pgxpool.Pool, configID, checkerEmail string) (bool, error) {
+	var actionType string
+	if err := pool.QueryRow(ctx, `
+		SELECT action_type
+		FROM investment.fd_accrual_schedule_config_audit
+		WHERE config_id=$1
+		ORDER BY requested_at DESC NULLS LAST, audit_id DESC
+		LIMIT 1`, configID).Scan(&actionType); err != nil {
+		return false, err
+	}
+	if actionType == "DELETE" {
+		_, err := pool.Exec(ctx, `
+			UPDATE investment.fd_accrual_schedule_config
+			SET is_active=false, is_deleted=true, updated_by=$1, updated_at=now()
+			WHERE config_id=$2`, checkerEmail, configID)
+		return true, err
+	}
+	_, err := pool.Exec(ctx, `
+		UPDATE investment.fd_accrual_schedule_config
+		SET is_active=true, updated_by=$1, updated_at=now()
+		WHERE config_id=$2`, checkerEmail, configID)
+	return false, err
 }
 
 // ─── 8. DeleteScheduleConfig ──────────────────────────────────────────────────

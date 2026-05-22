@@ -106,6 +106,7 @@ func (s *CronService) Start() error {
 	go fdAccrual.StartAccrualSchedulerWorker(s.db)
 	go investmentjobs.StartReceiptReconcileWorker(s.db)
 	go investmentjobs.StartAutoRenewalWorker(s.db)
+	go investmentjobs.StartCimplrAutoMaturityWorker(s.db)
 
 	logger.GlobalLogger.LogAudit("All background workers started")
 

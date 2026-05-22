@@ -73,6 +73,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
+		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
 		today := now.Format(constants.DateFormat)
 		threeDaysOut := now.AddDate(0, 0, 3).Format(constants.DateFormat)
 		ctx := r.Context()
@@ -110,14 +111,20 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(m.fd_status,'') AS fd_status,
 				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'') AS maturity_date,
 				  COALESCE(cf.interest_accrued,0) AS expected_interest,
-				  COALESCE(cr.closure_type,'') AS closure_instruction,
-				  COALESCE(cr.closure_status,'') AS closure_status
+				  COALESCE(NULLIF(cimplr_ci.closure_type, ''), NULLIF(cr.closure_type, ''), m.maturity_instructions, '') AS closure_instruction,
+				  COALESCE(NULLIF(cimplr_cc.closure_status, ''), NULLIF(cimplr_ci.closure_status, ''), NULLIF(cr.closure_status, ''), '') AS closure_status
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_cashflow_schedule cf
 				  ON cf.fd_id = m.fd_id AND cf.event_type = 'MATURITY' AND cf.is_deleted=false
-				LEFT JOIN investment.fd_closure_request cr
-				  ON cr.fd_id = m.fd_id AND cr.is_deleted=false
-				  AND cr.closure_type IN ('MATURITY','ROLLOVER','AUTO_RENEWAL')
+				`+sqlLatestCimplrInitiate+`
+				`+sqlLatestCimplrConfirm+`
+				LEFT JOIN LATERAL (
+				  SELECT cr.closure_type, cr.closure_status
+				  FROM investment.fd_closure_request cr
+				  WHERE cr.fd_id = m.fd_id AND COALESCE(cr.is_deleted, false) = false
+				  ORDER BY cr.created_at DESC
+				  LIMIT 1
+				) cr ON true
 				WHERE m.is_deleted=false
 				  AND m.maturity_date = $1::date
 				  AND ($2::text='' OR m.entity_id=$2)
@@ -431,6 +438,31 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND b.booking_status IN ('DRAFT','APPROVAL_PENDING','SENT_TO_BANK')
 				  AND ($1::text='' OR b.entity_id=$1)
+				UNION ALL
+				SELECT
+				  ci.closure_initiate_id AS ref_id,
+				  'CLOSURE' AS task_type,
+				  COALESCE(ci.entity_name, m.entity_name, '') AS entity,
+				  COALESCE(ci.bank_name, m.bank_name, '') AS bank,
+				  COALESCE(ci.principal_amount, m.principal_amount, 0)::float8 AS amount,
+				  COALESCE(la.processing_status, ci.closure_status, '') AS status,
+				  -- cimplr.fd_closure_initiate has no created_at column; age the
+				  -- task off the latest audit requested_at instead.
+				  COALESCE(EXTRACT(DAY FROM NOW() - la.requested_at)::int, 0) AS aging_days,
+				  COALESCE(la.requested_by, '') AS owner
+				FROM cimplr.fd_closure_initiate ci
+				JOIN investment.fd_master m ON m.fd_id = ci.fd_id AND m.is_deleted = false
+				LEFT JOIN LATERAL (
+				  SELECT processing_status, requested_by, requested_at
+				  FROM cimplr.fd_closure_initiate_audit a
+				  WHERE a.closure_initiate_id = ci.closure_initiate_id
+				  ORDER BY a.requested_at DESC
+				  LIMIT 1
+				) la ON true
+				WHERE COALESCE(ci.is_deleted, false) = false
+				  AND COALESCE(la.processing_status, ci.closure_status, '') NOT IN ('POSTED', 'REJECTED', 'DELETED')
+				  AND NOT (`+sqlCimplrClosureProcessed+`)
+				  AND ($1::text = '' OR COALESCE(ci.entity_id, m.entity_id) = $1)
 				UNION ALL
 				SELECT
 				  cr.closure_request_id AS ref_id,
@@ -830,11 +862,8 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			var pendingMaturities int64
 			pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_master m
 				WHERE m.is_deleted=false AND m.maturity_date=$1::date
-				AND NOT EXISTS (
-				    SELECT 1 FROM investment.fd_closure_request cr
-				    WHERE cr.fd_id=m.fd_id AND cr.is_deleted=false
-				    AND cr.closure_status IN ('COMPLETED','POSTED')
-				)
+				AND m.fd_status IN ('ACTIVE','MATURED')
+				AND NOT (`+sqlAnyClosureProcessed+`)
 				AND ($2::text='' OR m.entity_id=$2)`, today, entityFilter).Scan(&pendingMaturities)
 
 			accrualDone := latestRunStatus == "COMPLETED" || latestRunStatus == "POSTED"
@@ -1009,9 +1038,12 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"generated_at": now.Format(time.RFC3339),
 			"as_of_date":   today,
 			"filters": map[string]interface{}{
-				"entity_id": entityFilter,
-				"currency":  req.Currency,
-				"mode":      req.Mode,
+				"entity_id":  entityFilter,
+				"currency":   req.Currency,
+				"mode":       req.Mode,
+				"period":     periodBounds.Period,
+				"start_date": periodBounds.StartStr,
+				"end_date":   periodBounds.EndStr,
 			},
 			// ── BOD KPIs ──────────────────────────────────────────────────────
 			"bod_kpis": map[string]interface{}{

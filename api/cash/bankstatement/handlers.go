@@ -807,19 +807,38 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					}
 				}
 			}
+			// Check for a pending DELETE first — this must take priority over any RECAT
+			// entries that the smart-cat cron may have inserted after the delete request,
+			// which would otherwise mask the DELETE intent when querying the latest row.
+			var hasPendingDelete bool
+			_ = db.QueryRowContext(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM cimplrcorpsaas.auditactionbankstatement
+					WHERE bankstatementid = $1
+					  AND actiontype = 'DELETE'
+					  AND processing_status = 'PENDING_DELETE_APPROVAL'
+				)
+			`, bsid).Scan(&hasPendingDelete)
+
 			var actionType, processingStatus string
-			err := db.QueryRowContext(ctx, `
-				       SELECT actiontype, processing_status FROM cimplrcorpsaas.auditactionbankstatement
-				       WHERE bankstatementid = $1
-				       ORDER BY requested_at DESC, action_id DESC LIMIT 1
-			       `, bsid).Scan(&actionType, &processingStatus)
-			if err != nil {
-				results = append(results, map[string]interface{}{
-					"bank_statement_id": bsid,
-					"success":           false,
-					"error":             err.Error(),
-				})
-				continue
+			if hasPendingDelete {
+				actionType = "DELETE"
+				processingStatus = "PENDING_DELETE_APPROVAL"
+			} else {
+				err := db.QueryRowContext(ctx, `
+					SELECT actiontype, processing_status FROM cimplrcorpsaas.auditactionbankstatement
+					WHERE bankstatementid = $1
+					  AND actiontype IN ('CREATE', 'EDIT', 'RECAT')
+					ORDER BY requested_at DESC, action_id DESC LIMIT 1
+				`, bsid).Scan(&actionType, &processingStatus)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
 			}
 			if actionType == "DELETE" && processingStatus == "PENDING_DELETE_APPROVAL" {
 				tx, err := db.BeginTx(ctx, nil)
@@ -1404,7 +1423,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		multiFlag := r.FormValue("multi") == "true"
 		if multiFlag {
 			// explicit multi=true: only try multi approach, surface error if it fails
-			UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
+			UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(w, r)
 			return
 		}
 		// No explicit multi flag: run normal single-account V2 first.
@@ -1514,7 +1533,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		if !multiFlag {
 			if isLikelyMultiAccountStatement(uploadFileName, fileBytes) {
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] Auto-detected multi-account statement for %s; routing to multi handler", uploadFileName)
-				UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
+				UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(w, r)
 				return
 			}
 		}
@@ -1590,7 +1609,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			// V2 failed — try multi as a last-resort fallback (e.g. multi-account sheet)
 			logger.LogError("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
 			multiRec := httptest.NewRecorder()
-			UploadMultiAccountBankStatementHandler(db).ServeHTTP(multiRec, r)
+			UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(multiRec, r)
 			// Multi handler returns outer "success":true even when ALL individual accounts fail.
 			// We must check that at least one account in data{} actually succeeded.
 			var multiResp struct {

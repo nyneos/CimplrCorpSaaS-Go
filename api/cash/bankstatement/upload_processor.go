@@ -315,7 +315,7 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 	// legacy matchCategoryForTransaction engine.
 	if pgxPool != nil && len(newTxns) > 0 {
 		go func(bsID string) {
-			if err := cashjobs.ProcessUncategorizedTransactions(pgxPool, 500); err != nil {
+			if err := cashjobs.ProcessUncategorizedTransactions(pgxPool, 500, bsID); err != nil {
 				log.Printf("[SMART-CAT] post-upload categorization error (bs_id=%s): %v", bsID, err)
 			}
 		}(bankStatementID)

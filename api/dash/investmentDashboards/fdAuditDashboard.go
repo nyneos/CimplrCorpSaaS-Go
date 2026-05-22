@@ -65,25 +65,10 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		fdFilter := req.FDID
 		actionFilter := req.ActionType
 
-		// ── resolve period start/end for audit date range ─────────────────────
-		var startDate, endDate string
-		switch req.Period {
-		case "CUSTOM", "Custom":
-			startDate = req.StartDate
-			endDate = req.EndDate
-		case "Today":
-			startDate = now.Format(constants.DateFormat)
-			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
-		case "This Week":
-			startDate = periodStartDate("This Week", now).Format(constants.DateFormat)
-			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
-		case "This Month":
-			startDate = periodStartDate("This Month", now).Format(constants.DateFormat)
-			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
-		default: // blank / "Last 30 Days" / anything unrecognised → last 30 days
-			startDate = now.AddDate(0, 0, -30).Format(constants.DateFormat)
-			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
-		}
+		// ── resolve period start/end for audit date range (end is exclusive for SQL) ──
+		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
+		startDate := periodBounds.StartStr
+		endDate := auditPeriodExclusiveEnd(periodBounds)
 		if startDate == "" {
 			startDate = now.AddDate(0, 0, -30).Format(constants.DateFormat)
 		}
@@ -1759,8 +1744,9 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"generated_at": now.Format(time.RFC3339),
 			"filters": map[string]interface{}{
 				"entity_id":   entityFilter,
-				"start_date":  startDate,
-				"end_date":    endDate,
+				"period":      periodBounds.Period,
+				"start_date":  periodBounds.StartStr,
+				"end_date":    periodBounds.EndStr,
 				"action_type": actionFilter,
 				"fd_id":       fdFilter,
 			},

@@ -19,39 +19,39 @@ import (
 func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID              string  `json:"user_id"`
-			EntityID            string  `json:"entity_id"`
-			EntityName          string  `json:"entity_name"`
-			BankID              string  `json:"bank_id"`
-			BankName            string  `json:"bank_name"`
-			BankAccountID       string  `json:"bank_account_id"` // → source_account_id
-			SourceAccountNumber string  `json:"source_account_number"`
-			BankConfigID        string  `json:"bank_config_id"`
-			PrincipalAmount     float64 `json:"principal_amount"`
-			InterestRate        float64 `json:"interest_rate"`
-			TenorDays           int     `json:"tenor_days"`   // → tenure_days
-			TenorMonths         int     `json:"tenor_months"` // → tenure_months
-			TenorType           string  `json:"tenor_type"`
-			TenureYears         int     `json:"tenure_years"`
-			ExpectedStartDate   string  `json:"expected_start_date"` // NOT NULL
-			ValueDate           string  `json:"value_date"`          // NOT NULL
-			MaturityDate        string  `json:"maturity_date"`       // → expected_maturity_date NOT NULL
-			InterestType        string  `json:"interest_type"`       // → interest_type_code NOT NULL
-			InterestTypeID      string  `json:"interest_type_id"`
-			FrequencyID         string  `json:"frequency_id"`              // → frequency_id
-			InterestPayoutFreq  string  `json:"interest_payout_frequency"` // alias for frequency_id
-			DayCountCode        string  `json:"day_count_code"`            // → day_count_code
-			DayCountConvention  string  `json:"day_count_convention"`      // alias for day_count_code
-			TdsPlanID           string  `json:"tds_plan_id"`
-			ProductCode         string  `json:"product_code"`
-			AutoRenewal         bool    `json:"auto_renewal"`
-			RenewalInstructions string  `json:"renewal_instructions"` // kept for compat, maps to auto_renewal
-			Notes               string  `json:"notes"`                // → booking_remarks
-			BookingRemarks      string  `json:"booking_remarks"`
-			OfferValidTill          string `json:"offer_valid_till"` // YYYY-MM-DD; bank offer validity date
-			AccrualFrequencyCode    string `json:"accrual_frequency_code"`
-			ResetType               string `json:"reset_type"` // AT_MATURITY | AT_EACH_PAYOUT
-			PayoutFrequencyID       string `json:"payout_frequency_id"`
+			UserID               string  `json:"user_id"`
+			EntityID             string  `json:"entity_id"`
+			EntityName           string  `json:"entity_name"`
+			BankID               string  `json:"bank_id"`
+			BankName             string  `json:"bank_name"`
+			BankAccountID        string  `json:"bank_account_id"` // → source_account_id
+			SourceAccountNumber  string  `json:"source_account_number"`
+			BankConfigID         string  `json:"bank_config_id"`
+			PrincipalAmount      float64 `json:"principal_amount"`
+			InterestRate         float64 `json:"interest_rate"`
+			TenorDays            int     `json:"tenor_days"`   // → tenure_days
+			TenorMonths          int     `json:"tenor_months"` // → tenure_months
+			TenorType            string  `json:"tenor_type"`
+			TenureYears          int     `json:"tenure_years"`
+			ExpectedStartDate    string  `json:"expected_start_date"` // NOT NULL
+			ValueDate            string  `json:"value_date"`          // NOT NULL
+			MaturityDate         string  `json:"maturity_date"`       // → expected_maturity_date NOT NULL
+			InterestType         string  `json:"interest_type"`       // → interest_type_code NOT NULL
+			InterestTypeID       string  `json:"interest_type_id"`
+			FrequencyID          string  `json:"frequency_id"`              // → frequency_id
+			InterestPayoutFreq   string  `json:"interest_payout_frequency"` // alias for frequency_id
+			DayCountCode         string  `json:"day_count_code"`            // → day_count_code
+			DayCountConvention   string  `json:"day_count_convention"`      // alias for day_count_code
+			TdsPlanID            string  `json:"tds_plan_id"`
+			ProductCode          string  `json:"product_code"`
+			AutoRenewal          bool    `json:"auto_renewal"`
+			RenewalInstructions  string  `json:"renewal_instructions"` // kept for compat, maps to auto_renewal
+			Notes                string  `json:"notes"`                // → booking_remarks
+			BookingRemarks       string  `json:"booking_remarks"`
+			OfferValidTill       string  `json:"offer_valid_till"` // YYYY-MM-DD; bank offer validity date
+			AccrualFrequencyCode string  `json:"accrual_frequency_code"`
+			ResetType            string  `json:"reset_type"` // AT_MATURITY | AT_EACH_PAYOUT
+			PayoutFrequencyID    string  `json:"payout_frequency_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -166,8 +166,8 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"product_code":           nullIfEmpty(req.ProductCode),
 			"auto_renewal":           autoRenewal,
 			"booking_remarks":        nullIfEmpty(bookingRemarks),
-			"offer_valid_till":         nullIfEmpty(req.OfferValidTill),
-			"accrual_frequency_code":   nullIfEmpty(strings.ToUpper(strings.TrimSpace(req.AccrualFrequencyCode))),
+			"offer_valid_till":       nullIfEmpty(req.OfferValidTill),
+			"accrual_frequency_code": nullIfEmpty(strings.ToUpper(strings.TrimSpace(req.AccrualFrequencyCode))),
 			"reset_type":             resetType,
 			"payout_frequency_id":    nullIfEmpty(req.PayoutFrequencyID),
 			"booking_status":         "DRAFT",
@@ -688,6 +688,8 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"notes":           "booking_remarks", // alias → DB column
 			"booking_remarks": "booking_remarks",
 			"bank_config_id":  "bank_config_id",
+			// offer_valid_till is a date column on fd_booking_request
+			"offer_valid_till": "offer_valid_till",
 		}
 
 		setClauses := make([]string, 0)
@@ -703,7 +705,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue // already added this DB column via another alias
 			}
 			usedColumns[colName] = true
-			if k == "value_date" || k == "expected_maturity_date" {
+			if k == "value_date" || k == "expected_maturity_date" || k == "offer_valid_till" {
 				v = coerceDateValue(v)
 			}
 			setClauses = append(setClauses, fmt.Sprintf("%s = $%d", colName, argIdx))
@@ -866,6 +868,16 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_booking_request
 			WHERE booking_id = ANY($1::text[])
 			  AND booking_status IN ('DRAFT','REJECTED','APPROVAL_PENDING')
+			  AND NOT EXISTS (
+				  SELECT 1 FROM investment.fd_confirmation c
+				  WHERE c.booking_id = fd_booking_request.booking_id
+				    AND COALESCE(c.is_deleted,false) = false
+			  )
+			  AND NOT EXISTS (
+				  SELECT 1 FROM investment.fd_master fm
+				  WHERE fm.booking_id = fd_booking_request.booking_id
+				    AND COALESCE(fm.is_deleted,false) = false
+			  )
 			  AND COALESCE(is_deleted,false) = false`,
 			req.BookingIDs,
 		)
@@ -897,7 +909,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows.Close()
 
 		if len(validBookings) == 0 {
-			api.RespondWithPayload(w, false, "No eligible bookings found (must be DRAFT, REJECTED or APPROVAL_PENDING — APPROVED bookings cannot be deleted)", nil)
+			api.RespondWithPayload(w, false, "No eligible bookings found (must be DRAFT/REJECTED/APPROVAL_PENDING and must not have active confirmation or FD activation)", nil)
 			return
 		}
 
@@ -993,7 +1005,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, "booking_id": id,
-					constants.ValueError: "Not found or not in DRAFT/REJECTED/APPROVAL_PENDING status (APPROVED cannot be deleted)",
+					constants.ValueError: "Not found, wrong status, or already has active confirmation/FD activation",
 				})
 			}
 		}
@@ -1246,41 +1258,17 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errors []string
 
 		for _, bID := range req.BookingIDs {
-			// Try engine path first: find the active eye this user can act on.
-			var instanceEyeID string
-			engineErr := pgxPool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, bID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", bID, req.UserID, userEmail, "", approvalengine.ActionApproved, req.Comment)
+			if actionErr != nil {
+				api.LogError("[FDBooking] RecordAction approve failed for booking %s: %v", bID, actionErr)
+				errors = append(errors, bID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
 				// Engine path: RecordAction handles audit stamp + status flip for final eye.
-				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID,
-					ActorUserID:   req.UserID,
-					ActorEmail:    userEmail,
-					ActionType:    approvalengine.ActionApproved,
-					Comment:       req.Comment,
-				}); err != nil {
-					api.LogError("[FDBooking] RecordAction approve failed for booking %s: %v", bID, err)
-					errors = append(errors, bID+": "+err.Error())
-					continue
-				}
 				engineActed++
 				// If the engine fully approved (last eye done), flip booking status.
-				// Check if instance is now APPROVED.
-				var instStatus string
-				_ = pgxPool.QueryRow(ctx, `
-					SELECT i.status FROM uam.approval_instance i
-					JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
-					WHERE ie.instance_eye_id = $1`, instanceEyeID).Scan(&instStatus)
-				if instStatus == "APPROVED" {
+				if actionRes.InstanceStatus == "APPROVED" {
 					if _, execErr := pgxPool.Exec(ctx,
 						`UPDATE investment.fd_booking_request
 						 SET booking_status = 'SENT_TO_BANK'
@@ -1300,15 +1288,10 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				}
 			} else {
-				// No active eye for this user — check if any engine instance exists at all.
-				var anyInstance int
-				_ = pgxPool.QueryRow(ctx, `
-					SELECT COUNT(*) FROM uam.approval_instance
-					WHERE record_id = $1 AND module_code = 'FIXED_DEPOSIT' AND status = 'PENDING'`, bID,
-				).Scan(&anyInstance)
-				if anyInstance > 0 {
-					// Instance exists but this user is not the current eye — don't allow out-of-sequence approve.
-					errors = append(errors, bID+": not your turn in approval sequence")
+				if actionRes.CancelledStale {
+					api.LogInfo("[FDBooking] Cancelled stale approval instance for booking=%s: %s", bID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errors = append(errors, bID+": "+actionRes.Reason)
 					continue
 				}
 				// No matrix/instance — direct stamp (legacy / no-matrix path).
@@ -1405,30 +1388,13 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errors []string
 
 		for _, bID := range req.BookingIDs {
-			var instanceEyeID string
-			engineErr := pgxPool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, bID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
-				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID,
-					ActorUserID:   req.UserID,
-					ActorEmail:    userEmail,
-					ActionType:    approvalengine.ActionRejected,
-					Comment:       req.Comment,
-				}); err != nil {
-					api.LogError("[FDBooking] RecordAction reject failed for booking %s: %v", bID, err)
-					errors = append(errors, bID+": "+err.Error())
-					continue
-				}
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", bID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			if actionErr != nil {
+				api.LogError("[FDBooking] RecordAction reject failed for booking %s: %v", bID, actionErr)
+				errors = append(errors, bID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
 				// finalizeRecord already set processing_status=REJECTED; flip booking status.
 				if _, execErr := pgxPool.Exec(ctx,
 					`UPDATE investment.fd_booking_request SET booking_status='REJECTED'
@@ -1438,11 +1404,10 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				engineActed++
 			} else {
-				var anyInstance int
-				_ = pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM uam.approval_instance
-					WHERE record_id=$1 AND module_code='FIXED_DEPOSIT' AND status='PENDING'`, bID).Scan(&anyInstance)
-				if anyInstance > 0 {
-					errors = append(errors, bID+": not your turn in approval sequence")
+				if actionRes.CancelledStale {
+					api.LogInfo("[FDBooking] Cancelled stale approval instance for booking=%s: %s", bID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errors = append(errors, bID+": "+actionRes.Reason)
 					continue
 				}
 				tx, err := pgxPool.Begin(ctx)
@@ -2072,6 +2037,8 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				-- confirmation data (NULL until CONFIRMED)
 				COALESCE(c.confirmation_id,'')                                 AS confirmation_id,
 				COALESCE(c.bank_fd_ref_no,'')                                  AS bank_fd_ref_no,
+				COALESCE(NULLIF(BTRIM(c.bank_reference_number::text),''),
+				         c.bank_fd_ref_no, '')                                 AS bank_reference_number,
 				COALESCE(c.actual_principal,0)                                 AS actual_principal,
 				COALESCE(c.confirmed_rate,0)                                   AS confirmed_rate,
 				COALESCE(c.confirmed_interest_type_code,'')                    AS confirmed_interest_type,
@@ -2119,7 +2086,9 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')          AS first_payout_date,
 				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'') AS first_capitalization_date,
 				COALESCE(c.accrual_frequency_code,'')                          AS confirmed_accrual_frequency_code,
-				COALESCE(c.reset_type,'')                                      AS confirmed_reset_type
+				COALESCE(c.confirmed_frequency_id, '')  AS confirmed_payout_frequency_id,
+				COALESCE(NULLIF(c.reset_type,''),'AT_MATURITY')                AS confirmed_reset_type,
+				COALESCE(c.confirmed_frequency_id,'')                          AS confirmed_frequency_id
 			FROM investment.fd_booking_request m
 			LEFT JOIN investment.fd_confirmation c
 				ON c.booking_id = m.booking_id AND COALESCE(c.is_deleted,false) = false

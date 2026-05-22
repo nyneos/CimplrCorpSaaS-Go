@@ -34,12 +34,19 @@ type InsertFDAuditParams struct {
 	Reason           string
 }
 
+// cashflowAuditStatusPending must match investment.fd_audit_cashflow_schedule
+// check constraint fd_audit_cashflow_status_chk (not fd_master PENDING_ACTIVATION).
+const cashflowAuditStatusPending = "PENDING_APPROVAL"
+
 type activateFDRequest struct {
 	UserID         string `json:"user_id"`
 	ConfirmationID string `json:"confirmation_id"`
-	FDNumber       string `json:"fd_number"`
-	ReceiptDate    string `json:"receipt_date"`
-	Notes          string `json:"notes"`
+	// Deprecated: legacy clients sent bank ref here; use confirmation bank_fd_ref_no instead.
+	FDNumber string `json:"fd_number"`
+	ReceiptDate string `json:"receipt_date"`
+	// Ops activation comment (preferred over fd_number in UI).
+	Reason string `json:"reason"`
+	Notes       string `json:"notes"`
 }
 
 type bulkFDActionRequest struct {
@@ -227,11 +234,20 @@ func getFDMasterError(err error, contextMessage string) (string, int) {
 	if strings.Contains(errStr, "fd_master_status_chk") {
 		return "Invalid FD master status.", http.StatusOK
 	}
+	if strings.Contains(errStr, "fd_audit_cashflow_status_chk") {
+		return "Invalid cashflow audit status. Contact support if activation was just deployed.", http.StatusInternalServerError
+	}
 	if strings.Contains(errStr, "fd_master_fdno_not_empty") {
 		return "FD number / certificate number is required.", http.StatusOK
 	}
 	if strings.Contains(errStr, "duplicate key") || strings.Contains(errStr, "unique constraint") {
 		return "Duplicate entry detected. Please check for existing records.", http.StatusConflict
+	}
+	if strings.Contains(errStr, "25p02") || strings.Contains(errStr, "current transaction is aborted") {
+		return contextMessage + ": a previous database step in this activation failed. Please retry; if it persists, check server logs for the first SQL error.", http.StatusInternalServerError
+	}
+	if strings.Contains(errStr, "no unique or exclusion constraint") && strings.Contains(errStr, "on conflict") {
+		return "Cashflow audit setup failed (database constraint configuration). Please contact support.", http.StatusInternalServerError
 	}
 	if strings.Contains(errStr, "invalid") || strings.Contains(errStr, "required") {
 		return err.Error(), http.StatusBadRequest
@@ -491,10 +507,45 @@ func updateFDMasterStatusBy(ctx context.Context, exec queryExecutor, fdIDs []str
 	return err
 }
 
-// insertCashflowAuditRowsApproved writes one APPROVED audit entry per cashflow row
+func cashflowAuditScheduleTableExists(ctx context.Context, exec queryExecutor) bool {
+	var exists bool
+	_ = exec.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = 'investment' AND table_name = 'fd_audit_cashflow_schedule'
+		)`).Scan(&exists)
+	return exists
+}
+
+func updateFDMasterCashflowGenerated(ctx context.Context, exec queryExecutor, fdID string) error {
+	masterCols, err := loadTableColumns(ctx, exec, "investment", "fd_master")
+	if err != nil {
+		return err
+	}
+	if !masterCols["cashflow_generated"] {
+		return nil
+	}
+	setParts := []string{"cashflow_generated = true"}
+	if masterCols["cashflow_generated_at"] {
+		setParts = append(setParts, "cashflow_generated_at = now()")
+	}
+	keyCol := pickFirstExistingColumn(masterCols, "fd_id", "master_id")
+	if keyCol == "" {
+		return fmt.Errorf("fd_master key column not found")
+	}
+	q := fmt.Sprintf("UPDATE investment.fd_master SET %s WHERE %s = $1", strings.Join(setParts, ", "), keyCol)
+	_, err = exec.Exec(ctx, q, fdID)
+	return err
+}
+
+// insertCashflowAuditRowsPending writes one pending-approval audit entry per cashflow row
 // into fd_audit_cashflow_schedule. Called at FD activation to seed the audit trail.
-// The cashflow_id is read back from the just-inserted rows using the cashflow table.
-func insertCashflowAuditRowsApproved(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow, createdBy string) error {
+// Status is promoted to APPROVED later via markCashflowAuditApproved when the checker
+// approves the FD activation request (see BulkApproveActivation).
+func insertCashflowAuditRowsPending(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow, createdBy string) error {
+	if !cashflowAuditScheduleTableExists(ctx, exec) {
+		return nil
+	}
 	table := resolveFirstExistingTable(ctx, exec, []string{
 		constants.QuerryCashflowSchedule,
 		constants.QuerryCashflow,
@@ -547,27 +598,111 @@ func insertCashflowAuditRowsApproved(ctx context.Context, exec queryExecutor, fd
 
 	reason := "System generated at FD activation"
 	for _, cf := range cfList {
+		var already bool
+		if err := exec.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM investment.fd_audit_cashflow_schedule
+				WHERE cashflow_id = $1::text
+				  AND fd_id = $2::text
+				  AND action_type = 'CREATE'
+				  AND processing_status = $3::text
+			)`,
+			cf.id, fdID, cashflowAuditStatusPending,
+		).Scan(&already); err != nil {
+			return fmt.Errorf("cashflow audit lookup for %s: %w", cf.id, err)
+		}
+		if already {
+			continue
+		}
 		_, insErr := exec.Exec(ctx, `
 			INSERT INTO investment.fd_audit_cashflow_schedule (
 				cashflow_id, fd_id,
 				action_type, processing_status,
 				reason,
-				requested_by, requested_at,
-				checker_by, checker_at, checker_comment
+				requested_by, requested_at
 			) VALUES (
-				$1, $2,
-				'CREATE', 'APPROVED',
-				$3,
-				$4, now(),
-				$4, now(), 'Auto-approved at FD activation'
-			) ON CONFLICT DO NOTHING`,
-			cf.id, fdID, reason, createdBy,
+				$1::text, $2::text,
+				'CREATE', $5::text,
+				$3::text,
+				$4::text, now()
+			)`,
+			cf.id, fdID, reason, createdBy, cashflowAuditStatusPending,
 		)
 		if insErr != nil {
-			return insErr
+			return fmt.Errorf("cashflow audit insert for %s: %w", cf.id, insErr)
 		}
 	}
 	return nil
+}
+
+// markCashflowAuditApproved promotes activation-seeded cashflow audit rows for an FD
+// to APPROVED, recording the checker email. Called from BulkApproveActivation inside the
+// same transaction as fd_status → ACTIVE so the promotion is atomic.
+func markCashflowAuditApproved(ctx context.Context, exec queryExecutor, fdID, checkerEmail string) {
+	_, _ = exec.Exec(ctx, `
+		UPDATE investment.fd_audit_cashflow_schedule
+		SET processing_status = 'APPROVED',
+		    checker_by = $2,
+		    checker_at = now(),
+		    checker_comment = 'Auto-approved on FD activation approval'
+		WHERE fd_id = $1
+		  AND action_type = 'CREATE'
+		  AND processing_status = $3`,
+		fdID, checkerEmail, cashflowAuditStatusPending,
+	)
+}
+
+// softDeleteFDCashflowForRejection performs the three-step cashflow cleanup when an FD
+// activation is rejected, inside the caller's transaction:
+//  1. Soft-delete cashflow rows (is_deleted=true, is_active=false) so the accrual engine
+//     cannot pick them up.
+//  2. Mark cashflow audit rows REJECTED so they no longer appear as PENDING_ACTIVATION.
+//  3. Clear cashflow_generated=false on fd_master so the generation flag stays consistent.
+func softDeleteFDCashflowForRejection(ctx context.Context, exec queryExecutor, fdID, userEmail, comment string) {
+	cfTable := resolveFirstExistingTable(ctx, exec, []string{
+		constants.QuerryCashflowSchedule,
+		constants.QuerryCashflow,
+		constants.QuerryMasterCashflowSchedule,
+	})
+	if cfTable != "" {
+		schemaName, tableName := splitQualifiedTable(cfTable)
+		cfCols, err := loadTableColumns(ctx, exec, schemaName, tableName)
+		if err == nil {
+			fdCol := pickFirstExistingColumn(cfCols, "fd_id", "master_id")
+			if fdCol != "" {
+				setParts := []string{"is_deleted = true"}
+				if cfCols["is_active"] {
+					setParts = append(setParts, "is_active = false")
+				}
+				if cfCols["updated_at"] {
+					setParts = append(setParts, "updated_at = now()")
+				}
+				args := []interface{}{fdID}
+				if cfCols["updated_by"] {
+					args = append(args, userEmail)
+					setParts = append(setParts, fmt.Sprintf("updated_by = $%d", len(args)))
+				}
+				q := fmt.Sprintf("UPDATE %s SET %s WHERE %s = $1", cfTable, strings.Join(setParts, ", "), fdCol)
+				_, _ = exec.Exec(ctx, q, args...)
+			}
+		}
+	}
+	// Mark activation-seeded cashflow audit rows as REJECTED.
+	_, _ = exec.Exec(ctx, `
+		UPDATE investment.fd_audit_cashflow_schedule
+		SET processing_status = 'REJECTED', checker_by = $2, checker_at = now(), checker_comment = $3
+		WHERE fd_id = $1
+		  AND action_type = 'CREATE'
+		  AND processing_status = $4`,
+		fdID, userEmail, comment, cashflowAuditStatusPending,
+	)
+	// Clear cashflow_generated flag on fd_master.
+	_, _ = exec.Exec(ctx, `
+		UPDATE investment.fd_master
+		SET cashflow_generated = false, cashflow_generated_at = NULL
+		WHERE fd_id = $1`,
+		fdID,
+	)
 }
 
 func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -628,7 +763,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Guard 2: Bank-reference uniqueness — check (entity_id, bank_fd_ref_no) before INSERT.
 		// The unique constraint uniq_fd_bank_ref_entity fires when two confirmations share
 		// the same bank reference number for the same entity. Catch it here with a clear message.
-		bankRef := firstNonEmpty(req.FDNumber, rec.BankFDReference)
+		bankRef := firstNonEmpty(rec.BankFDReference, req.FDNumber)
 		if bankRef != "" && rec.EntityID != "" {
 			var refExists bool
 			if refErr := tx.QueryRow(ctx,
@@ -646,7 +781,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		fdID, _, err := insertFDMaster(ctx, tx, rec, req.FDNumber, receiptDate, req.Notes, userEmail)
+		fdID, _, err := insertFDMaster(ctx, tx, rec, bankRef, receiptDate, req.Notes, userEmail)
 		if err != nil {
 			msg, status := getFDMasterError(err, "FD activation failed")
 			api.RespondWithError(w, status, msg)
@@ -660,37 +795,36 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserEmail:        userEmail,
 			ActionType:       "CREATE",
 			ProcessingStatus: "PENDING_APPROVAL",
-			Reason:           "",
+			Reason:           firstNonEmpty(req.Reason, req.Notes),
 		}); err != nil {
 			msg, status := getFDMasterError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
 
-		cashflows, _, err := GenerateCashflowForFD(ctx, tx, "", req.ConfirmationID)
+		// Use the already-loaded rec to avoid a redundant DB round-trip inside the transaction.
+		cashflows, _, err := GenerateCashflowFromRecord(ctx, tx, rec)
 		if err != nil {
 			msg, status := getFDMasterError(err, "Cashflow generation failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
-		if err := SaveCashflowScheduleWithCreator(ctx, tx, fdID, cashflows, userEmail); err != nil {
+		if err := SaveCashflowScheduleWithRecord(ctx, tx, fdID, cashflows, userEmail, rec); err != nil {
 			msg, status := getFDMasterError(err, "Cashflow save failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
 
-		// Write one APPROVED audit row per cashflow row to establish the initial
-		// audit trail. These represent the system-generated state at activation.
-		if auditErr := insertCashflowAuditRowsApproved(ctx, tx, fdID, cashflows, userEmail); auditErr != nil {
-			// Non-fatal: log but don't block activation
-			api.LogError("[FDMaster] cashflow audit insert failed fd=%s: %v", fdID, auditErr)
+		// Write one pending-approval audit row per cashflow row to seed the audit trail.
+		// These will be promoted to APPROVED by BulkApproveActivation when the checker approves.
+		if auditErr := insertCashflowAuditRowsPending(ctx, tx, fdID, cashflows, userEmail); auditErr != nil {
+			msg, status := getFDMasterError(auditErr, "Cashflow audit setup failed")
+			api.RespondWithError(w, status, msg)
+			return
 		}
 
 		// Mark cashflow_generated=true so the accrual engine picks this FD up in scope.
-		if _, err := tx.Exec(ctx,
-			`UPDATE investment.fd_master SET cashflow_generated=true, cashflow_generated_at=now() WHERE fd_id=$1`,
-			fdID,
-		); err != nil {
+		if err := updateFDMasterCashflowGenerated(ctx, tx, fdID); err != nil {
 			msg, status := getFDMasterError(err, "Cashflow flag update failed")
 			api.RespondWithError(w, status, msg)
 			return
@@ -774,6 +908,12 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	// Cashflow audit lifecycle on approval:
+	//   PENDING_APPROVAL on cashflow audit (written at FD activation by insertCashflowAuditRowsPending)
+	//   → APPROVED (written here by markCashflowAuditApproved)
+	// Both the engine-driven path (approval-matrix) and the direct-stamp path (no matrix)
+	// call markCashflowAuditApproved inside their respective transactions so the promotion
+	// is atomic with the fd_status → ACTIVE update.
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req bulkFDActionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -814,37 +954,15 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// Try engine path first.
-			var instanceEyeID string
-			engineErr := pgxPool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, fdID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
-				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID,
-					ActorUserID:   req.UserID,
-					ActorEmail:    userEmail,
-					ActionType:    approvalengine.ActionApproved,
-					Comment:       firstNonEmpty(req.Comment, "Bulk approved FD activation"),
-				}); err != nil {
-					api.LogError("[FDMaster] RecordAction approve failed for fd %s: %v", fdID, err)
-					errors = append(errors, fdID+": "+err.Error())
-					continue
-				}
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", fdID, req.UserID, userEmail, "", approvalengine.ActionApproved, firstNonEmpty(req.Comment, "Bulk approved FD activation"))
+			if actionErr != nil {
+				api.LogError("[FDMaster] RecordAction approve failed for fd %s: %v", fdID, actionErr)
+				errors = append(errors, fdID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
 				// Check if fully approved (last eye) — if so, set ACTIVE and create journals.
-				var instStatus string
-				_ = pgxPool.QueryRow(ctx, `SELECT i.status FROM uam.approval_instance i
-					JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
-					WHERE ie.instance_eye_id = $1`, instanceEyeID).Scan(&instStatus)
-				if instStatus == "APPROVED" {
+				if actionRes.InstanceStatus == "APPROVED" {
 					tx, txErr := pgxPool.Begin(ctx)
 					if txErr != nil {
 						errors = append(errors, fdID+": post-approval tx begin failed")
@@ -854,6 +972,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					auditTable := resolveFDAuditTable(ctx, tx)
 					_ = updateFDMasterStatusBy(ctx, tx, []string{fdID}, "ACTIVE", userEmail)
 					_ = updateFDAuditStatus(ctx, tx, auditTable, []string{fdID}, userEmail, "APPROVED", req.Comment)
+					markCashflowAuditApproved(ctx, tx, fdID, userEmail) // promote cashflow audit CREATE rows → APPROVED
 					rec, err := loadFDRecordByFDID(ctx, tx, fdID)
 					if err == nil {
 						activityID, err := CreateFDAccountingActivity(ctx, tx, fdID, rec.ValueDate, userEmail)
@@ -870,11 +989,10 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				engineActed++
 			} else {
-				var anyInstance int
-				_ = pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM uam.approval_instance
-					WHERE record_id=$1 AND module_code='FIXED_DEPOSIT' AND status='PENDING'`, fdID).Scan(&anyInstance)
-				if anyInstance > 0 {
-					errors = append(errors, fdID+": not your turn in approval sequence")
+				if actionRes.CancelledStale {
+					api.LogInfo("[FDMaster] Cancelled stale activation approval instance for fd=%s: %s", fdID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errors = append(errors, fdID+": "+actionRes.Reason)
 					continue
 				}
 				// No matrix — direct stamp + ACTIVE + journals.
@@ -913,6 +1031,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, fdID+": journal save failed")
 					continue
 				}
+				markCashflowAuditApproved(ctx, tx, fdID, userEmail) // promote PENDING_ACTIVATION → APPROVED
 				if cerr := tx.Commit(ctx); cerr != nil {
 					errors = append(errors, fdID+constants.ErrCommitFailed)
 					continue
@@ -925,6 +1044,9 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		msg := ""
 		if !success {
 			msg = "No FDs were activated"
+			if len(errors) > 0 {
+				msg += ": " + strings.Join(errors, "; ")
+			}
 		}
 		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"engine_acted": engineActed, "direct_acted": directActed,
@@ -950,6 +1072,12 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	// On rejection, three cleanup steps run inside the same transaction as fd_status → REJECTED:
+	//  1. Soft-delete all cashflow rows (is_deleted=true, is_active=false) so the accrual engine
+	//     cannot pick up cashflow for a rejected FD.
+	//  2. Mark activation cashflow audit rows REJECTED.
+	//  3. Clear cashflow_generated=false on fd_master so the generation flag stays consistent.
+	// Implemented via softDeleteFDCashflowForRejection, called in both engine and direct paths.
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req bulkFDActionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -989,44 +1117,36 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			var instanceEyeID string
-			engineErr := pgxPool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, fdID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
-				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID,
-					ActorUserID:   req.UserID,
-					ActorEmail:    userEmail,
-					ActionType:    approvalengine.ActionRejected,
-					Comment:       req.Comment,
-				}); err != nil {
-					api.LogError("[FDMaster] RecordAction reject failed for fd %s: %v", fdID, err)
-					errors = append(errors, fdID+": "+err.Error())
-					continue
-				}
-				// finalizeRecord stamped audit; flip fd_master status.
-				if _, execErr := pgxPool.Exec(ctx,
-					`UPDATE investment.fd_master SET fd_status='REJECTED'
-					 WHERE fd_id=$1 AND fd_status NOT IN ('ACTIVE','REJECTED')`, fdID,
-				); execErr != nil {
-					api.LogError("[FDMaster] fd_status→REJECTED failed for %s: %v", fdID, execErr)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", fdID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			if actionErr != nil {
+				api.LogError("[FDMaster] RecordAction reject failed for fd %s: %v", fdID, actionErr)
+				errors = append(errors, fdID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
+				// Wrap in a transaction so the three-step cleanup is atomic with the status update.
+				rejectTx, rejectTxErr := pgxPool.Begin(ctx)
+				if rejectTxErr != nil {
+					api.LogError("[FDMaster] fd_status→REJECTED tx begin failed for %s: %v", fdID, rejectTxErr)
+				} else {
+					softDeleteFDCashflowForRejection(ctx, rejectTx, fdID, userEmail, req.Comment)
+					if _, execErr := rejectTx.Exec(ctx,
+						`UPDATE investment.fd_master SET fd_status='REJECTED'
+						 WHERE fd_id=$1 AND fd_status NOT IN ('ACTIVE','REJECTED')`, fdID,
+					); execErr != nil {
+						api.LogError("[FDMaster] fd_status→REJECTED failed for %s: %v", fdID, execErr)
+					}
+					if cerr := rejectTx.Commit(ctx); cerr != nil {
+						_ = rejectTx.Rollback(ctx)
+						api.LogError("[FDMaster] fd_status→REJECTED commit failed for %s: %v", fdID, cerr)
+					}
 				}
 				engineActed++
 			} else {
-				var anyInstance int
-				_ = pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM uam.approval_instance
-					WHERE record_id=$1 AND module_code='FIXED_DEPOSIT' AND status='PENDING'`, fdID).Scan(&anyInstance)
-				if anyInstance > 0 {
-					errors = append(errors, fdID+": not your turn in approval sequence")
+				if actionRes.CancelledStale {
+					api.LogInfo("[FDMaster] Cancelled stale activation rejection instance for fd=%s: %s", fdID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errors = append(errors, fdID+": "+actionRes.Reason)
 					continue
 				}
 				tx, err := pgxPool.Begin(ctx)
@@ -1045,6 +1165,7 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, fdID+": status update failed")
 					continue
 				}
+				softDeleteFDCashflowForRejection(ctx, tx, fdID, userEmail, req.Comment)
 				if cerr := tx.Commit(ctx); cerr != nil {
 					errors = append(errors, fdID+constants.ErrCommitFailed)
 					continue
@@ -1056,7 +1177,10 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		success := totalActed > 0 || len(errors) == 0
 		msg := ""
 		if !success {
-			msg = "No FDs were activated"
+			msg = "No FDs were rejected"
+			if len(errors) > 0 {
+				msg += ": " + strings.Join(errors, "; ")
+			}
 		}
 		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"engine_acted": engineActed, "direct_acted": directActed,
@@ -1912,41 +2036,25 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				skipped++
 				continue
 			}
-			// Try engine path
-			var instanceEyeID string
-			engineErr := pgxPool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, auditID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
-				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID,
-					ActorUserID:   req.UserID,
-					ActorEmail:    userEmail,
-					ActionType:    approvalengine.ActionApproved,
-					Comment:       firstNonEmpty(req.Comment, "Bulk cashflow edit approved"),
-				}); err != nil {
-					errs = append(errs, cashflowID+": "+err.Error())
-					continue
-				}
-				var instStatus string
-				_ = pgxPool.QueryRow(ctx, `SELECT i.status FROM uam.approval_instance i
-					JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
-					WHERE ie.instance_eye_id = $1`, instanceEyeID).Scan(&instStatus)
-				if instStatus == "APPROVED" {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", auditID, req.UserID, userEmail, "", approvalengine.ActionApproved, firstNonEmpty(req.Comment, "Bulk cashflow edit approved"))
+			if actionErr != nil {
+				errs = append(errs, cashflowID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
+				if actionRes.InstanceStatus == "APPROVED" {
 					if applyErr := applyApprovedCashflowEdit(ctx, pgxPool, auditID, userEmail); applyErr != nil {
 						errs = append(errs, cashflowID+": apply failed: "+applyErr.Error())
 						continue
 					}
 				}
 			} else {
+				if actionRes.CancelledStale {
+					api.LogInfo("[BulkApproveCashflow] Cancelled stale approval instance for audit=%s: %s", auditID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errs = append(errs, cashflowID+": "+actionRes.Reason)
+					continue
+				}
 				if applyErr := applyApprovedCashflowEdit(ctx, pgxPool, auditID, userEmail); applyErr != nil {
 					errs = append(errs, cashflowID+": apply failed: "+applyErr.Error())
 					continue
@@ -2063,27 +2171,16 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// Try engine rejection path
-			var instanceEyeID string
-			engineErr := pgxPool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, auditID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
-				_ = approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID,
-					ActorUserID:   req.UserID,
-					ActorEmail:    userEmail,
-					ActionType:    approvalengine.ActionRejected,
-					Comment:       req.Comment,
-				})
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", auditID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			if actionErr != nil {
+				errs = append(errs, cashflowID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.CancelledStale {
+				api.LogInfo("[BulkRejectCashflow] Cancelled stale approval instance for audit=%s: %s", auditID, actionRes.Reason)
+			} else if !actionRes.Acted && actionRes.Reason != "" {
+				errs = append(errs, cashflowID+": "+actionRes.Reason)
+				continue
 			}
 
 			// Stamp audit row as REJECTED
@@ -2900,39 +2997,15 @@ func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Try engine path
-		var instanceEyeID string
-		engineErr := pgxPool.QueryRow(ctx, `
-			SELECT ie.instance_eye_id
-			FROM uam.approval_instance i
-			JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-			JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-				AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-				AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-			WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-			ORDER BY ie.position ASC LIMIT 1`, req.AuditID, req.UserID,
-		).Scan(&instanceEyeID)
-
-		if engineErr == nil && instanceEyeID != "" {
+		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", req.AuditID, req.UserID, userEmail, "", approvalengine.ActionApproved, firstNonEmpty(req.Comment, "Cashflow edit approved"))
+		if actionErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "approval engine error: "+actionErr.Error())
+			return
+		}
+		if actionRes.Acted {
 			// Engine path: record action
-			if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-				InstanceEyeID: instanceEyeID,
-				ActorUserID:   req.UserID,
-				ActorEmail:    userEmail,
-				ActionType:    approvalengine.ActionApproved,
-				Comment:       firstNonEmpty(req.Comment, "Cashflow edit approved"),
-			}); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "approval engine error: "+err.Error())
-				return
-			}
 			// Check if instance is now fully APPROVED
-			var instStatus string
-			_ = pgxPool.QueryRow(ctx, `
-				SELECT i.status FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
-				WHERE ie.instance_eye_id = $1`, instanceEyeID,
-			).Scan(&instStatus)
-			if instStatus == "APPROVED" {
+			if actionRes.InstanceStatus == "APPROVED" {
 				if applyErr := applyApprovedCashflowEdit(ctx, pgxPool, req.AuditID, userEmail); applyErr != nil {
 					api.LogError("[CashflowApprove] apply failed audit=%s: %v", req.AuditID, applyErr)
 					api.RespondWithError(w, http.StatusInternalServerError, "apply edit failed: "+applyErr.Error())
@@ -2940,9 +3013,15 @@ func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"audit_id": req.AuditID, "status": instStatus, "approved_by": userEmail,
+				"audit_id": req.AuditID, "status": actionRes.InstanceStatus, "approved_by": userEmail,
 			})
 		} else {
+			if actionRes.CancelledStale {
+				api.LogInfo("[CashflowApprove] Cancelled stale approval instance for audit=%s: %s", req.AuditID, actionRes.Reason)
+			} else if actionRes.Reason != "" {
+				api.RespondWithError(w, http.StatusForbidden, actionRes.Reason)
+				return
+			}
 			// No engine instance — direct approval
 			if applyErr := applyApprovedCashflowEdit(ctx, pgxPool, req.AuditID, userEmail); applyErr != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "apply edit failed: "+applyErr.Error())
@@ -3001,30 +3080,12 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Try engine path
-		var instanceEyeID string
-		engineErr := pgxPool.QueryRow(ctx, `
-			SELECT ie.instance_eye_id
-			FROM uam.approval_instance i
-			JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-			JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-				AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-				AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-			WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-			ORDER BY ie.position ASC LIMIT 1`, req.AuditID, req.UserID,
-		).Scan(&instanceEyeID)
-
-		if engineErr == nil && instanceEyeID != "" {
-			if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-				InstanceEyeID: instanceEyeID,
-				ActorUserID:   req.UserID,
-				ActorEmail:    userEmail,
-				ActionType:    approvalengine.ActionRejected,
-				Comment:       req.Comment,
-			}); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "approval engine error: "+err.Error())
-				return
-			}
+		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", req.AuditID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+		if actionErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "approval engine error: "+actionErr.Error())
+			return
+		}
+		if actionRes.Acted {
 			// Engine finalizer stamps audit row; also ensure our status is REJECTED
 			if _, execErr := pgxPool.Exec(ctx,
 				`UPDATE investment.fd_audit_cashflow_schedule
@@ -3034,6 +3095,12 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[CashflowReject] audit stamp failed audit=%s: %v", req.AuditID, execErr)
 			}
 		} else {
+			if actionRes.CancelledStale {
+				api.LogInfo("[CashflowReject] Cancelled stale approval instance for audit=%s: %s", req.AuditID, actionRes.Reason)
+			} else if actionRes.Reason != "" {
+				api.RespondWithError(w, http.StatusForbidden, actionRes.Reason)
+				return
+			}
 			// No engine — direct stamp
 			if _, execErr := pgxPool.Exec(ctx,
 				`UPDATE investment.fd_audit_cashflow_schedule
@@ -3302,4 +3369,3 @@ func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
-

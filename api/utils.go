@@ -64,7 +64,7 @@ func IsBulkSuccess(results []map[string]interface{}) bool {
 
 // Error response helper
 func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
-	logger.LogError(errMsg)
+	logger.LogError("%s", errMsg)
 
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
@@ -103,6 +103,10 @@ func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payl
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	resp := map[string]interface{}{constants.ValueSuccess: success}
 
+	if !success {
+		errMsg = promotePayloadErrors(errMsg, payload)
+	}
+
 	if !success && errMsg != "" {
 		resp[constants.ValueError] = errMsg
 		logger.LogError("RespondWithPayload: %s", errMsg)
@@ -127,6 +131,108 @@ func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payl
 	json.NewEncoder(w).Encode(resp)
 }
 
+func promotePayloadErrors(errMsg string, payload interface{}) string {
+	details := payloadErrorStrings(payload)
+	if len(details) == 0 {
+		return errMsg
+	}
+	return BulkActionErrorMessage(errMsg, details)
+}
+
+func BulkActionErrorMessage(summary string, details []string) string {
+	clean := compactErrorStrings(details)
+	if len(clean) == 0 {
+		return summary
+	}
+	detail := strings.Join(clean, "; ")
+	if strings.TrimSpace(summary) == "" {
+		return detail
+	}
+	if strings.Contains(summary, detail) || strings.Contains(summary, clean[0]) {
+		return summary
+	}
+	return summary + ": " + detail
+}
+
+func payloadErrorStrings(payload interface{}) []string {
+	switch vals := payload.(type) {
+	case []string:
+		return compactErrorStrings(vals)
+	case []interface{}:
+		return compactErrorStrings(errorStringsFromInterfaceSlice(vals))
+	case []map[string]interface{}:
+		return compactErrorStrings(errorStringsFromMapSlice(vals))
+	}
+
+	rowMap, ok := payload.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	if raw, ok := rowMap["errors"]; ok {
+		switch vals := raw.(type) {
+		case []string:
+			return compactErrorStrings(vals)
+		case []interface{}:
+			return compactErrorStrings(errorStringsFromInterfaceSlice(vals))
+		case []map[string]interface{}:
+			return compactErrorStrings(errorStringsFromMapSlice(vals))
+		default:
+			return nil
+		}
+	}
+	if raw, ok := rowMap["validation_errors"]; ok {
+		switch vals := raw.(type) {
+		case []interface{}:
+			return compactErrorStrings(errorStringsFromInterfaceSlice(vals))
+		case []map[string]interface{}:
+			return compactErrorStrings(errorStringsFromMapSlice(vals))
+		}
+	}
+	return nil
+}
+
+func errorStringsFromInterfaceSlice(vals []interface{}) []string {
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		switch item := v.(type) {
+		case string:
+			out = append(out, item)
+		case map[string]interface{}:
+			out = append(out, errorStringsFromMap(item)...)
+		}
+	}
+	return out
+}
+
+func errorStringsFromMapSlice(vals []map[string]interface{}) []string {
+	out := make([]string, 0, len(vals))
+	for _, item := range vals {
+		out = append(out, errorStringsFromMap(item)...)
+	}
+	return out
+}
+
+func errorStringsFromMap(row map[string]interface{}) []string {
+	for _, key := range []string{constants.ValueError, "message", "reason"} {
+		if raw, ok := row[key]; ok {
+			if s, ok := raw.(string); ok {
+				return []string{s}
+			}
+		}
+	}
+	return nil
+}
+
+func compactErrorStrings(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
 // LogInfo logs an informational message (wrapper for consistent logging)
 func LogInfo(msg string, args ...interface{}) {
 	logger.LogInfo(msg, args...)
@@ -136,4 +242,3 @@ func LogInfo(msg string, args ...interface{}) {
 func LogError(msg string, args ...interface{}) {
 	logger.LogError(msg, args...)
 }
-

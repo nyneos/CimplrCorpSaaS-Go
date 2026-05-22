@@ -37,6 +37,7 @@ var txTypeRegistry = map[string]txTableConfig{
 	"FD_MASTER_EDIT":   {AuditTable: constants.QuerryAuditMaster, AuditIDColumn: "fd_id"},
 	"FD_MASTER_DELETE": {AuditTable: constants.QuerryAuditMaster, AuditIDColumn: "fd_id"},
 	"FD_ACTIVATE":      {AuditTable: constants.QuerryAuditMaster, AuditIDColumn: "fd_id"},
+	"FD_CASHFLOW_EDIT": {AuditTable: "investment.fd_audit_cashflow_schedule", AuditIDColumn: "audit_id"},
 
 	// ── FD Accrual ────────────────────────────────────────────────────────
 	"FD_ACCRUAL_APPROVE":          {AuditTable: "investment.fd_accrual_run_audit", AuditIDColumn: "run_id"},
@@ -53,12 +54,32 @@ var txTypeRegistry = map[string]txTableConfig{
 
 	// ── Cash / Payables & Receivables ─────────────────────────────────────
 	// (add specific types here as the cash module is wired up)
+	// ── Counterparty Hub ──────────────────────────────────────────────────
+	"COUNTERPARTY_CREATE":        {AuditTable: constants.ErrAuditCounterpartyServiceTable, AuditIDColumn: "counterparty_id"},
+	"COUNTERPARTY_EDIT":          {AuditTable: constants.ErrAuditCounterpartyServiceTable, AuditIDColumn: "counterparty_id"},
+	"COUNTERPARTY_MASTER_CREATE": {AuditTable: constants.ErrAuditCounterpartyServiceTable, AuditIDColumn: "counterparty_id"},
+	"COUNTERPARTY_MASTER_EDIT":   {AuditTable: constants.ErrAuditCounterpartyServiceTable, AuditIDColumn: "counterparty_id"},
+	"BANK_CREATE":                {AuditTable: "apibox_svc.audit_bank_master", AuditIDColumn: "bank_id"},
+	"EXCHANGE_MASTER_CREATE":     {AuditTable: "apibox_svc.audit_exchange_master", AuditIDColumn: "exchange_id"},
+	"DATA_PROVIDER_CREATE":       {AuditTable: "apibox_svc.audit_data_provider_master", AuditIDColumn: "provider_id"},
+	"CCP_CSD_CREATE":             {AuditTable: "apibox_svc.audit_ccp_csd_master", AuditIDColumn: "ccp_csd_id"},
+	"PAYMENT_NETWORK_CREATE":     {AuditTable: "apibox_svc.audit_payment_network_master", AuditIDColumn: "network_id"},
+	"ERP_SYSTEM_CREATE":          {AuditTable: "apibox_svc.audit_erp_system_master", AuditIDColumn: "erp_id"},
+
 	// ── FD Closure ───────────────────────────────────────────────────────
 	"FD_CLOSURE_MATURITY":     {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
 	"FD_CLOSURE_PREMATURE":    {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
 	"FD_CLOSURE_ROLLOVER":     {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
 	"FD_CLOSURE_AUTO_RENEWAL": {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
 	"FD_CLOSURE_DELETE":       {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
+
+	// ── FD Closure / Maturity & Rollover (cimplr schema) ─────────────────
+	"FD_CLOSURE_INITIATE_CREATE": {AuditTable: "cimplr.fd_closure_initiate_audit", AuditIDColumn: "closure_initiate_id"},
+	"FD_CLOSURE_INITIATE_EDIT":   {AuditTable: "cimplr.fd_closure_initiate_audit", AuditIDColumn: "closure_initiate_id"},
+	"FD_CLOSURE_INITIATE_DELETE": {AuditTable: "cimplr.fd_closure_initiate_audit", AuditIDColumn: "closure_initiate_id"},
+	"FD_CLOSURE_CONFIRM_CREATE":  {AuditTable: "cimplr.fd_closure_confirm_audit", AuditIDColumn: "closure_confirm_id"},
+	"FD_CLOSURE_CONFIRM_EDIT":    {AuditTable: "cimplr.fd_closure_confirm_audit", AuditIDColumn: "closure_confirm_id"},
+	"FD_CLOSURE_CONFIRM_DELETE":  {AuditTable: "cimplr.fd_closure_confirm_audit", AuditIDColumn: "closure_confirm_id"},
 } // LookupTxTableConfig returns the audit table name and audit ID column for the
 // given transaction type. If the type is not registered, both strings are empty.
 func LookupTxTableConfig(transactionType string) (auditTable, auditIDColumn string) {

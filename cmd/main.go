@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv" // Add this import
@@ -16,8 +18,6 @@ import (
 	"CimplrCorpSaas/api/auth"
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/appmanager"
-
-	"CimplrCorpSaas/internal/logger"
 )
 
 // InitDB loads DB config from env vars
@@ -27,9 +27,13 @@ func InitDB() (*sql.DB, error) {
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
+	sslMode := os.Getenv("DB_SSLMODE")
+	if sslMode == "" {
+		sslMode = "disable"
+	}
 	connStr := fmt.Sprintf(
-		"user=%s password=%s host=%s port=%s dbname=%s sslmode=disable",
-		user, pass, host, port, name,
+		"user=%s password=%s host=%s port=%s dbname=%s sslmode=%s",
+		user, pass, host, port, name, sslMode,
 	)
 	return sql.Open("postgres", connStr)
 }
@@ -52,7 +56,7 @@ func main() {
 	db, err := InitDB()
 	if err != nil {
 
-		logger.LogError("failed to connect to DB:", err)
+		log.Fatal("failed to connect to DB:", err)
 	}
 	appmanager.SetDB(db)
 
@@ -70,31 +74,41 @@ func main() {
 		sslMode = "disable"
 	}
 	pgxConnStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&pool_max_conns=30&pool_min_conns=2&statement_timeout=30000",
+		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&statement_timeout=30000",
 		user, pass, host, port, name, sslMode,
 	)
 
 	ctx := context.Background()
-	pgxPool, err := pgxpool.New(ctx, pgxConnStr)
+	pgxConfig, err := pgxpool.ParseConfig(pgxConnStr)
 	if err != nil {
-		logger.LogError("failed to create pgx pool:", err)
+		log.Fatal("failed to parse pgx config:", err)
+	}
+	pgxConfig.MaxConns = 20
+	pgxConfig.MinConns = 5
+	pgxConfig.MaxConnIdleTime = 5 * time.Minute
+	pgxConfig.MaxConnLifetime = 30 * time.Minute
+	pgxConfig.HealthCheckPeriod = 1 * time.Minute
+
+	pgxPool, err := pgxpool.NewWithConfig(ctx, pgxConfig)
+	if err != nil {
+		log.Fatal("failed to create pgx pool:", err)
 	}
 	defer pgxPool.Close()
 
 	// Fail fast: verify the pool can actually reach the DB before starting services.
 	if pingErr := pgxPool.Ping(ctx); pingErr != nil {
-		logger.LogError("pgx pool ping failed — check DB_HOST/DB_PORT/DB_SSLMODE in .env: %v", pingErr)
+		log.Fatalf("pgx pool ping failed — check DB_HOST/DB_PORT/DB_SSLMODE in .env: %v", pingErr)
 	}
-	logger.LogInfo("DB connected: host=%s port=%s db=%s sslmode=%s", host, port, name, sslMode)
+	log.Printf("DB connected: host=%s port=%s db=%s sslmode=%s", host, port, name, sslMode)
 
 	appmanager.SetPgxPool(pgxPool)
 
 	manager := appmanager.NewAppManager()
 
 	// Load service configs from YAML
-	servicesCfg, err := appmanager.LoadServiceSequence("./services.yaml")
+	servicesCfg, err := appmanager.LoadServiceSequence("../services.yaml")
 	if err != nil {
-		logger.LogError("failed to load service sequence:", err)
+		log.Fatal("failed to load service sequence:", err)
 	}
 
 	// Automatically register all services
@@ -102,17 +116,17 @@ func main() {
 
 	// Start all services
 	if err := manager.StartAll(); err != nil {
-		logger.LogError("failed to start:", err)
+		log.Fatal("failed to start:", err)
 	}
 
 	// --- Wire AuthService to Gateway ---
 	authSvcIface := manager.GetServiceByName("auth")
 	if authSvcIface == nil {
-		logger.LogError("Auth service not found in manager")
+		log.Fatal("Auth service not found in manager")
 	}
 	realAuthSvc, ok := authSvcIface.(*auth.AuthService)
 	if !ok {
-		logger.LogError("Auth service type assertion failed")
+		log.Fatal("Auth service type assertion failed")
 	}
 	api.SetAuthService(realAuthSvc)
 
@@ -128,7 +142,7 @@ func main() {
 
 	// Stop all services
 	if err := manager.StopAll(); err != nil {
-		logger.LogError("failed to stop:", err)
+		log.Fatal("failed to stop:", err)
 	}
 
 	// Close pgx pool if initialized

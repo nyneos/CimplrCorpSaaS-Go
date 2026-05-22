@@ -137,12 +137,24 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 	// ── 0. Advisory lock — prevent concurrent runs ────────────────────────────
 	// Targeted runs (specific bankStatementID) use a per-statement lock key so
 	// they don't block each other or the global cron batch.
+	//
+	// IMPORTANT: pg_try_advisory_lock is session-level. We must acquire the lock
+	// on a dedicated connection and explicitly unlock before releasing it, so the
+	// lock is not left held on a pooled connection indefinitely.
 	lockKey := "smart-cat-batch"
 	if filterBSID != "" {
 		lockKey = "smart-cat-bs-" + filterBSID
 	}
+	lockConn, err := db.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire lock connection: %w", err)
+	}
+	defer func() {
+		lockConn.QueryRow(ctx, `SELECT pg_advisory_unlock(hashtext($1))`, lockKey).Scan(new(bool)) //nolint:errcheck
+		lockConn.Release()
+	}()
 	var lockAcquired bool
-	if err := db.QueryRow(ctx,
+	if err := lockConn.QueryRow(ctx,
 		`SELECT pg_try_advisory_lock(hashtext($1))`, lockKey,
 	).Scan(&lockAcquired); err != nil {
 		return fmt.Errorf("advisory lock check: %w", err)
@@ -154,10 +166,13 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 	// ── 2. Count total eligible transactions ──────────────────────────────────
 	var totalCount int
 	if err := db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions
-		WHERE bank_statement_id IS NOT NULL
-		  AND (classification_step IS NULL OR classification_step NOT IN ('CORRECTION', 'CONFIRMATION'))
-		  AND ($1 = '' OR bank_statement_id::text = $1)
+		SELECT COUNT(*)
+		FROM cimplrcorpsaas.bank_statement_transactions t
+		JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
+		WHERE t.bank_statement_id IS NOT NULL
+		  AND (t.classification_step IS NULL OR t.classification_step NOT IN ('CORRECTION', 'CONFIRMATION'))
+		  AND ($1 = '' OR t.bank_statement_id::text = $1)
+		  AND COALESCE(bs.is_deleted, false) = false
 	`, filterBSID).Scan(&totalCount); err != nil {
 		return fmt.Errorf("count transactions: %w", err)
 	}
@@ -212,6 +227,7 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 			        OR t.classification_step NOT IN ('CORRECTION', 'CONFIRMATION')
 			  )
 			  AND ($3 = '' OR t.bank_statement_id::text = $3)
+			  AND COALESCE(bs.is_deleted, false) = false
 			ORDER BY t.transaction_id
 			LIMIT $2
 		`, lastID, batchSize, filterBSID)

@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,7 +18,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // TransactionDetail is the common structure for transaction-related data
 // InvestmentDetail is the common detail structure for all investment-related data
@@ -83,6 +85,122 @@ type KPICard struct {
 	Value     float64 `json:"value"`
 	LastValue float64 `json:"lastValue"`
 	Change    float64 `json:"change"`
+}
+
+type overviewAUMCacheEntry struct {
+	rows    []InvestmentDetail
+	expires time.Time
+}
+
+type overviewTransactionCacheEntry struct {
+	rows    []TransactionDetail
+	expires time.Time
+}
+
+type overviewDataInflight struct {
+	wg sync.WaitGroup
+}
+
+var overviewDataCache = struct {
+	sync.Mutex
+	aum      map[string]overviewAUMCacheEntry
+	tx       map[string]overviewTransactionCacheEntry
+	inflight map[string]*overviewDataInflight
+}{
+	aum:      make(map[string]overviewAUMCacheEntry),
+	tx:       make(map[string]overviewTransactionCacheEntry),
+	inflight: make(map[string]*overviewDataInflight),
+}
+
+func overviewDataCacheKey(prefix, entityFilter string, allowedEntities []string, extra string) string {
+	allowed := append([]string(nil), allowedEntities...)
+	sort.Strings(allowed)
+	return strings.Join([]string{
+		prefix,
+		strings.TrimSpace(entityFilter),
+		strings.Join(allowed, "|"),
+		extra,
+	}, "\n")
+}
+
+func cloneInvestmentDetails(in []InvestmentDetail) []InvestmentDetail {
+	out := make([]InvestmentDetail, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneTransactionDetails(in []TransactionDetail) []TransactionDetail {
+	out := make([]TransactionDetail, len(in))
+	copy(out, in)
+	return out
+}
+
+func getOverviewAUMCache(key string) ([]InvestmentDetail, bool) {
+	overviewDataCache.Lock()
+	defer overviewDataCache.Unlock()
+	entry, ok := overviewDataCache.aum[key]
+	if !ok || time.Now().After(entry.expires) {
+		if ok {
+			delete(overviewDataCache.aum, key)
+		}
+		return nil, false
+	}
+	return cloneInvestmentDetails(entry.rows), true
+}
+
+func setOverviewAUMCache(key string, rows []InvestmentDetail) {
+	ttl := investmentDashboardCacheTTL()
+	if ttl <= 0 {
+		return
+	}
+	overviewDataCache.Lock()
+	overviewDataCache.aum[key] = overviewAUMCacheEntry{rows: cloneInvestmentDetails(rows), expires: time.Now().Add(ttl)}
+	overviewDataCache.Unlock()
+}
+
+func getOverviewTransactionCache(key string) ([]TransactionDetail, bool) {
+	overviewDataCache.Lock()
+	defer overviewDataCache.Unlock()
+	entry, ok := overviewDataCache.tx[key]
+	if !ok || time.Now().After(entry.expires) {
+		if ok {
+			delete(overviewDataCache.tx, key)
+		}
+		return nil, false
+	}
+	return cloneTransactionDetails(entry.rows), true
+}
+
+func setOverviewTransactionCache(key string, rows []TransactionDetail) {
+	ttl := investmentDashboardCacheTTL()
+	if ttl <= 0 {
+		return
+	}
+	overviewDataCache.Lock()
+	overviewDataCache.tx[key] = overviewTransactionCacheEntry{rows: cloneTransactionDetails(rows), expires: time.Now().Add(ttl)}
+	overviewDataCache.Unlock()
+}
+
+func beginOverviewDataInflight(key string) (*overviewDataInflight, bool) {
+	overviewDataCache.Lock()
+	defer overviewDataCache.Unlock()
+	if current := overviewDataCache.inflight[key]; current != nil {
+		return current, true
+	}
+	current := &overviewDataInflight{}
+	current.wg.Add(1)
+	overviewDataCache.inflight[key] = current
+	return current, false
+}
+
+func endOverviewDataInflight(key string) {
+	overviewDataCache.Lock()
+	current := overviewDataCache.inflight[key]
+	delete(overviewDataCache.inflight, key)
+	overviewDataCache.Unlock()
+	if current != nil {
+		current.wg.Done()
+	}
 }
 
 // GetInvestmentOverviewKPIs computes the 4 KPI cards: Total AUM, AUM Trend, YTD P&L, Portfolio XIRR, Liquidity Position
@@ -437,8 +555,24 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // fetchAUMDetails returns detailed breakdown of current AUM by entity, AMC, scheme
 // OPTIMIZED: Uses CTE to pre-compute latest NAV per scheme (eliminates N+1 LATERAL joins)
 func fetchAUMDetails(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter string, allowedEntities []string) []InvestmentDetail {
+	cacheKey := overviewDataCacheKey("aum", entityFilter, allowedEntities, "")
+	if cached, ok := getOverviewAUMCache(cacheKey); ok {
+		return cached
+	}
+	if flight, shouldWait := beginOverviewDataInflight(cacheKey); shouldWait {
+		flight.wg.Wait()
+		if cached, ok := getOverviewAUMCache(cacheKey); ok {
+			return cached
+		}
+	} else {
+		defer endOverviewDataInflight(cacheKey)
+	}
+
 	query := `
-		WITH latest_nav AS (
+		WITH params AS (
+			SELECT $1::text AS entity_filter, $2::text[] AS allowed_entities
+		),
+		latest_nav AS (
 			SELECT DISTINCT ON (scheme_code) scheme_code::text, nav_value
 			FROM investment.amfi_nav_staging
 			ORDER BY scheme_code, nav_date DESC
@@ -477,11 +611,18 @@ func fetchAUMDetails(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter st
 		LEFT JOIN investment.masterscheme ms ON ms.scheme_id = ps.scheme_id
 		LEFT JOIN investment.amfi_scheme_master_staging asm ON asm.scheme_code::text = ms.amfi_scheme_code::text
 		LEFT JOIN latest_nav ln ON ln.scheme_code = COALESCE(ms.amfi_scheme_code::text, asm.scheme_code::text)
+		CROSS JOIN params p
 		WHERE COALESCE(ps.current_value, 0) > 0
+		  AND (p.entity_filter IS NULL OR ps.entity_name = p.entity_filter)
+		  AND (p.allowed_entities IS NULL OR ps.entity_name = ANY(p.allowed_entities))
 		ORDER BY ps.entity_name, ms.amc_name, ps.current_value DESC
 	`
 
-	rows, err := pgxPool.Query(ctx, query)
+	var allowedParam interface{} = nil
+	if len(allowedEntities) > 0 {
+		allowedParam = allowedEntities
+	}
+	rows, err := pgxPool.Query(ctx, query, nullIfEmpty(entityFilter), allowedParam)
 	if err != nil {
 		logger.LogError("[investmentOverview] fetchAUMDetails query error: %v", err)
 		return []InvestmentDetail{}
@@ -500,12 +641,26 @@ func fetchAUMDetails(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter st
 		}
 		details = append(details, d)
 	}
+	setOverviewAUMCache(cacheKey, details)
 	return details
 }
 
 // fetchRawTransactionDetails returns RAW TABULAR transaction data - no grouping
 // OPTIMIZED: Uses CTE to pre-compute latest NAV per scheme (eliminates N+1 LATERAL joins)
 func fetchRawTransactionDetails(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter string, allowedEntities []string, fromDate time.Time) []TransactionDetail {
+	cacheKey := overviewDataCacheKey("tx", entityFilter, allowedEntities, fromDate.Format(constants.DateFormat))
+	if cached, ok := getOverviewTransactionCache(cacheKey); ok {
+		return cached
+	}
+	if flight, shouldWait := beginOverviewDataInflight(cacheKey); shouldWait {
+		flight.wg.Wait()
+		if cached, ok := getOverviewTransactionCache(cacheKey); ok {
+			return cached
+		}
+	} else {
+		defer endOverviewDataInflight(cacheKey)
+	}
+
 	query := `
 		WITH latest_nav AS (
 			SELECT DISTINCT ON (scheme_code) scheme_code::text, nav_value
@@ -560,6 +715,7 @@ func fetchRawTransactionDetails(ctx context.Context, pgxPool *pgxpool.Pool, enti
 		}
 		transactions = append(transactions, t)
 	}
+	setOverviewTransactionCache(cacheKey, transactions)
 	return transactions
 }
 
@@ -612,8 +768,24 @@ func getAUMAtDate(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter strin
 // fetchAUMDetailsWithRisk returns detailed breakdown with risk ratings
 // OPTIMIZED: Uses CTE to pre-compute latest NAV per scheme (eliminates N+1 LATERAL joins)
 func fetchAUMDetailsWithRisk(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter string, allowedEntities []string) []InvestmentDetail {
+	cacheKey := overviewDataCacheKey("aum-risk", entityFilter, allowedEntities, "")
+	if cached, ok := getOverviewAUMCache(cacheKey); ok {
+		return cached
+	}
+	if flight, shouldWait := beginOverviewDataInflight(cacheKey); shouldWait {
+		flight.wg.Wait()
+		if cached, ok := getOverviewAUMCache(cacheKey); ok {
+			return cached
+		}
+	} else {
+		defer endOverviewDataInflight(cacheKey)
+	}
+
 	query := `
-		WITH latest_nav AS (
+		WITH params AS (
+			SELECT $1::text AS entity_filter, $2::text[] AS allowed_entities
+		),
+		latest_nav AS (
 			SELECT DISTINCT ON (scheme_code) scheme_code::text, nav_value
 			FROM investment.amfi_nav_staging
 			ORDER BY scheme_code, nav_date DESC
@@ -652,11 +824,18 @@ func fetchAUMDetailsWithRisk(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 		LEFT JOIN investment.masterscheme ms ON ms.scheme_id = ps.scheme_id
 		LEFT JOIN investment.amfi_scheme_master_staging asm ON asm.scheme_code::text = ms.amfi_scheme_code::text
 		LEFT JOIN latest_nav ln ON ln.scheme_code = COALESCE(ms.amfi_scheme_code::text, asm.scheme_code::text)
+		CROSS JOIN params p
 		WHERE COALESCE(ps.current_value, 0) > 0
+		  AND (p.entity_filter IS NULL OR ps.entity_name = p.entity_filter)
+		  AND (p.allowed_entities IS NULL OR ps.entity_name = ANY(p.allowed_entities))
 		ORDER BY ps.entity_name, ms.internal_risk_rating, ps.current_value DESC
 	`
 
-	rows, err := pgxPool.Query(ctx, query)
+	var allowedParam interface{} = nil
+	if len(allowedEntities) > 0 {
+		allowedParam = allowedEntities
+	}
+	rows, err := pgxPool.Query(ctx, query, nullIfEmpty(entityFilter), allowedParam)
 	if err != nil {
 		logger.LogError("[investmentOverview] fetchAUMDetailsWithRisk query error: %v", err)
 		return []InvestmentDetail{}
@@ -677,6 +856,7 @@ func fetchAUMDetailsWithRisk(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 		details = append(details, d)
 	}
 	logger.LogInfo("[investmentOverview] fetchAUMDetailsWithRisk returned %d rows", len(details))
+	setOverviewAUMCache(cacheKey, details)
 	return details
 }
 
@@ -2839,35 +3019,38 @@ func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY ps.current_value DESC
 			LIMIT $2
 		),
-		nav_data AS (
-			SELECT h.*,
-			       -- Current NAV (latest)
-			       COALESCE((
-			         SELECT nav_value FROM investment.amfi_nav_staging ans
-			         WHERE ans.scheme_code::text = h.amfi_code
-			         ORDER BY nav_date DESC LIMIT 1
-			       ), h.current_nav)::float8 AS latest_nav,
-			       -- Previous day NAV
-			       COALESCE((
-			         SELECT nav_value FROM investment.amfi_nav_staging ans
-			         WHERE ans.scheme_code::text = h.amfi_code
-			         ORDER BY nav_date DESC LIMIT 1 OFFSET 1
-			       ), 0)::float8 AS prev_nav
-			FROM holdings h
+		nav_ranked AS (
+			SELECT
+				ans.scheme_code::text AS scheme_code,
+				ans.nav_value,
+				ROW_NUMBER() OVER (PARTITION BY ans.scheme_code ORDER BY ans.nav_date DESC) AS rn
+			FROM investment.amfi_nav_staging ans
+			JOIN (SELECT DISTINCT amfi_code FROM holdings WHERE amfi_code <> '') hc
+			  ON hc.amfi_code = ans.scheme_code::text
+		),
+		nav_pairs AS (
+			SELECT
+				scheme_code,
+				MAX(nav_value) FILTER (WHERE rn = 1) AS latest_nav,
+				MAX(nav_value) FILTER (WHERE rn = 2) AS prev_nav
+			FROM nav_ranked
+			WHERE rn <= 2
+			GROUP BY scheme_code
 		)
 		SELECT 
-			COALESCE(scheme_name, 'Unknown') AS scheme_name,
-			COALESCE(amc_name, 'Unknown') AS amc,
-			COALESCE(amfi_code, '') AS amfi_code,
-			COALESCE(internal_code, '') AS internal_code,
-			COALESCE(isin, '') AS isin,
-			latest_nav AS nav,
-			prev_nav,
-			CASE WHEN prev_nav > 0 THEN ROUND(((latest_nav - prev_nav) / prev_nav * 100)::numeric, 2) ELSE 0 END AS change_1d,
-			COALESCE(gain_loss, 0)::float8 AS mtm,
-			COALESCE(total_units, 0)::float8 AS units,
-			COALESCE(current_value, 0)::float8 AS current_value
-		FROM nav_data
+			COALESCE(h.scheme_name, 'Unknown') AS scheme_name,
+			COALESCE(h.amc_name, 'Unknown') AS amc,
+			COALESCE(h.amfi_code, '') AS amfi_code,
+			COALESCE(h.internal_code, '') AS internal_code,
+			COALESCE(h.isin, '') AS isin,
+			COALESCE(np.latest_nav, h.current_nav, 0)::float8 AS nav,
+			COALESCE(np.prev_nav, 0)::float8 AS prev_nav,
+			CASE WHEN COALESCE(np.prev_nav, 0) > 0 THEN ROUND(((COALESCE(np.latest_nav, h.current_nav, 0) - np.prev_nav) / np.prev_nav * 100)::numeric, 2) ELSE 0 END AS change_1d,
+			COALESCE(h.gain_loss, 0)::float8 AS mtm,
+			COALESCE(h.total_units, 0)::float8 AS units,
+			COALESCE(h.current_value, 0)::float8 AS current_value
+		FROM holdings h
+		LEFT JOIN nav_pairs np ON np.scheme_code = h.amfi_code
 		`
 
 		rows, err := pgxPool.Query(ctx, query, nullIfEmpty(entityFilter), req.Limit, allowedParam)
@@ -2972,15 +3155,21 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			// Approved + active schemes only (existing behaviour)
 			query = `
-		WITH latest_nav AS (
-			SELECT DISTINCT ON (scheme_code) scheme_code::text AS scheme_code, nav_value, nav_date
+		WITH nav_ranked AS (
+			SELECT
+				scheme_code::text AS scheme_code,
+				nav_value,
+				ROW_NUMBER() OVER (PARTITION BY scheme_code ORDER BY nav_date DESC) AS rn
 			FROM investment.amfi_nav_staging
-			ORDER BY scheme_code, nav_date DESC
 		),
-		prev_nav AS (
-			SELECT DISTINCT ON (scheme_code) scheme_code::text AS scheme_code, nav_value
-			FROM investment.amfi_nav_staging
-			ORDER BY scheme_code, nav_date DESC OFFSET 1
+		nav_pairs AS (
+			SELECT
+				scheme_code,
+				MAX(nav_value) FILTER (WHERE rn = 1) AS latest_nav,
+				MAX(nav_value) FILTER (WHERE rn = 2) AS prev_nav
+			FROM nav_ranked
+			WHERE rn <= 2
+			GROUP BY scheme_code
 		),
 		latest_scheme AS (
 			SELECT DISTINCT ON (scheme_id) scheme_id, processing_status
@@ -2998,13 +3187,12 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			m.scheme_id,
 			COALESCE(m.amfi_scheme_code::text,'') AS amfi_code,
 	            COALESCE(m.isin, '') AS isin,
-			COALESCE(ln.nav_value,0)::float8 AS nav,
-			COALESCE(pn.nav_value,0)::float8 AS prev_nav
+			COALESCE(np.latest_nav,0)::float8 AS nav,
+			COALESCE(np.prev_nav,0)::float8 AS prev_nav
 		FROM investment.masterscheme m
 		JOIN latest_scheme ls ON ls.scheme_id = m.scheme_id
 		JOIN latest_amc la ON UPPER(la.amc_name) = UPPER(m.amc_name)
-		LEFT JOIN latest_nav ln ON ln.scheme_code = COALESCE(m.amfi_scheme_code::text, '')
-		LEFT JOIN prev_nav pn ON pn.scheme_code = ln.scheme_code
+		LEFT JOIN nav_pairs np ON np.scheme_code = COALESCE(m.amfi_scheme_code::text, '')
 		WHERE UPPER(ls.processing_status) = 'APPROVED'
 		  AND UPPER(m.status) = 'ACTIVE'
 		  AND COALESCE(m.is_deleted,false) = false
@@ -3123,7 +3311,7 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = mfapiHits
 			_ = mfapiMisses
 		} else {
-			var stagingHits, mfapiHits int
+			var stagingHits int
 			for rows.Next() {
 				var rname, sid, amfi, isin string
 				var nav, prevNav float64
@@ -3132,39 +3320,7 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				source := "staging"
-				// If NAVs not available locally, try MFapi (mfapi.in) as a fallback
-				if (nav == 0 || prevNav == 0) && amfi != "" {
-					name, mnav, mprev, mNavDate, _ := getMFAPIData(amfi)
-					if name != "" && rname == "" {
-						rname = name
-					}
-					if nav == 0 && mnav > 0 {
-						nav = mnav
-						source = "mfapi"
-						mfapiHits++
-					}
-					if prevNav == 0 && mprev > 0 {
-						prevNav = mprev
-						source = "mfapi"
-					}
-
-					// Persist latest MFAPI nav into staging (upsert). Run async to avoid latency.
-					if mnav > 0 {
-						if sc, err := strconv.ParseInt(amfi, 10, 64); err == nil {
-							upsertQ := `INSERT INTO investment.amfi_nav_staging (scheme_code, scheme_name, nav_value, nav_date, file_date, created_at)
-								VALUES ($1, $2, $3::numeric(18,4), $4::date, CURRENT_DATE, now())
-								ON CONFLICT (scheme_code, nav_date) DO UPDATE SET nav_value = EXCLUDED.nav_value, scheme_name = COALESCE(amfi_nav_staging.scheme_name, EXCLUDED.scheme_name)`
-							// parse mNavDate (DD-MM-YYYY) to SQL date; if parse fails, use CURRENT_DATE
-							navDate := time.Now().Format(constants.DateFormat)
-							if t, err := time.Parse("02-01-2006", mNavDate); err == nil {
-								navDate = t.Format(constants.DateFormat)
-							}
-							go func(codeInt int64, name string, navVal float64, dateStr string) {
-								_, _ = pgxPool.Exec(context.Background(), upsertQ, codeInt, nullIfEmpty(name), navVal, dateStr)
-							}(sc, name, mnav, navDate)
-						}
-					}
-				} else {
+				if nav != 0 || prevNav != 0 {
 					stagingHits++
 				}
 

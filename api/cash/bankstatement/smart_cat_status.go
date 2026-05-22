@@ -70,7 +70,7 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 		entityFilter := ""
 		entityArgs := []interface{}{}
 		if req.EntityID != "" {
-			entityFilter = ` JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id AND bs.entity_id = $1`
+			entityFilter = ` AND bs.entity_id = $1`
 			entityArgs = append(entityArgs, req.EntityID)
 		}
 
@@ -79,7 +79,9 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 				COUNT(*),
 				COUNT(category_id),
 				COUNT(*) FILTER (WHERE category_id IS NULL)
-			FROM cimplrcorpsaas.bank_statement_transactions t`+entityFilter,
+			FROM cimplrcorpsaas.bank_statement_transactions t
+			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
+			WHERE COALESCE(bs.is_deleted, false) = false`+entityFilter,
 			entityArgs...,
 		).Scan(&totalTxns, &categorized, &uncategorized)
 
@@ -100,7 +102,10 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 					transaction_id, classification_step
 				FROM cimplrcorpsaas.classification_audit_log
 				WHERE transaction_id IN (
-					SELECT transaction_id FROM cimplrcorpsaas.bank_statement_transactions
+					SELECT t.transaction_id
+					FROM cimplrcorpsaas.bank_statement_transactions t
+					JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
+					WHERE COALESCE(bs.is_deleted, false) = false
 				)
 				ORDER BY transaction_id, classified_at DESC
 			)
@@ -130,11 +135,13 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 		var highConf, medConf, lowConf int
 		_ = pool.QueryRow(ctx, `
 			SELECT
-				COUNT(*) FILTER (WHERE confidence_score >= 0.90),
-				COUNT(*) FILTER (WHERE confidence_score >= 0.70 AND confidence_score < 0.90),
-				COUNT(*) FILTER (WHERE confidence_score < 0.70 AND confidence_score IS NOT NULL)
-			FROM cimplrcorpsaas.bank_statement_transactions
-			WHERE classification_step IS NOT NULL
+				COUNT(*) FILTER (WHERE t.confidence_score >= 0.90),
+				COUNT(*) FILTER (WHERE t.confidence_score >= 0.70 AND t.confidence_score < 0.90),
+				COUNT(*) FILTER (WHERE t.confidence_score < 0.70 AND t.confidence_score IS NOT NULL)
+			FROM cimplrcorpsaas.bank_statement_transactions t
+			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
+			WHERE t.classification_step IS NOT NULL
+			  AND COALESCE(bs.is_deleted, false) = false
 		`).Scan(&highConf, &medConf, &lowConf)
 
 		classifiedTotal := highConf + medConf + lowConf
@@ -150,7 +157,14 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 			"PENDING": 0, "CONFIRMED": 0, "CORRECTED": 0, "DISMISSED": 0,
 		}
 		rqRows, err := pool.Query(ctx, `
-			SELECT status, COUNT(*) FROM cimplrcorpsaas.categorization_review_queue GROUP BY status
+			SELECT q.status, COUNT(*)
+			FROM cimplrcorpsaas.categorization_review_queue q
+			JOIN cimplrcorpsaas.bank_statement_transactions t
+			    ON t.transaction_id = q.transaction_id
+			JOIN cimplrcorpsaas.bank_statements bs
+			    ON bs.bank_statement_id = t.bank_statement_id
+			WHERE COALESCE(bs.is_deleted, false) = false
+			GROUP BY q.status
 		`)
 		if err == nil {
 			for rqRows.Next() {

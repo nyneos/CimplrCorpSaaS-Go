@@ -52,6 +52,13 @@ func BuildSimulateDiffInput(row map[string]interface{}) map[string]interface{} {
 		payoutFreqID = frequencyID
 	}
 
+	// confirmed_frequency_id: the bank-confirmed compounding/capitalization frequency.
+	// Falls back to the booking frequency when not set.
+	confirmedFrequencyID := strVal(row["confirmed_frequency_id"])
+	if confirmedFrequencyID == "" {
+		confirmedFrequencyID = frequencyID
+	}
+
 	accrualFreq := strVal(row["accrual_frequency_code"])
 	confirmedAccrualFreq := strVal(row["confirmed_accrual_frequency_code"])
 	if confirmedAccrualFreq == "" {
@@ -117,12 +124,15 @@ func BuildSimulateDiffInput(row map[string]interface{}) map[string]interface{} {
 		"tenor_months":     firstNonZero(row["tenor_months"], row["tenure_months"], row["confirmed_tenor_months"]),
 		"tenor_years":      firstNonZero(row["tenor_years"], row["tenure_years"], row["confirmed_tenor_years"]),
 		"interest_type":    confirmedInterestType,
-		"accrual_frequency_code": confirmedAccrualFreq,
-		"reset_type":             confirmedReset,
 	}
 	for k, v := range configBlock {
 		confirmationLeg[k] = v
 	}
+	// Override booking-derived values with confirmed values.
+	// Must happen after the configBlock copy so booking values are replaced.
+	confirmationLeg["frequency_id"] = confirmedFrequencyID
+	confirmationLeg["accrual_frequency_code"] = confirmedAccrualFreq
+	confirmationLeg["reset_type"] = confirmedReset
 	if fp := strVal(row["first_payout_date"]); fp != "" {
 		confirmationLeg["first_payout_date"] = fp
 	}

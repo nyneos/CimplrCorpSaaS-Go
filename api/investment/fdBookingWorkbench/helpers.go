@@ -547,6 +547,77 @@ type fdConfirmationVarianceInput struct {
 	BookedFirstPayoutDate, ActualFirstPayoutDate string
 }
 
+// lookupFrequencyLabel resolves a compounding-frequency id to a human readable
+// label of the form "FREQ-MONTHLY (Monthly)" pulled from
+// investment.fd_compounding_frequency_master. Lookup is best-effort: a blank
+// input or a missing row returns "" so callers can decide whether to fall back
+// to the raw id.
+func lookupFrequencyLabel(ctx context.Context, pool *pgxpool.Pool, id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" || pool == nil {
+		return ""
+	}
+	var code, name string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(frequency_code,''), COALESCE(frequency_name,'')
+		FROM investment.fd_compounding_frequency_master
+		WHERE (frequency_id::text = $1 OR frequency_code = $1 OR frequency_name = $1)
+		  AND COALESCE(is_deleted, false) = false
+		LIMIT 1`, id).Scan(&code, &name)
+	if err != nil {
+		return ""
+	}
+	code = strings.TrimSpace(code)
+	name = strings.TrimSpace(name)
+	switch {
+	case code != "" && name != "":
+		return fmt.Sprintf("%s (%s)", code, name)
+	case name != "":
+		return name
+	case code != "":
+		return code
+	default:
+		return ""
+	}
+}
+
+// frequencyLabelFor enriches a variance field with its display label. Only
+// returns a non-empty value for the frequency_id field (other identity fields
+// are already self-describing).
+func frequencyLabelFor(ctx context.Context, pool *pgxpool.Pool, fieldName, value string) string {
+	if fieldName != "frequency_id" {
+		return ""
+	}
+	return lookupFrequencyLabel(ctx, pool, value)
+}
+
+// serializeVarianceItem turns a varianceengine.VarianceItem into the JSON map
+// the UI consumes. expected_value / actual_value remain the raw stable values
+// (ids, codes, numbers) used everywhere else; sibling *_label fields carry the
+// human readable rendering when one is available (currently only for
+// frequency_id, which looks up code + name from the frequency master). includeAll
+// mirrors the legacy behaviour for resolve-variance which returns clean rows
+// too — pass false for endpoints that only return flagged rows.
+func serializeVarianceItem(ctx context.Context, pool *pgxpool.Pool, v varianceengine.VarianceItem) map[string]interface{} {
+	out := map[string]interface{}{
+		"field_name":     v.FieldName,
+		"variance_type":  v.VarianceType,
+		"expected_value": v.ExpectedValue,
+		"actual_value":   v.ActualValue,
+		"variance_delta": v.VarianceDelta,
+		"priority":       v.Priority,
+		"has_variance":   v.HasVariance,
+		"system_comment": v.SystemComment,
+	}
+	if expLabel := frequencyLabelFor(ctx, pool, v.FieldName, v.ExpectedValue); expLabel != "" {
+		out["expected_value_label"] = expLabel
+	}
+	if actLabel := frequencyLabelFor(ctx, pool, v.FieldName, v.ActualValue); actLabel != "" {
+		out["actual_value_label"] = actLabel
+	}
+	return out
+}
+
 func buildFDConfirmationVarianceRules(in fdConfirmationVarianceInput) []varianceengine.Rule {
 	return []varianceengine.Rule{
 		{FieldName: "interest_rate", VarianceType: varianceengine.TypeRate, ExpectedValue: formatNumber(in.BookedRate), ActualValue: formatNumber(in.ActualRate), Tolerance: rateTolerance, Priority: varianceengine.PriorityHigh},
@@ -733,10 +804,6 @@ func buildEditConfirmationFieldMap(confCols map[string]bool) map[string]string {
 		if confCols[dbCol] {
 			out[clientKey] = dbCol
 			continue
-		}
-		// bank_reference_number: fall back to bank_fd_ref_no when dedicated column missing
-		if clientKey == "bank_reference_number" && confCols["bank_fd_ref_no"] {
-			out[clientKey] = "bank_fd_ref_no"
 		}
 		// notes alias when only generic notes column exists
 		if clientKey == "notes" && confCols["notes"] {

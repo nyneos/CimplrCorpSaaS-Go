@@ -12,6 +12,7 @@ import (
 	"io"
 
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,6 +33,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			r.Body.Close()
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
 
+			lightDashboardRequest := isLightDashboardPrevalidationPath(r.URL.Path)
 			userID, err := validation.ExtractUserID(r)
 			if err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
@@ -85,12 +87,14 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 					entityNames = allEntityNames
 				}
 
-				all, errs := LoadEverythingIntoContext(ctx, db)
-				for k, v := range all {
-					ctx = context.WithValue(ctx, k, v)
-				}
-				if len(errs) > 0 {
-					ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
+				if !lightDashboardRequest {
+					all, errs := LoadEverythingIntoContext(ctx, db)
+					for k, v := range all {
+						ctx = context.WithValue(ctx, k, v)
+					}
+					if len(errs) > 0 {
+						ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
+					}
 				}
 				ctx = context.WithValue(ctx, "is_admin_override", true)
 				ctx = context.WithValue(ctx, "admin_override_by", "user")
@@ -126,17 +130,19 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 						entityIDs = allEntityIDs
 						entityNames = allEntityNames
 					}
-					all, errs := LoadEverythingIntoContext(ctx, db)
-					for k, v := range all {
-						ctx = context.WithValue(ctx, k, v)
+					if !lightDashboardRequest {
+						all, errs := LoadEverythingIntoContext(ctx, db)
+						for k, v := range all {
+							ctx = context.WithValue(ctx, k, v)
+						}
+						if len(errs) > 0 {
+							ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
+						}
 					}
 					// attach matched role info and audit
 					ctx = context.WithValue(ctx, "is_admin_override", true)
 					ctx = context.WithValue(ctx, "admin_override_by", "role")
 					ctx = context.WithValue(ctx, "admin_override_role", matchedRoles)
-					if len(errs) > 0 {
-						ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
-					}
 					// audit log
 					fmt.Printf("[AUDIT] AdminOverride applied for user=%s by=role matched=%v", userID, matchedRoles)
 					adminOverrideApplied = true
@@ -146,7 +152,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			// IMPORTANT: if admin override is enabled but not applied for this user,
 			// we must still load the standard approval context; otherwise bank/currency/account
 			// validations will fail for every request.
-			if !adminOverrideApplied {
+			if !adminOverrideApplied && !lightDashboardRequest {
 				banks, _ := loadApprovedBanks(ctx, db)
 				currencies, _ := loadApprovedCurrencies(ctx, db)
 				cashFlowCategories, _ := loadApprovedCashFlowCategories(ctx, db)
@@ -274,34 +280,45 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			ctx = context.WithValue(ctx, api.EntityIDsKey, entityIDs)
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
 
-			// Additional context debug dump (always log so we can inspect admin override and normal flows)
-			entityIDsDump := api.GetEntityIDsFromCtx(ctx)
-			bankNamesDump := api.GetBankNamesFromCtx(ctx)
-			currCodesDump := api.GetCurrencyCodesFromCtx(ctx)
-			// approved accounts stored as []map[string]string under "ApprovedBankAccounts"
-			acctNums := make([]string, 0)
-			if v := ctx.Value("ApprovedBankAccounts"); v != nil {
-				if bankAccounts, ok := v.([]map[string]string); ok {
-					for _, a := range bankAccounts {
-						if s, has := a["account_number"]; has && strings.TrimSpace(s) != "" {
-							acctNums = append(acctNums, strings.TrimSpace(s))
+			if prevalidationDebugEnabled() {
+				entityIDsDump := api.GetEntityIDsFromCtx(ctx)
+				bankNamesDump := api.GetBankNamesFromCtx(ctx)
+				currCodesDump := api.GetCurrencyCodesFromCtx(ctx)
+				// approved accounts stored as []map[string]string under "ApprovedBankAccounts"
+				acctNums := make([]string, 0)
+				if v := ctx.Value("ApprovedBankAccounts"); v != nil {
+					if bankAccounts, ok := v.([]map[string]string); ok {
+						for _, a := range bankAccounts {
+							if s, has := a["account_number"]; has && strings.TrimSpace(s) != "" {
+								acctNums = append(acctNums, strings.TrimSpace(s))
+							}
 						}
 					}
 				}
+				logger.LogInfo("[PREVALIDATION CONTEXT] user=%s entities=%v banks=%v accounts_count=%d currencies=%v is_admin_override=%v admin_override_by=%v\n",
+					userID,
+					entityIDsDump,
+					bankNamesDump,
+					len(acctNums),
+					currCodesDump,
+					ctx.Value("is_admin_override"),
+					ctx.Value("admin_override_by"),
+				)
 			}
-			logger.LogError("[PREVALIDATION CONTEXT] user=%s entities=%v banks=%v accounts_count=%d currencies=%v is_admin_override=%v admin_override_by=%v\n",
-				userID,
-				entityIDsDump,
-				bankNamesDump,
-				len(acctNums),
-				currCodesDump,
-				ctx.Value("is_admin_override"),
-				ctx.Value("admin_override_by"),
-			)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+func isLightDashboardPrevalidationPath(path string) bool {
+	return strings.HasPrefix(path, "/dash/investment/") ||
+		strings.HasPrefix(path, "/dash/benchmarks/") ||
+		strings.HasPrefix(path, "/dash/cash/forecast/")
+}
+
+func prevalidationDebugEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("PREVALIDATION_DEBUG")), "true")
 }
 func GetUserIDFromContext(ctx context.Context) string {
 	if userID, ok := ctx.Value("user_id").(string); ok {
@@ -751,10 +768,15 @@ func loadApprovedFolios(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 			m.folio_id,
 			m.folio_number,
 			COALESCE(m.amc_name,'') AS amc_name,
-			COALESCE(m.scheme_id,'') AS scheme_id,
+			COALESCE(fsm.scheme_ids,'') AS scheme_id,
 			COALESCE(m.entity_name,'') AS entity_name
 		FROM investment.masterfolio m
 		JOIN latest_approved l ON l.folio_id = m.folio_id
+		LEFT JOIN LATERAL (
+			SELECT string_agg(DISTINCT f.scheme_id::text, ',') AS scheme_ids
+			FROM investment.folioschememapping f
+			WHERE f.folio_id = m.folio_id
+		) fsm ON true
 		WHERE UPPER(m.status) = 'ACTIVE'
 		  AND COALESCE(m.is_deleted, false) = false
 		ORDER BY m.folio_number
