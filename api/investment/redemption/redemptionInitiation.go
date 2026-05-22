@@ -796,6 +796,7 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (redemption_id) action_id, redemption_id, actiontype, processing_status
 			FROM investment.auditactionredemption
 			WHERE redemption_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY redemption_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.RedemptionIDs)
@@ -1027,6 +1028,7 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (redemption_id) action_id, redemption_id, processing_status
 			FROM investment.auditactionredemption
 			WHERE redemption_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY redemption_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.RedemptionIDs)
@@ -1225,6 +1227,7 @@ func fetchRedemptionInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, i
 				a.checker_comment,
 				a.reason
 			FROM investment.auditactionredemption a
+			WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY a.redemption_id, a.requested_at DESC
 		),
 		history AS (
@@ -1377,6 +1380,7 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				requested_at,
 				checker_at
 			FROM investment.auditactionredemption
+			WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY redemption_id, requested_at DESC
 		),
 		resolved_folio AS (
@@ -1504,6 +1508,7 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactionredemption a
+				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY a.redemption_id, a.requested_at DESC
 			),
 			resolved_folio AS (
@@ -1854,6 +1859,7 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					processing_status,
 					requested_at
 				FROM investment.auditactionredemption
+				WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY redemption_id, requested_at DESC
 			),
 			confirmed_redemptions AS (

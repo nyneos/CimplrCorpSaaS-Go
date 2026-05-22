@@ -198,6 +198,78 @@ var (
 
 const investmentAdditionalFilesAuditTable = "investment.additional_file_audit"
 
+func recordInvestmentProposalMainUploadAudit(ctx context.Context, tx pgx.Tx, proposalID string, payload cashfiles.MainUploadAuditPayload) error {
+	return cashfiles.InsertMainUploadAudit(
+		ctx,
+		tx,
+		"investment.auditactionproposal",
+		"proposal_id",
+		"actiontype",
+		proposalID,
+		payload,
+	)
+}
+
+func recordInvestmentConfirmationMainUploadAudit(ctx context.Context, tx pgx.Tx, confirmationID string, payload cashfiles.MainUploadAuditPayload) error {
+	return cashfiles.InsertMainUploadAudit(
+		ctx,
+		tx,
+		"investment.auditactioninvestmentconfirmation",
+		"confirmation_id",
+		"actiontype",
+		confirmationID,
+		payload,
+	)
+}
+
+func recordInvestmentInitiationMainUploadAudit(ctx context.Context, tx pgx.Tx, initiationID string, payload cashfiles.MainUploadAuditPayload) error {
+	return cashfiles.InsertMainUploadAudit(
+		ctx,
+		tx,
+		"investment.auditactioninitiation",
+		"initiation_id",
+		"actiontype",
+		initiationID,
+		payload,
+	)
+}
+
+func recordRedemptionInitiationMainUploadAudit(ctx context.Context, tx pgx.Tx, redemptionID string, payload cashfiles.MainUploadAuditPayload) error {
+	return cashfiles.InsertMainUploadAudit(
+		ctx,
+		tx,
+		"investment.auditactionredemption",
+		"redemption_id",
+		"actiontype",
+		redemptionID,
+		payload,
+	)
+}
+
+func recordRedemptionConfirmationMainUploadAudit(ctx context.Context, tx pgx.Tx, redemptionConfirmID string, payload cashfiles.MainUploadAuditPayload) error {
+	return cashfiles.InsertMainUploadAudit(
+		ctx,
+		tx,
+		"investment.auditactionredemptionconfirmation",
+		"redemption_confirm_id",
+		"actiontype",
+		redemptionConfirmID,
+		payload,
+	)
+}
+
+func recordAccountingActivityMainUploadAudit(ctx context.Context, tx pgx.Tx, activityID string, payload cashfiles.MainUploadAuditPayload) error {
+	return cashfiles.InsertMainUploadAudit(
+		ctx,
+		tx,
+		"investment.auditactionaccountingactivity",
+		"activity_id",
+		"actiontype",
+		activityID,
+		payload,
+	)
+}
+
 func recordFDClosureMainUploadAudit(ctx context.Context, tx pgx.Tx, closureRequestID string, payload cashfiles.MainUploadAuditPayload) error {
 	reason, err := cashfiles.MainUploadAuditReasonJSON(payload)
 	if err != nil {
@@ -948,6 +1020,18 @@ func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Con
 	}
 
 	switch def.Module {
+	case proposalFilesDefinition.Module:
+		cfg.RecordMainUploadAudit = recordInvestmentProposalMainUploadAudit
+	case initiationFilesDefinition.Module:
+		cfg.RecordMainUploadAudit = recordInvestmentInitiationMainUploadAudit
+	case confirmationFilesDefinition.Module:
+		cfg.RecordMainUploadAudit = recordInvestmentConfirmationMainUploadAudit
+	case redemptionInitiationFilesDefinition.Module:
+		cfg.RecordMainUploadAudit = recordRedemptionInitiationMainUploadAudit
+	case redemptionConfirmationFilesDefinition.Module:
+		cfg.RecordMainUploadAudit = recordRedemptionConfirmationMainUploadAudit
+	case accountingActivityFilesDefinition.Module:
+		cfg.RecordMainUploadAudit = recordAccountingActivityMainUploadAudit
 	case fdClosureFilesDefinition.Module, fdRolloverFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDClosureMainUploadAudit
 	case fdInterestReceiptFilesDefinition.Module:

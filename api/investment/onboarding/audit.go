@@ -286,6 +286,29 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.masterfolio m ON m.folio_id = a.folio_id
 				JOIN investment.portfolio_onboarding_map pom ON pom.folio_id = a.folio_id AND pom.batch_id::text = $1
 
+				UNION ALL
+
+				SELECT
+					'BATCH_FILE' AS entity_type,
+					a.audit_id::text AS action_id,
+					a.parent_record_id AS entity_id,
+					COALESCE(f.stored_file_name, a.file_id, '') AS entity_name,
+					COALESCE(a.file_id, '') AS entity_code,
+					CASE WHEN a.action_type = 'CREATE' THEN 'UPLOAD_FILE' ELSE a.action_type END AS actiontype,
+					a.processing_status,
+					COALESCE(a.reason,'') AS reason,
+					COALESCE(a.requested_by,'') AS requested_by,
+					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+					COALESCE(a.checker_by,'') AS checker_by,
+					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+					COALESCE(a.checker_comment,'') AS checker_comment
+				FROM investment.additional_file_audit a
+				LEFT JOIN investment.onboard_batch_files f
+					ON f.file_id = a.file_id
+					AND f.batch_id::text = a.parent_record_id
+				WHERE a.module_key = 'investment-onboarding-additional'
+				  AND a.parent_record_id = $1
+
 				ORDER BY requested_at DESC`
 
 			entityRows, err := pgxPool.Query(ctx, filteredEntityQ, req.BatchID)

@@ -681,6 +681,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (initiation_id) action_id, initiation_id, actiontype, processing_status
 			FROM investment.auditactioninitiation
 			WHERE initiation_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY initiation_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.InitiationIDs)
@@ -835,6 +836,7 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (initiation_id) action_id, initiation_id, processing_status
 			FROM investment.auditactioninitiation
 			WHERE initiation_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY initiation_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.InitiationIDs)
@@ -919,6 +921,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.initiation_id, a.actiontype, a.processing_status, a.action_id,
 					a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason
 				FROM investment.auditactioninitiation a
+				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY a.initiation_id, a.requested_at DESC
 			),
 			history AS (
@@ -1136,6 +1139,7 @@ func fetchInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []strin
 				a.initiation_id, a.actiontype, a.processing_status, a.action_id,
 				a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason
 			FROM investment.auditactioninitiation a
+			WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY a.initiation_id, a.requested_at DESC
 		),
 		history AS (

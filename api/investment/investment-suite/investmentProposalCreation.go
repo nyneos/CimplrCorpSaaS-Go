@@ -350,6 +350,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 					ROW_NUMBER() OVER (PARTITION BY proposal_id ORDER BY requested_at DESC) AS rn
 				FROM investment.auditactionproposal
 				WHERE proposal_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			)
 			SELECT action_id, proposal_id, actiontype, processing_status
 			FROM ranked
@@ -578,6 +579,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 					processing_status
 				FROM investment.auditactionproposal
 				WHERE proposal_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			)
 			SELECT proposal_id
 			FROM ranked
@@ -701,6 +703,7 @@ func fetchProposalRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([
 				checker_comment,
 				reason
 			FROM investment.auditactionproposal
+			WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY proposal_id, requested_at DESC
 		),
 		history AS (
@@ -814,6 +817,7 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 					checker_comment,
 					reason
 				FROM investment.auditactionproposal
+				WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY proposal_id, requested_at DESC
 			),
 			history AS (
@@ -939,6 +943,7 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 					checker_comment,
 					reason
 				FROM investment.auditactionproposal
+				WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY proposal_id, requested_at DESC
 			),
 			history AS (
