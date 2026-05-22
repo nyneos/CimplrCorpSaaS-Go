@@ -106,9 +106,18 @@ func engResolveAccrualMonths(explicit, payoutOrCapMonths int) int {
 	return m
 }
 
-// engDaysDivisor returns the Actual/365 divisor (always 365 for the workbook
-// samples which all use Actual/365). Kept as a function for future extension.
-func engDaysDivisor() int { return 365 }
+// engDivisorAndDays returns the (divisor, days) pair for one accrual/cap/payout
+// period, honoring the day-count convention AND the bank config's weekend/holiday
+// accrual flags. It delegates to getDivisorAndDaysWithCal in cashflow.go so all
+// four conventions (ACT_365, ACT_360, ACT_ACT, 30_360) are handled consistently.
+// days is clamped to >= 1 so a zero-length period never produces zero interest.
+func engDivisorAndDays(conventionType string, start, end time.Time, cfg *BankConfig, cal HolidayCalendarInfo) (divisor, days int) {
+	divisor, days = getDivisorAndDaysWithCal(conventionType, start, end, cfg, cal)
+	if days <= 0 {
+		days = 1
+	}
+	return
+}
 
 // engRoundingFromCfg builds unified rounding settings from bank config.
 func engRoundingFromCfg(cfg *BankConfig) rounding.Config {
@@ -138,7 +147,7 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 	if hasTDS {
 		tRate = tdsCfg.TDSRate / 100.0
 	}
-	DC := engDaysDivisor()
+	convention := firstNonEmpty(p.DCInfo.ConventionType, normConventionStatic(p.Cfg.DayCountCode), "ACT_365")
 	rnd := engRoundingFromCfg(p.Cfg)
 
 	// Payout and accrual frequencies
@@ -192,8 +201,8 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 		// Emit all accrual rows in (lastPayoutDate, pd]
 		for _, ad := range accrualDates {
 			if ad.After(lastPayoutDate) && !ad.After(pd) {
-				tenor := engDaysBetween(prevRowDate, ad)
-				gross := rnd.RoundInterest(P * r * float64(tenor) / float64(DC))
+				periodDivisor, periodDays := engDivisorAndDays(convention, prevRowDate, ad, p.Cfg, p.CalInfo)
+				gross := rnd.RoundInterest(P * r * float64(periodDays) / float64(periodDivisor))
 				if gross < 0 {
 					gross = 0
 				}
@@ -208,26 +217,26 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 					CashflowType:     "NA",
 					PeriodStartDate:  prevRowDate,
 					PeriodEndDate:    ad,
-					PeriodDays:       tenor,
+					PeriodDays:       periodDays,
 					OpeningPrincipal: P,
 					InterestAccrued:  gross,
 					ClosingPrincipal: P,
 					TDSAmount:        provTDS, // provisional TDS — not actually deducted on SI accrual
 					NetCashFlow:      gross,   // net = gross for SI accrual
 					DayCountCode:     dcCode,
-					Divisor:          DC,
+					Divisor:          periodDivisor,
 				})
 				prevRowDate = ad
 			}
 		}
 
 		// Compute payout row (Interest Payout or Maturity)
-		payoutTenor := engDaysBetween(lastPayoutDate, pd)
+		payoutDivisor, payoutDays := engDivisorAndDays(convention, lastPayoutDate, pd, p.Cfg, p.CalInfo)
 		var payoutGross float64
 		if isMaturity {
-			payoutGross = rnd.RoundFinal(P * r * float64(payoutTenor) / float64(DC))
+			payoutGross = rnd.RoundFinal(P * r * float64(payoutDays) / float64(payoutDivisor))
 		} else {
-			payoutGross = rnd.RoundInterest(P * r * float64(payoutTenor) / float64(DC))
+			payoutGross = rnd.RoundInterest(P * r * float64(payoutDays) / float64(payoutDivisor))
 		}
 		if payoutGross < 0 {
 			payoutGross = 0
@@ -264,7 +273,7 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 				CashflowType:     "INFLOW",
 				PeriodStartDate:  lastPayoutDate,
 				PeriodEndDate:    pd,
-				PeriodDays:       payoutTenor,
+				PeriodDays:       payoutDays,
 				OpeningPrincipal: P,
 				InterestAccrued:  payoutGross,
 				ClosingPrincipal: P,
@@ -274,7 +283,7 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 				TDSRevL:          tdsRevL,
 				DueNotAccrued:    dueNotAccr,
 				DayCountCode:     dcCode,
-				Divisor:          DC,
+				Divisor:          payoutDivisor,
 			})
 			// Principal Return
 			rows = append(rows, CashflowRow{
@@ -299,7 +308,7 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 				CashflowType:     "INFLOW",
 				PeriodStartDate:  lastPayoutDate,
 				PeriodEndDate:    pd,
-				PeriodDays:       payoutTenor,
+				PeriodDays:       payoutDays,
 				OpeningPrincipal: P,
 				InterestAccrued:  payoutGross,
 				ClosingPrincipal: P,
@@ -309,7 +318,7 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 				TDSRevL:          tdsRevL,
 				DueNotAccrued:    dueNotAccr,
 				DayCountCode:     dcCode,
-				Divisor:          DC,
+				Divisor:          payoutDivisor,
 			})
 		}
 
@@ -335,7 +344,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 	if hasTDS {
 		tRate = tdsCfg.TDSRate / 100.0
 	}
-	DC := engDaysDivisor()
+	convention := firstNonEmpty(p.DCInfo.ConventionType, normConventionStatic(p.Cfg.DayCountCode), "ACT_365")
 	rnd := engRoundingFromCfg(p.Cfg)
 
 	// Cap frequency (from Freq)
@@ -428,8 +437,8 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 		// ── Emit ACCRUAL rows in (lastCapDate, cd] ──────────────────────────
 		for _, ad := range accrualDates {
 			if ad.After(lastCapDate) && !ad.After(cd) {
-				tenor := engDaysBetween(prevRowDate, ad)
-				gross := rnd.RoundInterest(F * r * float64(tenor) / float64(DC))
+				periodDivisor, periodDays := engDivisorAndDays(convention, prevRowDate, ad, p.Cfg, p.CalInfo)
+				gross := rnd.RoundInterest(F * r * float64(periodDays) / float64(periodDivisor))
 				if gross < 0 {
 					gross = 0
 				}
@@ -444,22 +453,22 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 					CashflowType:     "NA",
 					PeriodStartDate:  prevRowDate,
 					PeriodEndDate:    ad,
-					PeriodDays:       tenor,
+					PeriodDays:       periodDays,
 					OpeningPrincipal: Frnd, // display rounded F
 					InterestAccrued:  gross,
 					ClosingPrincipal: Frnd,
 					TDSAmount:        provTDS,
 					NetCashFlow:      0,
 					DayCountCode:     dcCode,
-					Divisor:          DC,
+					Divisor:          periodDivisor,
 				})
 				prevRowDate = ad
 			}
 		}
 
 		// ── Emit CAPITALIZATION row at cd ────────────────────────────────────
-		capTenor := engDaysBetween(lastCapDate, cd)
-		capGross := rnd.RoundInterest(F * r * float64(capTenor) / float64(DC))
+		capDivisor, capDays := engDivisorAndDays(convention, lastCapDate, cd, p.Cfg, p.CalInfo)
+		capGross := rnd.RoundInterest(F * r * float64(capDays) / float64(capDivisor))
 		if capGross < 0 {
 			capGross = 0
 		}
@@ -477,7 +486,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 			CashflowType:      "CAP",
 			PeriodStartDate:   lastCapDate,
 			PeriodEndDate:     cd,
-			PeriodDays:        capTenor,
+			PeriodDays:        capDays,
 			OpeningPrincipal:  Frnd, // display rounded F
 			InterestAccrued:   capGross,
 			CapitalizedAmount: capGross - capTDS,
@@ -486,7 +495,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 			NetCashFlow:       0,
 			NetAmount:         capJRnd,
 			DayCountCode:      dcCode,
-			Divisor:           DC,
+			Divisor:           capDivisor,
 		})
 		prevCapJRaw = capJRaw
 		prevCapJRnd = capJRnd
@@ -504,7 +513,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 				}
 			}
 
-			payoutTenor := engDaysBetween(lastPayoutDate, cd)
+			_, payoutDays := engDivisorAndDays(convention, lastPayoutDate, cd, p.Cfg, p.CalInfo)
 			var payoutGross float64
 			if isMaturity {
 				payoutGross = rnd.RoundFinal(capJRaw - P)
@@ -532,7 +541,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 					CashflowType:    "INFLOW",
 					PeriodStartDate: lastPayoutDate,
 					PeriodEndDate:   cd,
-					PeriodDays:      payoutTenor,
+					PeriodDays:      payoutDays,
 					InterestAccrued: payoutGross,
 					TDSAmount:       matTDS,
 					NetCashFlow:     payoutGross - matTDS,
@@ -563,7 +572,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 					CashflowType:    "INFLOW",
 					PeriodStartDate: lastPayoutDate,
 					PeriodEndDate:   cd,
-					PeriodDays:      payoutTenor,
+					PeriodDays:      payoutDays,
 					InterestAccrued: payoutGross,
 					TDSAmount:       0,
 					NetCashFlow:     payoutGross,
