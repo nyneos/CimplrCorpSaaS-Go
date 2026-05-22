@@ -16,7 +16,7 @@ import (
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 
 	"github.com/jackc/pgx/v5"
-
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -76,6 +76,25 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		// Block if entity already has a config with the same (frequency, granularity) combination.
+		// Same entity may have e.g. MONTHLY+MONTHLY and YEARLY+MONTHLY as separate configs,
+		// but not two MONTHLY+MONTHLY configs.
+		var existingConfigID string
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(config_id,'')
+			FROM investment.fd_accrual_schedule_config
+			WHERE entity_id           = $1
+			  AND schedule_frequency  = $2
+			  AND accrual_granularity = $3
+			  AND COALESCE(is_deleted, false) = false
+			LIMIT 1`, req.EntityID, req.ScheduleFrequency, req.AcrualGranularity).Scan(&existingConfigID)
+		if existingConfigID != "" {
+			api.RespondWithError(w, http.StatusConflict, fmt.Sprintf(
+				"entity already has a %s/%s schedule config (%s); update or delete it first",
+				req.ScheduleFrequency, req.AcrualGranularity, existingConfigID))
+			return
+		}
 
 		runTimeDB, runTimeErr := parseRunTimeForDB(req.RunTime)
 		if runTimeErr != nil {
@@ -1040,9 +1059,8 @@ func fireScheduledRun(
 		bankFilter)
 
 	// ── Duplicate guard ─────────────────────────────────────────────────────
-	// Skip if ANY scheduler-created run already exists for this entity+period+mode
-	// that is not in a terminal failure state.  This prevents server restarts or
-	// tick races from creating multiple runs for the same period.
+	// Skip if a scheduler-created run already exists for this entity+period+mode
+	// that is not in a terminal failure state.
 	var existingRun string
 	_ = pool.QueryRow(ctx, `
 		SELECT COALESCE(run_id,'') FROM investment.fd_accrual_run
@@ -1058,6 +1076,53 @@ func fireScheduledRun(
 	if existingRun != "" {
 		api.LogInfo("[FDAccrual] Scheduler skip entity=%s period=%s→%s mode=%s — run %s already exists",
 			entityID, periodStart.Format(constants.DateFormat), periodEnd.Format(constants.DateFormat), runMode, existingRun)
+		logAccrualEvent(ctx, pool, LogAccrualParams{
+			RunID:     existingRun,
+			Level:     "INFO",
+			EventType: "SCHEDULER_SKIPPED_DUPLICATE",
+			Message: fmt.Sprintf("Scheduler skipped: run %s already covers entity=%s period=%s→%s mode=%s config=%s",
+				existingRun, entityID,
+				periodStart.Format(constants.DateFormat), periodEnd.Format(constants.DateFormat),
+				runMode, configID),
+			Detail: map[string]interface{}{
+				"schedule_config_id":   configID,
+				"duplicate_run_id":     existingRun,
+				"accrual_period_start": periodStart.Format(constants.DateFormat),
+				"accrual_period_end":   periodEnd.Format(constants.DateFormat),
+				"run_mode":             runMode,
+			},
+		})
+		// When the skipped run was FINAL, auto-fire a companion SIMULATION run so
+		// the user gets a fresh simulation for this period (unless one already exists).
+		if strings.ToUpper(runMode) == "FINAL" {
+			var existingSim string
+			_ = pool.QueryRow(ctx, `
+				SELECT COALESCE(run_id,'') FROM investment.fd_accrual_run
+				WHERE entity_id=$1
+				  AND accrual_period_start=$2
+				  AND accrual_period_end=$3
+				  AND run_mode='SIMULATION'
+				  AND created_by='SCHEDULER'
+				  AND run_status NOT IN ('FAILED','VALIDATION_FAILED')
+				LIMIT 1`,
+				entityID, periodStart, periodEnd,
+			).Scan(&existingSim)
+			if existingSim == "" {
+				fireScheduledRun(ctx, pool, FireScheduledParams{
+					ConfigID:     p.ConfigID,
+					EntityID:     p.EntityID,
+					EntityName:   p.EntityName,
+					ScheduleFreq: p.ScheduleFreq,
+					BankFilter:   p.BankFilter,
+					FDStatus:     p.FDStatus,
+					RunMode:      "SIMULATION",
+					RunDay:       p.RunDay,
+					AutoSubmit:   false, // simulations never auto-submit
+					Granularity:  p.Granularity,
+					ScheduledAt:  p.ScheduledAt,
+				})
+			}
+		}
 		updateLastRunStatus(ctx, pool, configID, existingRun, "SKIPPED_DUPLICATE")
 		return
 	}
@@ -1300,6 +1365,16 @@ func parseRunTimeComponents(runTime interface{}) (hour, min, sec int, ok bool) {
 	switch t := runTime.(type) {
 	case time.Time:
 		return t.Hour(), t.Minute(), t.Second(), true
+	case pgtype.Time:
+		// pgx v5 returns PostgreSQL TIME columns as pgtype.Time{Microseconds, Valid}
+		if !t.Valid {
+			return 0, 0, 0, false
+		}
+		total := t.Microseconds / 1_000_000 // convert to seconds
+		h := int(total / 3600)
+		m := int((total % 3600) / 60)
+		s := int(total % 60)
+		return h, m, s, true
 	case string:
 		if t == "" {
 			return 0, 0, 0, false
