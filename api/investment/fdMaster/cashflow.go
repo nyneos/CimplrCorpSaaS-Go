@@ -52,6 +52,10 @@ type FDRecord struct {
 	// "AT_EACH_PAYOUT" — principal resets to original after each INTEREST_RECEIPT
 	// "AT_MATURITY"    — principal compounds continuously until maturity (default)
 	ResetType string
+	// AccrualFrequencyCode is the accrual step frequency (e.g. "MONTHLY", "QUARTERLY").
+	// Stored as accrual_frequency_code on fd_booking_request / fd_master.
+	// Used to derive AccrualFreqMonths for generateCashflowSchedule.
+	AccrualFrequencyCode string
 }
 
 // InterestType is an alias kept for backward compat inside cashflow calculations.
@@ -401,6 +405,29 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 		(rec.TenorMonths > 0 || rec.TenureYears > 0) {
 		rec.TenorDays = int(rec.MaturityDate.Sub(rec.ValueDate).Hours() / 24)
 	}
+	// Read payout_frequency_id from booking — overrides frequency_id as the cash-payout
+	// frequency for COMPOUND FDs that compound at one frequency but pay out at another.
+	if bookingCols["payout_frequency_id"] {
+		var v string
+		_ = exec.QueryRow(ctx, `
+			SELECT COALESCE(NULLIF(b.payout_frequency_id,''), '')
+			FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE c.confirmation_id = $1`, confirmationID).Scan(&v)
+		if v != "" {
+			rec.InterestPayoutFrequency = v
+		}
+	}
+	// Read accrual_frequency_code — controls accrual step months in the cashflow engine.
+	if bookingCols["accrual_frequency_code"] {
+		var v string
+		_ = exec.QueryRow(ctx, `
+			SELECT COALESCE(NULLIF(b.accrual_frequency_code,''), '')
+			FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE c.confirmation_id = $1`, confirmationID).Scan(&v)
+		rec.AccrualFrequencyCode = v
+	}
 	return rec, nil
 }
 
@@ -499,6 +526,24 @@ func loadFDRecordByFDID(ctx context.Context, exec queryExecutor, fdID string) (*
 	if rec.TenorDays == 0 && !rec.MaturityDate.IsZero() && !rec.ValueDate.IsZero() &&
 		(rec.TenorMonths > 0 || rec.TenureYears > 0) {
 		rec.TenorDays = int(rec.MaturityDate.Sub(rec.ValueDate).Hours() / 24)
+	}
+	// Override payout_frequency_id and accrual_frequency_code from fd_master when present
+	// (fd_master is the authoritative record after activation).
+	if masterCols["payout_frequency_id"] {
+		var v string
+		_ = exec.QueryRow(ctx, fmt.Sprintf(
+			"SELECT COALESCE(NULLIF(payout_frequency_id,''), '') FROM investment.fd_master WHERE %s=$1", keyCol), fdID).Scan(&v)
+		if v != "" {
+			rec.InterestPayoutFrequency = v
+		}
+	}
+	if masterCols["accrual_frequency_code"] {
+		var v string
+		_ = exec.QueryRow(ctx, fmt.Sprintf(
+			"SELECT COALESCE(NULLIF(accrual_frequency_code,''), '') FROM investment.fd_master WHERE %s=$1", keyCol), fdID).Scan(&v)
+		if v != "" {
+			rec.AccrualFrequencyCode = v
+		}
 	}
 	return rec, nil
 }
@@ -2730,10 +2775,6 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 	cfg, _ := loadBankConfig(ctx, exec, fd.BankConfigID)
 	logger.LogInfo("[CFGEN][%s] ✓ loadBankConfig (+%s) calCode=%q dcCode=%q", fd.ConfirmationID, time.Since(tg).Round(time.Millisecond), cfg.HolidayCalendarCode, cfg.DayCountCode)
 
-	t1 := time.Now()
-	freq, _ := loadCompoundingFreq(ctx, exec, firstNonEmpty(fd.CompoundingFrequency, fd.InterestPayoutFrequency, fd.FrequencyID))
-	logger.LogInfo("[CFGEN][%s] ✓ loadCompoundingFreq (+%s)", fd.ConfirmationID, time.Since(t1).Round(time.Millisecond))
-
 	t2 := time.Now()
 	tds, _ := loadTDSConfig(ctx, exec, fd.TDSPlanID)
 	logger.LogInfo("[CFGEN][%s] ✓ loadTDSConfig (+%s)", fd.ConfirmationID, time.Since(t2).Round(time.Millisecond))
@@ -2760,14 +2801,49 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 		}
 	}
 
+	isCompound := firstNonEmpty(itInfo.CalculationMethod, strings.ToUpper(fd.InterestTypeCode), "SIMPLE") == "COMPOUND"
+
+	// Mirror the simulator: split compounding (cap) and cash-payout frequencies.
+	// fd.FrequencyID / fd.CompoundingFrequency = cap freq.
+	// fd.InterestPayoutFrequency = payout_frequency_id from booking/master (may equal FrequencyID).
+	t1 := time.Now()
+	capFreqRef, payoutFreqRef := resolveCapAndPayoutFreqRefs(isCompound,
+		firstNonEmpty(fd.CompoundingFrequency, fd.FrequencyID),
+		fd.InterestPayoutFrequency)
+	capFreq, _ := loadCompoundingFreq(ctx, exec, capFreqRef)
+	var payoutFreq *CompoundingFreq
+	if payoutFreqRef != "" && !strings.EqualFold(payoutFreqRef, capFreqRef) {
+		payoutFreq, _ = loadCompoundingFreq(ctx, exec, payoutFreqRef)
+	} else {
+		payoutFreq = capFreq
+	}
+	payoutFreq = ensureAtMaturityPayoutFreq(payoutFreqRef, payoutFreq)
+	if !isCompound {
+		capFreq = payoutFreq
+	}
+	logger.LogInfo("[CFGEN][%s] ✓ loadCompoundingFreq cap=%q payout=%q (+%s)", fd.ConfirmationID, capFreqRef, payoutFreqRef, time.Since(t1).Round(time.Millisecond))
+
+	// Derive accrual step months from AccrualFrequencyCode (mirrors simulator path).
+	accrualFreqMonths := 1
+	if code := strings.ToUpper(strings.TrimSpace(fd.AccrualFrequencyCode)); code != "" {
+		if m := freqTypeToMonths(code); m > 0 {
+			accrualFreqMonths = m
+		}
+	}
+
 	// Load holiday calendar from bank config's holiday_calendar_code.
 	t5 := time.Now()
 	calInfo := loadHolidayCalendar(ctx, exec, cfg.HolidayCalendarCode, fd.ValueDate, fd.MaturityDate)
 	logger.LogInfo("[CFGEN][%s] ✓ loadHolidayCalendar (+%s) holidays=%d", fd.ConfirmationID, time.Since(t5).Round(time.Millisecond), len(calInfo.HolidayDates))
 
-	logger.LogInfo("[CFGEN][%s] dispatch: calcMethod=%s resetType=%q firstPayout=%v firstCap=%v",
-		fd.ConfirmationID, itInfo.CalculationMethod, fd.ResetType, fd.FirstPayoutDate, fd.FirstCapitalizationDate)
-	rows := generateCashflowSchedule(CashflowScheduleParams{FD: fd, Cfg: cfg, Freq: freq, TDSCfg: tds, DCInfo: dcInfo, ITInfo: itInfo, CalInfo: calInfo})
+	logger.LogInfo("[CFGEN][%s] dispatch: calcMethod=%s resetType=%q firstPayout=%v firstCap=%v accrualFreqMonths=%d",
+		fd.ConfirmationID, itInfo.CalculationMethod, fd.ResetType, fd.FirstPayoutDate, fd.FirstCapitalizationDate, accrualFreqMonths)
+	rows := generateCashflowSchedule(CashflowScheduleParams{
+		FD: fd, Cfg: cfg, Freq: capFreq, TDSCfg: tds,
+		DCInfo: dcInfo, ITInfo: itInfo, CalInfo: calInfo,
+		PayoutFreqOverride: payoutFreq,
+		AccrualFreqMonths:  accrualFreqMonths,
+	})
 	logger.LogInfo("[CFGEN][%s] ✓ generateCashflowSchedule → %d rows TOTAL (+%s)", fd.ConfirmationID, len(rows), time.Since(tg).Round(time.Millisecond))
 
 	// Mirror the simulator path: apply grace period and stamp cumulative fields
@@ -2777,8 +2853,6 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 	if tds != nil {
 		tdsRate = tds.TDSRate
 	}
-	calcMethod := firstNonEmpty(itInfo.CalculationMethod, strings.ToUpper(fd.InterestTypeCode), "SIMPLE")
-	isCompound := calcMethod == "COMPOUND"
 	rows = stampCumulativeFields(rows, fd, tdsRate, isCompound)
 	rows = applyFirstPayoutDateOverride(rows, fd)
 	renumberCashflowRows(rows)
