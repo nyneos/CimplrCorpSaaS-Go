@@ -1259,17 +1259,18 @@ func parseRunTimeForDB(s string) (interface{}, error) {
 	return fmt.Sprintf("%02d:%02d:%02d", h, m, sec), nil
 }
 
-// computeNextRunAt combines calendar day (IST) + run_time and ensures the result is after `from`.
+// computeNextRunAt combines calendar day (IST) + run_time and ensures the result is strictly after `from`.
 func computeNextRunAt(frequency string, runDay int, runTime interface{}, from time.Time) time.Time {
 	fromUTC := from.UTC()
 	for attempt := 0; attempt < 48; attempt++ {
 		dayUTC := computeNextRunForConfig(frequency, runDay, fromUTC)
 		result := applyRunTimeUTC(dayUTC, runTime)
-		if result.After(fromUTC) {
+		if result.After(from) {
 			return result
 		}
-		// This calendar slot (day at run_time) already passed — search from next minute.
-		fromUTC = result.Add(time.Minute)
+		// This calendar slot (day at run_time) already passed.
+		// We must advance fromUTC past the end of this calendar day to force the next period.
+		fromUTC = time.Date(fromUTC.Year(), fromUTC.Month(), fromUTC.Day(), 0, 0, 0, 0, fromUTC.Location()).AddDate(0, 0, 1)
 	}
 	dayUTC := computeNextRunForConfig(frequency, runDay, fromUTC)
 	return applyRunTimeUTC(dayUTC, runTime)

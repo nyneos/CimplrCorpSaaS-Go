@@ -1827,10 +1827,10 @@ func cimplrRejectInitiates(ctx context.Context, pool *pgxpool.Pool, ids []string
 	return results
 }
 
-func cimplrAssertConfirmApprovable(ctx context.Context, pool *pgxpool.Pool, closureConfirmID string) error {
+func cimplrAssertConfirmApprovable(ctx context.Context, exec cimplrRowQuerier, closureConfirmID string) error {
 	var hasUnresolved, hasVariance bool
 	var resolutionAction string
-	err := pool.QueryRow(ctx, `
+	err := exec.QueryRow(ctx, `
 		SELECT COALESCE(has_unresolved_variance,false), COALESCE(has_variance,false),
 		       COALESCE(resolution_action,'')
 		FROM cimplr.fd_closure_confirm
@@ -1844,7 +1844,7 @@ func cimplrAssertConfirmApprovable(ctx context.Context, pool *pgxpool.Pool, clos
 		return fmt.Errorf("cannot approve: unresolved variance exists — validate amounts, resolve variances, or set resolution_action to ACCEPT")
 	}
 	var openCount int
-	_ = pool.QueryRow(ctx, `
+	_ = exec.QueryRow(ctx, `
 		SELECT COUNT(*)::int FROM investment.variance_log
 		WHERE module_code=$1 AND record_id=$2 AND status='OPEN'`,
 		"FD_CLOSURE", closureConfirmID,
@@ -1909,7 +1909,14 @@ func cimplrApproveConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string
 							WHERE closure_initiate_id=$1 AND is_deleted=false`, initiateID)
 					}
 				default:
+					api.LogInfo("[CimplrFDClosure] confirm finalize starting (no approval engine) confirm_id=%s actor=%s", id, userEmail)
 					err = finalizeCimplrConfirmApproval(ctx, pool, id, userEmail, comment)
+					if err != nil {
+						api.LogError("[CimplrFDClosure] confirm finalize failed (no approval engine) confirm_id=%s: %v", id, err)
+						_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET posting_status='FAILED' WHERE closure_confirm_id=$1`, id)
+					} else {
+						api.LogInfo("[CimplrFDClosure] confirm finalize succeeded (no approval engine) confirm_id=%s", id)
+					}
 				}
 			}
 			if err != nil {
@@ -1980,9 +1987,22 @@ func cimplrActOnApproval(ctx context.Context, pool *pgxpool.Pool, recordID, user
 }
 
 func finalizeCimplrConfirmApproval(ctx context.Context, pool *pgxpool.Pool, closureConfirmID, actorEmail, comment string) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if err := finalizeCimplrConfirmApprovalTx(ctx, tx, closureConfirmID, actorEmail, comment); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func finalizeCimplrConfirmApprovalTx(ctx context.Context, tx pgx.Tx, closureConfirmID, actorEmail, comment string) error {
 	var closureType string
 	var accountingPosted bool
-	if err := pool.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		SELECT closure_type, accounting_posted
 		FROM cimplr.fd_closure_confirm
 		WHERE closure_confirm_id=$1 AND is_deleted=false`, closureConfirmID,
@@ -1992,23 +2012,19 @@ func finalizeCimplrConfirmApproval(ctx context.Context, pool *pgxpool.Pool, clos
 	if accountingPosted {
 		return nil
 	}
-	if err := cimplrAssertConfirmApprovable(ctx, pool, closureConfirmID); err != nil {
+	if err := cimplrAssertConfirmApprovable(ctx, tx, closureConfirmID); err != nil {
 		return err
 	}
 	if closureType == "ROLLOVER" {
-		return createCimplrRolloverBooking(ctx, pool, closureConfirmID, actorEmail, comment)
+		return createCimplrRolloverBookingTx(ctx, tx, closureConfirmID, actorEmail, comment)
 	}
-	return postCimplrClosureJournals(ctx, pool, closureConfirmID, actorEmail, comment)
+	return postCimplrClosureJournalsTx(ctx, tx, closureConfirmID, actorEmail, comment)
 }
 
-func postCimplrClosureJournals(ctx context.Context, pool *pgxpool.Pool, closureConfirmID, actorEmail, comment string) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+func postCimplrClosureJournalsTx(ctx context.Context, tx pgx.Tx, closureConfirmID, actorEmail, comment string) error {
 
-	var fdID, closureType, entityID, entityName, sourceAccountID string
+	var err error
+	var fdID, closureType, entityID, entityName, sourceAccountID, prematureType, bookingID string
 	var principal, interest, tds, penalty, netPayout float64
 	var accountingPosted bool
 	err = tx.QueryRow(ctx, `
@@ -2017,15 +2033,17 @@ func postCimplrClosureJournals(ctx context.Context, pool *pgxpool.Pool, closureC
 		       COALESCE(c.interest_received, c.interest_expected, 0),
 		       COALESCE(c.tds_deducted, c.tds_expected, 0),
 		       CASE WHEN c.closure_type='PREMATURE' THEN COALESCE(pc.penalty_amount,0) ELSE 0 END,
+		       CASE WHEN c.closure_type='PREMATURE' THEN COALESCE(pc.premature_type,'FULL') ELSE 'FULL' END,
 		       COALESCE(c.net_amount_received, c.net_expected, 0),
-		       COALESCE(b.source_account_id,''), c.accounting_posted
+		       COALESCE(b.source_account_id,''), c.accounting_posted,
+		       COALESCE(b.booking_id, '')
 		FROM cimplr.fd_closure_confirm c
 		LEFT JOIN cimplr.fd_closure_premature_confirm pc ON pc.closure_confirm_id=c.closure_confirm_id AND pc.is_deleted=false
 		LEFT JOIN investment.fd_master m ON m.fd_id=c.fd_id
 		LEFT JOIN investment.fd_booking_request b ON b.booking_id=m.booking_id
 		WHERE c.closure_confirm_id=$1 AND c.is_deleted=false
 		FOR UPDATE OF c`, closureConfirmID,
-	).Scan(&fdID, &closureType, &entityID, &entityName, &principal, &interest, &tds, &penalty, &netPayout, &sourceAccountID, &accountingPosted)
+	).Scan(&fdID, &closureType, &entityID, &entityName, &principal, &interest, &tds, &penalty, &prematureType, &netPayout, &sourceAccountID, &accountingPosted, &bookingID)
 	if err != nil {
 		return err
 	}
@@ -2101,12 +2119,22 @@ func postCimplrClosureJournals(ctx context.Context, pool *pgxpool.Pool, closureC
 
 	newFDStatus := "MATURED"
 	if closureType == "PREMATURE" {
-		newFDStatus = "PREMATURELY_CLOSED"
+		if prematureType == "PARTIAL" {
+			newFDStatus = "ACTIVE"
+		} else {
+			newFDStatus = "PREMATURELY_CLOSED"
+		}
 	}
 	_, err = tx.Exec(ctx, `UPDATE investment.fd_master SET fd_status=$1, closed_at=NOW(), closed_by=$2, accounting_posted=true, closure_request_id=$3, updated_by=$4, updated_at=NOW() WHERE fd_id=$5`,
 		newFDStatus, actorEmail, closureConfirmID, actorEmail, fdID)
 	if err != nil {
 		return err
+	}
+	if bookingID != "" {
+		_, err = tx.Exec(ctx, `UPDATE investment.fd_booking_request SET booking_status=$1, updated_by=$2, updated_at=NOW() WHERE booking_id=$3`, newFDStatus, actorEmail, bookingID)
+		if err != nil {
+			return err
+		}
 	}
 	_, err = tx.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET closure_status='POSTED', posting_status='POSTED', accounting_posted=true, journal_entry_id=$1 WHERE closure_confirm_id=$2`, entryID, closureConfirmID)
 	if err != nil {
@@ -2115,16 +2143,12 @@ func postCimplrClosureJournals(ctx context.Context, pool *pgxpool.Pool, closureC
 	if err := insertCimplrConfirmAudit(ctx, tx, closureConfirmID, "", "POST", "POSTED", firstNonEmpty(comment, "Journals posted on approval"), actorEmail, map[string]interface{}{"accounting_posted": false, "journal_entry_id": ""}); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
-func createCimplrRolloverBooking(ctx context.Context, pool *pgxpool.Pool, closureConfirmID, actorEmail, comment string) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+func createCimplrRolloverBookingTx(ctx context.Context, tx pgx.Tx, closureConfirmID, actorEmail, comment string) error {
 
+	var err error
 	var (
 		fdID, entityID, entityName, bankID, bankName, bankConfigID, sourceAccountID string
 		frequencyID, tdsPlanID, dayCountCode, interestTypeCode                      string
@@ -2134,6 +2158,7 @@ func createCimplrRolloverBooking(ctx context.Context, pool *pgxpool.Pool, closur
 		newTenorDays                                                                int
 		expectedStart, expectedMaturity                                             time.Time
 		accountingPosted                                                            bool
+		originalBookingID                                                           string
 	)
 	err = tx.QueryRow(ctx, `
 		SELECT c.fd_id, COALESCE(c.entity_id,''), COALESCE(c.entity_name,''),
@@ -2148,14 +2173,14 @@ func createCimplrRolloverBooking(ctx context.Context, pool *pgxpool.Pool, closur
 		       COALESCE(c.interest_received, c.interest_expected, 0),
 		       COALESCE(c.tds_deducted, c.tds_expected, 0),
 		       COALESCE(c.net_amount_received, c.net_expected, rc.new_fd_amount, 0),
-		       c.accounting_posted
+		       c.accounting_posted, COALESCE(b.booking_id, '')
 		FROM cimplr.fd_closure_confirm c
 		JOIN cimplr.fd_closure_rollover_confirm rc ON rc.closure_confirm_id=c.closure_confirm_id AND rc.is_deleted=false
 		JOIN investment.fd_master m ON m.fd_id=c.fd_id
 		LEFT JOIN investment.fd_booking_request b ON b.booking_id=m.booking_id
 		WHERE c.closure_confirm_id=$1 AND c.is_deleted=false
 		FOR UPDATE OF c`, closureConfirmID,
-	).Scan(&fdID, &entityID, &entityName, &bankID, &bankName, &bankConfigID, &sourceAccountID, &frequencyID, &tdsPlanID, &dayCountCode, &interestTypeCode, &newBankID, &newBankName, &newAccountID, &amountBasis, &newFDAmount, &newTenorDays, &newInterestRate, &expectedStart, &expectedMaturity, &principal, &interest, &tds, &netPayout, &accountingPosted)
+	).Scan(&fdID, &entityID, &entityName, &bankID, &bankName, &bankConfigID, &sourceAccountID, &frequencyID, &tdsPlanID, &dayCountCode, &interestTypeCode, &newBankID, &newBankName, &newAccountID, &amountBasis, &newFDAmount, &newTenorDays, &newInterestRate, &expectedStart, &expectedMaturity, &principal, &interest, &tds, &netPayout, &accountingPosted, &originalBookingID)
 	if err != nil {
 		return err
 	}
@@ -2165,11 +2190,17 @@ func createCimplrRolloverBooking(ctx context.Context, pool *pgxpool.Pool, closur
 	targetBankID := firstNonEmpty(newBankID, bankID)
 	targetBankName := firstNonEmpty(newBankName, bankName)
 	targetAccountID := firstNonEmpty(newAccountID, sourceAccountID)
+	api.LogInfo("[CimplrRollover] confirm_id=%s fd_id=%s entityID=%q entityName=%q bankID=%q bankName=%q sourceAccountID=%q newAccountID=%q targetAccountID=%q newFDAmount=%v newTenorDays=%v newInterestRate=%v amountBasis=%q expectedStart=%v",
+		closureConfirmID, fdID, entityID, entityName, bankID, bankName, sourceAccountID, newAccountID, targetAccountID, newFDAmount, newTenorDays, newInterestRate, amountBasis, expectedStart)
 	if targetBankID == "" || targetBankName == "" || targetAccountID == "" || entityID == "" || entityName == "" {
-		return fmt.Errorf("rollover booking requires entity, bank and source account details")
+		api.LogError("[CimplrRollover] FAILED validation confirm_id=%s: targetBankID=%q targetBankName=%q targetAccountID=%q entityID=%q entityName=%q",
+			closureConfirmID, targetBankID, targetBankName, targetAccountID, entityID, entityName)
+		return fmt.Errorf("rollover booking requires entity, bank and source account details (bankID=%q bankName=%q accountID=%q)", targetBankID, targetBankName, targetAccountID)
 	}
 	if newFDAmount <= 0 || newTenorDays <= 0 || newInterestRate <= 0 {
-		return fmt.Errorf("rollover booking requires positive amount, tenor and interest rate")
+		api.LogError("[CimplrRollover] FAILED amount validation confirm_id=%s: newFDAmount=%v newTenorDays=%v newInterestRate=%v",
+			closureConfirmID, newFDAmount, newTenorDays, newInterestRate)
+		return fmt.Errorf("rollover booking requires positive amount, tenor and interest rate (amount=%v tenor=%v rate=%v)", newFDAmount, newTenorDays, newInterestRate)
 	}
 	if !expectedMaturity.After(expectedStart) {
 		expectedMaturity = expectedStart.AddDate(0, 0, newTenorDays)
@@ -2247,11 +2278,27 @@ func createCimplrRolloverBooking(ctx context.Context, pool *pgxpool.Pool, closur
 		roundToFour(newFDAmount), newInterestRate, newTenorDays, interestTypeCode, frequencyID, dayCountCode, tdsPlanID,
 		expectedStart.Format(constants.DateFormat), expectedMaturity.Format(constants.DateFormat), expectedStart.Format(constants.DateFormat),
 		fmt.Sprintf("Rollover booking (%s) - source confirm %s source FD %s", amountBasis, closureConfirmID, fdID),
-		closureConfirmID, actorEmail,
+		nil, actorEmail,
 	).Scan(&newBookingID)
 	if err != nil {
 		return err
 	}
+
+	// Add journal lines showing the outflow for the new FD booking.
+	//   DR New FD Investment  = newFDAmount  (new FD investment created)
+	//   CR Settlement Account = newFDAmount  (cash reinvested from old FD)
+	// These lines are self-balancing so they don't disturb the closure journal's balance.
+	if newBookingID != "" {
+		_, _ = tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+			entryID, lineNum, "FD-INVEST-NEW-"+newBookingID, "New FD Investment (Rollover)", "ASSET",
+			roundToFour(newFDAmount), float64(0), "New FD booking from rollover — "+newBookingID, fdID)
+		lineNum++
+		_, _ = tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+			entryID, lineNum, firstNonEmpty(sourceAccountNumber, targetAccountID), sourceAccountName, "ASSET",
+			float64(0), roundToFour(newFDAmount), "Cash reinvested into new FD rollover — "+newBookingID, fdID)
+		lineNum++ //nolint:ineffassign
+	}
+
 	_, err = tx.Exec(ctx, `UPDATE cimplr.fd_closure_rollover_confirm SET new_booking_id=$1, rollover_approval_status='APPROVED' WHERE closure_confirm_id=$2`, newBookingID, closureConfirmID)
 	if err != nil {
 		return err
@@ -2264,10 +2311,16 @@ func createCimplrRolloverBooking(ctx context.Context, pool *pgxpool.Pool, closur
 	if err != nil {
 		return err
 	}
+	if originalBookingID != "" {
+		_, err = tx.Exec(ctx, `UPDATE investment.fd_booking_request SET booking_status='ROLLED_OVER', updated_by=$1, updated_at=NOW() WHERE booking_id=$2`, actorEmail, originalBookingID)
+		if err != nil {
+			return err
+		}
+	}
 	if err := insertCimplrConfirmAudit(ctx, tx, closureConfirmID, "", "POST", "POSTED", firstNonEmpty(comment, "Rollover journal and booking created on approval"), actorEmail, map[string]interface{}{"accounting_posted": false, "journal_entry_id": "", "new_booking_id": ""}); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func loadCimplrFDSource(ctx context.Context, q interface {
@@ -2538,7 +2591,7 @@ func persistCimplrInitiateVariances(ctx context.Context, pool *pgxpool.Pool, rec
 	return cimplrVarianceSummary(runID, items), nil
 }
 
-func persistCimplrConfirmVariances(ctx context.Context, pool *pgxpool.Pool, recordID string, req cimplrClosureConfirmRequest, src cimplrFDSource, calc cimplrClosureCalc) (map[string]interface{}, error) {
+func persistCimplrConfirmVariances(ctx context.Context, pool varianceengine.QueryExecutor, recordID string, req cimplrClosureConfirmRequest, src cimplrFDSource, calc cimplrClosureCalc) (map[string]interface{}, error) {
 	runID := varianceengine.NewRunID()
 	ff := func(v float64) string { return strconv.FormatFloat(roundToFour(v), 'f', 4, 64) }
 	rules := []varianceengine.Rule{
@@ -2886,6 +2939,7 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 			where = append(where, "t.closure_status='CONFIRM'")
 		} else {
 			where = append(where, "t.closure_status='CONFIRM'")
+			where = append(where, "NOT EXISTS (SELECT 1 FROM cimplr.fd_closure_confirm c WHERE c.closure_initiate_id = t.closure_initiate_id AND c.is_deleted = false AND c.closure_status NOT IN ('REJECTED', 'CANCELLED'))")
 		}
 	}
 	whereSQL := strings.Join(where, " AND ")
@@ -3846,11 +3900,18 @@ func CimplrClosureDetailCompat(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		id := strings.TrimSpace(firstNonEmpty(
-			fmt.Sprint(raw["closure_confirm_id"]),
-			fmt.Sprint(raw["closure_initiate_id"]),
-			fmt.Sprint(raw["closure_request_id"]),
-		))
+		safeStr := func(key string) string {
+			v, ok := raw[key]
+			if !ok || v == nil {
+				return ""
+			}
+			return strings.TrimSpace(fmt.Sprint(v))
+		}
+		id := firstNonEmpty(
+			safeStr("closure_confirm_id"),
+			safeStr("closure_initiate_id"),
+			safeStr("closure_request_id"),
+		)
 		if id == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "closure_request_id, closure_initiate_id or closure_confirm_id is required")
 			return

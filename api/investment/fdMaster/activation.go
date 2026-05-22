@@ -433,6 +433,7 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 		"created_by": createdBy,
 		"notes":      notes,
 		"is_deleted": false,
+		"auto_renewal": rec.AutoRenewal,
 	}
 	preferred := []string{
 		"confirmation_id", "booking_id",
@@ -449,7 +450,7 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 		"frequency_id", "bank_config_id", "tds_plan_id", "day_count_code",
 		"bank_fd_ref_no", "fd_number", "fd_no", "certificate_number", "bank_fd_reference",
 		"status", "fd_status",
-		"created_by", "notes", "is_deleted",
+		"created_by", "notes", "is_deleted", "auto_renewal",
 	}
 	insertSQL, args, returningCol, ok := buildDynamicInsert(constants.QuerryMaster, masterCols, preferred, valueMap, []string{"fd_id", "master_id", "confirmation_id"})
 	if !ok {

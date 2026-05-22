@@ -13,6 +13,7 @@ import (
 // initiates whose FD maturity date has arrived. Each initiate is processed at most once.
 func RunCimplrAutoMaturityDue(ctx context.Context, pool *pgxpool.Pool) (processed, skipped, failed int) {
 	_ = ensureCimplrExecutionLogTable(ctx, pool)
+	generateAutoRenewalInitiates(ctx, pool)
 
 	rows, err := pool.Query(ctx, `
 		SELECT
@@ -182,21 +183,24 @@ func processCimplrAutoMaturityInitiate(
 	if err != nil {
 		return err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-
-	varianceSummary, _ := persistCimplrConfirmVariances(ctx, pool, closureConfirmID, req, src, calc)
+	varianceSummary, _ := persistCimplrConfirmVariances(ctx, tx, closureConfirmID, req, src, calc)
 	open := cimplrVarianceOpenCount(varianceSummary)
 	if open > 0 {
+		_ = tx.Rollback(ctx)
 		_ = insertCimplrExecutionLog(ctx, pool, initiateID, fdID, closureType, closureConfirmID, "AUTO_MATURITY", "SKIPPED", fmt.Sprintf("%d open variance(s) after system calc", open))
 		return fmt.Errorf("open variance count %d — manual confirm required", open)
 	}
-	if err := cimplrAssertConfirmApprovable(ctx, pool, closureConfirmID); err != nil {
+	if err := cimplrAssertConfirmApprovable(ctx, tx, closureConfirmID); err != nil {
+		_ = tx.Rollback(ctx)
 		_ = insertCimplrExecutionLog(ctx, pool, initiateID, fdID, closureType, closureConfirmID, "AUTO_MATURITY", "SKIPPED", err.Error())
 		return err
 	}
-	if err := finalizeCimplrConfirmApproval(ctx, pool, closureConfirmID, actorEmail, "Auto maturity posting"); err != nil {
+	if err := finalizeCimplrConfirmApprovalTx(ctx, tx, closureConfirmID, actorEmail, "Auto maturity posting"); err != nil {
+		_ = tx.Rollback(ctx)
+		return err
+	}
+	
+	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 	return insertCimplrExecutionLog(ctx, pool, initiateID, fdID, closureType, closureConfirmID, "AUTO_MATURITY", "SUCCESS", "")
@@ -232,4 +236,42 @@ func insertCimplrExecutionLog(ctx context.Context, pool *pgxpool.Pool, initiateI
 		) VALUES (NULLIF($1,''),$2,$3,NULLIF($4,''),$5,$6,NULLIF($7,''))`,
 		initiateID, fdID, closureType, confirmID, source, status, message)
 	return err
+}
+
+func generateAutoRenewalInitiates(ctx context.Context, pool *pgxpool.Pool) {
+	// Auto-create initiate records for FDs with auto_renewal = true.
+	// We set closure_type = 'ROLLOVER', rollover_type = 'PRINCIPAL_PLUS_INTEREST',
+	// and closure_status = 'CONFIRM'.
+	query := `
+		INSERT INTO cimplr.fd_closure_initiate (
+			fd_id, booking_id, confirmation_id, entity_id, entity_name,
+			bank_id, bank_name, fd_ref_no, bank_fd_ref_no,
+			closure_type, action_at_maturity, maturity_date, requested_closure_date,
+			principal_amount, interest_type_code, interest_rate,
+			auto_renewal_flag, maturity_status, action_required,
+			rollover_type, rollover_bank_type,
+			tentative_new_tenor_days, remarks, closure_status
+		)
+		SELECT 
+			m.fd_id, m.booking_id, m.confirmation_id, b.entity_id, b.entity_name,
+			m.bank_id, m.bank_name, m.fd_ref_no, b.bank_fd_ref_no,
+			'ROLLOVER', 'ROLLOVER', m.maturity_date, m.maturity_date,
+			m.principal_amount, m.interest_type_code, m.interest_rate,
+			true, 'MATURED', false,
+			'PRINCIPAL_PLUS_INTEREST', 'SAME_BANK',
+			m.tenure_days, 'Auto-renewal initiated by system', 'CONFIRM'
+		FROM investment.fd_master m
+		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+		WHERE m.fd_status = 'ACTIVE'
+		  AND m.auto_renewal = true
+		  AND m.maturity_date <= CURRENT_DATE
+		  AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+			SELECT 1 FROM cimplr.fd_closure_initiate i 
+			WHERE i.fd_id = m.fd_id 
+			  AND COALESCE(i.is_deleted, false) = false 
+			  AND i.closure_status != 'REJECTED'
+		  )
+	`
+	_, _ = pool.Exec(ctx, query)
 }

@@ -35,7 +35,6 @@ func PeriodInterestFromSchedule(
 	defer rows.Close()
 
 	isCompound := strings.EqualFold(strings.TrimSpace(interestTypeCode), "COMPOUND")
-	hasInterestReceipt := false
 	type row struct {
 		id, eventType string
 		interest      float64
@@ -49,9 +48,6 @@ func PeriodInterestFromSchedule(
 			continue
 		}
 		schedule = append(schedule, r)
-		if r.eventType == "INTEREST_RECEIPT" {
-			hasInterestReceipt = true
-		}
 	}
 	if len(schedule) == 0 {
 		return 0, nil, false
@@ -62,24 +58,12 @@ func PeriodInterestFromSchedule(
 		cashflowIDs = append(cashflowIDs, r.id)
 		switch r.eventType {
 		case "ACCRUAL":
-			if !isCompound && !hasInterestReceipt {
+			if !isCompound {
 				interest += r.interest
 			}
 		case "CAPITALIZATION":
 			if isCompound {
 				interest += r.interest
-			}
-		case "INTEREST_RECEIPT":
-			if !isCompound && hasInterestReceipt {
-				interest += r.interest
-			}
-		case "MATURITY":
-			if r.interest > 0 {
-				if isCompound {
-					interest += r.interest
-				} else if !hasInterestReceipt {
-					interest += r.interest
-				}
 			}
 		case "GRACE_PERIOD":
 			interest += r.interest
