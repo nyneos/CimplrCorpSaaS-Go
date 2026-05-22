@@ -72,15 +72,15 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			entry := map[string]interface{}{
-				"entity_id":          entityID,
-				"action_type":        action,
-				"processing_status":  status,
-				"requested_by":       performedBy,
-				"requested_at":       performedAt,
-				"checker_by":         ifaceToString(checkerBy),
-				"checker_at":         ifaceToTimeString(checkerAt),
-				"checker_comment":    ifaceToString(checkerComment),
-				"reason":             ifaceToString(reason),
+				"entity_id":         entityID,
+				"action_type":       action,
+				"processing_status": status,
+				"requested_by":      performedBy,
+				"requested_at":      performedAt,
+				"checker_by":        ifaceToString(checkerBy),
+				"checker_at":        ifaceToTimeString(checkerAt),
+				"checker_comment":   ifaceToString(checkerComment),
+				"reason":            ifaceToString(reason),
 			}
 			if strings.EqualFold(action, "EDIT") {
 				if changes := buildProjectionChangeSummary(ctx, pgxPool, req.ProposalID); len(changes) > 0 {
@@ -131,18 +131,17 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"entity_id":         entityID,
-				"action_type":       "DOWNLOAD",
-				"processing_status": "COMPLETED",
-				"requested_by":      strings.TrimSpace(requestedBy),
-				"requested_at":      requestedAt.Time,
-				"checker_by":    "",
-				"checker_at":    nil,
+				"entity_id":       entityID,
+				"action_type":     "DOWNLOAD",
+				"requested_by":    strings.TrimSpace(requestedBy),
+				"requested_at":    requestedAt.Time,
+				"checker_by":      "",
+				"checker_at":      nil,
 				"checker_comment": "",
-				"reason":        "",
-				"file_name":     fileName.String,
-				"upload_s3_key": uploadKey.String,
-				"source":        "PROJECTION",
+				"reason":          "",
+				"file_name":       fileName.String,
+				"upload_s3_key":   uploadKey.String,
+				"source":          "PROJECTION",
 			})
 		}
 		if err := downloadRows.Err(); err != nil {

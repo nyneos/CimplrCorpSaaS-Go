@@ -73,16 +73,16 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 			}
 
 			entry := map[string]interface{}{
-				"audit_id":           auditID,
-				"entity_id":          entityID,
-				"action_type":        action.String,
-				"processing_status":  status.String,
-				"requested_by":       performedBy.String,
-				"requested_at":       nullableTime(performedAt),
-				"checker_by":         checkerBy.String,
-				"checker_at":         nullableTime(checkerAt),
-				"checker_comment":    comment.String,
-				"reason":             reason.String,
+				"audit_id":          auditID,
+				"entity_id":         entityID,
+				"action_type":       action.String,
+				"processing_status": status.String,
+				"requested_by":      performedBy.String,
+				"requested_at":      nullableTime(performedAt),
+				"checker_by":        checkerBy.String,
+				"checker_at":        nullableTime(checkerAt),
+				"checker_comment":   comment.String,
+				"reason":            reason.String,
 			}
 			if strings.EqualFold(action.String, "EDIT") {
 				if changes := buildBankStatementChangeSummary(ctx, db, body.BankStatementID); len(changes) > 0 {
@@ -151,19 +151,18 @@ func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"entity_id":          bankStatementID.String,
-				"action_type":        "DOWNLOAD",
-				"processing_status":  "COMPLETED",
-				"requested_by":       performedBy.String,
-				"requested_at":       performedAt,
-				"checker_by":         "",
-				"checker_at":         nil,
-				"checker_comment":    "",
-				"reason":             "",
-				"file_id":            fileID.String,
-				"bank_statement_id":  bankStatementID.String,
-				"ip":                 ip.String,
-				"entity_name":        entityName.String,
+				"entity_id":         bankStatementID.String,
+				"action_type":       "DOWNLOAD",
+				"requested_by":      performedBy.String,
+				"requested_at":      performedAt,
+				"checker_by":        "",
+				"checker_at":        nil,
+				"checker_comment":   "",
+				"reason":            "",
+				"file_id":           fileID.String,
+				"bank_statement_id": bankStatementID.String,
+				"ip":                ip.String,
+				"entity_name":       entityName.String,
 			})
 		}
 		if err := rows.Err(); err != nil {
@@ -226,16 +225,16 @@ func GetBankStatementBalanceImpactAuditHandler(db *sql.DB) http.Handler {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"entity_id":          balanceID,
-				"balance_id":         balanceID,
-				"action_type":        action.String,
-				"processing_status":  status.String,
-				"requested_by":       performedBy.String,
-				"requested_at":       nullableTime(performedAt),
-				"checker_by":         "",
-				"checker_at":         nil,
-				"checker_comment":    "",
-				"reason":             "",
+				"entity_id":         balanceID,
+				"balance_id":        balanceID,
+				"action_type":       action.String,
+				"processing_status": status.String,
+				"requested_by":      performedBy.String,
+				"requested_at":      nullableTime(performedAt),
+				"checker_by":        "",
+				"checker_at":        nil,
+				"checker_comment":   "",
+				"reason":            "",
 				"bank_statement_id": body.BankStatementID,
 			})
 		}
