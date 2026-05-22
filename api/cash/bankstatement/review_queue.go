@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -238,13 +239,18 @@ func ReviewActionHandler(pool *pgxpool.Pool) http.Handler {
 			defer confirmTx.Rollback(ctx) //nolint:errcheck
 
 			// 1. Write category + mark as human-confirmed on the transaction
-			if _, opErr = confirmTx.Exec(ctx, `
+			var confirmTag pgconn.CommandTag
+			if confirmTag, opErr = confirmTx.Exec(ctx, `
 				UPDATE cimplrcorpsaas.bank_statement_transactions
 				SET category_id=$1,
 				    classification_step='CONFIRMATION',
 				    confidence_score=$2
 				WHERE transaction_id=$3
 			`, *suggestedCat, conf, req.TransactionID); opErr != nil {
+				break
+			}
+			if confirmTag.RowsAffected() == 0 {
+				opErr = fmt.Errorf("transaction %d not found", req.TransactionID)
 				break
 			}
 			// 2. Immutable audit log entry — classified_by = analyst name
@@ -420,12 +426,16 @@ func applyCorrection(ctx context.Context, pool *pgxpool.Pool, txnID int64, categ
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	// 1. Update transaction
-	if _, err := tx.Exec(ctx, `
+	updateTag, err := tx.Exec(ctx, `
 		UPDATE cimplrcorpsaas.bank_statement_transactions
 		SET category_id=$1, classification_step='CORRECTION', confidence_score=0.99
 		WHERE transaction_id=$2
-	`, categoryID, txnID); err != nil {
+	`, categoryID, txnID)
+	if err != nil {
 		return fmt.Errorf("update category: %w", err)
+	}
+	if updateTag.RowsAffected() == 0 {
+		return fmt.Errorf("transaction %d not found", txnID)
 	}
 
 	// 2. Save correction for Step 4 future lookups.

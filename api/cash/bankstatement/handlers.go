@@ -1097,7 +1097,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 						SELECT action_id
 						FROM cimplrcorpsaas.auditactionbankstatement
 						WHERE bankstatementid = $1
-						  AND actiontype IN ('CREATE', 'EDIT')
+						  AND actiontype IN ('CREATE', 'EDIT', 'RECAT')
 						  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL')
 						ORDER BY requested_at DESC, action_id DESC
 						LIMIT 1
