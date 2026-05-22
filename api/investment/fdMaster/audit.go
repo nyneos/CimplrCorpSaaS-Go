@@ -54,6 +54,36 @@ func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
 			return
 		}
+		uploadRows, err := pgxPool.Query(ctx, `
+			SELECT
+				('file-' || a.audit_id::text) AS audit_id,
+				a.parent_record_id AS fd_id,
+				a.file_id,
+				'UPLOAD_FILE' AS action_type,
+				COALESCE(a.processing_status, '') AS processing_status,
+				COALESCE(a.reason, '') AS reason,
+				COALESCE(a.requested_by, '') AS requested_by,
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+				COALESCE(a.checker_by, '') AS checker_by,
+				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+				COALESCE(a.checker_comment, '') AS checker_comment
+			FROM investment.additional_file_audit a
+			JOIN investment.fd_master_files f ON f.file_id = a.file_id AND f.fd_id::text = a.parent_record_id
+			WHERE a.module_key = 'fd-master-additional'
+			  AND a.parent_record_id = $1
+			  AND a.action_type = 'CREATE'
+			ORDER BY a.requested_at DESC`, fdID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
+			return
+		}
+		defer uploadRows.Close()
+		uploadPayload, err := rowsToMaps(uploadRows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
+			return
+		}
+		payload = append(payload, uploadPayload...)
 		respondFDAuditPayload(w, payload)
 	}
 }
@@ -101,6 +131,38 @@ func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if payload == nil {
 			payload = []map[string]interface{}{}
+		}
+		if fdID != "" {
+			uploadRows, err := pgxPool.Query(ctx, `
+				SELECT
+					('file-' || a.audit_id::text) AS audit_id,
+					a.parent_record_id AS fd_id,
+					a.file_id,
+					'UPLOAD_FILE' AS action_type,
+					COALESCE(a.processing_status, '') AS audit_status,
+					COALESCE(a.reason, '') AS reason,
+					COALESCE(a.requested_by, '') AS requested_by,
+					COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+					COALESCE(a.checker_by, '') AS checker_by,
+					COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+					COALESCE(a.checker_comment, '') AS checker_comment
+				FROM investment.additional_file_audit a
+				JOIN investment.fd_cashflow_files f ON f.file_id = a.file_id AND f.fd_id::text = a.parent_record_id
+				WHERE a.module_key = 'fd-cashflow-additional'
+				  AND a.parent_record_id = $1
+				  AND a.action_type = 'CREATE'
+				ORDER BY a.requested_at DESC`, fdID)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
+				return
+			}
+			defer uploadRows.Close()
+			uploadPayload, err := rowsToMaps(uploadRows)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
+				return
+			}
+			payload = append(payload, uploadPayload...)
 		}
 		respondFDAuditPayload(w, payload)
 	}

@@ -104,6 +104,35 @@ func GetBookingAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to read booking audit history")
 			return
 		}
+		uploadRows, err := pgxPool.Query(ctx, `
+			SELECT
+				('file-' || a.audit_id::text) AS audit_id,
+				a.parent_record_id AS booking_id,
+				a.file_id,
+				'UPLOAD_FILE' AS action_type,
+				COALESCE(a.processing_status, '') AS processing_status,
+				COALESCE(a.requested_by, '') AS requested_by,
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+				COALESCE(a.checker_by, '') AS checker_by,
+				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+				COALESCE(a.checker_comment, '') AS checker_comment,
+				COALESCE(a.reason, '') AS reason
+			FROM investment.additional_file_audit a
+			JOIN investment.fd_booking_request_files f ON f.file_id = a.file_id AND f.booking_id::text = a.parent_record_id
+			WHERE a.module_key = 'fd-booking-additional'
+			  AND a.parent_record_id = $1
+			  AND a.action_type = 'CREATE'
+			ORDER BY a.requested_at DESC`, req.BookingID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		uploadPayload, err := collectPgxRows(uploadRows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read booking upload audit history")
+			return
+		}
+		payload = append(payload, uploadPayload...)
 
 		respondFDBookingAuditPayload(w, payload)
 	}
@@ -176,6 +205,35 @@ func GetConfirmationAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to read confirmation audit history")
 			return
 		}
+		uploadRows, err := pgxPool.Query(ctx, `
+			SELECT
+				('file-' || a.audit_id::text) AS audit_id,
+				a.parent_record_id AS confirmation_id,
+				a.file_id,
+				'UPLOAD_FILE' AS action_type,
+				COALESCE(a.processing_status, '') AS processing_status,
+				COALESCE(a.requested_by, '') AS requested_by,
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+				COALESCE(a.checker_by, '') AS checker_by,
+				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+				COALESCE(a.checker_comment, '') AS checker_comment,
+				COALESCE(a.reason, '') AS reason
+			FROM investment.additional_file_audit a
+			JOIN investment.fd_confirmation_files f ON f.file_id = a.file_id AND f.confirmation_id::text = a.parent_record_id
+			WHERE a.module_key = 'fd-confirmation-additional'
+			  AND a.parent_record_id = $1
+			  AND a.action_type = 'CREATE'
+			ORDER BY a.requested_at DESC`, req.ConfirmationID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		uploadPayload, err := collectPgxRows(uploadRows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read confirmation upload audit history")
+			return
+		}
+		payload = append(payload, uploadPayload...)
 
 		respondFDBookingAuditPayload(w, payload)
 	}

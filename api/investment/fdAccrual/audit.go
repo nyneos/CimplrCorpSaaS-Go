@@ -83,6 +83,35 @@ func GetAccrualRunAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to read accrual run audit history")
 			return
 		}
+		uploadRows, err := pgxPool.Query(ctx, `
+			SELECT
+				('file-' || a.audit_id::text) AS audit_id,
+				a.parent_record_id AS run_id,
+				a.file_id,
+				'UPLOAD_FILE' AS action_type,
+				COALESCE(a.processing_status, '') AS processing_status,
+				COALESCE(a.reason, '') AS reason,
+				COALESCE(a.requested_by, '') AS requested_by,
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+				COALESCE(a.checker_by, '') AS checker_by,
+				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+				COALESCE(a.checker_comment, '') AS checker_comment
+			FROM investment.additional_file_audit a
+			JOIN investment.fd_accrual_run_files f ON f.file_id = a.file_id AND f.run_id::text = a.parent_record_id
+			WHERE a.module_key = 'fd-accrual-run-additional'
+			  AND a.parent_record_id = $1
+			  AND a.action_type = 'CREATE'
+			ORDER BY a.requested_at DESC`, req.RunID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		uploadPayload, err := collectAccrualPgxRows(uploadRows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read accrual run upload audit history")
+			return
+		}
+		payload = append(payload, uploadPayload...)
 
 		respondFDAccrualAuditPayload(w, payload)
 	}
@@ -175,6 +204,47 @@ func GetAccrualLedgerAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to read accrual ledger audit history")
 			return
+		}
+		ledgerIDs := make([]string, 0, len(payload))
+		if req.LedgerID != "" {
+			ledgerIDs = append(ledgerIDs, req.LedgerID)
+		} else {
+			for _, row := range payload {
+				if ledgerID := strings.TrimSpace(fmt.Sprint(row["ledger_id"])); ledgerID != "" {
+					ledgerIDs = append(ledgerIDs, ledgerID)
+				}
+			}
+		}
+		if len(ledgerIDs) > 0 {
+			uploadRows, err := pgxPool.Query(ctx, `
+				SELECT
+					('file-' || a.audit_id::text) AS audit_id,
+					a.parent_record_id AS ledger_id,
+					a.file_id,
+					'UPLOAD_FILE' AS action_type,
+					COALESCE(a.processing_status, '') AS processing_status,
+					COALESCE(a.reason, '') AS reason,
+					COALESCE(a.requested_by, '') AS requested_by,
+					COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+					COALESCE(a.checker_by, '') AS checker_by,
+					COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+					COALESCE(a.checker_comment, '') AS checker_comment
+				FROM investment.additional_file_audit a
+				JOIN investment.fd_accrual_ledger_files f ON f.file_id = a.file_id AND f.ledger_id::text = a.parent_record_id
+				WHERE a.module_key = 'fd-accrual-ledger-additional'
+				  AND a.parent_record_id = ANY($1::text[])
+				  AND a.action_type = 'CREATE'
+				ORDER BY a.requested_at DESC`, ledgerIDs)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+				return
+			}
+			uploadPayload, err := collectAccrualPgxRows(uploadRows)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read accrual ledger upload audit history")
+				return
+			}
+			payload = append(payload, uploadPayload...)
 		}
 
 		respondFDAccrualAuditPayload(w, payload)
