@@ -120,10 +120,10 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback()
 
-		// Uniqueness checks: ensure username_or_employee_id and email are unique
+		// Uniqueness checks: ensure username_or_employee_id and email are unique (exclude soft-deleted users)
 		var existingID string
 		var existingUsername, existingEmail string
-		err = tx.QueryRow("SELECT id, username_or_employee_id, email FROM users WHERE username_or_employee_id = $1 OR email = $2 LIMIT 1", req.UsernameOrEmployeeID, req.Email).Scan(&existingID, &existingUsername, &existingEmail)
+		err = tx.QueryRow("SELECT id, username_or_employee_id, email FROM users WHERE (username_or_employee_id = $1 OR email = $2) AND COALESCE(is_deleted, false) = false LIMIT 1", req.UsernameOrEmployeeID, req.Email).Scan(&existingID, &existingUsername, &existingEmail)
 		if err == nil {
 			// conflict
 			msg := ""

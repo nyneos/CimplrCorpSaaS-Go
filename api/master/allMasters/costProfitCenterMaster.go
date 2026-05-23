@@ -2019,16 +2019,6 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		if err := tx.Commit(ctx); err != nil {
-			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrCommitFailedCapitalized)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
-		}
 		json.NewEncoder(w).Encode(resp)
 	}
 }
