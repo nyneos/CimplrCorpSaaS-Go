@@ -105,7 +105,13 @@ func (s *CronService) Start() error {
 	go approvalengine.StartSLAWorker(ctx, s.db)
 	go fdAccrual.StartAccrualSchedulerWorker(s.db)
 	go investmentjobs.StartReceiptReconcileWorker(s.db)
-	go investmentjobs.StartAutoRenewalWorker(s.db)
+	// Legacy auto-renewal worker (StartAutoRenewalWorker) is intentionally
+	// disabled. It writes ROLLOVER closures into investment.fd_closure_request,
+	// which no Cimplr-tab UI reads from, and would create duplicate parallel
+	// closures alongside StartCimplrAutoMaturityWorker. The Cimplr worker
+	// below is the single source of truth for auto-maturity now.
+	//
+	// go investmentjobs.StartAutoRenewalWorker(s.db)
 	go investmentjobs.StartCimplrAutoMaturityWorker(s.db)
 
 	logger.GlobalLogger.LogAudit("All background workers started")

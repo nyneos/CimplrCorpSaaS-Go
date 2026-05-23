@@ -120,4 +120,9 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 		mid(http.HandlerFunc(CimplrExecutionLogsAll(pool))))
 	mux.Handle("/investment/fd/closure/accounting/preview",
 		mid(http.HandlerFunc(CimplrJournalPreview(pool))))
+	// On-demand auto-maturity sweep — same logic as the 1h background worker,
+	// runs synchronously and returns counts. Use to verify worker behavior or
+	// catch up after data import without waiting for the next tick.
+	mux.Handle("/investment/fd/closure/auto-maturity/run-now",
+		mid(http.HandlerFunc(CimplrAutoMaturityRunNow(pool))))
 }
