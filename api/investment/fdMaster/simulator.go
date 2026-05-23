@@ -1431,74 +1431,68 @@ func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 // enrichSimpleWorkbookSummary fills workbook C16-style header totals (ACT/365 simple interest).
 // Schedule total_interest_accrued is the sum of per-period rounded rows; with unified rounding
 // it should match workbook totals when decimals and method align with bank config.
-func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, tdsRatePct float64, rawRows []CashflowRow, convention string) {
-	if fd == nil || s == nil {
-		return
-	}
+func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, tdsRatePct float64, convention string) {
+    if fd == nil || s == nil {
+        return
+    }
 
-	switch strings.ToUpper(convention) {
-	case "ACT_365", "ACT/365", "":
-		// Closed-form formula matches workbook C16 exactly for ACT/365
-		s.WorkbookTotalInterest = simpleFormulaInterest(fd.PrincipalAmount, fd.InterestRate, fd.TenorDays, cfg)
-	default:
-		// For 30/360, ACT/ACT etc — sum the actual schedule rows (convention changes per-period days)
-		var total float64
-		for _, row := range rawRows {
-			if row.EventType == "INTEREST_RECEIPT" || row.EventType == "MATURITY" {
-				total += row.InterestAccrued
-			}
-		}
-		// If no INTEREST_RECEIPT rows (AT_MATURITY SI), sum ACCRUAL rows
-		if total == 0 {
-			for _, row := range rawRows {
-				if row.EventType == "ACCRUAL" {
-					total += row.InterestAccrued
-				}
-			}
-		}
-		s.WorkbookTotalInterest = total
-	}
+    divisor := 365.0
+    switch strings.ToUpper(convention) {
+    case "30_360", "30/360":
+        divisor = 360.0
+    case "ACT_ACT", "ACT/ACT":
+        // Use 366 if maturity year is leap, else 365
+        if isLeapYear(fd.MaturityDate.Year()) {
+            divisor = 366.0
+        }
+    }
 
-	if tdsRatePct > 0 && s.WorkbookTotalInterest > 0 {
-		rnd := engRoundingFromCfg(cfg)
-		s.WorkbookTotalTDS = rnd.RoundFinal(s.WorkbookTotalInterest * tdsRatePct / 100.0)
-	}
+    rnd := engRoundingFromCfg(cfg)
+    s.WorkbookTotalInterest = rnd.RoundFinal(
+        fd.PrincipalAmount * (fd.InterestRate / 100.0) * float64(fd.TenorDays) / divisor,
+    )
+
+    if tdsRatePct > 0 && s.WorkbookTotalInterest > 0 {
+        s.WorkbookTotalTDS = rnd.RoundFinal(s.WorkbookTotalInterest * tdsRatePct / 100.0)
+    }
 }
-
 // enrichCompoundWorkbookSummary fills workbook C17-style header totals on a summary.
 // WorkbookTotalInterest uses the closed-form compound formula for Excel parity.
 // WorkbookTotalTDS is sourced from the schedule: Σ TDSAmount across CAPITALIZATION rows,
 // matching the per-period rounded TDS the bank actually deducts (Σ TDS Rev L on Form 16A).
 func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, capFreqType string, tdsRatePct float64, rawRows []CashflowRow, convention string) {
-	if fd == nil || s == nil {
-		return
-	}
+    if fd == nil || s == nil {
+        return
+    }
 
-	switch strings.ToUpper(convention) {
-	case "ACT_365", "ACT/365", "":
-		// Closed-form formula matches workbook C17 for ACT/365
-		n := capPeriodsPerYear(capFreqType)
-		s.WorkbookTotalInterest = compoundFormulaInterest(fd.PrincipalAmount, fd.InterestRate, n, fd.TenorDays, cfg)
-	default:
-		// For 30/360, ACT/ACT — sum CAPITALIZATION rows (convention changes per-period days/divisor)
-		var total float64
-		for _, row := range rawRows {
-			if row.EventType == "CAPITALIZATION" {
-				total += row.InterestAccrued
-			}
-		}
-		s.WorkbookTotalInterest = total
-	}
+    divisor := 365.0
+    switch strings.ToUpper(convention) {
+    case "30_360", "30/360":
+        divisor = 360.0
+    case "ACT_ACT", "ACT/ACT":
+        if isLeapYear(fd.MaturityDate.Year()) {
+            divisor = 366.0
+        }
+    }
 
-	if tdsRatePct > 0 {
-		var tdsSum float64
-		for _, row := range rawRows {
-			if row.EventType == "CAPITALIZATION" {
-				tdsSum += row.TDSAmount
-			}
-		}
-		s.WorkbookTotalTDS = tdsSum
-	}
+    n := float64(capPeriodsPerYear(capFreqType))
+    r := fd.InterestRate / 100.0
+    tenorYears := float64(fd.TenorDays) / divisor
+
+    rnd := engRoundingFromCfg(cfg)
+    s.WorkbookTotalInterest = rnd.RoundFinal(
+        fd.PrincipalAmount * (math.Pow(1+r/n, n*tenorYears) - 1),
+    )
+
+    if tdsRatePct > 0 {
+        var tdsSum float64
+        for _, row := range rawRows {
+            if row.EventType == "CAPITALIZATION" {
+                tdsSum += row.TDSAmount
+            }
+        }
+        s.WorkbookTotalTDS = tdsSum
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
