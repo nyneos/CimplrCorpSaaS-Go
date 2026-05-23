@@ -1325,16 +1325,36 @@ func isLeapYear(y int) bool {
 	return (y%4 == 0 && y%100 != 0) || y%400 == 0
 }
 
+func daysInMonth(year, month int) int {
+	switch month {
+	case 1, 3, 5, 7, 8, 10, 12:
+		return 31
+	case 4, 6, 9, 11:
+		return 30
+	case 2:
+		if isLeapYear(year) {
+			return 29
+		}
+		return 28
+	default:
+		return 0
+	}
+}
+
 func countDays30by360(start, end time.Time) int {
-	y1, m1, d1 := start.Date()
-	y2, m2, d2 := end.Date()
+	y1, m1, d1 := start.Year(), int(start.Month()), start.Day()
+	y2, m2, d2 := end.Year(), int(end.Month()), end.Day()
+	// Excel DAYS360 rule: if D1 is the last day of February, treat as 30
+	if m1 == 2 && d1 == daysInMonth(y1, m1) {
+		d1 = 30
+	}
 	if d1 == 31 {
 		d1 = 30
 	}
 	if d2 == 31 && d1 >= 30 {
 		d2 = 30
 	}
-	return (y2-y1)*360 + int(m2-m1)*30 + (d2 - d1)
+	return (y2-y1)*360 + (m2-m1)*30 + (d2 - d1)
 }
 
 // toFloat64 tries to convert an interface{} value to float64.
