@@ -1002,9 +1002,9 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 				tdsPct = tds.TDSRate
 			}
 			if isCompound {
-				enrichCompoundWorkbookSummary(&sum, fd, cfg, firstNonEmpty(capFreq.FrequencyType, capFreq.FrequencyCode), tdsPct, rawRows)
+				enrichCompoundWorkbookSummary(&sum, fd, cfg, firstNonEmpty(capFreq.FrequencyType, capFreq.FrequencyCode), tdsPct, rawRows, dcInfo.ConventionType)
 			} else {
-				enrichSimpleWorkbookSummary(&sum, fd, cfg, tdsPct)
+				enrichSimpleWorkbookSummary(&sum, fd, cfg, tdsPct, rawRows, dcInfo.ConventionType)
 			}
 			return sum
 		}(),
@@ -1431,11 +1431,34 @@ func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 // enrichSimpleWorkbookSummary fills workbook C16-style header totals (ACT/365 simple interest).
 // Schedule total_interest_accrued is the sum of per-period rounded rows; with unified rounding
 // it should match workbook totals when decimals and method align with bank config.
-func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, tdsRatePct float64) {
+func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, tdsRatePct float64, rawRows []CashflowRow, convention string) {
 	if fd == nil || s == nil {
 		return
 	}
-	s.WorkbookTotalInterest = simpleFormulaInterest(fd.PrincipalAmount, fd.InterestRate, fd.TenorDays, cfg)
+
+	switch strings.ToUpper(convention) {
+	case "ACT_365", "ACT/365", "":
+		// Closed-form formula matches workbook C16 exactly for ACT/365
+		s.WorkbookTotalInterest = simpleFormulaInterest(fd.PrincipalAmount, fd.InterestRate, fd.TenorDays, cfg)
+	default:
+		// For 30/360, ACT/ACT etc — sum the actual schedule rows (convention changes per-period days)
+		var total float64
+		for _, row := range rawRows {
+			if row.EventType == "INTEREST_RECEIPT" || row.EventType == "MATURITY" {
+				total += row.InterestAccrued
+			}
+		}
+		// If no INTEREST_RECEIPT rows (AT_MATURITY SI), sum ACCRUAL rows
+		if total == 0 {
+			for _, row := range rawRows {
+				if row.EventType == "ACCRUAL" {
+					total += row.InterestAccrued
+				}
+			}
+		}
+		s.WorkbookTotalInterest = total
+	}
+
 	if tdsRatePct > 0 && s.WorkbookTotalInterest > 0 {
 		rnd := engRoundingFromCfg(cfg)
 		s.WorkbookTotalTDS = rnd.RoundFinal(s.WorkbookTotalInterest * tdsRatePct / 100.0)
@@ -1446,12 +1469,27 @@ func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConf
 // WorkbookTotalInterest uses the closed-form compound formula for Excel parity.
 // WorkbookTotalTDS is sourced from the schedule: Σ TDSAmount across CAPITALIZATION rows,
 // matching the per-period rounded TDS the bank actually deducts (Σ TDS Rev L on Form 16A).
-func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, capFreqType string, tdsRatePct float64, rawRows []CashflowRow) {
+func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, capFreqType string, tdsRatePct float64, rawRows []CashflowRow, convention string) {
 	if fd == nil || s == nil {
 		return
 	}
-	n := capPeriodsPerYear(capFreqType)
-	s.WorkbookTotalInterest = compoundFormulaInterest(fd.PrincipalAmount, fd.InterestRate, n, fd.TenorDays, cfg)
+
+	switch strings.ToUpper(convention) {
+	case "ACT_365", "ACT/365", "":
+		// Closed-form formula matches workbook C17 for ACT/365
+		n := capPeriodsPerYear(capFreqType)
+		s.WorkbookTotalInterest = compoundFormulaInterest(fd.PrincipalAmount, fd.InterestRate, n, fd.TenorDays, cfg)
+	default:
+		// For 30/360, ACT/ACT — sum CAPITALIZATION rows (convention changes per-period days/divisor)
+		var total float64
+		for _, row := range rawRows {
+			if row.EventType == "CAPITALIZATION" {
+				total += row.InterestAccrued
+			}
+		}
+		s.WorkbookTotalInterest = total
+	}
+
 	if tdsRatePct > 0 {
 		var tdsSum float64
 		for _, row := range rawRows {
