@@ -1002,9 +1002,10 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 				tdsPct = tds.TDSRate
 			}
 			if isCompound {
-				enrichCompoundWorkbookSummary(&sum, fd, cfg, firstNonEmpty(capFreq.FrequencyType, capFreq.FrequencyCode), tdsPct, rawRows, dcInfo.ConventionType)
+				// enrichCompoundWorkbookSummary(&sum, fd, cfg, firstNonEmpty(capFreq.FrequencyType, capFreq.FrequencyCode), tdsPct, rawRows, dcInfo.ConventionType)
+				enrichCompoundWorkbookSummary(&sum, fd, cfg, firstNonEmpty(capFreq.FrequencyType, capFreq.FrequencyCode), tdsPct, rawRows)
 			} else {
-				enrichSimpleWorkbookSummary(&sum, fd, cfg, tdsPct, rawRows, dcInfo.ConventionType)
+				enrichSimpleWorkbookSummary(&sum, fd, cfg, tdsPct, dcInfo.ConventionType)
 			}
 			return sum
 		}(),
@@ -1460,24 +1461,51 @@ func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConf
 // WorkbookTotalInterest uses the closed-form compound formula for Excel parity.
 // WorkbookTotalTDS is sourced from the schedule: Σ TDSAmount across CAPITALIZATION rows,
 // matching the per-period rounded TDS the bank actually deducts (Σ TDS Rev L on Form 16A).
+// func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, capFreqType string, tdsRatePct float64, rawRows []CashflowRow, convention string) {
+//     if fd == nil || s == nil {
+//         return
+//     }
+
+//     divisor := 365.0
+//     switch strings.ToUpper(convention) {
+//     case "30_360", "30/360":
+//         divisor = 360.0
+//     case "ACT_ACT", "ACT/ACT":
+//         if isLeapYear(fd.MaturityDate.Year()) {
+//             divisor = 366.0
+//         }
+//     }
+
+//     n := float64(capPeriodsPerYear(capFreqType))
+//     r := fd.InterestRate / 100.0
+//     tenorYears := float64(fd.TenorDays) / divisor
+
+//     rnd := engRoundingFromCfg(cfg)
+//     s.WorkbookTotalInterest = rnd.RoundFinal(
+//         fd.PrincipalAmount * (math.Pow(1+r/n, n*tenorYears) - 1),
+//     )
+
+//     if tdsRatePct > 0 {
+//         var tdsSum float64
+//         for _, row := range rawRows {
+//             if row.EventType == "CAPITALIZATION" {
+//                 tdsSum += row.TDSAmount
+//             }
+//         }
+//         s.WorkbookTotalTDS = tdsSum
+//     }
+// }
 func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, capFreqType string, tdsRatePct float64, rawRows []CashflowRow, convention string) {
     if fd == nil || s == nil {
         return
     }
 
-    divisor := 365.0
-    switch strings.ToUpper(convention) {
-    case "30_360", "30/360":
-        divisor = 360.0
-    case "ACT_ACT", "ACT/ACT":
-        if isLeapYear(fd.MaturityDate.Year()) {
-            divisor = 366.0
-        }
-    }
-
+    // Workbook C17 formula: =ROUND(C11*(1+C12/n)^(n*(C10/365))-C11, 0)
+    // The exponent always uses 365 regardless of day count convention —
+    // it's a header approximation cell, not the per-period schedule calculation.
     n := float64(capPeriodsPerYear(capFreqType))
     r := fd.InterestRate / 100.0
-    tenorYears := float64(fd.TenorDays) / divisor
+    tenorYears := float64(fd.TenorDays) / 365.0 // always 365, matches workbook
 
     rnd := engRoundingFromCfg(cfg)
     s.WorkbookTotalInterest = rnd.RoundFinal(
