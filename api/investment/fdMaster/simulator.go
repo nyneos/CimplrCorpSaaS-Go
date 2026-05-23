@@ -1495,7 +1495,7 @@ func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConf
 //         s.WorkbookTotalTDS = tdsSum
 //     }
 // }
-func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, capFreqType string, tdsRatePct float64, rawRows []CashflowRow, convention string) {
+func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, capFreqType string, tdsRatePct float64, rawRows []CashflowRow) {
     if fd == nil || s == nil {
         return
     }
