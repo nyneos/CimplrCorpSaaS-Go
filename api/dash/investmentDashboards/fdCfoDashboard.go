@@ -56,7 +56,7 @@ type fdCfoDashRequest struct {
 	EndDate           string `json:"end_date"`   // YYYY-MM-DD — used when Period=="CUSTOM"
 	AsOnDate          string `json:"as_on_date"` // optional snapshot date (default = today)
 	Bank              string `json:"bank"`
-	FDStatus          string `json:"fd_status"`          // ACTIVE | NEAR_MATURITY | MATURED | CLOSED
+	FDStatus          string `json:"fd_status"`          // ACTIVE | NEAR_MATURITY | MATURED | ROLLED_OVER | PREMATURELY_CLOSED
 	FDType            string `json:"fd_type"`            // SIMPLE | COMPOUNDING
 	InterestFrequency string `json:"interest_frequency"` // PAYOUT | COMPOUNDING
 	LadderView        string `json:"ladder_view"`        // WEEK | MONTH | YEAR — Maturity Ladder bucket size (default WEEK)
@@ -1320,6 +1320,51 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
+		// ── 8b. yield_nature (closure profile chart) ────────────────────────────
+		// Count posted closures by fd_master.fd_status — matches:
+		//   MATURED → Maturity, ROLLED_OVER → Rollover, PREMATURELY_CLOSED → Premature
+		// Only rows with approval_status POSTED (posted cimplr/legacy closure).
+		run("yield_nature", func(ctx context.Context) (interface{}, error) {
+			sql := `
+				SELECT
+				  CASE m.fd_status
+				    WHEN 'MATURED' THEN 'Maturity'
+				    WHEN 'ROLLED_OVER' THEN 'Rollover'
+				    WHEN 'PREMATURELY_CLOSED' THEN 'Premature'
+				  END AS label,
+				  COUNT(*)::bigint AS count
+				FROM investment.fd_master m
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				WHERE m.is_deleted = false
+				  AND m.fd_status IN ('MATURED', 'ROLLED_OVER', 'PREMATURELY_CLOSED')
+				  AND ` + sqlAnyClosureProcessed + `
+				  AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)
+				  AND ($2::text = '' OR COALESCE(m.bank_name, m.bank_id, '') = $2)
+				GROUP BY m.fd_status
+				ORDER BY m.fd_status`
+			rows, err := pool.Query(ctx, sql, entityFilter, req.Bank)
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+			type ynRow struct {
+				Label string `json:"label"`
+				Count int64  `json:"count"`
+			}
+			var out []ynRow
+			for rows.Next() {
+				var yr ynRow
+				if err := rows.Scan(&yr.Label, &yr.Count); err != nil {
+					continue
+				}
+				out = append(out, yr)
+			}
+			if out == nil {
+				out = []ynRow{}
+			}
+			return out, nil
+		})
+
 		// ── 8. rate_distribution (chart) ──────────────────────────────────────
 		run("rate_distribution", func(ctx context.Context) (interface{}, error) {
 			sql := `
@@ -1386,8 +1431,13 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			dbStatusFilter = "ACTIVE"
 		case "MATURED":
 			dbStatusFilter = "MATURED"
+		case "ROLLED_OVER":
+			dbStatusFilter = "ROLLED_OVER"
+		case "PREMATURELY_CLOSED":
+			dbStatusFilter = "PREMATURELY_CLOSED"
 		case "CLOSED":
-			dbStatusFilter = "CLOSED"
+			// Legacy UI alias — treat as prematurely closed
+			dbStatusFilter = "PREMATURELY_CLOSED"
 		}
 
 		// Tenor years between 0 and ~1 = "NEAR_MATURITY" interpreted at SQL
@@ -1418,6 +1468,10 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  m.fd_status AS status,
 				  COALESCE(b.booking_id,'') AS booking_id,
 				  COALESCE(b.booking_status,'') AS booking_status,
+				  CASE
+				    WHEN ` + sqlAnyClosureProcessed + ` THEN 'POSTED'
+				    ELSE COALESCE(cimplr_cc.closure_status, cimplr_ci.closure_status, cr.closure_status, '')
+				  END AS approval_status,
 				  ` + sqlEffectiveClosureType + ` AS closure_type,
 				  ` + sqlEffectiveClosureStatus + ` AS closure_status,
 				  ` + sqlAnyClosureProcessed + ` AS is_closure_processed
@@ -1440,7 +1494,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				  AND ($2::text='' OR COALESCE(m.bank_name, m.bank_id,'')=$2)
 				  AND (
-				        ($3::text='' AND m.fd_status IN ('ACTIVE','MATURED'))
+				        ($3::text='' AND m.fd_status IN ('ACTIVE','MATURED','ROLLED_OVER','PREMATURELY_CLOSED'))
 				    OR  ($3::text<>'' AND m.fd_status=$3)
 				  )
 				  AND ($4::boolean=false OR (m.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE+30))
@@ -1482,6 +1536,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				Status             string  `json:"status"`
 				BookingID          string  `json:"booking_id"`
 				BookingStatus      string  `json:"booking_status"`
+				ApprovalStatus     string  `json:"approval_status"`
 				ClosureType        string  `json:"closure_type"`
 				ClosureStatus      string  `json:"closure_status"`
 				IsClosureProcessed bool    `json:"is_closure_processed"`
@@ -1496,6 +1551,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&fr.MaturityDate,
 					&fr.InterestAccrued, &fr.Status,
 					&fr.BookingID, &fr.BookingStatus,
+					&fr.ApprovalStatus,
 					&fr.ClosureType, &fr.ClosureStatus,
 					&fr.IsClosureProcessed,
 				); err != nil {
@@ -1641,6 +1697,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"interest_trend":     get("interest_trend"),
 				"rate_distribution":  get("rate_distribution"),
 				"bank_concentration": bankConcChart,
+				"yield_nature":       get("yield_nature"),
 			},
 			"governance": map[string]interface{}{
 				"approvals":         govApprovals,
