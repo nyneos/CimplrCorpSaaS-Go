@@ -52,8 +52,8 @@ type AccrualInput struct {
 	CapDateAdjustment      string // PRECEDING_WD / FOLLOWING_WD / NO_ADJUST
 	BrokenPeriodMethod     string // SIMPLE / COMPOUND / HYBRID / NONE
 	// Compounding frequency (from fd_master.frequency_id → frequency_master)
-	FrequencyID           string // e.g. "FREQ-QUARTERLY"
-	CompoundingFrequency  string // e.g. "QUARTERLY", "MONTHLY", "ANNUALLY", "DAILY", "AT_MATURITY"
+	FrequencyID          string // e.g. "FREQ-QUARTERLY"
+	CompoundingFrequency string // e.g. "QUARTERLY", "MONTHLY", "ANNUALLY", "DAILY", "AT_MATURITY"
 }
 
 // AccrualRunParams controls what the engine calculates.
@@ -139,8 +139,8 @@ type AccrualPeriodResult struct {
 	ReqHolidayAccrual    bool // always true
 
 	// Compounding metadata (for BRD IA-05 Section C)
-	FrequencyID            string // from fd_master.frequency_id
-	CompoundingFrequency   string // human-readable e.g. "QUARTERLY"
+	FrequencyID            string  // from fd_master.frequency_id
+	CompoundingFrequency   string  // human-readable e.g. "QUARTERLY"
 	CompoundPrincipalUsed  float64 // the opening_principal including past capitalizations
 	NextCapitalizationDate string  // next cashflow CAPITALIZATION event after period_end
 
@@ -268,12 +268,10 @@ func buildAccrualPeriod(t time.Time) string {
 // getFDsInScope queries investment.fd_master using exact column names.
 //
 // Scope rules (TC-27/28/29/30/31/32):
-//   - ACTIVE FDs whose [start_date, maturity_date] overlaps the run period.
-//   - MATURED FDs whose maturity falls inside the run period (interest till
-//     maturity only — TC-31/32). Already excluded if the run period starts
-//     after the maturity date.
-//   - PREMATURELY_CLOSED FDs whose effective_closure_date falls inside the run
-//     period (TC-29/30 — interest stops at closure, no accrual after closure).
+//   - ACTIVE means active FDs only.
+//   - ACTIVE_MATURED means active FDs plus all completed FD outcomes
+//     (matured payout, premature closure, rollover) that overlap the run period.
+//   - ALL includes every accrual-capable status except pending/cancelled activation.
 //
 // FDs that were closed/matured before the run period start are filtered out
 // because they have no overlap window.
@@ -283,17 +281,18 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 		fdStatus = "ACTIVE"
 	}
 
-	// Build the fd_status IN (...) filter. We always include closed/matured FDs
-	// so the engine can produce partial-period accruals up to the closure or
-	// maturity date — without ever accruing beyond it.
+	// Build the fd_status IN (...) filter. Keep this aligned with the user's
+	// selected scope; validation should not pull closed FDs into an ACTIVE run.
 	var statusValues []string
 	switch fdStatus {
-	case "ACTIVE", "ACTIVE_MATURED":
-		statusValues = []string{"ACTIVE", "MATURED", "PREMATURELY_CLOSED"}
+	case "ACTIVE":
+		statusValues = []string{"ACTIVE"}
+	case "ACTIVE_MATURED":
+		statusValues = []string{"ACTIVE", "MATURED", "PREMATURELY_CLOSED", "ROLLED_OVER"}
 	case "ALL":
 		statusValues = []string{"ACTIVE", "MATURED", "PREMATURELY_CLOSED", "ROLLED_OVER"}
 	default:
-		statusValues = []string{fdStatus, "MATURED", "PREMATURELY_CLOSED"}
+		statusValues = []string{fdStatus}
 	}
 
 	query := `
@@ -341,7 +340,10 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 		  AND f.is_active = true
 		  AND f.start_date <= $3
 		  AND f.maturity_date >= $4
-		  AND (cr.effective_closure_date IS NULL OR cr.effective_closure_date >= $4)`
+		  AND (
+		  	COALESCE(cr.effective_closure_date, f.closed_at::date) IS NULL
+		  	OR COALESCE(cr.effective_closure_date, f.closed_at::date) >= $4
+		  )`
 
 	args := []interface{}{params.EntityID, statusValues, params.PeriodEnd, params.PeriodStart}
 	argIdx := 5
@@ -993,39 +995,60 @@ func getNextCapitalizationDate(ctx context.Context, pool *pgxpool.Pool, fdID str
 	return nextDate.Format(constants.DateFormat)
 }
 
+func sameAccrualDate(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	return a.Format(constants.DateFormat) == b.Format(constants.DateFormat)
+}
+
 // getCashflowDataForPeriod sums interest receipts and TDS deductions in the period.
 func getCashflowDataForPeriod(ctx context.Context, pool *pgxpool.Pool,
-	fdID string, periodStart, periodEnd time.Time) (interestReceived float64, tdsDeducted float64, cashflowIDs []string) {
+	fdID string, periodStart, periodEnd time.Time, includePeriodEnd bool) (interestReceived float64, tdsDeducted float64, cashflowIDs []string) {
 
 	rows, err := pool.Query(ctx, `
-		SELECT cashflow_id, event_type,
+		SELECT cashflow_id, event_type, event_date,
 		       COALESCE(net_cash_flow, 0),
 		       COALESCE(tds_amount, 0)
 		FROM investment.fd_cashflow_schedule
 		WHERE fd_id = $1
 		  AND event_date >= $2
-		  AND event_date <= $3
-		  AND event_type IN ('INTEREST_RECEIPT', 'TDS_DEDUCTION')
+		  AND (event_date < $3 OR ($4 AND event_date = $3))
+		  AND event_type IN ('INTEREST_RECEIPT', 'MATURITY', 'TDS_DEDUCTION', 'CAPITALIZATION')
 		  AND COALESCE(is_deleted, false) = false`,
-		fdID, periodStart, periodEnd,
+		fdID, periodStart, periodEnd, includePeriodEnd,
 	)
 	if err != nil {
 		return 0, 0, nil
 	}
 	defer rows.Close()
 
+	tdsByDeductionDate := map[string]float64{}
+	embeddedTDSByDate := map[string]float64{}
+
 	for rows.Next() {
 		var cashflowID, eventType string
+		var eventDate time.Time
 		var netCash, tdsAmt float64
-		if err := rows.Scan(&cashflowID, &eventType, &netCash, &tdsAmt); err != nil {
+		if err := rows.Scan(&cashflowID, &eventType, &eventDate, &netCash, &tdsAmt); err != nil {
 			continue
 		}
 		cashflowIDs = append(cashflowIDs, cashflowID)
-		if eventType == "INTEREST_RECEIPT" {
+		if eventType == "INTEREST_RECEIPT" || eventType == "MATURITY" {
 			interestReceived += netCash
 		}
 		if eventType == "TDS_DEDUCTION" {
-			tdsDeducted += tdsAmt
+			tdsByDeductionDate[eventDate.Format(constants.DateFormat)] += tdsAmt
+		} else if tdsAmt > 0 {
+			embeddedTDSByDate[eventDate.Format(constants.DateFormat)] += tdsAmt
+		}
+	}
+	for _, amount := range tdsByDeductionDate {
+		tdsDeducted += amount
+	}
+	for date, amount := range embeddedTDSByDate {
+		if tdsByDeductionDate[date] == 0 {
+			tdsDeducted += amount
 		}
 	}
 	return interestReceived, tdsDeducted, cashflowIDs
@@ -1233,8 +1256,11 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 		configRaw, configDecimals, configRoundingRule, configRoundingFreq, true)
 	interestSource := "formula"
 	var schedCFIDs []string
-	if schedInterest, ids, hasSched := fdMaster.PeriodInterestFromSchedule(
+	includePeriodEndCashflows := sameAccrualDate(effectiveEnd, fd.FdMaturityDate) ||
+		sameAccrualDate(effectiveEnd, fd.EffectiveCloseDate)
+	if schedInterest, ids, hasSched := fdMaster.PeriodInterestFromScheduleWithEnd(
 		ctx, pool, fd.FDID, effectiveStart, effectiveEnd, fd.InterestTypeCode,
+		includePeriodEndCashflows,
 	); hasSched {
 		configPeriodInterest = schedInterest
 		schedCFIDs = ids
@@ -1243,7 +1269,7 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 
 	// Cashflow data (same for both paths — receipts come from bank, not formula)
 	interestReceived, tdsDeducted, cashflowIDs := getCashflowDataForPeriod(
-		ctx, pool, fd.FDID, effectiveStart, effectiveEnd)
+		ctx, pool, fd.FDID, effectiveStart, effectiveEnd, includePeriodEndCashflows)
 	if len(schedCFIDs) > 0 {
 		seen := make(map[string]struct{}, len(cashflowIDs))
 		for _, id := range cashflowIDs {
@@ -1315,8 +1341,8 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 		EntityID: fd.EntityID, EntityName: fd.EntityName,
 		InterestTypeCode: fd.InterestTypeCode,
 		PrincipalAmount:  fd.PrincipalAmount, InterestRate: fd.InterestRate,
-		FdStartDate:      fd.FdStartDate,
-		FdMaturityDate:   fd.FdMaturityDate,
+		FdStartDate:    fd.FdStartDate,
+		FdMaturityDate: fd.FdMaturityDate,
 
 		// Period window
 		AccrualPeriodStart: effectiveStart,
@@ -1363,9 +1389,9 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 		ReqHolidayAccrual:    true,
 
 		// Compounding metadata (BRD IA-05 Section C)
-		FrequencyID:           fd.FrequencyID,
-		CompoundingFrequency:  fd.CompoundingFrequency,
-		CompoundPrincipalUsed: configOpeningPrincipal,
+		FrequencyID:            fd.FrequencyID,
+		CompoundingFrequency:   fd.CompoundingFrequency,
+		CompoundPrincipalUsed:  configOpeningPrincipal,
 		NextCapitalizationDate: getNextCapitalizationDate(ctx, pool, fd.FDID, effectiveEnd),
 
 		// References

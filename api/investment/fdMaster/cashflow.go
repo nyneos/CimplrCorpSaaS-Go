@@ -42,8 +42,10 @@ type FDRecord struct {
 	Currency                string
 	TDSPlanID               string
 	BankFDReference         string
+	BankReferenceNumber     string
 	ReceiptDate             time.Time
 	ConfirmationStatus      string
+	PrematureClosureTerms   string
 	// User-overridable payout / cap dates — if set, value_dates of the first (and
 	// subsequent by offset) INTEREST_RECEIPT / CAPITALIZATION rows are shifted.
 	FirstPayoutDate         time.Time
@@ -277,6 +279,49 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 	if confCols["penalty_id"] {
 		penaltyExpr = "COALESCE(c.penalty_id, '')"
 	}
+	confirmedFrequencyExpr := "COALESCE(b.frequency_id, '')"
+	if confCols["confirmed_frequency_id"] {
+		confirmedFrequencyExpr = "COALESCE(NULLIF(c.confirmed_frequency_id, ''), b.frequency_id, '')"
+	}
+	confirmedInterestTypeExpr := "COALESCE(b.interest_type_code, 'SIMPLE')"
+	if confCols["confirmed_interest_type_code"] {
+		confirmedInterestTypeExpr = "COALESCE(NULLIF(c.confirmed_interest_type_code, ''), b.interest_type_code, 'SIMPLE')"
+	}
+	payoutFrequencyExpr := "COALESCE(b.frequency_id, '')"
+	switch {
+	case confCols["payout_frequency_id"] && bookingCols["payout_frequency_id"]:
+		payoutFrequencyExpr = "COALESCE(NULLIF(c.payout_frequency_id, ''), NULLIF(b.payout_frequency_id, ''), b.frequency_id, '')"
+	case confCols["payout_frequency_id"]:
+		payoutFrequencyExpr = "COALESCE(NULLIF(c.payout_frequency_id, ''), b.frequency_id, '')"
+	case bookingCols["payout_frequency_id"]:
+		payoutFrequencyExpr = "COALESCE(NULLIF(b.payout_frequency_id, ''), b.frequency_id, '')"
+	}
+	accrualFrequencyExpr := constants.ErrEmptyString
+	switch {
+	case confCols["accrual_frequency_code"] && bookingCols["accrual_frequency_code"]:
+		accrualFrequencyExpr = "COALESCE(NULLIF(c.accrual_frequency_code, ''), NULLIF(b.accrual_frequency_code, ''), '')"
+	case confCols["accrual_frequency_code"]:
+		accrualFrequencyExpr = "COALESCE(NULLIF(c.accrual_frequency_code, ''), '')"
+	case bookingCols["accrual_frequency_code"]:
+		accrualFrequencyExpr = "COALESCE(NULLIF(b.accrual_frequency_code, ''), '')"
+	}
+	resetTypeExpr := "'AT_MATURITY'"
+	switch {
+	case confCols["reset_type"] && bookingCols["reset_type"]:
+		resetTypeExpr = "COALESCE(NULLIF(c.reset_type, ''), NULLIF(b.reset_type, ''), 'AT_MATURITY')"
+	case confCols["reset_type"]:
+		resetTypeExpr = "COALESCE(NULLIF(c.reset_type, ''), 'AT_MATURITY')"
+	case bookingCols["reset_type"]:
+		resetTypeExpr = "COALESCE(NULLIF(b.reset_type, ''), 'AT_MATURITY')"
+	}
+	bankReferenceExpr := constants.ErrEmptyString
+	if confCols["bank_reference_number"] {
+		bankReferenceExpr = "COALESCE(c.bank_reference_number, '')"
+	}
+	prematureTermsExpr := constants.ErrEmptyString
+	if confCols["premature_closure_terms"] {
+		prematureTermsExpr = "COALESCE(c.premature_closure_terms, '')"
+	}
 
 	rec := &FDRecord{}
 	q := fmt.Sprintf(`
@@ -287,15 +332,15 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			COALESCE(b.bank_id, '') AS bank_id,
 			%s AS bank_account_id,
 			COALESCE(b.bank_config_id, '') AS bank_config_id,
-			COALESCE(b.frequency_id, '') AS frequency_id,
+			%s AS frequency_id,
 			COALESCE(c.actual_principal, 0),
 			COALESCE(c.confirmed_rate, 0),
-			COALESCE(b.interest_type_code, 'SIMPLE') AS interest_type_code,
+			%s AS interest_type_code,
 			COALESCE(b.tenure_days, 0),
 			COALESCE(c.actual_start_date, b.expected_start_date),
 			COALESCE(c.actual_maturity_date, b.expected_maturity_date),
 			0,
-			COALESCE(b.frequency_id, '') AS interest_payout_frequency,
+			%s AS interest_payout_frequency,
 			'' AS compounding_frequency,
 			COALESCE(b.day_count_code, '') AS day_count_convention,
 			COALESCE(b.auto_renewal, false) AS auto_renewal,
@@ -304,13 +349,18 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			COALESCE(c.bank_fd_ref_no, ''),
 			COALESCE(c.confirmation_received_date, c.actual_start_date),
 			COALESCE(c.confirmation_status, ''),
-			%s AS penalty_id
+			%s AS penalty_id,
+			%s AS bank_reference_number,
+			%s AS premature_closure_terms,
+			%s AS accrual_frequency_code,
+			%s AS reset_type
 		FROM investment.fd_confirmation c
 		JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 		WHERE c.confirmation_id = $1
 		  AND COALESCE(c.is_deleted, false) = false
 		  AND COALESCE(b.is_deleted, false) = false
-	`, bankAccExpr, currencyExpr, penaltyExpr)
+	`, bankAccExpr, confirmedFrequencyExpr, confirmedInterestTypeExpr, payoutFrequencyExpr,
+		currencyExpr, penaltyExpr, bankReferenceExpr, prematureTermsExpr, accrualFrequencyExpr, resetTypeExpr)
 	err = exec.QueryRow(ctx, q, confirmationID).Scan(
 		&rec.ConfirmationID,
 		&rec.BookingID,
@@ -336,6 +386,10 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 		&rec.ReceiptDate,
 		&rec.ConfirmationStatus,
 		&rec.PenaltyID,
+		&rec.BankReferenceNumber,
+		&rec.PrematureClosureTerms,
+		&rec.AccrualFrequencyCode,
+		&rec.ResetType,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(constants.ErrLoadFDRecord, err)
@@ -353,20 +407,11 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			rec.FirstCapitalizationDate = *capDate
 		}
 	}
-	if confCols["reset_type"] {
-		var resetType string
-		_ = exec.QueryRow(ctx, `
-			SELECT COALESCE(NULLIF(c.reset_type,''), NULLIF(b.reset_type,''), 'AT_MATURITY')
-			FROM investment.fd_confirmation c
-			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
-			WHERE c.confirmation_id = $1`, confirmationID).Scan(&resetType)
-		rec.ResetType = resetType
-	}
 	// Read tenure_months, tenure_years, tenure_type — gate on whichever table has the column.
 	// Confirmation value takes precedence over booking when both exist.
-	if confCols["tenure_months"] {
+	if confCols["tenor_months"] {
 		var v int
-		_ = exec.QueryRow(ctx, `SELECT COALESCE(tenure_months, 0) FROM investment.fd_confirmation WHERE confirmation_id = $1`, confirmationID).Scan(&v)
+		_ = exec.QueryRow(ctx, `SELECT COALESCE(tenor_months, 0) FROM investment.fd_confirmation WHERE confirmation_id = $1`, confirmationID).Scan(&v)
 		rec.TenorMonths = v
 	} else if bookingCols["tenure_months"] {
 		var v int
@@ -377,9 +422,9 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			WHERE c.confirmation_id = $1`, confirmationID).Scan(&v)
 		rec.TenorMonths = v
 	}
-	if confCols["tenure_years"] {
+	if confCols["tenor_years"] {
 		var v int
-		_ = exec.QueryRow(ctx, `SELECT COALESCE(tenure_years, 0) FROM investment.fd_confirmation WHERE confirmation_id = $1`, confirmationID).Scan(&v)
+		_ = exec.QueryRow(ctx, `SELECT COALESCE(tenor_years, 0) FROM investment.fd_confirmation WHERE confirmation_id = $1`, confirmationID).Scan(&v)
 		rec.TenureYears = v
 	} else if bookingCols["tenure_years"] {
 		var v int
@@ -407,29 +452,6 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 	if rec.TenorDays == 0 && !rec.MaturityDate.IsZero() && !rec.ValueDate.IsZero() &&
 		(rec.TenorMonths > 0 || rec.TenureYears > 0) {
 		rec.TenorDays = int(rec.MaturityDate.Sub(rec.ValueDate).Hours() / 24)
-	}
-	// Read payout_frequency_id from booking — overrides frequency_id as the cash-payout
-	// frequency for COMPOUND FDs that compound at one frequency but pay out at another.
-	if bookingCols["payout_frequency_id"] {
-		var v string
-		_ = exec.QueryRow(ctx, `
-			SELECT COALESCE(NULLIF(b.payout_frequency_id,''), '')
-			FROM investment.fd_confirmation c
-			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
-			WHERE c.confirmation_id = $1`, confirmationID).Scan(&v)
-		if v != "" {
-			rec.InterestPayoutFrequency = v
-		}
-	}
-	// Read accrual_frequency_code — controls accrual step months in the cashflow engine.
-	if bookingCols["accrual_frequency_code"] {
-		var v string
-		_ = exec.QueryRow(ctx, `
-			SELECT COALESCE(NULLIF(b.accrual_frequency_code,''), '')
-			FROM investment.fd_confirmation c
-			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
-			WHERE c.confirmation_id = $1`, confirmationID).Scan(&v)
-		rec.AccrualFrequencyCode = v
 	}
 	return rec, nil
 }
@@ -3062,14 +3084,18 @@ type SaveCashflowBatchParams struct {
 // saveCashflowBatch is the shared batch-INSERT engine used by both
 // SaveCashflowScheduleWithCreator and SaveCashflowScheduleWithRecord.
 // dbAllowedEventTypes is the set of event_type values permitted by fd_cashflow_event_type_chk.
-// INITIAL_INVESTMENT and PRINCIPAL_RETURN are internal-only types used for cashflow
-// display/simulation but must never be written to fd_cashflow_schedule.
+// Persist the full generated schedule so activation, simulator, and detail APIs
+// all agree on row counts and cash movement rows.
 var dbAllowedEventTypes = map[string]bool{
-	"ACCRUAL":          true,
-	"CAPITALIZATION":   true,
-	"INTEREST_RECEIPT": true,
-	"TDS_DEDUCTION":    true,
-	"MATURITY":         true,
+	"INITIAL_INVESTMENT": true,
+	"ACCRUAL":            true,
+	"CAPITALIZATION":     true,
+	"INTEREST_RECEIPT":   true,
+	"INTEREST_PAYOUT":    true,
+	"TDS_DEDUCTION":      true,
+	"MATURITY":           true,
+	"PRINCIPAL_RETURN":   true,
+	"GRACE_PERIOD":       true,
 }
 
 func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
@@ -3186,7 +3212,7 @@ func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
 			"tds_amount":                row.TDSAmount,
 			"net_cash_flow":             row.NetCashFlow,
 			"net_cashflow":              row.NetCashFlow,
-			"net_amount":                row.NetCashFlow,
+			"net_amount":                row.NetAmount,
 			"due_not_accrued":           row.DueNotAccrued,
 			"accr_rev_k":                row.AccrRevK,
 			"tds_rev_l":                 row.TDSRevL,

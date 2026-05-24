@@ -18,16 +18,30 @@ func PeriodInterestFromSchedule(
 	periodStart, periodEnd time.Time,
 	interestTypeCode string,
 ) (interest float64, cashflowIDs []string, found bool) {
+	return PeriodInterestFromScheduleWithEnd(ctx, pool, fdID, periodStart, periodEnd, interestTypeCode, true)
+}
+
+// PeriodInterestFromScheduleWithEnd is the accrual-engine variant. Adjacent
+// sub-periods should be half-open [start,end), except when end is the FD's
+// terminal maturity/closure date.
+func PeriodInterestFromScheduleWithEnd(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	fdID string,
+	periodStart, periodEnd time.Time,
+	interestTypeCode string,
+	includePeriodEnd bool,
+) (interest float64, cashflowIDs []string, found bool) {
 	rows, err := pool.Query(ctx, `
 		SELECT cashflow_id, event_type, event_date,
 		       COALESCE(interest_accrued, 0)
 		FROM investment.fd_cashflow_schedule
 		WHERE fd_id = $1
 		  AND event_date >= $2
-		  AND event_date <= $3
+		  AND (event_date < $3 OR ($4 AND event_date = $3))
 		  AND COALESCE(is_deleted, false) = false
 		ORDER BY event_date, cashflow_id`,
-		fdID, periodStart, periodEnd,
+		fdID, periodStart, periodEnd, includePeriodEnd,
 	)
 	if err != nil {
 		return 0, nil, false

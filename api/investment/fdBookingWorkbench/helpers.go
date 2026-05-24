@@ -127,6 +127,46 @@ func pickFirstExistingFDColumn(columns map[string]bool, candidates ...string) st
 	return ""
 }
 
+func fdTextExpr(columns map[string]bool, tableAlias string, fallback string, candidates ...string) string {
+	columnName := pickFirstExistingFDColumn(columns, candidates...)
+	if columnName == "" {
+		return fallback
+	}
+	return fmt.Sprintf("COALESCE(%s.%s,'')", tableAlias, columnName)
+}
+
+func fdNumericExpr(columns map[string]bool, tableAlias string, fallback string, candidates ...string) string {
+	columnName := pickFirstExistingFDColumn(columns, candidates...)
+	if columnName == "" {
+		return fallback
+	}
+	return fmt.Sprintf("COALESCE(%s.%s,0)", tableAlias, columnName)
+}
+
+func fdBoolExpr(columns map[string]bool, tableAlias string, fallback string, candidates ...string) string {
+	columnName := pickFirstExistingFDColumn(columns, candidates...)
+	if columnName == "" {
+		return fallback
+	}
+	return fmt.Sprintf("COALESCE(%s.%s,false)", tableAlias, columnName)
+}
+
+func fdDateTextExpr(columns map[string]bool, tableAlias string, fallback string, candidates ...string) string {
+	columnName := pickFirstExistingFDColumn(columns, candidates...)
+	if columnName == "" {
+		return fallback
+	}
+	return fmt.Sprintf("COALESCE(TO_CHAR(%s.%s,'YYYY-MM-DD'),'')", tableAlias, columnName)
+}
+
+func fdTimestampTextExpr(columns map[string]bool, tableAlias string, fallback string, candidates ...string) string {
+	columnName := pickFirstExistingFDColumn(columns, candidates...)
+	if columnName == "" {
+		return fallback
+	}
+	return fmt.Sprintf("COALESCE(TO_CHAR(%s.%s,'YYYY-MM-DD HH24:MI:SS'),'')", tableAlias, columnName)
+}
+
 func buildFDPlaceholders(count int) string {
 	placeholders := make([]string, count)
 	for index := 0; index < count; index++ {
@@ -179,6 +219,18 @@ func resolveFDBookingAccountColumn(ctx context.Context, exec fdSchemaQueryExecut
 		return "", err
 	}
 	return pickFirstExistingFDColumn(columns, "source_account_id", "bank_account_id", "account_id", "bank_account"), nil
+}
+
+func resolveFDBookingAccountNumberExpression(ctx context.Context, exec fdSchemaQueryExecutor, tableAlias string) (string, error) {
+	columns, err := loadFDTableColumns(ctx, exec, "investment", "fd_booking_request")
+	if err != nil {
+		return "", err
+	}
+	columnName := pickFirstExistingFDColumn(columns, "source_account_number", "bank_account_number", "account_number")
+	if columnName == "" {
+		return constants.ErrEmptyString, nil
+	}
+	return fmt.Sprintf("COALESCE(%s.%s,'')", tableAlias, columnName), nil
 }
 
 // fdConfirmationHasUploadS3Key returns true when investment.fd_confirmation
@@ -530,20 +582,20 @@ func formatNumber(v float64) string {
 
 // fdConfirmationVarianceInput holds booked vs actual values for varianceengine.Compare.
 type fdConfirmationVarianceInput struct {
-	BookingID, EntityID, RunID string
+	BookingID, EntityID, RunID  string
 	ResolvedBy, ResolvedByEmail string
 
-	BookedPrincipal, ActualPrincipal float64
-	BookedRate, ActualRate           float64
-	BookedTenorDays, ActualTenorDays int
-	BookedTenorMonths, ActualTenorMonths int
-	BookedTenorYears, ActualTenorYears   int
-	BookedValueDate, ActualValueDate         string
-	BookedMaturityDate, ActualMaturityDate string
-	BookedInterestType, ActualInterestType   string
-	BookedFrequencyID, ActualFrequencyID     string
-	BookedTenorType, ActualTenorType         string
-	BookedFirstCapDate, ActualFirstCapDate   string
+	BookedPrincipal, ActualPrincipal             float64
+	BookedRate, ActualRate                       float64
+	BookedTenorDays, ActualTenorDays             int
+	BookedTenorMonths, ActualTenorMonths         int
+	BookedTenorYears, ActualTenorYears           int
+	BookedValueDate, ActualValueDate             string
+	BookedMaturityDate, ActualMaturityDate       string
+	BookedInterestType, ActualInterestType       string
+	BookedFrequencyID, ActualFrequencyID         string
+	BookedTenorType, ActualTenorType             string
+	BookedFirstCapDate, ActualFirstCapDate       string
 	BookedFirstPayoutDate, ActualFirstPayoutDate string
 }
 
@@ -762,42 +814,42 @@ func backfillOpenVarianceLogFromDetails(ctx context.Context, pool *pgxpool.Pool,
 func buildEditConfirmationFieldMap(confCols map[string]bool) map[string]string {
 	// clientKey → dbColumn
 	candidates := map[string]string{
-		"actual_principal":              "actual_principal",
-		"confirmed_principal_amount":    "actual_principal",
-		"confirmed_rate":                "confirmed_rate",
-		"confirmed_interest_rate":       "confirmed_rate",
-		"actual_start_date":             "actual_start_date",
-		"confirmed_value_date":          "actual_start_date",
-		"actual_maturity_date":          "actual_maturity_date",
-		"confirmed_maturity_date":       "actual_maturity_date",
-		"bank_fd_ref_no":                "bank_fd_ref_no",
-		"bank_fd_reference":             "bank_fd_ref_no",
-		"confirmation_received_date":    "confirmation_received_date",
-		"receipt_date":                  "confirmation_received_date",
-		"confirmed_interest_type_code":  "confirmed_interest_type_code",
-		"confirmed_interest_type":       "confirmed_interest_type_code",
-		"confirmed_frequency_id":        "confirmed_frequency_id",
-		"tenor_type":                    "tenor_type",
-		"confirmed_tenor_type":          "tenor_type",
-		"tenor_days":                    "tenor_days",
-		"confirmed_tenor_days":        "tenor_days",
-		"tenor_months":                  "tenor_months",
-		"confirmed_tenor_months":        "tenor_months",
-		"tenor_years":                   "tenor_years",
-		"confirmed_tenor_years":         "tenor_years",
-		"payout_dates":                  "payout_dates",
-		"compounding_dates":             "compounding_dates",
-		"penalty_id":                    "penalty_id",
-		"first_payout_date":             "first_payout_date",
-		"first_capitalization_date":     "first_capitalization_date",
-		"accrual_frequency_code":        "accrual_frequency_code",
-		"reset_type":                    "reset_type",
-		"payout_frequency_id":           "payout_frequency_id",
-		"bank_reference_number":         "bank_reference_number",
-		"premature_closure_terms":       "premature_closure_terms",
-		"confirmation_notes":            "confirmation_notes",
-		"notes":                         "confirmation_notes",
-		"confirmation_mode":             "confirmation_mode",
+		"actual_principal":             "actual_principal",
+		"confirmed_principal_amount":   "actual_principal",
+		"confirmed_rate":               "confirmed_rate",
+		"confirmed_interest_rate":      "confirmed_rate",
+		"actual_start_date":            "actual_start_date",
+		"confirmed_value_date":         "actual_start_date",
+		"actual_maturity_date":         "actual_maturity_date",
+		"confirmed_maturity_date":      "actual_maturity_date",
+		"bank_fd_ref_no":               "bank_fd_ref_no",
+		"bank_fd_reference":            "bank_fd_ref_no",
+		"confirmation_received_date":   "confirmation_received_date",
+		"receipt_date":                 "confirmation_received_date",
+		"confirmed_interest_type_code": "confirmed_interest_type_code",
+		"confirmed_interest_type":      "confirmed_interest_type_code",
+		"confirmed_frequency_id":       "confirmed_frequency_id",
+		"tenor_type":                   "tenor_type",
+		"confirmed_tenor_type":         "tenor_type",
+		"tenor_days":                   "tenor_days",
+		"confirmed_tenor_days":         "tenor_days",
+		"tenor_months":                 "tenor_months",
+		"confirmed_tenor_months":       "tenor_months",
+		"tenor_years":                  "tenor_years",
+		"confirmed_tenor_years":        "tenor_years",
+		"payout_dates":                 "payout_dates",
+		"compounding_dates":            "compounding_dates",
+		"penalty_id":                   "penalty_id",
+		"first_payout_date":            "first_payout_date",
+		"first_capitalization_date":    "first_capitalization_date",
+		"accrual_frequency_code":       "accrual_frequency_code",
+		"reset_type":                   "reset_type",
+		"payout_frequency_id":          "payout_frequency_id",
+		"bank_reference_number":        "bank_reference_number",
+		"premature_closure_terms":      "premature_closure_terms",
+		"confirmation_notes":           "confirmation_notes",
+		"notes":                        "confirmation_notes",
+		"confirmation_mode":            "confirmation_mode",
 	}
 	out := make(map[string]string, len(candidates))
 	for clientKey, dbCol := range candidates {
