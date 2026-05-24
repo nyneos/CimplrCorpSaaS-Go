@@ -256,13 +256,13 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Run variance engine ───────────────────────────────────────────────
 		runID := varianceengine.NewRunID()
-		bookedPayout, actualPayout := normalizedPayoutFrequency(
+		bookedPayout, actualPayout := normalizedPayoutFrequency(ctx, pgxPool,
 			bookedPayoutFreqID, bookedFrequencyID, req.PayoutFrequencyID, req.ConfirmedFrequencyID,
 		)
-		bookedAccrual, actualAccrual := normalizedAccrualFrequency(
+		bookedAccrual, actualAccrual := normalizedAccrualFrequency(ctx, pgxPool,
 			bookedAccrualFreqCode, req.AccrualFrequencyCode, bookedPayout, actualPayout, bookedFrequencyID, req.ConfirmedFrequencyID,
 		)
-		varItems := varianceengine.Compare("FD_CONFIRMATION", req.BookingID, entityID, runID, buildFDConfirmationVarianceRules(fdConfirmationVarianceInput{
+		varIn := prepareFDConfirmationVarianceInput(ctx, pgxPool, fdConfirmationVarianceInput{
 			BookedPrincipal: bookedPrincipal, ActualPrincipal: req.ConfirmedPrincipalAmount,
 			BookedRate: bookedRate, ActualRate: req.ConfirmedInterestRate,
 			BookedTenorDays: bookedTenorDays, ActualTenorDays: req.ConfirmedTenorDays,
@@ -276,7 +276,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			BookedResetType: bookedResetType, ActualResetType: req.ResetType,
 			BookedAccrualFrequencyCode: bookedAccrual, ActualAccrualFrequencyCode: actualAccrual,
 			BookedTenorType: bookedTenorType, ActualTenorType: strings.ToUpper(strings.TrimSpace(req.ConfirmedTenorType)),
-		}))
+		})
+		varItems := varianceengine.Compare("FD_CONFIRMATION", req.BookingID, entityID, runID, buildFDConfirmationVarianceRules(varIn))
 
 		hasVariance := false
 		for _, v := range varItems {
@@ -289,6 +290,9 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── Variance found: return items, no DB ingestion ─────────────────────
 		if hasVariance {
 			cleanupUpload()
+			userEmail := api.GetUserEmailFromCtx(ctx)
+			_ = varianceengine.PersistVariances(ctx, pgxPool, varItems)
+			_ = varianceengine.AutoResolveCleared(ctx, pgxPool, req.BookingID, varItems, req.UserID, userEmail)
 			out := make([]map[string]interface{}, 0, len(varItems))
 			for _, v := range varItems {
 				out = append(out, serializeVarianceItem(ctx, pgxPool, v))
@@ -804,10 +808,10 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		runID := varianceengine.NewRunID()
-		bookedPayout, actualPayout := normalizedPayoutFrequency(
+		bookedPayout, actualPayout := normalizedPayoutFrequency(ctx, pgxPool,
 			bookedPayoutFreqID, bookedFrequencyID, req.PayoutFrequencyID, req.ConfirmedFrequencyID,
 		)
-		bookedAccrual, actualAccrual := normalizedAccrualFrequency(
+		bookedAccrual, actualAccrual := normalizedAccrualFrequency(ctx, pgxPool,
 			bookedAccrualFreqCode, req.AccrualFrequencyCode, bookedPayout, actualPayout, bookedFrequencyID, req.ConfirmedFrequencyID,
 		)
 		varItems, hasVariance := runFDConfirmationVarianceCompare(ctx, pgxPool, fdConfirmationVarianceInput{
@@ -1377,10 +1381,10 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var varItems []varianceengine.VarianceItem
 		var hasVariance bool
 		if bookingID != "" {
-			bookedPayout, actualPayout := normalizedPayoutFrequency(
+			bookedPayout, actualPayout := normalizedPayoutFrequency(ctx, pgxPool,
 				bookedPayoutFreqID, bookedFrequencyID, effPayoutFreqID, effFrequencyID,
 			)
-			bookedAccrual, actualAccrual := normalizedAccrualFrequency(
+			bookedAccrual, actualAccrual := normalizedAccrualFrequency(ctx, pgxPool,
 				bookedAccrualFreqCode, effAccrualFreqCode, bookedPayout, actualPayout, bookedFrequencyID, effFrequencyID,
 			)
 			varItems, hasVariance = runFDConfirmationVarianceCompare(ctx, pgxPool, fdConfirmationVarianceInput{

@@ -338,8 +338,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			accRows, err := pool.Query(ctx, `
 				SELECT
 				  COALESCE(ae.exception_id,'')                    AS exception_id,
-				  COALESCE(ae.fd_id,'')                           AS fd_ref,
-				  COALESCE(m.bank_name, m.bank_id,'')             AS bank,
+				  COALESCE(NULLIF(m.bank_fd_ref_no,''), m.fd_id, b.booking_id, ae.fd_id,'') AS fd_ref,
+				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
 				  COALESCE(b.entity_name, m.entity_name,'')       AS entity,
 				  COALESCE(ae.variance_amount,0)                  AS variance_amount,
 				  COALESCE(ae.variance_pct,0)                     AS variance_pct,
@@ -382,8 +382,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			varRows, vErr := pool.Query(ctx, `
 				SELECT
 				  COALESCE(vl.variance_id,'')                                  AS variance_id,
-				  COALESCE(vl.record_id,'')                                    AS fd_ref,
-				  COALESCE(m.bank_name, m.bank_id,'')                          AS bank,
+				  COALESCE(NULLIF(m.bank_fd_ref_no,''), m.fd_id, b.booking_id, vl.record_id,'') AS fd_ref,
+				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
 				  COALESCE(b.entity_name, m.entity_name, vl.entity_id,'')      AS entity,
 				  COALESCE(ABS(vl.variance_delta),0)                           AS variance_amount,
 				  COALESCE(vl.variance_delta,0)                                AS variance_delta,

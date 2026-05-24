@@ -786,7 +786,29 @@ func normalizeAccrualFrequencyCode(code, payoutFreqID, compoundingFreqID string)
 	return strings.TrimSpace(compoundingFreqID)
 }
 
-func normalizedPayoutFrequency(bookedPayout, bookedCompound, actualPayout, actualCompound string) (booked, actual string) {
+// canonicalFrequencyIdentity maps frequency id/code/name to a stable master id so
+// IDENTITY variance does not fire when the user picks the same frequency via id vs code.
+func canonicalFrequencyIdentity(ctx context.Context, pool *pgxpool.Pool, raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if pool != nil {
+		var fid string
+		err := pool.QueryRow(ctx, `
+			SELECT COALESCE(frequency_id::text,'')
+			FROM investment.fd_compounding_frequency_master
+			WHERE (frequency_id::text = $1 OR frequency_code = $1 OR frequency_name = $1)
+			  AND COALESCE(is_deleted,false) = false
+			LIMIT 1`, raw).Scan(&fid)
+		if err == nil && fid != "" {
+			return fid
+		}
+	}
+	return strings.ToUpper(raw)
+}
+
+func normalizedPayoutFrequency(ctx context.Context, pool *pgxpool.Pool, bookedPayout, bookedCompound, actualPayout, actualCompound string) (booked, actual string) {
 	b := strings.TrimSpace(bookedPayout)
 	if b == "" {
 		b = strings.TrimSpace(bookedCompound)
@@ -795,12 +817,41 @@ func normalizedPayoutFrequency(bookedPayout, bookedCompound, actualPayout, actua
 	if a == "" {
 		a = strings.TrimSpace(actualCompound)
 	}
+	return canonicalFrequencyIdentity(ctx, pool, b), canonicalFrequencyIdentity(ctx, pool, a)
+}
+
+func normalizedAccrualFrequency(ctx context.Context, pool *pgxpool.Pool, bookedCode, actualCode, bookedPayout, actualPayout, bookedCompound, actualCompound string) (booked, actual string) {
+	bookedNorm := normalizeAccrualFrequencyCode(bookedCode, bookedPayout, bookedCompound)
+	actualNorm := normalizeAccrualFrequencyCode(actualCode, actualPayout, actualCompound)
+	return canonicalFrequencyIdentity(ctx, pool, bookedNorm), canonicalFrequencyIdentity(ctx, pool, actualNorm)
+}
+
+func normalizeTenorTypeForVariance(booked, actual string) (string, string) {
+	b := strings.ToUpper(strings.TrimSpace(booked))
+	a := strings.ToUpper(strings.TrimSpace(actual))
+	if b == "" {
+		if a != "" {
+			b = a
+		} else {
+			b = "DAYS"
+		}
+	}
+	if a == "" {
+		a = b
+	}
 	return b, a
 }
 
-func normalizedAccrualFrequency(bookedCode, actualCode, bookedPayout, actualPayout, bookedCompound, actualCompound string) (booked, actual string) {
-	return normalizeAccrualFrequencyCode(bookedCode, bookedPayout, bookedCompound),
-		normalizeAccrualFrequencyCode(actualCode, actualPayout, actualCompound)
+// prepareFDConfirmationVarianceInput canonicalizes frequency identity fields before compare.
+func prepareFDConfirmationVarianceInput(ctx context.Context, pool *pgxpool.Pool, in fdConfirmationVarianceInput) fdConfirmationVarianceInput {
+	in.BookedTenorType, in.ActualTenorType = normalizeTenorTypeForVariance(in.BookedTenorType, in.ActualTenorType)
+	in.BookedFrequencyID = canonicalFrequencyIdentity(ctx, pool, in.BookedFrequencyID)
+	in.ActualFrequencyID = canonicalFrequencyIdentity(ctx, pool, in.ActualFrequencyID)
+	in.BookedPayoutFrequencyID = canonicalFrequencyIdentity(ctx, pool, in.BookedPayoutFrequencyID)
+	in.ActualPayoutFrequencyID = canonicalFrequencyIdentity(ctx, pool, in.ActualPayoutFrequencyID)
+	in.BookedAccrualFrequencyCode = canonicalFrequencyIdentity(ctx, pool, in.BookedAccrualFrequencyCode)
+	in.ActualAccrualFrequencyCode = canonicalFrequencyIdentity(ctx, pool, in.ActualAccrualFrequencyCode)
+	return in
 }
 
 func resetTypeDisplayLabel(v string) string {
@@ -916,6 +967,7 @@ func runFDConfirmationVarianceCompare(ctx context.Context, pool *pgxpool.Pool, i
 	if in.RunID == "" {
 		in.RunID = varianceengine.NewRunID()
 	}
+	in = prepareFDConfirmationVarianceInput(ctx, pool, in)
 	items := varianceengine.Compare("FD_CONFIRMATION", in.BookingID, in.EntityID, in.RunID, buildFDConfirmationVarianceRules(in))
 	hasVariance := false
 	for _, v := range items {
