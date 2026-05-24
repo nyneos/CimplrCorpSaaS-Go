@@ -4,8 +4,8 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
-	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/investment/fdMaster"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
 	"bytes"
 	"context"
@@ -924,6 +924,12 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
 
+		closureInitiateID, err := ensureCimplrPrematureInitiate(ctx, tx, "", "", src, req, calc)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "premature initiate failed: "+err.Error())
+			return
+		}
+
 		var closureConfirmID string
 		err = tx.QueryRow(ctx, `
 			INSERT INTO cimplr.fd_closure_confirm (
@@ -934,10 +940,10 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				principal_received, interest_received, tds_deducted, net_amount_received,
 				variance_type, resolution_action, remarks
 			) VALUES (
-				NULL,$1,$2,$3,$4,$5,$6,$7,$8,$9,'PREMATURE',NULLIF($10,''),NULLIF($11,''),$12::date,$13::date,
-				$14,$15,$16,$17,$18,$19,$20,$21,$22,NULLIF($23,''),NULLIF($24,''),$25
+				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'PREMATURE',NULLIF($11,''),NULLIF($12,''),$13::date,$14::date,
+				$15,$16,$17,$18,$19,$20,$21,$22,$23,NULLIF($24,''),NULLIF($25,''),$26
 			) RETURNING closure_confirm_id`,
-			src.FDID, nullStrOrNil(src.BookingID), nullStrOrNil(src.ConfirmationID), nullStrOrNil(src.EntityID), nullStrOrNil(src.EntityName),
+			closureInitiateID, src.FDID, nullStrOrNil(src.BookingID), nullStrOrNil(src.ConfirmationID), nullStrOrNil(src.EntityID), nullStrOrNil(src.EntityName),
 			nullStrOrNil(src.BankID), nullStrOrNil(src.BankName), nullStrOrNil(src.FDRefNo), nullStrOrNil(src.BankFDRefNo),
 			strings.ToUpper(strings.TrimSpace(req.ConfirmationMode)), req.BankReferenceNo, nullDateArg(req.ActualPayoutDate), nullDateArg(req.RequestedClosureDate),
 			req.PrematureReason, principalExpected, interestExpected, tdsExpected, netExpected,
@@ -952,11 +958,11 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "premature detail failed: "+err.Error())
 			return
 		}
-		if err := insertCimplrCalculation(ctx, tx, "", closureConfirmID, src, calc); err != nil {
+		if err := insertCimplrCalculation(ctx, tx, closureInitiateID, closureConfirmID, src, calc); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "calculation snapshot failed: "+err.Error())
 			return
 		}
-		if err := insertCimplrConfirmAudit(ctx, tx, closureConfirmID, "", "CREATE", "PENDING_APPROVAL", firstNonEmpty(req.Reason, "Create premature closure"), req.UserID, nil); err != nil {
+		if err := insertCimplrConfirmAudit(ctx, tx, closureConfirmID, closureInitiateID, "CREATE", "PENDING_APPROVAL", firstNonEmpty(req.Reason, "Create premature closure"), req.UserID, nil); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "premature audit failed: "+err.Error())
 			return
 		}
@@ -979,6 +985,7 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET approval_instance_id=$1 WHERE closure_confirm_id=$2`, instanceID, closureConfirmID)
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"closure_initiate_id":  closureInitiateID,
 			"closure_confirm_id":   closureConfirmID,
 			"approval_instance_id": instanceID,
 			"calculation":          cimplrCalcToMap(calc),
@@ -1115,6 +1122,20 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
+
+		closureInitiateID := cimplrMapString(oldRow, "closure_initiate_id")
+		if closureType == "PREMATURE" {
+			closureInitiateID, err = ensureCimplrPrematureInitiate(ctx, tx, closureInitiateID, req.ClosureConfirmID, src, req, calc)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "premature initiate failed: "+err.Error())
+				return
+			}
+		}
+		if closureInitiateID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "closure_initiate_id is missing for this confirm record")
+			return
+		}
+
 		_, err = tx.Exec(ctx, `
 			UPDATE cimplr.fd_closure_confirm
 			SET confirmation_mode=NULLIF($1,''), bank_reference_no=NULLIF($2,''),
@@ -1144,11 +1165,11 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		if err := insertCimplrCalculation(ctx, tx, fmt.Sprint(oldRow["closure_initiate_id"]), req.ClosureConfirmID, src, calc); err != nil {
+		if err := insertCimplrCalculation(ctx, tx, closureInitiateID, req.ClosureConfirmID, src, calc); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "calculation snapshot failed: "+err.Error())
 			return
 		}
-		if err := insertCimplrConfirmAudit(ctx, tx, req.ClosureConfirmID, fmt.Sprint(oldRow["closure_initiate_id"]), "EDIT", "PENDING_EDIT_APPROVAL", firstNonEmpty(req.Reason, "Edit FD closure confirm"), req.UserID, oldRow); err != nil {
+		if err := insertCimplrConfirmAudit(ctx, tx, req.ClosureConfirmID, closureInitiateID, "EDIT", "PENDING_EDIT_APPROVAL", firstNonEmpty(req.Reason, "Edit FD closure confirm"), req.UserID, oldRow); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "confirm audit failed: "+err.Error())
 			return
 		}
@@ -1170,6 +1191,7 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"closure_initiate_id":  closureInitiateID,
 			"closure_confirm_id":   req.ClosureConfirmID,
 			"approval_instance_id": instanceID,
 			"variance":             varianceSummary,
@@ -1809,6 +1831,17 @@ func cimplrConfirmPostFinalizeHook(ctx context.Context, pool *pgxpool.Pool, reco
 		if transactionType == txCimplrConfirmCreate || transactionType == txCimplrConfirmDelete {
 			_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET closure_status='REJECTED' WHERE closure_confirm_id=$1 AND is_deleted=false`, recordID)
 		}
+		if transactionType == txCimplrConfirmCreate {
+			_, _ = pool.Exec(ctx, `
+				UPDATE cimplr.fd_closure_initiate i
+				SET closure_status='REJECTED'
+				FROM cimplr.fd_closure_confirm c
+				WHERE c.closure_confirm_id=$1
+				  AND c.closure_initiate_id=i.closure_initiate_id
+				  AND c.closure_type='PREMATURE'
+				  AND i.closure_type='PREMATURE'
+				  AND COALESCE(i.is_deleted,false)=false`, recordID)
+		}
 		return
 	}
 	switch transactionType {
@@ -2301,6 +2334,18 @@ func postCimplrClosureJournalsTx(ctx context.Context, tx pgx.Tx, closureConfirmI
 	}
 	_ = bookingID // intentionally not status-flipped — see comment above
 	_, err = tx.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET closure_status='POSTED', posting_status='POSTED', accounting_posted=true, journal_entry_id=$1 WHERE closure_confirm_id=$2`, entryID, closureConfirmID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE cimplr.fd_closure_initiate i
+		SET closure_status='CONFIRM'
+		FROM cimplr.fd_closure_confirm c
+		WHERE c.closure_confirm_id=$1
+		  AND c.closure_initiate_id=i.closure_initiate_id
+		  AND c.closure_type='PREMATURE'
+		  AND i.closure_type='PREMATURE'
+		  AND COALESCE(i.is_deleted,false)=false`, closureConfirmID)
 	if err != nil {
 		return err
 	}
@@ -2862,6 +2907,62 @@ func cimplrAssertConfirmCreateAllowed(req cimplrClosureConfirmRequest, src cimpl
 	return summary, fmt.Sprintf("%d variance(s) detected — fix the amounts to match the calculated values, or send resolution_action='ACCEPT' (with remarks) to acknowledge the variance.", openCount)
 }
 
+func cimplrMapString(m map[string]interface{}, key string) string {
+	if m == nil {
+		return ""
+	}
+	v := strings.TrimSpace(fmt.Sprint(m[key]))
+	if v == "" || v == "<nil>" {
+		return ""
+	}
+	return v
+}
+
+func ensureCimplrPrematureInitiate(ctx context.Context, exec dbExec, existingInitiateID, confirmID string, src cimplrFDSource, req cimplrClosureConfirmRequest, calc cimplrClosureCalc) (string, error) {
+	existingInitiateID = strings.TrimSpace(existingInitiateID)
+	if existingInitiateID != "" && existingInitiateID != "<nil>" {
+		return existingInitiateID, nil
+	}
+
+	var closureInitiateID string
+	err := exec.QueryRow(ctx, `
+		INSERT INTO cimplr.fd_closure_initiate (
+			fd_id, booking_id, confirmation_id, entity_id, entity_name,
+			bank_id, bank_name, fd_ref_no, bank_fd_ref_no,
+			closure_type, closure_status, action_at_maturity,
+			maturity_date, requested_closure_date, principal_amount,
+			interest_type_code, interest_rate, expected_maturity_value,
+			accrued_interest_till_date, tds_expected, net_expected_amount,
+			maturity_status, action_required, remarks
+		) VALUES (
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,
+			'PREMATURE','INITIATE',NULL,
+			$10::date,$11::date,$12,$13,$14,$15,$16,$17,$18,
+			$19,true,$20
+		) RETURNING closure_initiate_id`,
+		src.FDID, nullStrOrNil(src.BookingID), nullStrOrNil(src.ConfirmationID), nullStrOrNil(src.EntityID), nullStrOrNil(src.EntityName),
+		nullStrOrNil(src.BankID), nullStrOrNil(src.BankName), nullStrOrNil(src.FDRefNo), nullStrOrNil(src.BankFDRefNo),
+		src.MaturityDate.Format(constants.DateFormat), nullDateArg(firstNonEmpty(req.RequestedClosureDate, calc.CalculationDate.Format(constants.DateFormat))),
+		src.Principal, nullStrOrNil(src.InterestTypeCode), src.InterestRate,
+		calc.ExpectedMaturityValue, calc.RevisedInterestAmount, calc.TDSAmount, calc.NetPayout,
+		deriveCimplrMaturityStatus(src.MaturityDate), req.Remarks,
+	).Scan(&closureInitiateID)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(confirmID) != "" {
+		if _, err := exec.Exec(ctx, `
+			UPDATE cimplr.fd_closure_confirm
+			SET closure_initiate_id=$1
+			WHERE closure_confirm_id=$2 AND COALESCE(is_deleted,false)=false`,
+			closureInitiateID, confirmID,
+		); err != nil {
+			return "", err
+		}
+	}
+	return closureInitiateID, nil
+}
+
 func persistCimplrConfirmVariances(ctx context.Context, pool varianceengine.QueryExecutor, recordID string, req cimplrClosureConfirmRequest, src cimplrFDSource, calc cimplrClosureCalc) (map[string]interface{}, error) {
 	runID := varianceengine.NewRunID()
 	rules := buildCimplrConfirmVarianceRules(req, src, calc)
@@ -3106,9 +3207,12 @@ func insertCimplrConfirmAudit(ctx context.Context, exec dbExec, confirmID, initi
 		// and the real post path). A silently-swallowed error here would abort the
 		// surrounding tx and surface as SQLSTATE 25P02 on the next INSERT. ErrNoRows
 		// is the only acceptable error — initiate_id will simply stay empty.
-		if err := exec.QueryRow(ctx, `SELECT closure_initiate_id FROM cimplr.fd_closure_confirm WHERE closure_confirm_id=$1`, confirmID).Scan(&initiateID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if err := exec.QueryRow(ctx, `SELECT COALESCE(closure_initiate_id,'') FROM cimplr.fd_closure_confirm WHERE closure_confirm_id=$1`, confirmID).Scan(&initiateID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("audit prep: initiate-id lookup failed for %s: %w", confirmID, err)
 		}
+	}
+	if strings.TrimSpace(initiateID) == "" {
+		return fmt.Errorf("audit prep: closure_initiate_id is missing for %s", confirmID)
 	}
 	_, err := exec.Exec(ctx, `
 		INSERT INTO cimplr.fd_closure_confirm_audit (
@@ -3190,7 +3294,7 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 	}
 	if req.ClosureType != "" {
 		add("t.closure_type=$%d", strings.ToUpper(req.ClosureType))
-	} else if stage == "confirm" {
+	} else {
 		where = append(where, "t.closure_type <> 'PREMATURE'")
 	}
 	if approvedActive {
@@ -3812,13 +3916,13 @@ func buildCimplrJournalPreview(closureType, fdID, bankAcctNum, bankAcctName stri
 		"accounting_period": time.Now().Format("2006-01"),
 		"total_debit":       totalDebit,
 		"total_credit":      totalCredit,
-		"principal":        roundToFour(principal),
-		"interest":         roundToFour(interest),
-		"tds":              roundToFour(tds),
-		"penalty":          roundToFour(penalty),
-		"net_payout":       roundToFour(netPayout),
-		"new_fd_status":    newFDStatus,
-		"lines":            lines,
+		"principal":         roundToFour(principal),
+		"interest":          roundToFour(interest),
+		"tds":               roundToFour(tds),
+		"penalty":           roundToFour(penalty),
+		"net_payout":        roundToFour(netPayout),
+		"new_fd_status":     newFDStatus,
+		"lines":             lines,
 	}
 }
 

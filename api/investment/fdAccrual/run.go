@@ -2862,15 +2862,10 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 
 		openingBalance := getPriorRunClosingBalance(ctx, pool, params.EntityID, fd.FDID, params.PeriodStart)
 
-		// COMPOUND principal tracking across sub-periods.
-		// originalPrincipal is fd.PrincipalAmount; for COMPOUND, each sub-period's
-		// opening principal = originalPrincipal + all accumulated accrued interest so far.
-		originalPrincipal := fd.PrincipalAmount
-
 		fdCalculated := false
 		fdFailed := false
 
-		for spIdx, sp := range subPeriods {
+		for _, sp := range subPeriods {
 			// Build per-sub-period params
 			subParams := params
 			subParams.PeriodStart = sp[0]
@@ -2882,11 +2877,6 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 			fdForCalc := fd
 			fdForCalc.AccrualStartConvention = "INCLUDE" // neutral: no +1 shift
 			fdForCalc.AccrualEndConvention = "EXCLUDE"   // neutral: no +1 shift
-			// For COMPOUND FDs after first sub-period, compound the principal:
-			// use originalPrincipal + all interest accrued so far as the new base.
-			if spIdx > 0 && strings.EqualFold(fd.InterestTypeCode, "COMPOUND") {
-				fdForCalc.PrincipalAmount = originalPrincipal + openingBalance
-			}
 
 			result := calculateAccrualForFD(ctx, pool, fdForCalc, subParams, openingBalance)
 
@@ -3540,8 +3530,8 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 		// Update ledger with journal_entry_id
 		_, _ = pool.Exec(ctx,
 			`UPDATE investment.fd_accrual_ledger SET journal_entry_id=$1, ledger_row_status='POSTED', updated_at=now()
-			 WHERE run_id=$2 AND fd_id=$3`,
-			entryID, runID, lr.FDID)
+			 WHERE ledger_id=$2`,
+			entryID, lr.LedgerID)
 
 		api.LogInfo("[FDAccrual] Journal posted fd=%s run=%s entry=%s", lr.FDID, runID, entryID)
 	}

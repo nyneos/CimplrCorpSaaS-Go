@@ -198,12 +198,63 @@ type ScheduleConfigRow struct {
 
 // ─── Day-count helpers ────────────────────────────────────────────────────────
 
+func normalizeAccrualDayCountCode(dayCountCode string) string {
+	norm := strings.ToUpper(strings.NewReplacer("/", "_", "-", "_").Replace(strings.TrimSpace(dayCountCode)))
+	norm = strings.TrimPrefix(norm, "DC_")
+	switch {
+	case strings.Contains(norm, "30") && strings.Contains(norm, "360"):
+		return "30_360"
+	case strings.Contains(norm, "ACT") && strings.Contains(norm, "360") && !strings.Contains(norm, "365"):
+		return "ACT_360"
+	case norm == "ACT_ACT" || (strings.Contains(norm, "ACT") && strings.Contains(norm, "ACTUAL") && !strings.Contains(norm, "360") && !strings.Contains(norm, "365")):
+		return "ACT_ACT"
+	case strings.Contains(norm, "365"):
+		return "ACT_365"
+	default:
+		return "ACT_365"
+	}
+}
+
+func accrualIsLeapYear(year int) bool {
+	return year%400 == 0 || (year%4 == 0 && year%100 != 0)
+}
+
+func accrualDaysInMonth(year int, month time.Month) int {
+	switch month {
+	case time.January, time.March, time.May, time.July, time.August, time.October, time.December:
+		return 31
+	case time.April, time.June, time.September, time.November:
+		return 30
+	case time.February:
+		if accrualIsLeapYear(year) {
+			return 29
+		}
+		return 28
+	default:
+		return 0
+	}
+}
+
+func accrualCountDays30by360(start, end time.Time) int {
+	y1, m1, d1 := start.Year(), start.Month(), start.Day()
+	y2, m2, d2 := end.Year(), end.Month(), end.Day()
+	if m1 == time.February && d1 == accrualDaysInMonth(y1, m1) {
+		d1 = 30
+	}
+	if d1 == 31 {
+		d1 = 30
+	}
+	if d2 == 31 && d1 >= 30 {
+		d2 = 30
+	}
+	return (y2-y1)*360 + (int(m2)-int(m1))*30 + (d2 - d1)
+}
+
 // getDivisorForAccrual returns the annual divisor from a day count code.
-// For ACT_ACT it uses the reference date's year. Use getDivisorForPeriod
-// when you have a full period (start, end) for accurate leap-year handling.
+// For ACT_ACT it uses the reference date's year, matching the cashflow workbook rule.
 // Never returns 0.
 func getDivisorForAccrual(dayCountCode string, refDate time.Time) int {
-	switch strings.ToUpper(dayCountCode) {
+	switch normalizeAccrualDayCountCode(dayCountCode) {
 	case "ACT_365":
 		return 365
 	case "ACT_360":
@@ -211,37 +262,19 @@ func getDivisorForAccrual(dayCountCode string, refDate time.Time) int {
 	case "30_360":
 		return 360
 	case "ACT_ACT":
-		year := refDate.Year()
-		if year%400 == 0 || (year%4 == 0 && year%100 != 0) {
+		if accrualIsLeapYear(refDate.Year()) {
 			return 366
 		}
 		return 365
 	default:
 		return 365
 	}
-}
-
-// periodHasLeapDay returns true if any day in [start, end) falls in a
-// calendar year that is a leap year AND Feb 29 exists in [start, end).
-func periodHasLeapDay(start, end time.Time) bool {
-	for y := start.Year(); y <= end.Year(); y++ {
-		isLeap := y%400 == 0 || (y%4 == 0 && y%100 != 0)
-		if !isLeap {
-			continue
-		}
-		feb29 := time.Date(y, time.February, 29, 0, 0, 0, 0, time.UTC)
-		if !feb29.Before(start) && feb29.Before(end) {
-			return true
-		}
-	}
-	return false
 }
 
 // getDivisorForPeriod is the period-aware version of getDivisorForAccrual.
-// For ACT_ACT it returns 366 if Feb 29 falls within [start, end), else 365.
-// All other conventions behave identically to getDivisorForAccrual.
+// For ACT_ACT it follows the cashflow workbook rule: end-date year decides 365/366.
 func getDivisorForPeriod(dayCountCode string, start, end time.Time) int {
-	switch strings.ToUpper(dayCountCode) {
+	switch normalizeAccrualDayCountCode(dayCountCode) {
 	case "ACT_365":
 		return 365
 	case "ACT_360":
@@ -249,13 +282,25 @@ func getDivisorForPeriod(dayCountCode string, start, end time.Time) int {
 	case "30_360":
 		return 360
 	case "ACT_ACT":
-		if periodHasLeapDay(start, end) {
+		if accrualIsLeapYear(end.Year()) {
 			return 366
 		}
 		return 365
 	default:
 		return 365
 	}
+}
+
+func getDivisorAndDaysForAccrualPeriod(dayCountCode string, start, end time.Time, fd AccrualInput, cal accrualHolidayCalendar, holidayAware bool) (int, int) {
+	normalized := normalizeAccrualDayCountCode(dayCountCode)
+	if normalized == "30_360" {
+		return 360, accrualCountDays30by360(start, end)
+	}
+	divisor := getDivisorForPeriod(normalized, start, end)
+	if holidayAware {
+		return divisor, accrualCountWorkingDays(start, end, fd, cal)
+	}
+	return divisor, int(end.Sub(start).Hours() / 24)
 }
 
 // buildAccrualPeriod returns "APR 2025" uppercase month-year string.
@@ -1009,7 +1054,8 @@ func getCashflowDataForPeriod(ctx context.Context, pool *pgxpool.Pool,
 	rows, err := pool.Query(ctx, `
 		SELECT cashflow_id, event_type, event_date,
 		       COALESCE(net_cash_flow, 0),
-		       COALESCE(tds_amount, 0)
+		       COALESCE(tds_amount, 0),
+		       COALESCE(interest_accrued, 0)
 		FROM investment.fd_cashflow_schedule
 		WHERE fd_id = $1
 		  AND event_date >= $2
@@ -1029,13 +1075,17 @@ func getCashflowDataForPeriod(ctx context.Context, pool *pgxpool.Pool,
 	for rows.Next() {
 		var cashflowID, eventType string
 		var eventDate time.Time
-		var netCash, tdsAmt float64
-		if err := rows.Scan(&cashflowID, &eventType, &eventDate, &netCash, &tdsAmt); err != nil {
+		var netCash, tdsAmt, interestAccrued float64
+		if err := rows.Scan(&cashflowID, &eventType, &eventDate, &netCash, &tdsAmt, &interestAccrued); err != nil {
 			continue
 		}
 		cashflowIDs = append(cashflowIDs, cashflowID)
 		if eventType == "INTEREST_RECEIPT" || eventType == "MATURITY" {
-			interestReceived += netCash
+			if interestAccrued > 0 {
+				interestReceived += interestAccrued
+			} else {
+				interestReceived += netCash + tdsAmt
+			}
 		}
 		if eventType == "TDS_DEDUCTION" {
 			tdsByDeductionDate[eventDate.Format(constants.DateFormat)] += tdsAmt
@@ -1196,19 +1246,19 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 	// ─────────────────────────────────────────────────────────────────────
 
 	// Day count from bank config (fd_master / fd_bank_config_master)
-	configDayCountCode := fd.DayCountCode
+	configDayCountCode := normalizeAccrualDayCountCode(fd.DayCountCode)
 	if configDayCountCode == "" {
 		configDayCountCode = "ACT_365"
 	}
-	// Period-aware divisor: for ACT_ACT, use 366 if Feb 29 falls in the period
-	configDivisor := getDivisorForPeriod(configDayCountCode, effectiveStart, effectiveEnd)
-
-	// Holiday-aware accrual day count
-	configAccrualDays := accrualCountWorkingDays(effectiveStart, effectiveEnd, fd, cal)
+	configDivisor, configAccrualDays := getDivisorAndDaysForAccrualPeriod(
+		configDayCountCode, effectiveStart, effectiveEnd, fd, cal, true)
 
 	// Count excluded days for reporting
 	rawCalDays := int(effectiveEnd.Sub(effectiveStart).Hours() / 24)
 	configHolidaysExcluded := rawCalDays - configAccrualDays
+	if configDayCountCode == "30_360" {
+		configHolidaysExcluded = 0
+	}
 	if configHolidaysExcluded < 0 {
 		configHolidaysExcluded = 0
 	}
@@ -1297,15 +1347,13 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 	// No holiday exclusions. Always fd.PrincipalAmount (no compounding lookup).
 	// ─────────────────────────────────────────────────────────────────────
 
-	reqDayCountCode := params.DayCountConvention
+	reqDayCountCode := normalizeAccrualDayCountCode(params.DayCountConvention)
 	if reqDayCountCode == "" {
 		reqDayCountCode = "ACT_365"
 	}
-	// Req path: period-aware divisor too, but using the run's day count
-	reqDivisor := getDivisorForPeriod(reqDayCountCode, effectiveStart, effectiveEnd)
-
-	// Raw calendar days — NO holiday/weekend exclusion on req path
-	reqAccrualDays := rawCalDays
+	// Req path: run-level day count, no holiday/weekend exclusion except 30/360 formula days.
+	reqDivisor, reqAccrualDays := getDivisorAndDaysForAccrualPeriod(
+		reqDayCountCode, effectiveStart, effectiveEnd, fd, cal, false)
 
 	reqOpeningPrincipal := fd.PrincipalAmount // always original principal
 
