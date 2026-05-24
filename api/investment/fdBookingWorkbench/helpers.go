@@ -282,6 +282,164 @@ func getEntityName(ctx context.Context, exec fdSchemaQueryExecutor, entityID str
 	return ""
 }
 
+// ─── FD confirmation reference uniqueness ────────────────────────────────────
+
+type fdConfirmationReferenceCheck struct {
+	EntityID              string
+	BankFDRefNo           string
+	BankReferenceNumber   string
+	ExcludeConfirmationID string
+}
+
+func fdReferenceValueInUseOnConfirmation(
+	ctx context.Context,
+	exec fdSchemaQueryExecutor,
+	entityID, refValue, excludeConfirmationID string,
+	hasBankReferenceNumberCol bool,
+) (bool, error) {
+	refValue = strings.TrimSpace(refValue)
+	if refValue == "" {
+		return false, nil
+	}
+	excludeConfirmationID = strings.TrimSpace(excludeConfirmationID)
+
+	matchSQL := `BTRIM(COALESCE(c.bank_fd_ref_no, '')) = $3`
+	if hasBankReferenceNumberCol {
+		matchSQL = `(
+			BTRIM(COALESCE(c.bank_fd_ref_no, '')) = $3
+			OR BTRIM(COALESCE(c.bank_reference_number::text, '')) = $3
+		)`
+	}
+
+	var exists bool
+	err := exec.QueryRow(ctx, fmt.Sprintf(`
+		SELECT EXISTS (
+			SELECT 1
+			FROM investment.fd_confirmation c
+			INNER JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE COALESCE(c.is_deleted, false) = false
+			  AND COALESCE(b.is_deleted, false) = false
+			  AND b.entity_id = $1
+			  AND ($2 = '' OR c.confirmation_id <> $2)
+			  AND %s
+		)`, matchSQL), entityID, excludeConfirmationID, refValue).Scan(&exists)
+	return exists, err
+}
+
+func fdReferenceValueInUseOnMaster(
+	ctx context.Context,
+	exec fdSchemaQueryExecutor,
+	entityID, refValue string,
+	masterCols map[string]bool,
+) (bool, error) {
+	refValue = strings.TrimSpace(refValue)
+	if refValue == "" || strings.TrimSpace(entityID) == "" {
+		return false, nil
+	}
+
+	matchSQL := `BTRIM(COALESCE(m.bank_fd_ref_no, '')) = $2`
+	if masterCols["bank_reference_number"] {
+		matchSQL = `(
+			BTRIM(COALESCE(m.bank_fd_ref_no, '')) = $2
+			OR BTRIM(COALESCE(m.bank_reference_number::text, '')) = $2
+		)`
+	}
+
+	var exists bool
+	err := exec.QueryRow(ctx, fmt.Sprintf(`
+		SELECT EXISTS (
+			SELECT 1
+			FROM investment.fd_master m
+			WHERE COALESCE(m.is_deleted, false) = false
+			  AND m.entity_id = $1
+			  AND %s
+		)`, matchSQL), entityID, refValue).Scan(&exists)
+	return exists, err
+}
+
+// validateFDConfirmationReferenceUniqueness ensures bank FD ref and bank reference
+// number are unique per entity across fd_confirmation and fd_master.
+func validateFDConfirmationReferenceUniqueness(
+	ctx context.Context,
+	exec fdSchemaQueryExecutor,
+	check fdConfirmationReferenceCheck,
+) (string, int) {
+	entityID := strings.TrimSpace(check.EntityID)
+	if entityID == "" {
+		return "", http.StatusOK
+	}
+
+	confCols, err := loadFDTableColumns(ctx, exec, "investment", "fd_confirmation")
+	if err != nil {
+		return "Failed to load confirmation schema: " + err.Error(), http.StatusInternalServerError
+	}
+	masterCols, err := loadFDTableColumns(ctx, exec, "investment", "fd_master")
+	if err != nil {
+		return "Failed to load FD master schema: " + err.Error(), http.StatusInternalServerError
+	}
+	hasBankReferenceNumberCol := confCols["bank_reference_number"]
+
+	refs := []struct {
+		value   string
+		fdLabel string
+	}{
+		{strings.TrimSpace(check.BankFDRefNo), "Bank FD reference number"},
+		{strings.TrimSpace(check.BankReferenceNumber), "Bank reference number"},
+	}
+	seen := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		if ref.value == "" || seen[ref.value] {
+			continue
+		}
+		seen[ref.value] = true
+
+		inUse, err := fdReferenceValueInUseOnConfirmation(
+			ctx, exec, entityID, ref.value, check.ExcludeConfirmationID, hasBankReferenceNumberCol,
+		)
+		if err != nil {
+			return "Failed to validate confirmation reference uniqueness: " + err.Error(), http.StatusInternalServerError
+		}
+		if inUse {
+			return fmt.Sprintf(
+				`%s "%s" already exists for this entity. Please use a unique reference.`,
+				ref.fdLabel, ref.value,
+			), http.StatusConflict
+		}
+
+		inUse, err = fdReferenceValueInUseOnMaster(ctx, exec, entityID, ref.value, masterCols)
+		if err != nil {
+			return "Failed to validate FD master reference uniqueness: " + err.Error(), http.StatusInternalServerError
+		}
+		if inUse {
+			return fmt.Sprintf(
+				`%s "%s" already exists for this entity. Please use a unique reference.`,
+				ref.fdLabel, ref.value,
+			), http.StatusConflict
+		}
+	}
+
+	return "", http.StatusOK
+}
+
+func resolveEditConfirmationReferenceFields(
+	fields map[string]interface{},
+	oldBankFDRefNo, oldBankReferenceNumber string,
+) (bankFDRefNo, bankReferenceNumber string) {
+	bankFDRefNo = strings.TrimSpace(oldBankFDRefNo)
+	bankReferenceNumber = strings.TrimSpace(oldBankReferenceNumber)
+
+	if v, ok := fields["bank_fd_ref_no"]; ok {
+		bankFDRefNo = strings.TrimSpace(fmt.Sprint(v))
+	} else if v, ok := fields["bank_fd_reference"]; ok {
+		bankFDRefNo = strings.TrimSpace(fmt.Sprint(v))
+	}
+	if v, ok := fields["bank_reference_number"]; ok {
+		bankReferenceNumber = strings.TrimSpace(fmt.Sprint(v))
+	}
+
+	return bankFDRefNo, bankReferenceNumber
+}
+
 // ─── getUserFriendlyFDError ───────────────────────────────────────────────────
 
 // getUserFriendlyFDError converts database errors to user-friendly messages
@@ -325,6 +483,12 @@ func getUserFriendlyFDError(err error, context string) (string, int) {
 			case strings.Contains(constraint, "interest_payout"):
 				return "Invalid interest payout frequency.", http.StatusOK
 			}
+		case "23505":
+			constraint := strings.ToLower(pgErr.ConstraintName)
+			if strings.Contains(constraint, "bank_ref") {
+				return "Bank reference number already exists for this entity. Please use a unique reference.", http.StatusConflict
+			}
+			return "Duplicate entry detected. Please check for existing records.", http.StatusConflict
 		}
 	}
 	errStr := strings.ToLower(err.Error())
@@ -594,9 +758,58 @@ type fdConfirmationVarianceInput struct {
 	BookedMaturityDate, ActualMaturityDate       string
 	BookedInterestType, ActualInterestType       string
 	BookedFrequencyID, ActualFrequencyID         string
+	BookedPayoutFrequencyID, ActualPayoutFrequencyID string
+	BookedResetType, ActualResetType             string
+	BookedAccrualFrequencyCode, ActualAccrualFrequencyCode string
 	BookedTenorType, ActualTenorType             string
 	BookedFirstCapDate, ActualFirstCapDate       string
 	BookedFirstPayoutDate, ActualFirstPayoutDate string
+}
+
+func normalizeResetType(v string) string {
+	v = strings.ToUpper(strings.TrimSpace(v))
+	if v == "" {
+		return "AT_MATURITY"
+	}
+	return v
+}
+
+// normalizeAccrualFrequencyCode treats blank accrual as "same as payout", then compounding.
+func normalizeAccrualFrequencyCode(code, payoutFreqID, compoundingFreqID string) string {
+	c := strings.TrimSpace(strings.ToUpper(code))
+	if c != "" {
+		return c
+	}
+	if p := strings.TrimSpace(payoutFreqID); p != "" {
+		return p
+	}
+	return strings.TrimSpace(compoundingFreqID)
+}
+
+func normalizedPayoutFrequency(bookedPayout, bookedCompound, actualPayout, actualCompound string) (booked, actual string) {
+	b := strings.TrimSpace(bookedPayout)
+	if b == "" {
+		b = strings.TrimSpace(bookedCompound)
+	}
+	a := strings.TrimSpace(actualPayout)
+	if a == "" {
+		a = strings.TrimSpace(actualCompound)
+	}
+	return b, a
+}
+
+func normalizedAccrualFrequency(bookedCode, actualCode, bookedPayout, actualPayout, bookedCompound, actualCompound string) (booked, actual string) {
+	return normalizeAccrualFrequencyCode(bookedCode, bookedPayout, bookedCompound),
+		normalizeAccrualFrequencyCode(actualCode, actualPayout, actualCompound)
+}
+
+func resetTypeDisplayLabel(v string) string {
+	switch normalizeResetType(v) {
+	case "AT_EACH_PAYOUT":
+		return "At Each Payout"
+	default:
+		return "At Maturity (default)"
+	}
 }
 
 // lookupFrequencyLabel resolves a compounding-frequency id to a human readable
@@ -633,14 +846,19 @@ func lookupFrequencyLabel(ctx context.Context, pool *pgxpool.Pool, id string) st
 	}
 }
 
-// frequencyLabelFor enriches a variance field with its display label. Only
-// returns a non-empty value for the frequency_id field (other identity fields
-// are already self-describing).
-func frequencyLabelFor(ctx context.Context, pool *pgxpool.Pool, fieldName, value string) string {
-	if fieldName != "frequency_id" {
+// identityLabelFor enriches identity variance fields with human-readable labels.
+func identityLabelFor(ctx context.Context, pool *pgxpool.Pool, fieldName, value string) string {
+	switch fieldName {
+	case "frequency_id", "payout_frequency_id", "accrual_frequency_code":
+		if lbl := lookupFrequencyLabel(ctx, pool, value); lbl != "" {
+			return lbl
+		}
+		return strings.TrimSpace(value)
+	case "reset_type":
+		return resetTypeDisplayLabel(value)
+	default:
 		return ""
 	}
-	return lookupFrequencyLabel(ctx, pool, value)
 }
 
 // serializeVarianceItem turns a varianceengine.VarianceItem into the JSON map
@@ -661,10 +879,10 @@ func serializeVarianceItem(ctx context.Context, pool *pgxpool.Pool, v varianceen
 		"has_variance":   v.HasVariance,
 		"system_comment": v.SystemComment,
 	}
-	if expLabel := frequencyLabelFor(ctx, pool, v.FieldName, v.ExpectedValue); expLabel != "" {
+	if expLabel := identityLabelFor(ctx, pool, v.FieldName, v.ExpectedValue); expLabel != "" {
 		out["expected_value_label"] = expLabel
 	}
-	if actLabel := frequencyLabelFor(ctx, pool, v.FieldName, v.ActualValue); actLabel != "" {
+	if actLabel := identityLabelFor(ctx, pool, v.FieldName, v.ActualValue); actLabel != "" {
 		out["actual_value_label"] = actLabel
 	}
 	return out
@@ -681,6 +899,9 @@ func buildFDConfirmationVarianceRules(in fdConfirmationVarianceInput) []variance
 		{FieldName: "maturity_date", VarianceType: varianceengine.TypeDate, ExpectedValue: in.BookedMaturityDate, ActualValue: in.ActualMaturityDate, Priority: varianceengine.PriorityHigh},
 		{FieldName: "interest_type_code", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedInterestType, ActualValue: in.ActualInterestType, Priority: varianceengine.PriorityHigh},
 		{FieldName: "frequency_id", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedFrequencyID, ActualValue: in.ActualFrequencyID, Priority: varianceengine.PriorityMedium},
+		{FieldName: "payout_frequency_id", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedPayoutFrequencyID, ActualValue: in.ActualPayoutFrequencyID, Priority: varianceengine.PriorityMedium},
+		{FieldName: "reset_type", VarianceType: varianceengine.TypeIdentity, ExpectedValue: normalizeResetType(in.BookedResetType), ActualValue: normalizeResetType(in.ActualResetType), Priority: varianceengine.PriorityMedium},
+		{FieldName: "accrual_frequency_code", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedAccrualFrequencyCode, ActualValue: in.ActualAccrualFrequencyCode, Priority: varianceengine.PriorityMedium},
 		{FieldName: "tenor_type", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedTenorType, ActualValue: in.ActualTenorType, Priority: varianceengine.PriorityLow},
 		{FieldName: "first_capitalization_date", VarianceType: varianceengine.TypeDate, ExpectedValue: in.BookedFirstCapDate, ActualValue: in.ActualFirstCapDate, Priority: varianceengine.PriorityMedium},
 		{FieldName: "first_payout_date", VarianceType: varianceengine.TypeDate, ExpectedValue: in.BookedFirstPayoutDate, ActualValue: in.ActualFirstPayoutDate, Priority: varianceengine.PriorityMedium},
@@ -746,7 +967,7 @@ func varianceTypeForField(field string) string {
 		return varianceengine.TypeDays
 	case "value_date", "maturity_date", "first_capitalization_date", "first_payout_date":
 		return varianceengine.TypeDate
-	case "interest_type_code", "frequency_id", "tenor_type":
+	case "interest_type_code", "frequency_id", "payout_frequency_id", "accrual_frequency_code", "reset_type", "tenor_type":
 		return varianceengine.TypeIdentity
 	default:
 		return varianceengine.TypeOther
