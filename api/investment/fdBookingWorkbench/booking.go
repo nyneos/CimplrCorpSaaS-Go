@@ -2116,8 +2116,17 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, statusFilter)
 			argIdx++
 		} else {
-			// default: bookings eligible for confirmation — APPROVED and SENT_TO_BANK
-			q = baseSelect + ` AND m.booking_status IN ('APPROVED','SENT_TO_BANK')`
+			// default: bookings eligible for first-time capture — APPROVED and SENT_TO_BANK
+			// only, excluding rows that already have a live confirmation (pending approval,
+			// variance, confirmed, etc.). REJECTED / VARIANCE_REJECTED may reappear for re-capture.
+			q = baseSelect + ` AND m.booking_status IN ('APPROVED','SENT_TO_BANK')
+			  AND NOT EXISTS (
+			    SELECT 1
+			    FROM investment.fd_confirmation c
+			    WHERE c.booking_id = m.booking_id
+			      AND COALESCE(c.is_deleted, false) = false
+			      AND UPPER(COALESCE(c.confirmation_status, '')) NOT IN ('REJECTED', 'VARIANCE_REJECTED')
+			  )`
 		}
 
 		if entityID != "" {

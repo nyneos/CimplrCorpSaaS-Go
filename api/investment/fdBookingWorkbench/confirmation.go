@@ -1761,6 +1761,20 @@ func ResolveVariance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return VarianceResolve(pgxPool)
 }
 
+// confirmationPendingDeleteApproval reports whether checker approval should finalize
+// a DELETE workflow (not a capture/edit confirm). Variance gates must not block that path.
+func confirmationPendingDeleteApproval(ctx context.Context, pool *pgxpool.Pool, confirmationID string) bool {
+	var pending bool
+	_ = pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM investment.fd_audit_confirmation
+			WHERE confirmation_id = $1
+			  AND action_type = 'DELETE'
+			  AND processing_status = 'PENDING_DELETE_APPROVAL'
+		)`, confirmationID).Scan(&pending)
+	return pending
+}
+
 // ─── BulkApproveConfirmation ─────────────────────────────────────────────────
 // Engine-first: RecordAction handles eye sequence + audit stamp + status flip
 // for the final eye. Falls back to direct stamp only when no engine instance.
@@ -1804,18 +1818,21 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// ── Variance guard: block approval if OPEN variance_log rows exist ────
-			var openVarCount int
-			_ = pgxPool.QueryRow(ctx,
-				`SELECT COUNT(*) FROM public.variance_log WHERE record_id=$1 AND status='OPEN'`, cID).
-				Scan(&openVarCount)
-			if openVarCount > 0 {
-				errors = append(errors, cID+": has unresolved variance — resolve or accept as exception first")
-				continue
-			}
-			if confStatus == "VARIANCE_PENDING" {
-				errors = append(errors, cID+": variance pending — resolve or accept as exception before approving")
-				continue
+			// ── Variance guard: applies to capture/edit approval only, not DELETE approval ──
+			pendingDelete := confirmationPendingDeleteApproval(ctx, pgxPool, cID)
+			if !pendingDelete {
+				var openVarCount int
+				_ = pgxPool.QueryRow(ctx,
+					`SELECT COUNT(*) FROM public.variance_log WHERE record_id=$1 AND status='OPEN'`, cID).
+					Scan(&openVarCount)
+				if openVarCount > 0 {
+					errors = append(errors, cID+": has unresolved variance — resolve or accept as exception first")
+					continue
+				}
+				if confStatus == "VARIANCE_PENDING" {
+					errors = append(errors, cID+": variance pending — resolve or accept as exception before approving")
+					continue
+				}
 			}
 
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", cID, req.UserID, userEmail, "", approvalengine.ActionApproved, req.Comment)
