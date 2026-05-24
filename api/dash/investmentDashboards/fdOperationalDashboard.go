@@ -217,7 +217,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 3. unmatched interest receipts ─────────────────────────────────────
 		run("unmatched_receipts", func(ctx context.Context) (interface{}, error) {
-			// fd_interest_receipt where fd_id is NULL or matching fd_master row is missing
+			// fd_interest_receipt rows that also feed top_mismatch_causes (interest_receipt).
 			rows, err := pool.Query(ctx, `
 				SELECT
 				  ir.receipt_id,
@@ -226,10 +226,14 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(ir.currency,'INR') AS currency,
 				  COALESCE(TO_CHAR(ir.receipt_date,'YYYY-MM-DD'),'') AS transaction_date,
 				  COALESCE(ir.narration,'') AS description,
-				  COALESCE(ir.fd_id,'') AS suspected_fd_ref
+				  COALESCE(ir.fd_id,'') AS suspected_fd_ref,
+				  COALESCE(ir.reconcile_status,'') AS reconcile_status,
+				  COALESCE(b.entity_name, m.entity_name, ir.entity_id,'') AS entity
 				FROM investment.fd_interest_receipt ir
+				LEFT JOIN investment.fd_master m ON m.fd_id = ir.fd_id
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE ir.is_deleted=false
-				  AND (ir.fd_id IS NULL OR ir.reconcile_status IN ('UNMATCHED','PENDING',''))
+				  AND (ir.fd_id IS NULL OR ir.fd_id='' OR ir.reconcile_status IN ('UNMATCHED','PENDING',''))
 				  AND ($1::text='' OR ir.entity_id=$1)
 				ORDER BY ir.receipt_date DESC
 				LIMIT 100`, entityFilter)
@@ -246,6 +250,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				TransactionDate string  `json:"transaction_date"`
 				Description     string  `json:"description"`
 				SuspectedFDRef  string  `json:"suspected_fd_ref"`
+				ReconcileStatus string  `json:"reconcile_status"`
+				Entity          string  `json:"entity"`
 			}
 			out := []stmtRow{}
 			totalAmt := 0.0
@@ -253,7 +259,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				var sr stmtRow
 				if err2 := rows.Scan(&sr.ReceiptID, &sr.Bank, &sr.CreditAmount,
 					&sr.Currency, &sr.TransactionDate, &sr.Description,
-					&sr.SuspectedFDRef); err2 == nil {
+					&sr.SuspectedFDRef, &sr.ReconcileStatus, &sr.Entity); err2 == nil {
 					sr.CreditAmount = fdRound(sr.CreditAmount, 2)
 					totalAmt += sr.CreditAmount
 					out = append(out, sr)
