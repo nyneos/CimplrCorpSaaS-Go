@@ -1379,24 +1379,39 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 8. rate_distribution (chart) ──────────────────────────────────────
 		run("rate_distribution", func(ctx context.Context) (interface{}, error) {
+			// interest_rate on fd_master is annual % (e.g. 8.38). Normalize decimal
+			// (0.0838) and mistaken bps (>100) before bucketing.
 			sql := `
+				WITH base AS (
+				  SELECT
+				    m.principal_amount,
+				    CASE
+				      WHEN m.interest_rate > 100 THEN m.interest_rate / 100.0
+				      WHEN m.interest_rate > 0 AND m.interest_rate < 1 THEN m.interest_rate * 100.0
+				      ELSE m.interest_rate
+				    END AS rate_pct
+				  FROM investment.fd_master m
+				  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				  WHERE m.is_deleted = false
+				    AND m.fd_status = 'ACTIVE'
+				    AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)
+				)
 				SELECT
 				  CASE
-				    WHEN m.interest_rate < 5  THEN '<5%'
-				    WHEN m.interest_rate < 6  THEN '5–6%'
-				    WHEN m.interest_rate < 7  THEN '6–7%'
-				    WHEN m.interest_rate < 8  THEN '7–8%'
-				    WHEN m.interest_rate < 9  THEN '8–9%'
-				    ELSE '9%+'
+				    WHEN rate_pct < 5  THEN '<5%'
+				    WHEN rate_pct < 6  THEN '5–6%'
+				    WHEN rate_pct < 7  THEN '6–7%'
+				    WHEN rate_pct < 8  THEN '7–8%'
+				    WHEN rate_pct < 9  THEN '8–9%'
+				    WHEN rate_pct < 10 THEN '9–10%'
+				    ELSE '10%+'
 				  END AS bucket,
-				  COUNT(*) AS count,
-				  COALESCE(SUM(m.principal_amount),0) AS value
-				FROM investment.fd_master m
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE m.is_deleted=false AND m.fd_status='ACTIVE'
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  COUNT(*)::bigint AS count,
+				  COALESCE(SUM(principal_amount), 0) AS value
+				FROM base
+				WHERE rate_pct > 0
 				GROUP BY 1
-				ORDER BY MIN(m.interest_rate)`
+				ORDER BY MIN(rate_pct)`
 			rows, err := pool.Query(ctx, sql, entityFilter)
 			if err != nil {
 				return nil, err
