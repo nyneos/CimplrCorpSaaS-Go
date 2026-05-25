@@ -8,7 +8,6 @@ import (
 	"compress/gzip"
 	"database/sql"
 
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,6 +38,12 @@ func getUserFriendlyEntityCashError(err error, context string) (string, int) {
 	// Unique constraint violations
 	if strings.Contains(errLower, "unique_entity_name_not_deleted") {
 		return "Entity name already exists and is not deleted. Please use a different name.", http.StatusOK
+	}
+	if strings.Contains(errLower, "idx_masterentitycash_name_not_deleted") {
+		return "Entity name already exists and is not deleted. Please use a different name.", http.StatusOK
+	}
+	if strings.Contains(errLower, "idx_masterentitycash_unique_identifier_not_deleted") {
+		return "Unique identifier already exists and is not deleted. Please use a different value.", http.StatusOK
 	}
 	if strings.Contains(errLower, "idx_masterentitycash_name") {
 		return "Entity name already exists. Please use a different name.", http.StatusOK
@@ -1840,16 +1845,6 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		if err := tx.Commit(ctx); err != nil {
-			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrCommitFailedCapitalized)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
-		}
 		json.NewEncoder(w).Encode(resp)
 	}
 }
@@ -2025,18 +2020,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if !success {
 			resp["message"] = "No entities found to approve"
-		}
-		if anyError == nil {
-			if err := tx.Commit(ctx); err != nil {
-				errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrCommitFailedCapitalized)
-				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-				} else {
-					api.RespondWithError(w, statusCode, errMsg)
-				}
-				return
-			}
 		}
 		if anyError == nil {
 			if err := tx.Commit(ctx); err != nil {
@@ -2985,7 +2968,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			dbRows, err := pgxPool.Query(ctx,
 				`SELECT entity_name, entity_level, COALESCE(parent_entity_name, '')
 				 FROM masterentitycash
-				 WHERE entity_name = ANY($1) AND is_deleted = false`,
+				 WHERE entity_name = ANY($1) AND COALESCE(is_deleted, false) = false`,
 				lookupNames,
 			)
 			if err != nil {
@@ -3048,7 +3031,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(uidsToCheck) > 0 {
 			var existingUID string
-			rows, err := pgxPool.Query(ctx, `SELECT unique_identifier FROM masterentitycash WHERE lower(unique_identifier) = ANY($1) AND is_deleted = false`, uidsToCheck)
+			rows, err := pgxPool.Query(ctx, `SELECT unique_identifier FROM masterentitycash WHERE lower(unique_identifier) = ANY($1) AND COALESCE(is_deleted, false) = false`, uidsToCheck)
 			if err != nil {
 				errMsg, _ := getUserFriendlyEntityCashError(err, "Could not validate unique identifiers against existing records")
 				uploadEntityError(w, http.StatusInternalServerError, errMsg)
@@ -3161,14 +3144,6 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, _ = tx.Exec(ctx, "SET LOCAL synchronous_commit = OFF")
 		_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'")
 
-		// Ensure index (non-fatal, outside tx to avoid temp-table conflicts)
-		{
-			cctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-			defer cancel()
-			_, _ = pgxPool.Exec(cctx,
-				`CREATE UNIQUE INDEX IF NOT EXISTS idx_masterentitycash_name ON masterentitycash (entity_name)`)
-		}
-
 		// ── 9a. Temp table ────────────────────────────────────────────────
 		if _, err := tx.Exec(ctx,
 			`CREATE TEMP TABLE tmp_me (LIKE masterentitycash INCLUDING DEFAULTS) ON COMMIT DROP`,
@@ -3279,7 +3254,7 @@ SELECT
 	t.associated_treasury_contact, t.associated_business_units, t.comments,
 	false
 FROM tmp_me t
-LEFT JOIN masterentitycash m ON m.entity_name = t.entity_name AND m.is_deleted = false
+LEFT JOIN masterentitycash m ON m.entity_name = t.entity_name AND COALESCE(m.is_deleted, false) = false
 WHERE m.entity_name IS NULL;
 `); err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Insert failed")
@@ -3289,7 +3264,7 @@ WHERE m.entity_name IS NULL;
 		logger.LogInfo("[UploadEntitySimple] INSERT elapsed=%v", time.Since(t1))
 
 		if s3Key != "" {
-			if _, err := tx.Exec(ctx, `UPDATE masterentitycash SET upload_s3_key = $1 WHERE entity_name IN (SELECT entity_name FROM tmp_me) AND upload_s3_key IS NULL AND is_deleted = false`, s3Key); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE masterentitycash SET upload_s3_key = $1 WHERE entity_name IN (SELECT entity_name FROM tmp_me) AND upload_s3_key IS NULL AND COALESCE(is_deleted, false) = false`, s3Key); err != nil {
 				log.Printf("[UploadEntitySimple] warn: failed to set upload_s3_key: %v", err)
 			}
 		}
@@ -3328,7 +3303,7 @@ SET
 	unique_identifier          = COALESCE(t.unique_identifier,          m.unique_identifier)
 FROM tmp_me t
 WHERE m.entity_name = t.entity_name
-  AND m.is_deleted  = false
+  AND COALESCE(m.is_deleted, false) = false
   AND (
 	m.entity_short_name          IS DISTINCT FROM t.entity_short_name OR
 	m.entity_level               IS DISTINCT FROM t.entity_level OR
@@ -3371,9 +3346,9 @@ WITH RECURSIVE sync AS (
   FROM masterentitycash m
   LEFT JOIN masterentitycash p
          ON p.entity_name = m.parent_entity_name
-        AND p.is_deleted = false
+        AND COALESCE(p.is_deleted, false) = false
   WHERE m.entity_name IN (SELECT entity_name FROM tmp_me)
-    AND m.is_deleted = false
+    AND COALESCE(m.is_deleted, false) = false
 
   UNION ALL
 
@@ -3384,7 +3359,7 @@ WITH RECURSIVE sync AS (
     s.correct_level + 1
   FROM masterentitycash c
   JOIN sync s ON c.parent_entity_name = s.entity_name
-  WHERE c.is_deleted = false
+  WHERE COALESCE(c.is_deleted, false) = false
     AND s.correct_level < 3
 )
 UPDATE masterentitycash m
@@ -3415,8 +3390,8 @@ WHERE (
   p.entity_name IN (SELECT entity_name FROM tmp_me) OR
   c.entity_name IN (SELECT entity_name FROM tmp_me)
 )
-AND c.is_deleted = false
-AND p.is_deleted = false
+AND COALESCE(c.is_deleted, false) = false
+AND COALESCE(p.is_deleted, false) = false
 ON CONFLICT (parent_entity_name, child_entity_name) DO UPDATE
   SET status = 'Active';
 `); err != nil {
@@ -3445,7 +3420,7 @@ ON CONFLICT (parent_entity_name, child_entity_name) DO UPDATE
 		for _, row := range parsed {
 			var entityID string
 			err := tx.QueryRow(ctx,
-				`SELECT entity_id FROM masterentitycash WHERE entity_name=$1 AND is_deleted=false`,
+				`SELECT entity_id FROM masterentitycash WHERE entity_name=$1 AND COALESCE(is_deleted, false)=false`,
 				row.EntityName).Scan(&entityID)
 			if err != nil {
 				continue // entity not found; shouldn't happen post-INSERT

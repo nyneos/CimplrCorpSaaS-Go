@@ -50,10 +50,10 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Uniqueness checks: ensure role name and role code are unique
+		// Uniqueness checks: ensure role name and role code are unique (exclude soft-deleted roles)
 		var existingID string
 		// check name uniqueness (case-insensitive)
-		if err := db.QueryRow("SELECT id FROM roles WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) LIMIT 1", req.Name).Scan(&existingID); err == nil {
+		if err := db.QueryRow("SELECT id FROM roles WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) AND COALESCE(is_deleted, false) = false LIMIT 1", req.Name).Scan(&existingID); err == nil {
 			respondWithError(w, http.StatusBadRequest, fmt.Sprintf("role name '%s' already exists (id=%s)", req.Name, existingID))
 			return
 		} else if err != sql.ErrNoRows {
@@ -62,7 +62,7 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 		}
 		// check role code uniqueness if supplied
 		if strings.TrimSpace(req.RoleCode) != "" {
-			if err := db.QueryRow("SELECT id FROM roles WHERE rolecode = $1 OR role_code = $1 LIMIT 1", req.RoleCode).Scan(&existingID); err == nil {
+			if err := db.QueryRow("SELECT id FROM roles WHERE (rolecode = $1 OR role_code = $1) AND COALESCE(is_deleted, false) = false LIMIT 1", req.RoleCode).Scan(&existingID); err == nil {
 				respondWithError(w, http.StatusBadRequest, fmt.Sprintf("role code '%s' already exists (id=%s)", req.RoleCode, existingID))
 				return
 			} else if err != sql.ErrNoRows {

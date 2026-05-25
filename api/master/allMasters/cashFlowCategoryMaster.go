@@ -2369,7 +2369,7 @@ SELECT
 	t.tally_group, t.tally_voucher, t.tally_notes,
 	t.sage_section, t.sage_line, t.sage_notes
 FROM tmp_mcc t
-LEFT JOIN mastercashflowcategory m ON m.category_name = t.category_name
+LEFT JOIN mastercashflowcategory m ON m.category_name = t.category_name AND COALESCE(m.is_deleted, false) = false
 WHERE m.category_name IS NULL;
 `
 		insertStart := time.Now()

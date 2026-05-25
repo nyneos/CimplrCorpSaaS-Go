@@ -689,7 +689,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							computedIsTop = true
 						} else {
 							var plevel int
-							if err := pgxPool.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1`, pcode).Scan(&plevel); err != nil {
+							if err := pgxPool.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, pcode).Scan(&plevel); err != nil {
 								results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent centre not found: " + pcode, "centre_id": row.CentreID})
 								return
 							}
@@ -989,7 +989,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			srcColsStr := strings.Join(selectExprs, ", ")
 
 			// Build insert: don't include centre_id column (DB default will populate it). Use ON CONFLICT DO NOTHING.
-			insertSQL := fmt.Sprintf(`INSERT INTO mastercostprofitcenter (%s, upload_s3_key) SELECT %s, $2 FROM input_costprofitcenter s WHERE s.upload_batch_id = $1 ON CONFLICT (centre_code) DO NOTHING RETURNING centre_id, centre_code`, tgtColsStr, srcColsStr)
+			insertSQL := fmt.Sprintf(`INSERT INTO mastercostprofitcenter (%s, upload_s3_key) SELECT %s, $2 FROM input_costprofitcenter s WHERE s.upload_batch_id = $1 ON CONFLICT DO NOTHING RETURNING centre_id, centre_code`, tgtColsStr, srcColsStr)
 
 			var s3KeyPtr *string
 			if s3Key != "" {
@@ -1017,7 +1017,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM mastercostprofitcenter m
 				WHERE m.centre_code IN (
 					SELECT DISTINCT centre_code FROM input_costprofitcenter WHERE upload_batch_id = $1
-				)
+				) AND COALESCE(m.is_deleted, false) = false
 			`, batchID)
 			if err == nil {
 				defer existingRows.Close()
@@ -1100,7 +1100,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if cid, ok := codeToID[cc]; ok {
 						childID = cid
 					} else {
-						if err := tx.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, cc).Scan(&childID); err != nil {
+						if err := tx.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, cc).Scan(&childID); err != nil {
 							// cannot resolve child - skip
 							continue
 						}
@@ -1112,7 +1112,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						if pid, ok := codeToID[pc]; ok {
 							parentID = pid
 						} else {
-							if err := tx.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, pc).Scan(&parentID); err != nil {
+							if err := tx.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, pc).Scan(&parentID); err != nil {
 								// cannot resolve parent - skip relationship
 								continue
 							}
@@ -1128,7 +1128,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 						// Update child master: set parent and compute level
 						var parentLevel int
-						if err := tx.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1`, pc).Scan(&parentLevel); err == nil {
+						if err := tx.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, pc).Scan(&parentLevel); err == nil {
 							_, _ = tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_code=$1, centre_level=$2, is_top_level_centre=false WHERE centre_id=$3`, pc, parentLevel+1, childID)
 						} else {
 							// parent exists but level unknown - at least set parent code
@@ -1606,7 +1606,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// resolve parent code to id
 				if _, ok := codeToID[pcode]; !ok {
 					var pid string
-					if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, pcode).Scan(&pid); err == nil {
+					if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, pcode).Scan(&pid); err == nil {
 						codeToID[pcode] = pid
 					} else {
 						// skip if parent code not found
@@ -1615,7 +1615,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if _, ok := codeToID[ccode]; !ok {
 					var cid string
-					if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, ccode).Scan(&cid); err == nil {
+					if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, ccode).Scan(&cid); err == nil {
 						codeToID[ccode] = cid
 					} else {
 						// skip if child not found
@@ -2008,16 +2008,6 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
 		if !success {
 			resp["message"] = constants.ErrNoRowsUpdated
-		}
-		if err := tx.Commit(ctx); err != nil {
-			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrCommitFailedCapitalized)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrCommitFailedCapitalized)
@@ -2435,6 +2425,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					SELECT DISTINCT p.centre_code, c.centre_code, 'Active'
 					FROM mastercostprofitcenter c
 					JOIN mastercostprofitcenter p ON c.parent_centre_code = p.centre_code
+					WHERE COALESCE(c.is_deleted, false) = false AND COALESCE(p.is_deleted, false) = false
 					ON CONFLICT DO NOTHING;
 				`)
 				if err != nil {

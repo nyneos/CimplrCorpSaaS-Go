@@ -1627,7 +1627,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					INSERT INTO auditactioncounterparty(counterparty_id, actiontype, processing_status, requested_by, requested_at)
 					SELECT counterparty_id, 'CREATE', 'PENDING_APPROVAL', $1, now()
 					FROM mastercounterparty
-					WHERE counterparty_code = ANY($2);
+					WHERE counterparty_code = ANY($2) AND COALESCE(is_deleted, false) = false;
 				`
 				if _, err := tx.Exec(ctx, auditSQL, userName, counterpartyCodes); err != nil {
 					api.RespondWithError(w, http.StatusInternalServerError,
