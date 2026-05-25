@@ -2665,30 +2665,13 @@ func cimplrTDSTill(ctx context.Context, pool *pgxpool.Pool, src cimplrFDSource, 
 			scheduleRows = append(scheduleRows, r)
 		}
 		if len(scheduleRows) > 0 {
-			isCompound := strings.EqualFold(src.InterestTypeCode, "COMPOUND")
-			hasLaterCompoundCap := func(eventDate time.Time) bool {
-				for _, r := range scheduleRows {
-					if r.eventType == "CAPITALIZATION" && !r.eventDate.Before(eventDate) {
-						return true
-					}
-				}
-				return false
-			}
 			for _, r := range scheduleRows {
-				if isCompound {
-					switch r.eventType {
-					case "CAPITALIZATION", "MATURITY", "GRACE_PERIOD":
-						tds += r.tds
-					case "ACCRUAL":
-						if !hasLaterCompoundCap(r.eventDate) {
-							tds += r.tds
-						}
-					}
+				// ACCRUAL.tds is provisional — never count it as actually deducted.
+				// Only include TDS from events where cash actually changes hands.
+				if r.eventType == "ACCRUAL" {
 					continue
 				}
-				if r.eventType != "ACCRUAL" {
-					tds += r.tds
-				}
+				tds += r.tds
 			}
 			if tds != 0 {
 				return roundToFour(tds)
@@ -2707,7 +2690,8 @@ func cimplrTDSTill(ctx context.Context, pool *pgxpool.Pool, src cimplrFDSource, 
 			SELECT COALESCE(SUM(tds_amount),0)
 			FROM investment.fd_cashflow_schedule
 			WHERE fd_id=$1 AND COALESCE(is_deleted,false)=false
-			  AND event_date >= $2::date AND event_date <= $3::date`,
+			  AND event_date >= $2::date AND event_date <= $3::date
+			  AND event_type != 'ACCRUAL'`,
 			fdID, periodStart, periodEnd,
 		).Scan(&tds)
 	}
