@@ -285,33 +285,12 @@ func applyExceptionReject(ctx context.Context, pool *pgxpool.Pool, exceptionID s
 	}
 	receiptID, tdsID = resolveExceptionReceiptLinks(ctx, pool, receiptID, tdsID)
 
-	restoreStatus := "UNMATCHED"
 	if resultID != "" {
-		var matchStatus string
-		_ = pool.QueryRow(ctx, `
-			SELECT COALESCE(match_status,'UNMATCHED')
-			FROM investment.fd_receipt_reconcile_result WHERE result_id=$1`, resultID,
-		).Scan(&matchStatus)
-		switch matchStatus {
-		case "EXCEPTION", "PARTIAL", "UNMATCHED":
-			restoreStatus = matchStatus
-		}
 		_, _ = pool.Exec(ctx, `
 			UPDATE investment.fd_receipt_reconcile_result
 			SET has_exception=false
 			WHERE result_id=$1`, resultID)
 	}
 
-	if receiptID != "" {
-		_, _ = pool.Exec(ctx, `
-			UPDATE investment.fd_interest_receipt
-			SET reconcile_status=$1
-			WHERE receipt_id=$2`, restoreStatus, receiptID)
-	}
-	if tdsID != "" {
-		_, _ = pool.Exec(ctx, `
-			UPDATE investment.fd_tds_receipt
-			SET reconcile_status=$1
-			WHERE tds_id=$2`, restoreStatus, tdsID)
-	}
+	UpdateAggregateReceiptStatus(ctx, pool, receiptID, tdsID)
 }
