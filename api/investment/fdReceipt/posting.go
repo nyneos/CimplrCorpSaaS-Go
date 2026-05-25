@@ -305,7 +305,8 @@ func resolveExceptionReceiptLinks(ctx context.Context, pool *pgxpool.Pool, recei
 	return receiptID, tdsID
 }
 
-// stampVarianceAccepted marks linked receipt/TDS and reconcile result after ACCEPT close.
+// stampVarianceAccepted marks linked receipt/TDS, reconcile result, and junction
+// map rows after an ACCEPT close on an exception.
 func stampVarianceAccepted(ctx context.Context, pool *pgxpool.Pool, receiptID, tdsID, resultID string) {
 	if receiptID != "" {
 		_, _ = pool.Exec(ctx, `
@@ -313,11 +314,31 @@ func stampVarianceAccepted(ctx context.Context, pool *pgxpool.Pool, receiptID, t
 			SET reconcile_status='VARIANCE_ACCEPTED'
 			WHERE receipt_id=$1 AND COALESCE(is_deleted,false)=false`,
 			receiptID)
+		_, _ = pool.Exec(ctx, `
+			UPDATE investment.fd_receipt_cashflow_map
+			SET match_status='VARIANCE_ACCEPTED'
+			WHERE receipt_id=$1 AND COALESCE(is_deleted,false)=false`,
+			receiptID)
+		_, _ = pool.Exec(ctx, `
+			UPDATE investment.fd_receipt_accrual_map
+			SET match_status='VARIANCE_ACCEPTED'
+			WHERE receipt_id=$1 AND COALESCE(is_deleted,false)=false`,
+			receiptID)
 	}
 	if tdsID != "" {
 		_, _ = pool.Exec(ctx, `
 			UPDATE investment.fd_tds_receipt
 			SET reconcile_status='VARIANCE_ACCEPTED'
+			WHERE tds_id=$1 AND COALESCE(is_deleted,false)=false`,
+			tdsID)
+		_, _ = pool.Exec(ctx, `
+			UPDATE investment.fd_receipt_cashflow_map
+			SET match_status='VARIANCE_ACCEPTED'
+			WHERE tds_id=$1 AND COALESCE(is_deleted,false)=false`,
+			tdsID)
+		_, _ = pool.Exec(ctx, `
+			UPDATE investment.fd_receipt_accrual_map
+			SET match_status='VARIANCE_ACCEPTED'
 			WHERE tds_id=$1 AND COALESCE(is_deleted,false)=false`,
 			tdsID)
 	}
@@ -329,14 +350,39 @@ func stampVarianceAccepted(ctx context.Context, pool *pgxpool.Pool, receiptID, t
 	}
 }
 
-func stampVariancePending(ctx context.Context, pool *pgxpool.Pool, resultID string) {
-	if resultID == "" {
-		return
+// stampVariancePending marks linked receipt/TDS, reconcile result, and junction
+// map rows when a variance is not accepted (rejected or left pending).
+func stampVariancePending(ctx context.Context, pool *pgxpool.Pool, receiptID, tdsID, resultID string) {
+	if receiptID != "" {
+		_, _ = pool.Exec(ctx, `
+			UPDATE investment.fd_receipt_cashflow_map
+			SET match_status='UNMATCHED'
+			WHERE receipt_id=$1 AND COALESCE(is_deleted,false)=false`,
+			receiptID)
+		_, _ = pool.Exec(ctx, `
+			UPDATE investment.fd_receipt_accrual_map
+			SET match_status='UNMATCHED'
+			WHERE receipt_id=$1 AND COALESCE(is_deleted,false)=false`,
+			receiptID)
 	}
-	_, _ = pool.Exec(ctx, `
-		UPDATE investment.fd_receipt_reconcile_result
-		SET has_exception=false, match_status='UNMATCHED'
-		WHERE result_id=$1`, resultID)
+	if tdsID != "" {
+		_, _ = pool.Exec(ctx, `
+			UPDATE investment.fd_receipt_cashflow_map
+			SET match_status='UNMATCHED'
+			WHERE tds_id=$1 AND COALESCE(is_deleted,false)=false`,
+			tdsID)
+		_, _ = pool.Exec(ctx, `
+			UPDATE investment.fd_receipt_accrual_map
+			SET match_status='UNMATCHED'
+			WHERE tds_id=$1 AND COALESCE(is_deleted,false)=false`,
+			tdsID)
+	}
+	if resultID != "" {
+		_, _ = pool.Exec(ctx, `
+			UPDATE investment.fd_receipt_reconcile_result
+			SET has_exception=false, match_status='UNMATCHED'
+			WHERE result_id=$1`, resultID)
+	}
 }
 
 // applyExceptionClosure applies receipt/result side-effects after close (ACCEPT → EXCEPTION + postable).
@@ -357,7 +403,7 @@ func applyExceptionClosure(ctx context.Context, pool *pgxpool.Pool, exceptionID 
 		stampVarianceAccepted(ctx, pool, receiptID, tdsID, resultID)
 		return
 	}
-	stampVariancePending(ctx, pool, resultID)
+	stampVariancePending(ctx, pool, receiptID, tdsID, resultID)
 }
 
 // repairClosedAcceptException re-applies close side-effects for legacy rows (idempotent).

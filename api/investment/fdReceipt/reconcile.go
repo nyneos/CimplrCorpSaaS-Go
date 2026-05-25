@@ -156,6 +156,13 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 	if err != nil {
 		return nil, fmt.Errorf("fetch run metadata: %w", err)
 	}
+	filterReceiptIDs, filterTDSIDs, err = expandLinkedReconcileIDs(ctx, pool, filterReceiptIDs, filterTDSIDs)
+	if err != nil {
+		if !dryRun {
+			markRunFailed(ctx, pool, runID, err.Error())
+		}
+		return nil, err
+	}
 
 	preview := &ReconcilePreviewSummary{
 		EntityID:         entityID,
@@ -191,22 +198,26 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 			for _, cf := range cfLines {
 				expectedCF += cf.Amount
 			}
-			if !dryRun {
-				buildCashflowMap(ctx, MapLookupParams{Pool: pool, RunID: runID, FDID: rec.FDID, ReceiptID: rec.ReceiptID, TDSID: "", PeriodStart: rec.PeriodStart, PeriodEnd: rec.PeriodEnd}) //nolint:errcheck
-			}
 		}
 		if matchingBasis == "ACCRUAL" || matchingBasis == "BOTH" {
 			acLines = loadAccrualLedgerForReceipt(ctx, pool, rec.FDID, rec.PeriodStart, rec.PeriodEnd, false)
 			for _, al := range acLines {
 				expectedAcc += al.Amount
 			}
-			if !dryRun {
-				buildAccrualMap(ctx, MapLookupParams{Pool: pool, RunID: runID, FDID: rec.FDID, ReceiptID: rec.ReceiptID, TDSID: "", PeriodStart: rec.PeriodStart, PeriodEnd: rec.PeriodEnd}) //nolint:errcheck
-			}
 		}
 
 		expected := resolveExpected(matchingBasis, expectedCF, expectedAcc)
 		matchStatus, variance, variancePct := classifyVariance(rec.Gross, expected)
+
+		// Build junction maps after matchStatus is known so the status is accurate.
+		if !dryRun {
+			if matchingBasis == "CASHFLOW" || matchingBasis == "BOTH" {
+				buildCashflowMap(ctx, MapLookupParams{Pool: pool, RunID: runID, FDID: rec.FDID, ReceiptID: rec.ReceiptID, TDSID: "", PeriodStart: rec.PeriodStart, PeriodEnd: rec.PeriodEnd, MatchStatus: matchStatus}) //nolint:errcheck
+			}
+			if matchingBasis == "ACCRUAL" || matchingBasis == "BOTH" {
+				buildAccrualMap(ctx, MapLookupParams{Pool: pool, RunID: runID, FDID: rec.FDID, ReceiptID: rec.ReceiptID, TDSID: "", PeriodStart: rec.PeriodStart, PeriodEnd: rec.PeriodEnd, MatchStatus: matchStatus}) //nolint:errcheck
+			}
+		}
 
 		line := ReconcilePreviewLine{
 			ReceiptID:      rec.ReceiptID,
@@ -281,7 +292,7 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 						varianceAbs = -varianceAbs
 					}
 					insertVarianceRaisedAudit(ctx, pool, exID, triggeredBy, deriveExceptionType(variance, expected), expected, rec.Gross, varianceAbs) //nolint:errcheck
-					pool.Exec(ctx, //nolint:errcheck
+					pool.Exec(ctx,                                                                                                                     //nolint:errcheck
 						`UPDATE investment.fd_receipt_reconcile_result
 						 SET has_exception=false, exception_id=$1 WHERE result_id=$2`,
 						exID, resultID)
@@ -321,22 +332,26 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 				for _, cf := range tdsCFLines {
 					expectedCF += cf.Amount
 				}
-				if !dryRun {
-					buildCashflowMap(ctx, MapLookupParams{Pool: pool, RunID: runID, FDID: tds.FDID, ReceiptID: "", TDSID: tds.TDSID, PeriodStart: tds.PeriodStart, PeriodEnd: tds.PeriodEnd}) //nolint:errcheck
-				}
 			}
 			if matchingBasis == "ACCRUAL" || matchingBasis == "BOTH" {
 				tdsACLines = loadAccrualLedgerForReceipt(ctx, pool, tds.FDID, tds.PeriodStart, tds.PeriodEnd, true)
 				for _, al := range tdsACLines {
 					expectedAcc += al.Amount
 				}
-				if !dryRun {
-					buildAccrualMapTDS(ctx, MapLookupParams{Pool: pool, RunID: runID, FDID: tds.FDID, ReceiptID: "", TDSID: tds.TDSID, PeriodStart: tds.PeriodStart, PeriodEnd: tds.PeriodEnd}) //nolint:errcheck
-				}
 			}
 
 			expected := resolveExpected(matchingBasis, expectedCF, expectedAcc)
 			matchStatus, variance, variancePct := classifyVariance(tds.Actual, expected)
+
+			// Build junction maps after matchStatus is known so the status is accurate.
+			if !dryRun {
+				if matchingBasis == "CASHFLOW" || matchingBasis == "BOTH" {
+					buildCashflowMap(ctx, MapLookupParams{Pool: pool, RunID: runID, FDID: tds.FDID, ReceiptID: "", TDSID: tds.TDSID, PeriodStart: tds.PeriodStart, PeriodEnd: tds.PeriodEnd, MatchStatus: matchStatus}) //nolint:errcheck
+				}
+				if matchingBasis == "ACCRUAL" || matchingBasis == "BOTH" {
+					buildAccrualMapTDS(ctx, MapLookupParams{Pool: pool, RunID: runID, FDID: tds.FDID, ReceiptID: "", TDSID: tds.TDSID, PeriodStart: tds.PeriodStart, PeriodEnd: tds.PeriodEnd, MatchStatus: matchStatus}) //nolint:errcheck
+				}
+			}
 
 			line := ReconcilePreviewLine{
 				TDSID:          tds.TDSID,
@@ -413,7 +428,7 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 							varianceAmt = -varianceAmt
 						}
 						insertVarianceRaisedAudit(ctx, pool, exID, triggeredBy, deriveExceptionType(variance, expected), expected, tds.Actual, varianceAmt) //nolint:errcheck
-						pool.Exec(ctx, //nolint:errcheck
+						pool.Exec(ctx,                                                                                                                      //nolint:errcheck
 							`UPDATE investment.fd_receipt_reconcile_result
 							 SET has_exception=false, exception_id=$1 WHERE result_id=$2`,
 							exID, tdsResultID)
@@ -497,12 +512,83 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string, fi
 	return err
 }
 
+func addUniqueString(values []string, seen map[string]bool, value string) []string {
+	if value == "" || seen[value] {
+		return values
+	}
+	seen[value] = true
+	return append(values, value)
+}
+
+func expandLinkedReconcileIDs(ctx context.Context, pool *pgxpool.Pool, receiptIDs, tdsIDs []string) ([]string, []string, error) {
+	receiptSeen := map[string]bool{}
+	tdsSeen := map[string]bool{}
+	expandedReceiptIDs := make([]string, 0, len(receiptIDs))
+	expandedTDSIDs := make([]string, 0, len(tdsIDs))
+	for _, id := range receiptIDs {
+		expandedReceiptIDs = addUniqueString(expandedReceiptIDs, receiptSeen, id)
+	}
+	for _, id := range tdsIDs {
+		expandedTDSIDs = addUniqueString(expandedTDSIDs, tdsSeen, id)
+	}
+
+	if len(receiptIDs) > 0 {
+		rows, err := pool.Query(ctx, `
+			SELECT tds_id
+			FROM investment.fd_tds_receipt
+			WHERE receipt_id = ANY($1::text[])
+			  AND is_deleted = false`, receiptIDs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load linked TDS receipts: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var tdsID string
+			if err := rows.Scan(&tdsID); err == nil {
+				expandedTDSIDs = addUniqueString(expandedTDSIDs, tdsSeen, tdsID)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, nil, fmt.Errorf("scan linked TDS receipts: %w", err)
+		}
+	}
+
+	if len(tdsIDs) > 0 {
+		rows, err := pool.Query(ctx, `
+			SELECT COALESCE(receipt_id, '')
+			FROM investment.fd_tds_receipt
+			WHERE tds_id = ANY($1::text[])
+			  AND is_deleted = false`, tdsIDs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load linked interest receipts: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var receiptID string
+			if err := rows.Scan(&receiptID); err == nil {
+				expandedReceiptIDs = addUniqueString(expandedReceiptIDs, receiptSeen, receiptID)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, nil, fmt.Errorf("scan linked interest receipts: %w", err)
+		}
+	}
+
+	return expandedReceiptIDs, expandedTDSIDs, nil
+}
+
 // reconcilePreviewDirect runs a pure in-memory preview without any run row.
 // It derives entity+period from the receipt/TDS records themselves.
 // No DB writes happen — safe to call repeatedly.
 func reconcilePreviewDirect(ctx context.Context, pool *pgxpool.Pool,
 	matchingBasis string,
 	filterReceiptIDs, filterTDSIDs []string) (*ReconcilePreviewSummary, error) {
+
+	var expandErr error
+	filterReceiptIDs, filterTDSIDs, expandErr = expandLinkedReconcileIDs(ctx, pool, filterReceiptIDs, filterTDSIDs)
+	if expandErr != nil {
+		return nil, expandErr
+	}
 
 	// Derive entity+period from the supplied IDs by querying the receipt tables.
 	// We use the widest possible period that covers all supplied records.
@@ -535,9 +621,12 @@ func reconcilePreviewDirect(ctx context.Context, pool *pgxpool.Pool,
 	}
 	if len(filterTDSIDs) > 0 {
 		rows2, err := pool.Query(ctx, `
-			SELECT entity_id, period_start::text, period_end::text
-			FROM investment.fd_tds_receipt
-			WHERE tds_id = ANY($1::text[]) AND is_deleted = false`, filterTDSIDs)
+			SELECT t.entity_id,
+			       COALESCE(r.period_start, t.period_start)::text,
+			       COALESCE(r.period_end, t.period_end)::text
+			FROM investment.fd_tds_receipt t
+			LEFT JOIN investment.fd_interest_receipt r ON r.receipt_id = t.receipt_id AND r.is_deleted = false
+			WHERE t.tds_id = ANY($1::text[]) AND t.is_deleted = false`, filterTDSIDs)
 		if err == nil {
 			defer rows2.Close()
 			for rows2.Next() {
@@ -602,6 +691,7 @@ func reconcilePreviewDirect(ctx context.Context, pool *pgxpool.Pool,
 		}
 		expected := resolveExpected(matchingBasis, expectedCF, expectedAcc)
 		matchStatus, variance, variancePct := classifyVariance(rec.Gross, expected)
+
 		line := ReconcilePreviewLine{
 			ReceiptID: rec.ReceiptID, ResultType: "INTEREST",
 			FDID: rec.FDID, FdRefNo: rec.FdRefNo,
@@ -655,6 +745,7 @@ func reconcilePreviewDirect(ctx context.Context, pool *pgxpool.Pool,
 		}
 		expected := resolveExpected(matchingBasis, expectedCF, expectedAcc)
 		matchStatus, variance, variancePct := classifyVariance(tds.Actual, expected)
+
 		line := ReconcilePreviewLine{
 			TDSID: tds.TDSID, ResultType: "TDS",
 			FDID: tds.FDID, FdRefNo: tds.FdRefNo,
@@ -770,10 +861,13 @@ func loadTDSReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, periodSt
 			       COALESCE(m.entity_name, t.entity_id, '') AS entity_name,
 			       COALESCE(t.bank_id,'')                    AS bank_id,
 			       COALESCE(m.bank_name, '')                 AS bank_name,
-			       t.period_start, t.period_end, t.deduction_date,
+			       COALESCE(r.period_start, t.period_start),
+			       COALESCE(r.period_end, t.period_end),
+			       t.deduction_date,
 			       t.tds_deducted_actual
 			FROM investment.fd_tds_receipt t
 			LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND m.is_deleted = false
+			LEFT JOIN investment.fd_interest_receipt r ON r.receipt_id = t.receipt_id AND r.is_deleted = false
 			WHERE t.tds_id = ANY($1::text[])
 			  AND t.tds_status IN ('APPROVED','POSTED','PARTIAL')
 			  AND t.is_deleted = false`, filterIDs)
@@ -783,12 +877,16 @@ func loadTDSReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, periodSt
 			       COALESCE(m.entity_name, t.entity_id, '') AS entity_name,
 			       COALESCE(t.bank_id,'')                    AS bank_id,
 			       COALESCE(m.bank_name, '')                 AS bank_name,
-			       t.period_start, t.period_end, t.deduction_date,
+			       COALESCE(r.period_start, t.period_start),
+			       COALESCE(r.period_end, t.period_end),
+			       t.deduction_date,
 			       t.tds_deducted_actual
 			FROM investment.fd_tds_receipt t
 			LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND m.is_deleted = false
+			LEFT JOIN investment.fd_interest_receipt r ON r.receipt_id = t.receipt_id AND r.is_deleted = false
 			WHERE t.entity_id = $1
-			  AND t.deduction_date BETWEEN $2::date AND $3::date
+			  AND COALESCE(r.period_end, t.period_end) > $2::date
+			  AND COALESCE(r.period_end, t.period_end) <= $3::date
 			  AND t.tds_status IN ('APPROVED','POSTED','PARTIAL')
 			  AND t.is_deleted = false`, entityID, periodStart, periodEnd)
 	}
@@ -809,22 +907,28 @@ func loadTDSReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, periodSt
 
 // ─── Detail row loaders (populate preview arrays + compute sums) ──────────────
 
-// loadCashflowsForReceipt returns ALL cashflow rows for the fd_id within the period.
-// forTDS=true  → Amount field = tds_amount  (used for TDS expected sum)
-// forTDS=false → Amount field = interest_accrued for ACCRUAL rows, net_cash_flow for rest
-// All event_types are always returned so the UI always has full context.
+// loadCashflowsForReceipt returns cashflow rows whose accrual period belongs to
+// the receipt/TDS window. The lower bound is exclusive and the upper bound is
+// inclusive, so a 2025-10-24→2025-11-24 receipt matches only that period, not
+// the prior 2025-09-24→2025-10-24 cashflow.
+// forTDS=true  → Amount = tds_amount;  forTDS=false → Amount = interest_accrued.
 func loadCashflowsForReceipt(ctx context.Context, pool *pgxpool.Pool,
 	fdID string, periodStart, periodEnd time.Time, forTDS bool) []CashflowLine {
 
 	amountExpr := `CASE event_type
-		         WHEN 'ACCRUAL' THEN COALESCE(interest_accrued, 0)
-		         WHEN 'TDS'     THEN COALESCE(tds_amount, 0)
-		         ELSE COALESCE(net_cash_flow, 0)
+		         WHEN 'INTEREST_RECEIPT' THEN COALESCE(interest_accrued, 0)
+		         WHEN 'MATURITY'         THEN COALESCE(interest_accrued, 0)
+		         ELSE 0
 		       END`
 	if forTDS {
-		amountExpr = `COALESCE(tds_amount, 0)`
+		amountExpr = `CASE event_type
+			         WHEN 'INTEREST_RECEIPT' THEN COALESCE(tds_amount, 0)
+			         WHEN 'MATURITY'         THEN COALESCE(tds_amount, 0)
+			         ELSE 0
+			       END`
 	}
-	rows, err := pool.Query(ctx, fmt.Sprintf(`
+
+	selectCols := fmt.Sprintf(`
 		SELECT cashflow_id,
 		       event_type,
 		       event_date,
@@ -837,34 +941,45 @@ func loadCashflowsForReceipt(ctx context.Context, pool *pgxpool.Pool,
 		       COALESCE(net_cash_flow, 0),
 		       COALESCE(posting_status, 'NOT_POSTED'),
 		       %s AS amount
-		FROM investment.fd_cashflow_schedule
-		WHERE fd_id = $1
-		  AND event_date BETWEEN $2 AND $3
-		  AND COALESCE(is_deleted, false) = false
-		ORDER BY event_date`, amountExpr),
-		fdID, periodStart, periodEnd)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var out []CashflowLine
-	for rows.Next() {
-		var c CashflowLine
-		var evDate, psDate, peDate time.Time
-		if e := rows.Scan(
-			&c.CashflowID, &c.EventType,
-			&evDate, &psDate, &peDate,
-			&c.PeriodDays, &c.OpeningPrincipal,
-			&c.InterestAccrued, &c.TDSAmount, &c.NetCashFlow,
-			&c.PostingStatus, &c.Amount,
-		); e == nil {
-			c.EventDate = evDate.Format(constants.DateFormat)
-			c.PeriodStartDate = psDate.Format(constants.DateFormat)
-			c.PeriodEndDate = peDate.Format(constants.DateFormat)
-			out = append(out, c)
+		FROM investment.fd_cashflow_schedule`, amountExpr)
+
+	scanRows := func(rows interface {
+		Next() bool
+		Scan(...any) error
+		Close()
+		Err() error
+	}) []CashflowLine {
+		defer rows.Close()
+		var out []CashflowLine
+		for rows.Next() {
+			var c CashflowLine
+			var evDate, psDate, peDate time.Time
+			if e := rows.Scan(
+				&c.CashflowID, &c.EventType,
+				&evDate, &psDate, &peDate,
+				&c.PeriodDays, &c.OpeningPrincipal,
+				&c.InterestAccrued, &c.TDSAmount, &c.NetCashFlow,
+				&c.PostingStatus, &c.Amount,
+			); e == nil {
+				c.EventDate = evDate.Format(constants.DateFormat)
+				c.PeriodStartDate = psDate.Format(constants.DateFormat)
+				c.PeriodEndDate = peDate.Format(constants.DateFormat)
+				out = append(out, c)
+			}
 		}
+		return out
 	}
-	return out
+
+	rows, err := pool.Query(ctx, selectCols+`
+		WHERE fd_id = $1
+		  AND COALESCE(period_end_date, event_date) > $2
+		  AND COALESCE(period_end_date, event_date) <= $3
+		  AND COALESCE(is_deleted, false) = false
+		ORDER BY COALESCE(period_end_date, event_date), event_date`, fdID, periodStart, periodEnd)
+	if err == nil {
+		return scanRows(rows)
+	}
+	return nil
 }
 
 // loadAccrualLedgerForReceipt returns all matching accrual ledger rows for a receipt period.
@@ -933,6 +1048,7 @@ type MapLookupParams struct {
 	TDSID       string
 	PeriodStart time.Time
 	PeriodEnd   time.Time
+	MatchStatus string // actual outcome — written into match_status on junction rows
 }
 
 // buildCashflowMap loads ALL interest/accrual cashflow rows for the receipt's
@@ -947,26 +1063,34 @@ func buildCashflowMap(ctx context.Context, p MapLookupParams) float64 {
 	periodStart := p.PeriodStart
 	periodEnd := p.PeriodEnd
 
-	eventTypes := []string{"INTEREST_RECEIPT", "ACCRUAL"}
+	// TDS is stored as a field on INTEREST_RECEIPT/MATURITY rows — there is no event_type='TDS'.
+	eventTypes := []string{"INTEREST_RECEIPT", "MATURITY"}
+
+	amountCol := `CASE event_type
+		         WHEN 'INTEREST_RECEIPT' THEN COALESCE(interest_accrued, 0)
+		         WHEN 'MATURITY'         THEN COALESCE(interest_accrued, 0)
+		         ELSE 0
+		       END`
 	if tdsID != "" {
-		eventTypes = []string{"TDS"}
+		amountCol = `CASE event_type
+		         WHEN 'INTEREST_RECEIPT' THEN COALESCE(tds_amount, 0)
+		         WHEN 'MATURITY'         THEN COALESCE(tds_amount, 0)
+		         ELSE 0
+		       END`
 	}
 
-	cfRows, err := pool.Query(ctx, `
+	cfRows, err := pool.Query(ctx, fmt.Sprintf(`
 		SELECT cashflow_id,
 		       event_type,
 		       COALESCE(period_start_date, event_date) AS cf_period_start,
 		       COALESCE(period_end_date,   event_date) AS cf_period_end,
-		       CASE event_type
-		         WHEN 'ACCRUAL' THEN COALESCE(interest_accrued, 0)
-		         WHEN 'TDS'     THEN COALESCE(tds_amount, 0)
-		         ELSE COALESCE(net_cash_flow, 0)
-		       END AS amount
+		       %s AS amount
 		FROM investment.fd_cashflow_schedule
 		WHERE fd_id      = $1
 		  AND event_type = ANY($2::text[])
-		  AND event_date BETWEEN $3 AND $4
-		  AND COALESCE(is_deleted, false) = false`,
+		  AND COALESCE(period_end_date, event_date) > $3
+		  AND COALESCE(period_end_date, event_date) <= $4
+		  AND COALESCE(is_deleted, false) = false`, amountCol),
 		fdID, eventTypes, periodStart, periodEnd)
 	if err != nil {
 		return 0
@@ -992,13 +1116,13 @@ func buildCashflowMap(ctx context.Context, p MapLookupParams) float64 {
 				cashflow_period_start, cashflow_period_end,
 				cashflow_amount, matched_amount,
 				match_status, is_deleted
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,'MATCHED',false)
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,false)
 			ON CONFLICT DO NOTHING`, //nolint:errcheck
 			runID, fdID,
 			nullStr(receiptID), nullStr(tdsID),
 			cfID, evType,
 			cfPStart, cfPEnd,
-			amount)
+			amount, p.MatchStatus)
 	}
 	return total
 }
@@ -1050,13 +1174,13 @@ func buildAccrualMap(ctx context.Context, p MapLookupParams) float64 {
 				accrual_period_start, accrual_period_end,
 				accrual_amount, matched_amount,
 				match_status, is_deleted
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,'MATCHED',false)
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,false)
 			ON CONFLICT DO NOTHING`, //nolint:errcheck
 			runID, fdID,
 			nullStr(receiptID), nullStr(tdsID),
 			ledgerID,
 			acPStart, acPEnd,
-			amount)
+			amount, p.MatchStatus)
 	}
 	return total
 }
@@ -1107,13 +1231,13 @@ func buildAccrualMapTDS(ctx context.Context, p MapLookupParams) float64 {
 				accrual_period_start, accrual_period_end,
 				accrual_amount, matched_amount,
 				match_status, is_deleted
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,'MATCHED',false)
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,false)
 			ON CONFLICT DO NOTHING`, //nolint:errcheck
 			runID, fdID,
 			nullStr(receiptID), nullStr(tdsID),
 			ledgerID,
 			acPStart, acPEnd,
-			amount)
+			amount, p.MatchStatus)
 	}
 	return total
 }

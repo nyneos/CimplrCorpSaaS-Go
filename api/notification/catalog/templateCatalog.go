@@ -786,6 +786,7 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
 				COALESCE(l.checker_by,'')                                     AS checker_by,
 				COALESCE(l.checker_comment,'')                                AS checker_comment,
+				COALESCE(l.change_note,'')                                    AS change_note,
 				COALESCE(l.is_deleted, false)                                 AS version_is_deleted,
 
 				COALESCE(h.created_by,'')        AS created_by,
@@ -837,6 +838,26 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					row[string(f.Name)] = vals[i]
 				}
 			}
+
+			// Parse recipient_strategy from change_note if present
+			if cn, ok := row["change_note"].(string); ok && cn != "" {
+				const strategyPrefix = "__STRATEGY__:"
+				if strings.HasPrefix(cn, strategyPrefix) {
+					raw := strings.TrimPrefix(cn, strategyPrefix)
+					strategyRaw := raw
+					if idx := strings.Index(raw, "\n"); idx >= 0 {
+						strategyRaw = raw[:idx]
+						row["change_note"] = raw[idx+1:]
+					} else {
+						row["change_note"] = ""
+					}
+					var strat map[string]interface{}
+					if err := json.Unmarshal([]byte(strategyRaw), &strat); err == nil {
+						row["recipient_strategy"] = strat
+					}
+				}
+			}
+
 			out = append(out, row)
 		}
 		if rows.Err() != nil {
@@ -924,6 +945,7 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
 				COALESCE(a.checker_by,'')                                     AS checker_by,
 				COALESCE(a.checker_comment,'')                                AS checker_comment,
+				COALESCE(a.change_note,'')                                    AS change_note,
 
 				COALESCE(h.created_by,'')        AS created_by,
 				COALESCE(h.created_at,'')        AS created_at,
@@ -985,6 +1007,26 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					row[string(f.Name)] = vals[i]
 				}
 			}
+
+			// Parse recipient_strategy from change_note if present
+			if cn, ok := row["change_note"].(string); ok && cn != "" {
+				const strategyPrefix = "__STRATEGY__:"
+				if strings.HasPrefix(cn, strategyPrefix) {
+					raw := strings.TrimPrefix(cn, strategyPrefix)
+					strategyRaw := raw
+					if idx := strings.Index(raw, "\n"); idx >= 0 {
+						strategyRaw = raw[:idx]
+						row["change_note"] = raw[idx+1:]
+					} else {
+						row["change_note"] = ""
+					}
+					var strat map[string]interface{}
+					if err := json.Unmarshal([]byte(strategyRaw), &strat); err == nil {
+						row["recipient_strategy"] = strat
+					}
+				}
+			}
+
 			out = append(out, row)
 		}
 		if rows.Err() != nil {
@@ -1097,7 +1139,22 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			oldRecipientsJSON = []byte("[]")
 		}
 
-		// ── Step 4: marshal recipient_strategy for storage ───────────────────────
+		// ── Step 4: marshal recipient_strategy and template-level fields for storage ───────
+		if req.TemplateName != "" || req.Description != "" || req.RoleScope != "" {
+			if req.Strategy == nil {
+				req.Strategy = make(map[string]interface{})
+			}
+			if req.TemplateName != "" {
+				req.Strategy["__template_name"] = req.TemplateName
+			}
+			if req.Description != "" {
+				req.Strategy["__description"] = req.Description
+			}
+			if req.RoleScope != "" {
+				req.Strategy["__role_scope"] = req.RoleScope
+			}
+		}
+
 		// Always embed the strategy using a sentinel prefix so the approval handler
 		// can reliably extract and apply it even when a human change_note is present.
 		var strategyJSON []byte
@@ -1516,18 +1573,46 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				var strategy map[string]interface{}
 				if jerr := json.Unmarshal([]byte(strategyRaw), &strategy); jerr == nil && len(strategy) > 0 {
-					// Deactivate all current live recipients for this template
-					if _, derr := tx.Exec(ctx,
-						`UPDATE notification_svc.template_recipient SET is_active = false WHERE template_id = $1`,
-						t.TemplateID,
-					); derr != nil {
-						api.RespondWithPayload(w, false, "recipient deactivation failed: "+derr.Error(), nil)
-						return
+					// Apply template metadata if present
+					if tn, ok := strategy["__template_name"].(string); ok {
+						if _, err := tx.Exec(ctx, `UPDATE notification_svc.template SET template_name = $1 WHERE template_id = $2`, tn, t.TemplateID); err != nil {
+							api.RespondWithPayload(w, false, "template_name update failed: "+err.Error(), nil)
+							return
+						}
 					}
-					// Insert new recipients per the stored strategy
-					if _, rerr := populateRecipientsOnTx(ctx, tx, pgxPool, t.TemplateID, strategy, userEmail); rerr != nil {
-						api.RespondWithPayload(w, false, "recipient apply failed: "+rerr.Error(), nil)
-						return
+					if desc, ok := strategy["__description"].(string); ok {
+						if _, err := tx.Exec(ctx, `UPDATE notification_svc.template SET description = $1 WHERE template_id = $2`, desc, t.TemplateID); err != nil {
+							api.RespondWithPayload(w, false, "description update failed: "+err.Error(), nil)
+							return
+						}
+					}
+					if rs, ok := strategy["__role_scope"].(string); ok {
+						if _, err := tx.Exec(ctx, `UPDATE notification_svc.template SET role_scope = $1 WHERE template_id = $2`, rs, t.TemplateID); err != nil {
+							api.RespondWithPayload(w, false, "role_scope update failed: "+err.Error(), nil)
+							return
+						}
+					}
+
+					// Remove metadata keys so they don't interfere with recipient mode (if any)
+					delete(strategy, "__template_name")
+					delete(strategy, "__description")
+					delete(strategy, "__role_scope")
+
+					// Apply recipient strategy only if mode is present
+					if mode, ok := strategy["mode"].(string); ok && mode != "" {
+						// Deactivate all current live recipients for this template
+						if _, derr := tx.Exec(ctx,
+							`UPDATE notification_svc.template_recipient SET is_active = false WHERE template_id = $1`,
+							t.TemplateID,
+						); derr != nil {
+							api.RespondWithPayload(w, false, "recipient deactivation failed: "+derr.Error(), nil)
+							return
+						}
+						// Insert new recipients per the stored strategy
+						if _, rerr := populateRecipientsOnTx(ctx, tx, pgxPool, t.TemplateID, strategy, userEmail); rerr != nil {
+							api.RespondWithPayload(w, false, "recipient apply failed: "+rerr.Error(), nil)
+							return
+						}
 					}
 				}
 			}
@@ -2451,29 +2536,8 @@ func populateRecipientsOnTx(ctx context.Context, tx pgx.Tx, pgxPool *pgxpool.Poo
 		if v, ok := strategy["recipient_priority"].(float64); ok && v > 0 {
 			rollePriority = int(v)
 		}
-		// Read-only lookup on pool (role→users) — this is fine, no write conflict
-		rowsU, err := pgxPool.Query(ctx,
-			`SELECT u.id FROM users u
-			  JOIN user_roles ur ON ur.user_id = u.id
-			  JOIN roles ro ON ro.id = ur.role_id
-			 WHERE ro.name = $1 OR ro.rolecode = $1`, roleName)
-		if err != nil {
-			return 0, err
-		}
-		defer rowsU.Close()
-		var userRows [][]interface{}
-		for rowsU.Next() {
-			var uid string
-			if err := rowsU.Scan(&uid); err == nil {
-				userRows = append(userRows, []interface{}{templateID, "USER", uid, nil, true, createdBy, rollePriority})
-			}
-		}
-		rowsU.Close()
-		if len(userRows) > 0 {
-			return len(userRows), batchInsertRecipientsOnTx(ctx, tx, userRows)
-		}
-		// fallback: insert a ROLE sentinel row
-		err = batchInsertRecipientsOnTx(ctx, tx, [][]interface{}{{templateID, "ROLE", nil, roleName, true, createdBy, rollePriority}})
+		// Insert a ROLE recipient so that it dynamically evaluates at runtime
+		err := batchInsertRecipientsOnTx(ctx, tx, [][]interface{}{{templateID, "ROLE", nil, roleName, true, createdBy, rollePriority}})
 		if err != nil {
 			return 0, err
 		}

@@ -101,6 +101,46 @@ func toFloat64(v interface{}) (float64, bool) {
 	return 0, false
 }
 
+// checkFDDates validates that date strings fall inside the FD start-to-maturity window.
+// Returns a human-friendly error message, or "" when all dates are valid.
+func checkFDDates(fdStart, fdMaturity time.Time, labels, values []string) string {
+	for i, v := range values {
+		if v == "" {
+			continue
+		}
+		t, err := time.Parse(constants.DateFormat, v)
+		if err != nil {
+			return fmt.Sprintf("%s must be in YYYY-MM-DD format", labels[i])
+		}
+		if t.Before(fdStart) || t.After(fdMaturity) {
+			return fmt.Sprintf(
+				"%s (%s) must be within this FD's window (%s to %s)",
+				labels[i], v, fdStart.Format(constants.DateFormat), fdMaturity.Format(constants.DateFormat))
+		}
+	}
+	return ""
+}
+
+func checkFDPeriodDates(fdStart, fdMaturity time.Time, periodStart, periodEnd string) string {
+	if errMsg := checkFDDates(fdStart, fdMaturity,
+		[]string{"period_start", "period_end"},
+		[]string{periodStart, periodEnd}); errMsg != "" {
+		return errMsg
+	}
+	if periodStart == "" || periodEnd == "" {
+		return ""
+	}
+	ps, psErr := time.Parse(constants.DateFormat, periodStart)
+	pe, peErr := time.Parse(constants.DateFormat, periodEnd)
+	if psErr != nil || peErr != nil {
+		return ""
+	}
+	if ps.After(pe) {
+		return fmt.Sprintf("period_start (%s) cannot be after period_end (%s)", periodStart, periodEnd)
+	}
+	return ""
+}
+
 // ─── HANDLER 1: CreateReceipt ─────────────────────────────────────────────────
 
 func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
@@ -164,11 +204,14 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		// Fetch FD master
 		var fdRefNo, entityID, entityName, bankID, bankName, fdStatus string
 		var tdsPlanID *string
+		var fdStart, fdMaturity time.Time
 		err = pool.QueryRow(ctx, `
-			SELECT bank_fd_ref_no, entity_id, entity_name, bank_id, bank_name, fd_status, tds_plan_id
+			SELECT bank_fd_ref_no, entity_id, entity_name, bank_id, bank_name, fd_status, tds_plan_id,
+			       start_date, maturity_date
 			FROM investment.fd_master
 			WHERE fd_id=$1 AND is_deleted=false`, req.FdID).Scan(
-			&fdRefNo, &entityID, &entityName, &bankID, &bankName, &fdStatus, &tdsPlanID)
+			&fdRefNo, &entityID, &entityName, &bankID, &bankName, &fdStatus, &tdsPlanID,
+			&fdStart, &fdMaturity)
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				api.RespondWithError(w, http.StatusNotFound, "FD not found")
@@ -179,6 +222,16 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if fdStatus != "ACTIVE" && fdStatus != "MATURED" {
 			api.RespondWithError(w, http.StatusBadRequest, "FD must be ACTIVE or MATURED")
+			return
+		}
+		if errMsg := checkFDDates(fdStart, fdMaturity,
+			[]string{"receipt_date"},
+			[]string{req.ReceiptDate}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+		if errMsg := checkFDPeriodDates(fdStart, fdMaturity, req.PeriodStart, req.PeriodEnd); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -402,9 +455,70 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Fetch entity_id for approval engine
-		var entityID string
-		pool.QueryRow(ctx, `SELECT entity_id FROM investment.fd_interest_receipt WHERE receipt_id=$1`, req.ReceiptID).Scan(&entityID) //nolint:errcheck
+		// Fetch existing date context for approval engine and date validation.
+		var entityID, fdIDForReceipt string
+		var currentReceiptDate, currentPeriodStart, currentPeriodEnd *time.Time
+		err = pool.QueryRow(ctx, `
+			SELECT entity_id, fd_id, receipt_date, period_start, period_end
+			FROM investment.fd_interest_receipt
+			WHERE receipt_id=$1 AND is_deleted=false`,
+			req.ReceiptID).Scan(&entityID, &fdIDForReceipt, &currentReceiptDate, &currentPeriodStart, &currentPeriodEnd)
+		if err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "Receipt not found")
+			return
+		}
+
+		// Validate updated date fields against FD's active period
+		if fdIDForReceipt != "" {
+			var fdStartU, fdMaturityU time.Time
+			if scanErr := pool.QueryRow(ctx,
+				`SELECT start_date, maturity_date FROM investment.fd_master WHERE fd_id=$1 AND is_deleted=false`,
+				fdIDForReceipt).Scan(&fdStartU, &fdMaturityU); scanErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "FD date lookup failed: "+scanErr.Error())
+				return
+			}
+			receiptDateForValidation := ""
+			periodStartForValidation := ""
+			periodEndForValidation := ""
+			if currentReceiptDate != nil {
+				receiptDateForValidation = currentReceiptDate.Format(constants.DateFormat)
+			}
+			if currentPeriodStart != nil {
+				periodStartForValidation = currentPeriodStart.Format(constants.DateFormat)
+			}
+			if currentPeriodEnd != nil {
+				periodEndForValidation = currentPeriodEnd.Format(constants.DateFormat)
+			}
+			for _, key := range []string{"receipt_date", "period_start", "period_end"} {
+				val, ok := req.Fields[key]
+				if !ok {
+					continue
+				}
+				s, ok := val.(string)
+				if !ok {
+					api.RespondWithError(w, http.StatusBadRequest, key+" must be in YYYY-MM-DD format")
+					return
+				}
+				switch key {
+				case "receipt_date":
+					receiptDateForValidation = s
+				case "period_start":
+					periodStartForValidation = s
+				case "period_end":
+					periodEndForValidation = s
+				}
+			}
+			if errMsg := checkFDDates(fdStartU, fdMaturityU,
+				[]string{"receipt_date"},
+				[]string{receiptDateForValidation}); errMsg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
+			}
+			if errMsg := checkFDPeriodDates(fdStartU, fdMaturityU, periodStartForValidation, periodEndForValidation); errMsg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
+			}
+		}
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -1299,10 +1413,14 @@ SELECT
   COALESCE(r.bank_id,'')              AS bank_id,
   COALESCE(r.bank_name,'')            AS bank_name,
   TO_CHAR(r.receipt_date,'YYYY-MM-DD') AS receipt_date,
+  TO_CHAR(r.period_start,'YYYY-MM-DD') AS period_start,
+  TO_CHAR(r.period_end,'YYYY-MM-DD')   AS period_end,
   COALESCE(r.gross_interest_received,0) AS gross_interest_received,
   COALESCE(r.tds_amount_deducted,0)    AS tds_amount_deducted,
   COALESCE(r.net_amount_received,0)    AS net_amount_received,
   COALESCE(r.receipt_status,'')        AS receipt_status,
+  COALESCE(r.reconcile_status,'')      AS reconcile_status,
+  COALESCE(r.reconcile_run_id,'')      AS reconcile_run_id,
   COALESCE(l.requested_by,'')          AS requested_by,
   COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
   COALESCE(l.checker_by,'')            AS checker_by,
@@ -3369,8 +3487,13 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		var currentStatus string
-		err := pool.QueryRow(ctx, `SELECT tds_status FROM investment.fd_tds_receipt WHERE tds_id=$1 AND is_deleted=false`, req.TdsID).Scan(&currentStatus)
+		var currentStatus, fdIDForTDS string
+		var currentPeriodStart, currentPeriodEnd, currentDeductionDate *time.Time
+		err := pool.QueryRow(ctx, `
+			SELECT tds_status, fd_id, period_start, period_end, deduction_date
+			FROM investment.fd_tds_receipt
+			WHERE tds_id=$1 AND is_deleted=false`,
+			req.TdsID).Scan(&currentStatus, &fdIDForTDS, &currentPeriodStart, &currentPeriodEnd, &currentDeductionDate)
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, "TDS record not found")
 			return
@@ -3378,6 +3501,56 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 		if currentStatus != "CAPTURED" {
 			api.RespondWithError(w, http.StatusBadRequest, "TDS can only be edited when tds_status=CAPTURED")
 			return
+		}
+		if fdIDForTDS != "" {
+			var fdStartU, fdMaturityU time.Time
+			if scanErr := pool.QueryRow(ctx,
+				`SELECT start_date, maturity_date FROM investment.fd_master WHERE fd_id=$1 AND is_deleted=false`,
+				fdIDForTDS).Scan(&fdStartU, &fdMaturityU); scanErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "FD date lookup failed: "+scanErr.Error())
+				return
+			}
+			periodStartForValidation := ""
+			periodEndForValidation := ""
+			deductionDateForValidation := ""
+			if currentPeriodStart != nil {
+				periodStartForValidation = currentPeriodStart.Format(constants.DateFormat)
+			}
+			if currentPeriodEnd != nil {
+				periodEndForValidation = currentPeriodEnd.Format(constants.DateFormat)
+			}
+			if currentDeductionDate != nil {
+				deductionDateForValidation = currentDeductionDate.Format(constants.DateFormat)
+			}
+			for _, key := range []string{"period_start", "period_end", "deduction_date"} {
+				val, ok := req.Fields[key]
+				if !ok {
+					continue
+				}
+				s, ok := val.(string)
+				if !ok {
+					api.RespondWithError(w, http.StatusBadRequest, key+" must be in YYYY-MM-DD format")
+					return
+				}
+				switch key {
+				case "period_start":
+					periodStartForValidation = s
+				case "period_end":
+					periodEndForValidation = s
+				case "deduction_date":
+					deductionDateForValidation = s
+				}
+			}
+			if errMsg := checkFDPeriodDates(fdStartU, fdMaturityU, periodStartForValidation, periodEndForValidation); errMsg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
+			}
+			if errMsg := checkFDDates(fdStartU, fdMaturityU,
+				[]string{"deduction_date"},
+				[]string{deductionDateForValidation}); errMsg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
+			}
 		}
 
 		tx, err := pool.Begin(ctx)
