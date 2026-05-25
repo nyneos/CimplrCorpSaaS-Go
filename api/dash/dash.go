@@ -129,6 +129,11 @@ func StartDashService(db *sql.DB, port string) {
 	mux.Handle("/dash/investment/fd/operational-dashboard", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetFDOperationalDashboard(pgxPool)))
 	// FD BOD/EOD Control Room — maturities, confirmations due, accrual runs, receipts, GL postings, checklist
 	mux.Handle("/dash/investment/fd/bod-eod-dashboard", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetFDBodEodDashboard(pgxPool)))
+	// FD BOD/EOD Control Room V2 — role-based, template-driven checklist, sign-off + handover persistence
+	mux.Handle("/dash/investment/fd/bod-eod-dashboard/v2", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetFDBodEodDashboardV2(pgxPool)))
+	mux.Handle("/dash/investment/fd/bod-eod/signoff", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.PostFDBodEodSignOff(pgxPool)))
+	mux.Handle("/dash/investment/fd/bod-eod/handover", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.PostFDBodEodHandover(pgxPool)))
+	mux.Handle("/dash/investment/fd/bod-eod/bank-contacts", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.UpsertFDBodEodBankContact(pgxPool)))
 	// FD Audit & Governance Dashboard — audit log, maker-checker rate, overrides, missing evidence, period reopens
 	mux.Handle("/dash/investment/fd/audit-dashboard", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetFDAuditDashboard(pgxPool)))
 
