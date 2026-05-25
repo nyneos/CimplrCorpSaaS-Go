@@ -2634,16 +2634,73 @@ func cimplrResolvePenalty(ctx context.Context, pool *pgxpool.Pool, src cimplrFDS
 	return penaltyID, penaltyType, penaltyValue, penaltyAmount, noInterest, applicable
 }
 
-func cimplrTDSTill(ctx context.Context, pool *pgxpool.Pool, fdID string, periodStart, periodEnd time.Time) float64 {
+func cimplrTDSTill(ctx context.Context, pool *pgxpool.Pool, src cimplrFDSource, periodStart, periodEnd time.Time) float64 {
+	fdID := src.FDID
 	if fdID == "" || periodStart.IsZero() || periodEnd.IsZero() {
 		return 0
 	}
 	var tds float64
+
+	type scheduleTDSRow struct {
+		eventType string
+		eventDate time.Time
+		tds       float64
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT COALESCE(event_type,''), event_date::date, COALESCE(tds_amount,0)
+		FROM investment.fd_cashflow_schedule
+		WHERE fd_id=$1 AND COALESCE(is_deleted,false)=false
+		  AND event_date >= $2::date AND event_date <= $3::date
+		ORDER BY event_date, id`,
+		fdID, periodStart, periodEnd,
+	)
+	if err == nil {
+		defer rows.Close()
+		var scheduleRows []scheduleTDSRow
+		for rows.Next() {
+			var r scheduleTDSRow
+			if scanErr := rows.Scan(&r.eventType, &r.eventDate, &r.tds); scanErr != nil {
+				continue
+			}
+			scheduleRows = append(scheduleRows, r)
+		}
+		if len(scheduleRows) > 0 {
+			isCompound := strings.EqualFold(src.InterestTypeCode, "COMPOUND")
+			hasLaterCompoundCap := func(eventDate time.Time) bool {
+				for _, r := range scheduleRows {
+					if r.eventType == "CAPITALIZATION" && !r.eventDate.Before(eventDate) {
+						return true
+					}
+				}
+				return false
+			}
+			for _, r := range scheduleRows {
+				if isCompound {
+					switch r.eventType {
+					case "CAPITALIZATION", "MATURITY", "GRACE_PERIOD":
+						tds += r.tds
+					case "ACCRUAL":
+						if !hasLaterCompoundCap(r.eventDate) {
+							tds += r.tds
+						}
+					}
+					continue
+				}
+				if r.eventType != "ACCRUAL" {
+					tds += r.tds
+				}
+			}
+			if tds != 0 {
+				return roundToFour(tds)
+			}
+		}
+	}
+
 	_ = pool.QueryRow(ctx, `
 		SELECT COALESCE(SUM(tds_deducted_in_period),0)
 		FROM investment.fd_accrual_ledger
 		WHERE fd_id=$1 AND COALESCE(is_deleted,false)=false
-		  AND period_end <= $2::date`, fdID, periodEnd,
+		  AND period_end >= $2::date AND period_end <= $3::date`, fdID, periodStart, periodEnd,
 	).Scan(&tds)
 	if tds == 0 {
 		_ = pool.QueryRow(ctx, `
@@ -2699,7 +2756,7 @@ func cimplrAccruedInterestTill(ctx context.Context, pool *pgxpool.Pool, src cimp
 		}
 	}
 	if tds == 0 {
-		tds = cimplrTDSTill(ctx, pool, src.FDID, src.StartDate, periodEnd)
+		tds = cimplrTDSTill(ctx, pool, src, src.StartDate, periodEnd)
 	}
 	return roundToFour(accrued), roundToFour(tds)
 }
@@ -2734,8 +2791,9 @@ func validateCimplrMaturityTiming(src cimplrFDSource, closureType string) error 
 }
 
 func calculateCimplrClosure(ctx context.Context, pool *pgxpool.Pool, src cimplrFDSource, closureType, requestedDate string, enforceMaturityTiming bool) (cimplrClosureCalc, error) {
+	ct := strings.ToUpper(strings.TrimSpace(closureType))
 	if enforceMaturityTiming {
-		if err := validateCimplrMaturityTiming(src, closureType); err != nil {
+		if err := validateCimplrMaturityTiming(src, ct); err != nil {
 			return cimplrClosureCalc{}, err
 		}
 	}
@@ -2743,18 +2801,8 @@ func calculateCimplrClosure(ctx context.Context, pool *pgxpool.Pool, src cimplrF
 	if t, ok := parseCimplrDate(requestedDate); ok {
 		calcDate = t
 	}
-	if closureType == "PAYOUT" && !src.MaturityDate.IsZero() {
+	if (ct == "PAYOUT" || ct == "ROLLOVER") && !src.MaturityDate.IsZero() {
 		calcDate = src.MaturityDate
-	}
-	if closureType == "ROLLOVER" {
-		_, explicitDate := parseCimplrDate(requestedDate)
-		if !explicitDate {
-			if !src.MaturityDate.IsZero() && !src.MaturityDate.After(time.Now()) {
-				calcDate = src.MaturityDate
-			} else if calcDate.After(time.Now()) {
-				calcDate = time.Now()
-			}
-		}
 	}
 	accruedDays := int(calcDate.Sub(src.StartDate).Hours() / 24)
 	if accruedDays < 0 {
@@ -2774,7 +2822,7 @@ func calculateCimplrClosure(ctx context.Context, pool *pgxpool.Pool, src cimplrF
 		RevisedMaturityValue:  roundToFour(src.Principal + revisedInterest),
 		NetPayout:             roundToFour(src.Principal + revisedInterest - tds),
 	}
-	if closureType == "PREMATURE" {
+	if ct == "PREMATURE" {
 		pID, pType, pVal, pAmt, noInt, pApp := cimplrResolvePenalty(ctx, pool, src, accruedDays, accrued)
 		calc.PenaltyID = pID
 		calc.PenaltyType = pType

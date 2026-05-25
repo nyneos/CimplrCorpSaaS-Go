@@ -53,24 +53,21 @@ func PeriodInterestFromScheduleWithEnd(
 	isCompound := strings.EqualFold(strings.TrimSpace(interestTypeCode), "COMPOUND")
 	type row struct {
 		id, eventType string
+		eventDate     time.Time
 		interest      float64
 		dueNotAccrued float64
 	}
 	var schedule []row
-	hasCompoundCap := false
 	hasSimpleAccrual := false
 
 	for rows.Next() {
 		var r row
-		var eventDate time.Time
-		if err := rows.Scan(&r.id, &r.eventType, &eventDate, &r.interest, &r.dueNotAccrued); err != nil {
+		if err := rows.Scan(&r.id, &r.eventType, &r.eventDate, &r.interest, &r.dueNotAccrued); err != nil {
 			continue
 		}
 		switch r.eventType {
 		case "ACCRUAL":
 			hasSimpleAccrual = true
-		case "CAPITALIZATION":
-			hasCompoundCap = true
 		}
 		schedule = append(schedule, r)
 	}
@@ -79,14 +76,24 @@ func PeriodInterestFromScheduleWithEnd(
 	}
 	found = true
 
+	hasLaterCompoundCap := func(eventDate time.Time) bool {
+		for _, r := range schedule {
+			if r.eventType == "CAPITALIZATION" && !r.eventDate.Before(eventDate) {
+				return true
+			}
+		}
+		return false
+	}
+
 	for _, r := range schedule {
 		cashflowIDs = append(cashflowIDs, r.id)
 		switch r.eventType {
 		case "ACCRUAL":
-			// Compound accrual rows are the source only before a capitalization row
-			// lands in the same accrual window. Once cap exists, cap carries the
-			// aggregate interest and avoids double counting the accrual sub-rows.
-			if !isCompound || !hasCompoundCap {
+			// Compound accrual rows are counted only when no later capitalization
+			// in the requested window will roll them up. This keeps maturity from
+			// double-counting, while premature/till-date calculations still include
+			// accruals after the last completed capitalization.
+			if !isCompound || !hasLaterCompoundCap(r.eventDate) {
 				interest += r.interest
 			}
 		case "CAPITALIZATION":
