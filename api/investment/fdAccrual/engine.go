@@ -845,6 +845,17 @@ var scheduleFrequencies = map[string]bool{
 	"HALF_YEARLY": true, "YEARLY": true,
 }
 
+// periodCoverages are valid period_coverage values (the date window each run covers).
+// RUN = inherit from schedule_frequency (legacy behaviour).
+var periodCoverages = map[string]bool{
+	"DAILY": true, "MONTHLY": true, "QUARTERLY": true,
+	"HALF_YEARLY": true, "YEARLY": true, "RUN": true,
+}
+
+func isValidPeriodCoverage(p string) bool {
+	return periodCoverages[strings.ToUpper(strings.TrimSpace(p))]
+}
+
 // accrualRunApprovalListStatuses — /run/all shows only submitted approval-queue runs
 // (excludes DRAFT, VALIDATED, COMPUTED, IN_PROGRESS, VALIDATION_FAILED, FAILED, etc.).
 var accrualRunApprovalListStatuses = map[string]bool{
@@ -878,6 +889,39 @@ func isValidScheduleFrequency(f string) bool {
 
 // AccrualPeriodBounds returns inclusive calendar start/end for the accrual window
 // that contains `at`, based on accrual_granularity (not schedule_frequency).
+//
+// CURRENT BEHAVIOUR (calendar-month):
+//
+//	 MONTHLY → 2025-05-01 to 2025-05-31  (always 1st → last day of month)
+//
+//	— ALTERNATIVE: FD-date-based periods ("24 to 24")
+//
+// If you want the period to run from one FD-anniversary-day to the next
+// (e.g. Apr 24 → May 23, so the scheduler fires ON May 24 and covers the
+// preceding month), this function needs a second parameter: anchorDay int.
+// Change the signature to:
+//
+//	func AccrualPeriodBounds(at time.Time, granularity string, anchorDay ...int) (time.Time, time.Time)
+//
+// Then in the MONTHLY case replace the two lines with:
+//
+//	 — FD-date period: fire date IS the period end + 1 (anniversary)
+//	day := at.Day()                                          // e.g. 24 (run_day_of_month)
+//	if len(anchorDay) > 0 && anchorDay[0] >= 1 {
+//	    day = anchorDay[0]
+//	}
+//	periodEnd   := time.Date(at.Year(), at.Month(), day, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1) // May 23
+//	periodStart := time.Date(at.Year(), at.Month()-1, day, 0, 0, 0, 0, time.UTC)                 // Apr 24
+//	return periodStart, periodEnd
+//
+// NOTE: at.Month()-1 wraps correctly via Go's time.Date overflow (e.g. January-1 = December).
+//
+// You ALSO need to update the call site in fireScheduledRun (scheduler.go) to pass p.RunDay:
+//
+//	periodStart, periodEnd := AccrualPeriodBounds(scheduledAt, periodGranularity, p.RunDay)
+//
+// The manual-run API (run.go CreateAccrualRun) already accepts explicit accrual_period_start /
+// accrual_period_end from the caller — no change needed there.
 func AccrualPeriodBounds(at time.Time, granularity string) (time.Time, time.Time) {
 	at = at.UTC()
 	switch normalizeAccrualGranularity(granularity) {
@@ -899,6 +943,8 @@ func AccrualPeriodBounds(at time.Time, granularity string) (time.Time, time.Time
 		return time.Date(at.Year(), 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(at.Year(), 12, 31, 0, 0, 0, 0, time.UTC)
 	default: // MONTHLY and unknown
+		//  — CURRENT: calendar-month window (1st → last day).
+		// To switch to FD-date-based see the comment above the function.
 		start := time.Date(at.Year(), at.Month(), 1, 0, 0, 0, 0, time.UTC)
 		return start, start.AddDate(0, 1, -1)
 	}
