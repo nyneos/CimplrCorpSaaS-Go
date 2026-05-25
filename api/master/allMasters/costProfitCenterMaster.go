@@ -2425,6 +2425,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					SELECT DISTINCT p.centre_code, c.centre_code, 'Active'
 					FROM mastercostprofitcenter c
 					JOIN mastercostprofitcenter p ON c.parent_centre_code = p.centre_code
+					WHERE COALESCE(c.is_deleted, false) = false AND COALESCE(p.is_deleted, false) = false
 					ON CONFLICT DO NOTHING;
 				`)
 				if err != nil {
