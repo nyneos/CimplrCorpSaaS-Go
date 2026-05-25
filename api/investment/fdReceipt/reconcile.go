@@ -274,7 +274,10 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 			varianceengine.AutoResolveCleared(ctx, pool, rec.ReceiptID, veItems, triggeredBy, triggeredBy)                               //nolint:errcheck
 
 			// ── Exception ─────────────────────────────────────────────────────
-			if matchStatus != "MATCHED" && resultID != "" {
+			// Always create an exception for non-MATCHED receipts. Do NOT gate
+			// on resultID != ""; if insertInterestResult failed the exception
+			// must still surface in /exception/all so the variance workflow works.
+			if matchStatus != "MATCHED" {
 				exID, _ := insertException(ctx, pool, ExceptionParams{
 					Rec:           rec,
 					RunID:         runID,
@@ -292,10 +295,12 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 						varianceAbs = -varianceAbs
 					}
 					insertVarianceRaisedAudit(ctx, pool, exID, triggeredBy, deriveExceptionType(variance, expected), expected, rec.Gross, varianceAbs) //nolint:errcheck
-					pool.Exec(ctx,                                                                                                                     //nolint:errcheck
-						`UPDATE investment.fd_receipt_reconcile_result
-						 SET has_exception=false, exception_id=$1 WHERE result_id=$2`,
-						exID, resultID)
+					if resultID != "" {
+						pool.Exec(ctx, //nolint:errcheck
+							`UPDATE investment.fd_receipt_reconcile_result
+							 SET has_exception=true, exception_id=$1 WHERE result_id=$2`,
+							exID, resultID)
+					}
 				}
 			}
 		}
@@ -404,7 +409,10 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 				varianceengine.UpdateRecordFlags(ctx, pool, "investment.fd_tds_receipt", "tds_id", tds.TDSID, tveRunID, tItems) //nolint:errcheck
 				varianceengine.AutoResolveCleared(ctx, pool, tds.TDSID, tItems, triggeredBy, triggeredBy)                       //nolint:errcheck
 
-				if matchStatus != "MATCHED" && tdsResultID != "" {
+				// Always create an exception for non-MATCHED TDS rows. Do NOT gate
+				// on tdsResultID != ""; if insertTDSResult failed the exception
+				// must still surface in /exception/all so the variance workflow works.
+				if matchStatus != "MATCHED" {
 					exID, _ := insertException(ctx, pool, ExceptionParams{
 						Rec: ReceiptRow{
 							ReceiptID: tds.ReceiptID,
@@ -428,10 +436,12 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 							varianceAmt = -varianceAmt
 						}
 						insertVarianceRaisedAudit(ctx, pool, exID, triggeredBy, deriveExceptionType(variance, expected), expected, tds.Actual, varianceAmt) //nolint:errcheck
-						pool.Exec(ctx,                                                                                                                      //nolint:errcheck
-							`UPDATE investment.fd_receipt_reconcile_result
-							 SET has_exception=false, exception_id=$1 WHERE result_id=$2`,
-							exID, tdsResultID)
+						if tdsResultID != "" {
+							pool.Exec(ctx, //nolint:errcheck
+								`UPDATE investment.fd_receipt_reconcile_result
+								 SET has_exception=true, exception_id=$1 WHERE result_id=$2`,
+								exID, tdsResultID)
+						}
 					}
 				}
 			}
@@ -554,6 +564,7 @@ func expandLinkedReconcileIDs(ctx context.Context, pool *pgxpool.Pool, receiptID
 	}
 
 	if len(tdsIDs) > 0 {
+		// Step 1: direct receipt_id link.
 		rows, err := pool.Query(ctx, `
 			SELECT COALESCE(receipt_id, '')
 			FROM investment.fd_tds_receipt
@@ -571,6 +582,30 @@ func expandLinkedReconcileIDs(ctx context.Context, pool *pgxpool.Pool, receiptID
 		}
 		if err := rows.Err(); err != nil {
 			return nil, nil, fmt.Errorf("scan linked interest receipts: %w", err)
+		}
+
+		// Step 2: fallback — for TDS entries that had no receipt_id link, restrict the
+		// interest pass to receipts from the same FD(s) and overlapping periods.
+		// Without this guard, loadInterestReceipts falls back to entity+period-wide and pulls in unrelated FDs' receipts.
+		irRows, irErr := pool.Query(ctx, `
+			SELECT r.receipt_id
+			FROM investment.fd_interest_receipt r
+			JOIN investment.fd_tds_receipt t ON t.fd_id = r.fd_id
+			WHERE t.tds_id = ANY($1::text[])
+			  AND COALESCE(t.receipt_id, '') = ''
+			  AND r.is_deleted = false
+			  AND t.is_deleted = false
+			  AND r.receipt_status IN ('APPROVED','POSTED','PARTIAL')
+			  AND r.period_start <= t.period_end
+			  AND r.period_end >= t.period_start`, tdsIDs)
+		if irErr == nil {
+			for irRows.Next() {
+				var rid string
+				if irRows.Scan(&rid) == nil {
+					expandedReceiptIDs = addUniqueString(expandedReceiptIDs, receiptSeen, rid)
+				}
+			}
+			irRows.Close()
 		}
 	}
 
@@ -915,14 +950,31 @@ func loadTDSReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, periodSt
 func loadCashflowsForReceipt(ctx context.Context, pool *pgxpool.Pool,
 	fdID string, periodStart, periodEnd time.Time, forTDS bool) []CashflowLine {
 
+	// For compound FDs the bank pays interest at each CAPITALIZATION event,
+	// NOT at MATURITY (the MATURITY row's interest_accrued is the net-after-TDS
+	// figure, not the gross). So:
+	//   INTEREST: include CAPITALIZATION; exclude MATURITY when CAPITALIZATION exists.
+	//   TDS:      include CAPITALIZATION + MATURITY (bank deducts TDS at both).
 	amountExpr := `CASE event_type
 		         WHEN 'INTEREST_RECEIPT' THEN COALESCE(interest_accrued, 0)
-		         WHEN 'MATURITY'         THEN COALESCE(interest_accrued, 0)
+		         WHEN 'CAPITALIZATION'   THEN COALESCE(interest_accrued, 0)
+		         WHEN 'MATURITY' THEN
+		             CASE WHEN EXISTS (
+		                 SELECT 1 FROM investment.fd_cashflow_schedule cs2
+		                 WHERE cs2.fd_id = fd_cashflow_schedule.fd_id
+		                   AND cs2.event_type = 'CAPITALIZATION'
+		                   AND COALESCE(cs2.period_end_date, cs2.event_date) > $2
+		                   AND COALESCE(cs2.period_end_date, cs2.event_date) <= $3
+		                   AND COALESCE(cs2.is_deleted, false) = false
+		             ) THEN 0
+		             ELSE COALESCE(interest_accrued, 0)
+		             END
 		         ELSE 0
 		       END`
 	if forTDS {
 		amountExpr = `CASE event_type
 			         WHEN 'INTEREST_RECEIPT' THEN COALESCE(tds_amount, 0)
+			         WHEN 'CAPITALIZATION'   THEN COALESCE(tds_amount, 0)
 			         WHEN 'MATURITY'         THEN COALESCE(tds_amount, 0)
 			         ELSE 0
 			       END`
@@ -1003,7 +1055,13 @@ func loadAccrualLedgerForReceipt(ctx context.Context, pool *pgxpool.Pool,
 		       COALESCE(opening_accrued_balance, 0),
 		       COALESCE(closing_accrued_balance, 0),
 		       ledger_row_status,
-		       COALESCE(%s, 0) AS amount
+		       CASE 
+		         WHEN COALESCE(accrual_days, 0) > 0 THEN
+		           ROUND(
+		             (COALESCE(%[1]s, 0) * GREATEST(0, LEAST($3::date, accrual_period_end) - GREATEST($2::date, accrual_period_start))::numeric) / accrual_days
+		           )
+		         ELSE COALESCE(%[1]s, 0)
+		       END AS amount
 		FROM investment.fd_accrual_ledger
 		WHERE fd_id                = $1
 		  AND accrual_period_start  < $3
@@ -1063,17 +1121,34 @@ func buildCashflowMap(ctx context.Context, p MapLookupParams) float64 {
 	periodStart := p.PeriodStart
 	periodEnd := p.PeriodEnd
 
-	// TDS is stored as a field on INTEREST_RECEIPT/MATURITY rows — there is no event_type='TDS'.
-	eventTypes := []string{"INTEREST_RECEIPT", "MATURITY"}
+	// Include CAPITALIZATION so compound FDs are matched correctly.
+	// INTEREST_RECEIPT covers simple/quarterly-payout FDs; MATURITY covers
+	// remaining interest at the end; CAPITALIZATION covers compound periods.
+	eventTypes := []string{"INTEREST_RECEIPT", "MATURITY", "CAPITALIZATION"}
 
+	// Interest: use CAPITALIZATION gross interest; suppress MATURITY when
+	// CAPITALIZATION rows exist (MATURITY's interest_accrued is net-after-TDS).
+	// TDS: always include CAPITALIZATION + MATURITY (bank deducts TDS at both).
 	amountCol := `CASE event_type
 		         WHEN 'INTEREST_RECEIPT' THEN COALESCE(interest_accrued, 0)
-		         WHEN 'MATURITY'         THEN COALESCE(interest_accrued, 0)
+		         WHEN 'CAPITALIZATION'   THEN COALESCE(interest_accrued, 0)
+		         WHEN 'MATURITY' THEN
+		             CASE WHEN EXISTS (
+		                 SELECT 1 FROM investment.fd_cashflow_schedule cs2
+		                 WHERE cs2.fd_id = fd_cashflow_schedule.fd_id
+		                   AND cs2.event_type = 'CAPITALIZATION'
+		                   AND COALESCE(cs2.period_end_date, cs2.event_date) > $3
+		                   AND COALESCE(cs2.period_end_date, cs2.event_date) <= $4
+		                   AND COALESCE(cs2.is_deleted, false) = false
+		             ) THEN 0
+		             ELSE COALESCE(interest_accrued, 0)
+		             END
 		         ELSE 0
 		       END`
 	if tdsID != "" {
 		amountCol = `CASE event_type
 		         WHEN 'INTEREST_RECEIPT' THEN COALESCE(tds_amount, 0)
+		         WHEN 'CAPITALIZATION'   THEN COALESCE(tds_amount, 0)
 		         WHEN 'MATURITY'         THEN COALESCE(tds_amount, 0)
 		         ELSE 0
 		       END`
@@ -1494,7 +1569,7 @@ func insertException(ctx context.Context, pool *pgxpool.Pool, p ExceptionParams)
 			'VARIANCE','OPEN',$13,now(),
 			true,false
 		) RETURNING exception_id`,
-		p.RunID, p.ResultID,
+		p.RunID, nullStr(p.ResultID),
 		p.Rec.FDID, p.Rec.FdRefNo, resultType,
 		nullStr(p.Rec.ReceiptID), nullStr(p.TDSID),
 		p.ExceptionType, severity,

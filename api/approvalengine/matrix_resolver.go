@@ -187,7 +187,28 @@ func ResolveMatrix(
 
 	// Step 2: Load all active eyes for this matrix.
 	rows, err := pool.Query(ctx, `
-		SELECT eye_id, position, eye_count, sla_hours
+		SELECT e.eye_id, e.position, e.eye_count, e.sla_hours,
+		       (
+		           SELECT COUNT(*)
+		           FROM uam.approval_matrix_eye_member mem
+		           JOIN LATERAL (
+		               SELECT processing_status, action_type
+		               FROM uam.audit_approval_matrix_eye_member ma2
+		               WHERE ma2.member_id = mem.member_id
+		               ORDER BY requested_at DESC, audit_id DESC
+		               LIMIT 1
+		           ) mla ON true
+		           WHERE mem.eye_id = e.eye_id
+		             AND mem.member_type = 'APPROVER'
+		             AND mem.is_active = true
+		             AND mem.is_deleted = false
+		             AND mla.processing_status = 'APPROVED'
+		             AND mla.action_type <> 'DELETE'
+		             AND (
+		                 (mem.assignment_type IN ('USER_ONLY','ROLE_USER') AND NULLIF(mem.user_id,'') IS NOT NULL)
+		                 OR (mem.assignment_type IN ('ROLE_ONLY','ROLE_USER') AND NULLIF(mem.role_id,'') IS NOT NULL)
+		             )
+		       ) AS approver_count
 		FROM uam.approval_matrix_eye e
 		JOIN LATERAL (
 			SELECT action_type, processing_status
@@ -233,10 +254,15 @@ func ResolveMatrix(
 	var eyes []MatrixEye
 	for rows.Next() {
 		var e MatrixEye
-		if err := rows.Scan(&e.EyeID, &e.Position, &e.EyeCount, &e.SlaHours); err != nil {
+		var approverCount int
+		if err := rows.Scan(&e.EyeID, &e.Position, &e.EyeCount, &e.SlaHours, &approverCount); err != nil {
 			return nil, fmt.Errorf("ResolveMatrix eye scan: %w", err)
 		}
-		e.ApprovalsRequired = e.EyeCount / 2
+		if approvalOrder == "PARALLEL" {
+			e.ApprovalsRequired = 1
+		} else {
+			e.ApprovalsRequired = approverCount
+		}
 		if e.ApprovalsRequired < 1 {
 			e.ApprovalsRequired = 1
 		}

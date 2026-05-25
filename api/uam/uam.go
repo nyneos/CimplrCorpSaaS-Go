@@ -82,6 +82,7 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.Handle("/uam/roles/reject-multiple-roles", prevalidate(http.HandlerFunc(role.RejectMultipleRoles(db))))
 	mux.Handle("/uam/roles/update-role", prevalidate(http.HandlerFunc(role.UpdateRole(db))))
 	mux.Handle("/uam/roles/get-just-roles", prevalidate(http.HandlerFunc(role.GetJustRoles(db))))
+	mux.Handle("/uam/roles/get-roles-for-dropdown", prevalidate(http.HandlerFunc(role.GetRolesForDropdown(db))))
 	mux.Handle("/uam/roles/get-user-roles", prevalidate(http.HandlerFunc(role.GetJustRolesPERMISSIONapproved(db))))
 	mux.Handle("/uam/roles/get-pending-roles", prevalidate(http.HandlerFunc(role.GetPendingRoles(db))))
 	mux.Handle("/uam/roles/audit-history", prevalidate(http.HandlerFunc(role.GetRoleAuditHistory(db))))

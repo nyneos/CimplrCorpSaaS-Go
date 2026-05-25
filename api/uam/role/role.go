@@ -479,6 +479,30 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// Handler: Get roles for dropdown (returns id and name)
+func GetRolesForDropdown(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rows, err := db.Query("SELECT id, name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND COALESCE(is_deleted, false) = false")
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+		type RoleOption struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		roles := []RoleOption{}
+		for rows.Next() {
+			var opt RoleOption
+			rows.Scan(&opt.ID, &opt.Name)
+			roles = append(roles, opt)
+		}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "roles": roles})
+	}
+}
+
 // Handler: Get just role names
 func GetJustRoles(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

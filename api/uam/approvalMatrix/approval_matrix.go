@@ -129,17 +129,11 @@ func validateEyeFields(eyeCount, position int, slaHours *int) error {
 	return nil
 }
 
-// normaliseEyeCount rounds an actual member count (1..5) up to the smallest
-// value the uam_appr_eye_count_chk check constraint accepts (2, 4, or 6).
-func normaliseEyeCount(memberCount int) int {
-	switch {
-	case memberCount <= 2:
-		return 2
-	case memberCount <= 4:
-		return 4
-	default:
-		return 6
-	}
+// normaliseEyeCount calculates the eye count for a given round based on its position.
+// Position 1 -> 2, Position 2 -> 4, Position 3 -> 6.
+// This aligns with standard Maker-Checker terminology and satisfies uam_appr_eye_count_chk.
+func normaliseEyeCount(position int) int {
+	return position * 2
 }
 
 func validateMemberFields(memberType, assignmentType string, roleID, userID *string, slotOrder int) error {
@@ -436,8 +430,8 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						i, eye.Position))
 				return
 			}
-			// Normalise eye_count so it satisfies uam_appr_eye_count_chk (2/4/6).
-			req.Eyes[i].EyeCount = normaliseEyeCount(len(eye.Members))
+			// Normalise eye_count so it satisfies uam_appr_eye_count_chk (2/4/6) based on position.
+			req.Eyes[i].EyeCount = normaliseEyeCount(eye.Position)
 		}
 
 		ctx := r.Context()
@@ -2075,7 +2069,7 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"an ESCALATION eye must contain at least one APPROVER member (role/user) in addition to its ESCALATION member(s)")
 			return
 		}
-		req.EyeCount = normaliseEyeCount(len(req.Members))
+		req.EyeCount = normaliseEyeCount(req.Position)
 		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)

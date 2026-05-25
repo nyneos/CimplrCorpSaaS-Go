@@ -3556,6 +3556,7 @@ func enrichCimplrInitiateListFromCalculation(ctx context.Context, pool *pgxpool.
 		if forceSystemCalc {
 			row["accrued_interest_till_date"] = calc.AccruedInterest
 			row["tds_expected"] = calc.TDSAmount
+			row["bank_calculated_tds"] = calc.TDSAmount
 			row["net_expected_amount"] = calc.NetPayout
 			row["expected_maturity_value"] = calc.ExpectedMaturityValue
 			continue
@@ -3580,6 +3581,14 @@ func enrichCimplrInitiateListFromCalculation(ctx context.Context, pool *pgxpool.
 		}
 		if chooseFloat(parseFloatMap(row, "accrued_interest_till_date"), 0) == 0 && accrued > 0 {
 			row["accrued_interest_till_date"] = accrued
+		}
+		// Always expose the live-recalculated TDS so the frontend can prefer it.
+		// The stored tds_expected may be stale (computed at initiation with an older
+		// cashflow); bank_calculated_tds always reflects the current cashflow schedule.
+		if tds > 0 {
+			row["bank_calculated_tds"] = tds
+		} else if calc.TDSAmount > 0 {
+			row["bank_calculated_tds"] = calc.TDSAmount
 		}
 		if chooseFloat(parseFloatMap(row, "tds_expected"), 0) == 0 && tds > 0 {
 			row["tds_expected"] = tds

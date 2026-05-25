@@ -1251,6 +1251,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
+		userID := api.GetUserIDFromCtx(r.Context())
 
 		ctx := r.Context()
 		engineActed := 0
@@ -1340,7 +1341,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"errors": errors, "checker": userEmail,
 		})
 		for _, bID := range req.BookingIDs {
-			go func(id, uEmail string) {
+			go func(id, uEmail, uID string) {
 				defer func() {
 					if rec := recover(); rec != nil {
 						api.LogError("[FDBooking] approve notification goroutine panic for booking %s: %v", id, rec)
@@ -1349,9 +1350,10 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/approve", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_BOOKING_APPROVED",
+					"user_id":     uID,
 					"actor_email": uEmail,
 				})
-			}(bID, userEmail)
+			}(bID, userEmail, userID)
 		}
 		api.LogInfo("[FDBooking] BulkApproveBooking: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)
@@ -1381,6 +1383,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
+		userID := api.GetUserIDFromCtx(r.Context())
 
 		ctx := r.Context()
 		engineActed := 0
@@ -1449,7 +1452,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"errors": errors, "checker": userEmail,
 		})
 		for _, bID := range req.BookingIDs {
-			go func(id, uEmail string) {
+			go func(id, uEmail, uID string) {
 				defer func() {
 					if rec := recover(); rec != nil {
 						api.LogError("[FDBooking] reject notification goroutine panic for booking %s: %v", id, rec)
@@ -1458,9 +1461,10 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/reject", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_BOOKING_REJECTED",
+					"user_id":     uID,
 					"actor_email": uEmail,
 				})
-			}(bID, userEmail)
+			}(bID, userEmail, userID)
 		}
 		api.LogInfo("[FDBooking] BulkRejectBooking: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)

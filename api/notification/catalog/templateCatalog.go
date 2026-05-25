@@ -1180,15 +1180,15 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				(template_id, action_type, processing_status,
 				 subject, body_text, body_html, is_html_enabled, formula_steps,
 				 version_label, requested_by, requested_at, change_note,
-				 old_subject, old_body_text, old_body_html, old_formula_steps,
+				 old_subject, old_body_text, old_body_html, old_is_html_enabled, old_formula_steps,
 				 old_recipients)
 			VALUES
 				($1, 'EDIT', 'PENDING_EDIT_APPROVAL',
 				 $2, $3, $4, $5, $6,
-				 (SELECT 'v' || (COUNT(*)+1) FROM notification_svc.audit_template WHERE template_id = $14::varchar),
+				 (SELECT 'v' || (COUNT(*)+1) FROM notification_svc.audit_template WHERE template_id = $15::varchar),
 				 $7, now(), $8,
-				 $9, $10, $11, $12,
-				 $13)
+				 $9, $10, $11, $12, $13,
+				 $14)
 			RETURNING audit_id::text, version_label
 		`
 		var newAuditID, newVersion string
@@ -1196,22 +1196,55 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.TemplateID,                                                   // $1
 			req.Subject, req.BodyText, req.BodyHTML, *req.IsHTML, formulaVal, // $2–$6
 			editor, changeNote, // $7, $8
-			oldSubject.String, oldBodyText.String, oldBodyHTML.String, oldFormula, // $9–$12
-			oldRecipientsJSON, // $13
-			req.TemplateID,    // $14 — subquery ref (avoids 42P08)
+			oldSubject.String, oldBodyText.String, oldBodyHTML.String, oldIsHTML.Bool, oldFormula, // $9–$13
+			oldRecipientsJSON, // $14
+			req.TemplateID,    // $15 — subquery ref (avoids 42P08)
 		).Scan(&newAuditID, &newVersion); err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
 		}
 
+		// ── Step 6: immediately apply recipient strategy to live template_recipient ──
+		// Recipients don't need checker approval — apply now so the UI reflects the
+		// change immediately. The old snapshot is already saved in old_recipients above.
+		recipientsApplied := 0
+		if req.Strategy != nil {
+			stratCopy := make(map[string]interface{}, len(req.Strategy))
+			for k, v := range req.Strategy {
+				stratCopy[k] = v
+			}
+			// Strip metadata-only keys before passing to recipient resolver
+			delete(stratCopy, "__template_name")
+			delete(stratCopy, "__description")
+			delete(stratCopy, "__role_scope")
+
+			if mode, ok := stratCopy["mode"].(string); ok && mode != "" {
+				// Deactivate all current live recipients
+				if _, derr := pgxPool.Exec(ctx,
+					`UPDATE notification_svc.template_recipient SET is_active = false WHERE template_id = $1`,
+					req.TemplateID,
+				); derr != nil {
+					api.LogError("[EditTemplateSingle] recipient deactivation failed for %s: %v", req.TemplateID, derr)
+				} else {
+					// Insert new recipients per the strategy
+					if cnt, rerr := populateRecipientsForTemplate(ctx, pgxPool, req.TemplateID, stratCopy, editor); rerr != nil {
+						api.LogError("[EditTemplateSingle] populateRecipientsForTemplate failed for %s: %v", req.TemplateID, rerr)
+					} else {
+						recipientsApplied = cnt
+					}
+				}
+			}
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"template_id":    req.TemplateID,
-			"audit_id":       newAuditID,
-			"version_label":  newVersion,
-			"action_type":    "EDIT",
-			"status":         "PENDING_EDIT_APPROVAL",
-			"requested_by":   editor,
-			"old_recipients": string(oldRecipientsJSON),
+			"template_id":        req.TemplateID,
+			"audit_id":           newAuditID,
+			"version_label":      newVersion,
+			"action_type":        "EDIT",
+			"status":             "PENDING_EDIT_APPROVAL",
+			"requested_by":       editor,
+			"old_recipients":     string(oldRecipientsJSON),
+			"recipients_applied": recipientsApplied,
 		})
 	}
 }
