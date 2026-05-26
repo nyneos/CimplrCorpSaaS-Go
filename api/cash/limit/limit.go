@@ -140,7 +140,7 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 
@@ -617,7 +617,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 

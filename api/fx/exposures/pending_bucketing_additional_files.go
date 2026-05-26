@@ -30,15 +30,32 @@ func DeletePendingExposureBucketingAdditionalFileHandler(pool *pgxpool.Pool) htt
 	return additionalfiles.NewDeleteHandler(pool, pendingExposureBucketingAdditionalFilesConfig())
 }
 
+func AuditPendingExposureBucketingAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, pendingExposureBucketingAdditionalFilesConfig())
+}
+
+func ApprovePendingExposureBucketingAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, pendingExposureBucketingAdditionalFilesConfig())
+}
+
+func RejectPendingExposureBucketingAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, pendingExposureBucketingAdditionalFilesConfig())
+}
+
 func pendingExposureBucketingAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:        "fx-pending-exposure-bucketing",
-		ParentIDField: "exposure_header_id",
-		List:          listPendingExposureBucketingAdditionalFiles,
-		Create:        createPendingExposureBucketingAdditionalFile,
-		GetOne:        getPendingExposureBucketingAdditionalFile,
-		GetMany:       getPendingExposureBucketingAdditionalFiles,
-		SoftDelete:    deletePendingExposureBucketingAdditionalFile,
+		Module:                "fx-pending-exposure-bucketing",
+		AuditSource:           "FX_EXPOSURE_BUCKETING",
+		AuditTableName:        fxAdditionalFileAuditTable,
+		ParentIDField:         "exposure_header_id",
+		List:                  listPendingExposureBucketingAdditionalFiles,
+		CreateReturning:       createPendingExposureBucketingAdditionalFile,
+		GetOne:                getPendingExposureBucketingAdditionalFile,
+		GetAnyFile:            getAnyPendingExposureBucketingAdditionalFile,
+		GetMany:               getPendingExposureBucketingAdditionalFiles,
+		SoftDelete:            deletePendingExposureBucketingAdditionalFile,
+		SoftDeleteTx:          deletePendingExposureBucketingAdditionalFileTx,
+		RecordMainUploadAudit: recordExposureBucketingMainUploadAudit,
 	}
 }
 
@@ -60,12 +77,12 @@ func listPendingExposureBucketingAdditionalFiles(ctx context.Context, pool *pgxp
 	`), parentID, names)
 }
 
-func createPendingExposureBucketingAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
+func createPendingExposureBucketingAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
 	names, err := fxEntityNames(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "public.pending_exposure_bucketing_files", "exposure_header_id", input, `
+	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "public.pending_exposure_bucketing_files", "exposure_header_id", input, `
 		SELECT h.exposure_header_id AS parent_id
 		FROM public.exposure_headers h
 		WHERE h.exposure_header_id::text = $8
@@ -79,14 +96,26 @@ func createPendingExposureBucketingAdditionalFile(ctx context.Context, tx pgx.Tx
 }
 
 func getPendingExposureBucketingAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getPendingExposureBucketingAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnyPendingExposureBucketingAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getPendingExposureBucketingAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getPendingExposureBucketingAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
 	names, err := fxEntityNames(ctx)
 	if err != nil {
 		return nil, err
 	}
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
+	}
 	return additionalfiles.FirstFile(ctx, pool, pendingExposureBucketingFileQuery(`
 		WHERE f.exposure_header_id::text = $1
 		  AND f.file_id::text = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  `+deletedClause+`
 		  AND LOWER(TRIM(h.entity)) = ANY($3)
 		  AND EXISTS (
 		      SELECT 1
@@ -121,11 +150,19 @@ func getPendingExposureBucketingAdditionalFiles(ctx context.Context, pool *pgxpo
 }
 
 func deletePendingExposureBucketingAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deletePendingExposureBucketingAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deletePendingExposureBucketingAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deletePendingExposureBucketingAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deletePendingExposureBucketingAdditionalFileExec(ctx context.Context, exec fxAdditionalFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	names, err := fxEntityNames(ctx)
 	if err != nil {
 		return false, err
 	}
-	result, execErr := pool.Exec(ctx, `
+	result, execErr := exec.Exec(ctx, `
 		UPDATE public.pending_exposure_bucketing_files f
 		SET is_deleted = TRUE,
 		    deleted_by = $3,

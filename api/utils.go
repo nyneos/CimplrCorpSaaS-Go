@@ -2,8 +2,8 @@ package api
 
 import (
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/logger"
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -64,7 +64,8 @@ func IsBulkSuccess(results []map[string]interface{}) bool {
 
 // Error response helper
 func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
+	logger.LogError("%s", errMsg)
+
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -76,9 +77,10 @@ func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
 // RespondWithResult sends a consistent JSON response for success or error
 func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+
 	if success {
 		w.WriteHeader(http.StatusOK) // 200
-		log.Println("[INFO] RespondWithResult success")
+		logger.LogInfo("RespondWithResult success")
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true})
 	} else {
 		// Set appropriate error status code based on error type
@@ -91,7 +93,7 @@ func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
 		} else {
 			w.WriteHeader(http.StatusInternalServerError) // 500
 		}
-		log.Println("[ERROR] RespondWithResult", errMsg)
+		logger.LogError("RespondWithResult: %s", errMsg)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg})
 	}
 }
@@ -100,9 +102,14 @@ func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
 func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payload interface{}) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	resp := map[string]interface{}{constants.ValueSuccess: success}
+
+	if !success {
+		errMsg = promotePayloadErrors(errMsg, payload)
+	}
+
 	if !success && errMsg != "" {
 		resp[constants.ValueError] = errMsg
-		log.Println("[ERROR] RespondWithPayload", errMsg)
+		logger.LogError("RespondWithPayload: %s", errMsg)
 		// Set appropriate error status code
 		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
 			w.WriteHeader(http.StatusBadRequest) // 400
@@ -119,25 +126,119 @@ func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payl
 	if payload != nil {
 		// use a conventional key `rows` for list payloads
 		resp["rows"] = payload
-		log.Println("[INFO] RespondWithPayload payload included")
+		logger.LogInfo("RespondWithPayload: payload included")
 	}
 	json.NewEncoder(w).Encode(resp)
 }
 
+func promotePayloadErrors(errMsg string, payload interface{}) string {
+	details := payloadErrorStrings(payload)
+	if len(details) == 0 {
+		return errMsg
+	}
+	return BulkActionErrorMessage(errMsg, details)
+}
+
+func BulkActionErrorMessage(summary string, details []string) string {
+	clean := compactErrorStrings(details)
+	if len(clean) == 0 {
+		return summary
+	}
+	detail := strings.Join(clean, "; ")
+	if strings.TrimSpace(summary) == "" {
+		return detail
+	}
+	if strings.Contains(summary, detail) || strings.Contains(summary, clean[0]) {
+		return summary
+	}
+	return summary + ": " + detail
+}
+
+func payloadErrorStrings(payload interface{}) []string {
+	switch vals := payload.(type) {
+	case []string:
+		return compactErrorStrings(vals)
+	case []interface{}:
+		return compactErrorStrings(errorStringsFromInterfaceSlice(vals))
+	case []map[string]interface{}:
+		return compactErrorStrings(errorStringsFromMapSlice(vals))
+	}
+
+	rowMap, ok := payload.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	if raw, ok := rowMap["errors"]; ok {
+		switch vals := raw.(type) {
+		case []string:
+			return compactErrorStrings(vals)
+		case []interface{}:
+			return compactErrorStrings(errorStringsFromInterfaceSlice(vals))
+		case []map[string]interface{}:
+			return compactErrorStrings(errorStringsFromMapSlice(vals))
+		default:
+			return nil
+		}
+	}
+	if raw, ok := rowMap["validation_errors"]; ok {
+		switch vals := raw.(type) {
+		case []interface{}:
+			return compactErrorStrings(errorStringsFromInterfaceSlice(vals))
+		case []map[string]interface{}:
+			return compactErrorStrings(errorStringsFromMapSlice(vals))
+		}
+	}
+	return nil
+}
+
+func errorStringsFromInterfaceSlice(vals []interface{}) []string {
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		switch item := v.(type) {
+		case string:
+			out = append(out, item)
+		case map[string]interface{}:
+			out = append(out, errorStringsFromMap(item)...)
+		}
+	}
+	return out
+}
+
+func errorStringsFromMapSlice(vals []map[string]interface{}) []string {
+	out := make([]string, 0, len(vals))
+	for _, item := range vals {
+		out = append(out, errorStringsFromMap(item)...)
+	}
+	return out
+}
+
+func errorStringsFromMap(row map[string]interface{}) []string {
+	for _, key := range []string{constants.ValueError, "message", "reason"} {
+		if raw, ok := row[key]; ok {
+			if s, ok := raw.(string); ok {
+				return []string{s}
+			}
+		}
+	}
+	return nil
+}
+
+func compactErrorStrings(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
 // LogInfo logs an informational message (wrapper for consistent logging)
 func LogInfo(msg string, args ...interface{}) {
-	if len(args) > 0 {
-		log.Printf("[INFO] "+msg, args...)
-	} else {
-		log.Println("[INFO]", msg)
-	}
+	logger.LogInfo(msg, args...)
 }
 
 // LogError logs an error message (wrapper for consistent logging)
 func LogError(msg string, args ...interface{}) {
-	if len(args) > 0 {
-		log.Printf("[ERROR] "+msg, args...)
-	} else {
-		log.Println("[ERROR]", msg)
-	}
+	logger.LogError(msg, args...)
 }

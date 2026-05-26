@@ -20,6 +20,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/lib/pq"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 // MaxBankStatementZipBytes is the maximum allowed uncompressed upload size for a
@@ -741,6 +743,8 @@ func userFriendlyUploadError(err error) string {
 	if errors.As(err, &pqErr) && pqErr.Code == "22003" {
 		return "Some transaction amounts/balances in this statement are too large to be saved. Please try uploading the Excel version, or contact support with this file."
 	}
+	logger.LogInfo("Debug raw mesage: %s", msg)
+	logger.LogInfo("Debug raw mesage: %s", msg)
 	if strings.Contains(msg, "failed to begin db transaction") ||
 		strings.Contains(msg, "failed to insert bank statement") ||
 		strings.Contains(msg, "failed to upsert bank_balances_manual") ||

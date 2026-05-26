@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"net/http"
 	"sort"
@@ -18,12 +17,13 @@ import (
 	"CimplrCorpSaas/api/dash/fxrates"
 
 	"github.com/lib/pq"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 var rates = fxrates.FxRates
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
+	logger.LogError("%s", errMsg)
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -160,7 +160,7 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 			rate, found := rates[cur]
 			if !found {
 				rate = 1.0 // Default to 1 if no rate is found
-				log.Printf("No rate found for currency: %s. Using default rate of 1.0", cur)
+				logger.LogInfo("No rate found for currency: %s. Using default rate of 1.0", cur)
 			}
 
 			usdValue := math.Abs(amount.Float64) * rate

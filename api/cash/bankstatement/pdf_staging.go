@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
@@ -258,7 +260,7 @@ func GetStagingStatementHandler(db *sql.DB) http.Handler {
 		var rawStatementParsed interface{}
 		if len(rawStmt) > 0 {
 			if err := json.Unmarshal(rawStmt, &rawStatementParsed); err != nil {
-				log.Printf("[staging] warn: failed to parse raw_statement for %s: %v", stagingID, err)
+				logger.LogError("[staging] warn: failed to parse raw_statement for %s: %v", stagingID, err)
 				rawStatementParsed = nil
 			}
 		}
@@ -581,7 +583,7 @@ func deleteStagingBatchGET(w http.ResponseWriter, r *http.Request, db *sql.DB, c
 	resSt, err := tx.ExecContext(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE batch_id = $1`, bid)
 	if err != nil {
 		_ = tx.Rollback()
-		respondWithError(w, err, "failed to delete staged statements", http.StatusInternalServerError)
+		respondWithError(w, err, constants.ErrFailedToDeleteStagedStatements, http.StatusInternalServerError)
 		return
 	}
 	stRemoved, _ := resSt.RowsAffected()
@@ -655,7 +657,7 @@ func deleteStagingBatchPOST(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 	`, sessionUID, pq.Array(ids))
 	if err != nil {
 		_ = tx.Rollback()
-		respondWithError(w, err, "failed to delete staged statements", http.StatusInternalServerError)
+		respondWithError(w, err, constants.ErrFailedToDeleteStagedStatements, http.StatusInternalServerError)
 		return
 	}
 	defer delRows.Close()
@@ -675,7 +677,7 @@ func deleteStagingBatchPOST(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 	}
 	if err := delRows.Err(); err != nil {
 		_ = tx.Rollback()
-		respondWithError(w, err, "failed to delete staged statements", http.StatusInternalServerError)
+		respondWithError(w, err, constants.ErrFailedToDeleteStagedStatements, http.StatusInternalServerError)
 		return
 	}
 

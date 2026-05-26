@@ -2,11 +2,11 @@ package api
 
 import (
 	"context"
-	"log"
 	"strings"
 
 	"CimplrCorpSaas/api/auth"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func RequestedByFromCtx(ctx context.Context, userID string) string {
 	if v := ctx.Value("session"); v != nil {
@@ -176,7 +176,7 @@ func CtxEntityIDs(ctx context.Context) []string {
 // DebugPrevalidationContext logs common prevalidation context fields for debugging.
 func DebugPrevalidationContext(ctx context.Context) {
 	if ctx == nil {
-		log.Printf("[DEBUG context_helpers] context is nil")
+		logger.LogInfo("[DEBUG context_helpers] context is nil")
 		return
 	}
 	user := ""
@@ -193,6 +193,6 @@ func DebugPrevalidationContext(ctx context.Context) {
 	adminBy := ctx.Value("admin_override_by")
 	sessionPresent := ctx.Value("session") != nil
 
-	log.Printf("[DEBUG context_helpers] user=%s entities=%v banks=%v accounts_count=%d currencies=%v is_admin_override=%v admin_override_by=%v session_present=%v",
+	logger.LogError("[DEBUG context_helpers] user=%s entities=%v banks=%v accounts_count=%d currencies=%v is_admin_override=%v admin_override_by=%v session_present=%v",
 		user, entityIDs, bankNames, len(accounts), currencies, admin, adminBy, sessionPresent)
 }

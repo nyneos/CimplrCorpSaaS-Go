@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"encoding/json"
 	"fmt"
@@ -96,6 +97,7 @@ func GetCompoundingFrequenciesApprovedActive(pgxPool *pgxpool.Pool) http.Handler
 			FROM investment.fd_compounding_frequency_master m
 			INNER JOIN investment.fd_audit_compounding_frequency a ON a.frequency_id = m.frequency_id
 			WHERE a.processing_status = 'APPROVED'
+			  AND a.action_type IN ('CREATE','EDIT','DELETE')
 				AND m.is_active = true
 				AND COALESCE(m.is_deleted, false) = false
 			ORDER BY m.frequency_name
@@ -550,7 +552,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		fileBytes, err := io.ReadAll(file)
 		file.Close()
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -561,13 +563,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -706,13 +702,13 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Reuse bulk insert logic
 		ctx := r.Context()
 
-		s3Key := ""
+		s3Key, storedFileName := "", ""
 		if s3storage.IsS3UploadEnabled() {
 			folder := s3storage.GetStoragePrefix("master-compounding-frequency")
-			storedFileName := s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
+			storedFileName = s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 				return
 			}
 		}
@@ -862,6 +858,20 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+		bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+			ModuleKey:        "master-compounding-frequency",
+			OriginalFileName: handler.Filename,
+			StoredFileName:   storedFileName,
+			UploadS3Key:      s3Key,
+			ContentType:      contentType,
+			FileSize:         int64(len(fileBytes)),
+			TotalRows:        len(inserted) + len(errorsList),
+			InsertedCount:    len(inserted),
+			ErrorCount:       len(errorsList),
+			Status:           bulkuploadaudit.StatusFor(len(inserted), len(errorsList)),
+			UploadedBy:       userEmail,
+			UploadedAt:       time.Now().UTC(),
+		})
 
 		allResults := append(inserted, errorsList...)
 		api.RespondWithPayload(w, len(inserted) > 0, "", allResults)
@@ -934,6 +944,7 @@ func GetCompoundingFrequenciesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc 
 					a.old_description,
 					a.old_is_active
 				FROM investment.fd_audit_compounding_frequency a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.frequency_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (
@@ -1025,170 +1036,6 @@ func GetCompoundingFrequenciesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			"rows":                 out,
 		})
 		api.LogInfo("Retrieved %d compounding frequencies with audit data", len(out))
-	}
-}
-
-// --- Compounding Frequency: Audit History ---
-func GetCompoundingFrequencyAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		frequencyID := r.URL.Query().Get("frequency_id")
-
-		var q string
-		var args []interface{}
-
-		if frequencyID != "" {
-			q = `
-				SELECT
-					a.audit_id,
-					a.frequency_id,
-					a.action_type,
-					a.processing_status,
-					COALESCE(a.reason,'') AS reason,
-					COALESCE(a.requested_by,'') AS requested_by,
-					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-					COALESCE(a.checker_by,'') AS checker_by,
-					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-					COALESCE(a.checker_comment,'') AS checker_comment,
-
-					-- Current/New values from master table
-					COALESCE(m.frequency_code,'') AS frequency_code,
-					COALESCE(m.frequency_name,'') AS frequency_name,
-					COALESCE(m.frequency_type,'') AS frequency_type,
-					COALESCE(m.compounding_periods_per_year,0) AS compounding_periods_per_year,
-					COALESCE(m.days_per_period,0) AS days_per_period,
-					COALESCE(m.description,'') AS description,
-					COALESCE(m.is_active,false) AS is_active,
-					COALESCE(m.is_deleted,false) AS is_deleted,
-
-					-- Old values from audit table
-					COALESCE(a.old_frequency_code,'') AS old_frequency_code,
-					COALESCE(a.old_frequency_name,'') AS old_frequency_name,
-					COALESCE(a.old_frequency_type,'') AS old_frequency_type,
-					COALESCE(a.old_compounding_periods_per_year,0) AS old_compounding_periods_per_year,
-					COALESCE(a.old_days_per_period,0) AS old_days_per_period,
-					COALESCE(a.old_description,'') AS old_description,
-					COALESCE(a.old_is_active,false) AS old_is_active
-
-				FROM investment.fd_audit_compounding_frequency a
-				LEFT JOIN investment.fd_compounding_frequency_master m ON m.frequency_id = a.frequency_id
-				WHERE a.frequency_id = $1
-				ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
-			`
-			args = append(args, frequencyID)
-		} else {
-			q = `
-				SELECT
-					a.audit_id,
-					a.frequency_id,
-					a.action_type,
-					a.processing_status,
-					COALESCE(a.reason,'') AS reason,
-					COALESCE(a.requested_by,'') AS requested_by,
-					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-					COALESCE(a.checker_by,'') AS checker_by,
-					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-					COALESCE(a.checker_comment,'') AS checker_comment,
-
-					-- Current/New values from master table
-					COALESCE(m.frequency_code,'') AS frequency_code,
-					COALESCE(m.frequency_name,'') AS frequency_name,
-					COALESCE(m.frequency_type,'') AS frequency_type,
-					COALESCE(m.compounding_periods_per_year,0) AS compounding_periods_per_year,
-					COALESCE(m.days_per_period,0) AS days_per_period,
-					COALESCE(m.description,'') AS description,
-					COALESCE(m.is_active,false) AS is_active,
-					COALESCE(m.is_deleted,false) AS is_deleted,
-
-					-- Old values from audit table
-					COALESCE(a.old_frequency_code,'') AS old_frequency_code,
-					COALESCE(a.old_frequency_name,'') AS old_frequency_name,
-					COALESCE(a.old_frequency_type,'') AS old_frequency_type,
-					COALESCE(a.old_compounding_periods_per_year,0) AS old_compounding_periods_per_year,
-					COALESCE(a.old_days_per_period,0) AS old_days_per_period,
-					COALESCE(a.old_description,'') AS old_description,
-					COALESCE(a.old_is_active,false) AS old_is_active
-
-				FROM investment.fd_audit_compounding_frequency a
-				LEFT JOIN investment.fd_compounding_frequency_master m ON m.frequency_id = a.frequency_id
-				ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
-				LIMIT 1000
-			`
-		}
-
-		rows, err := pgxPool.Query(ctx, q, args...)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
-			return
-		}
-		defer rows.Close()
-
-		out := make([]map[string]interface{}, 0)
-
-		for rows.Next() {
-			var auditID, fid, actionType, processStatus, reason, reqBy, reqAt, checkerBy, checkerAt, checkerComment string
-
-			var currentCode, currentName, currentType, currentDesc string
-			var currentPeriods, currentDays int
-			var currentIsActive, currentIsDeleted bool
-
-			var oldCode, oldName, oldType, oldDesc string
-			var oldPeriods, oldDays int
-			var oldIsActive bool
-
-			if err := rows.Scan(
-				&auditID, &fid, &actionType, &processStatus, &reason, &reqBy, &reqAt, &checkerBy, &checkerAt, &checkerComment,
-				&currentCode, &currentName, &currentType, &currentPeriods, &currentDays, &currentDesc, &currentIsActive, &currentIsDeleted,
-				&oldCode, &oldName, &oldType, &oldPeriods, &oldDays, &oldDesc, &oldIsActive,
-			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
-				api.LogError("Database scan error in GetCompoundingFrequencyAuditHistory: %v", err)
-				return
-			}
-
-			out = append(out, map[string]interface{}{
-				"audit_id":          auditID,
-				"frequency_id":      fid,
-				"action_type":       actionType,
-				"processing_status": processStatus,
-				"reason":            reason,
-				"requested_by":      reqBy,
-				"requested_at":      reqAt,
-				"checker_by":        checkerBy,
-				"checker_at":        checkerAt,
-				"checker_comment":   checkerComment,
-
-				"frequency_code":               currentCode,
-				"frequency_name":               currentName,
-				"frequency_type":               currentType,
-				"compounding_periods_per_year": currentPeriods,
-				"days_per_period":              currentDays,
-				"description":                  currentDesc,
-				"is_active":                    currentIsActive,
-				"is_deleted":                   currentIsDeleted,
-
-				"old_frequency_code":               oldCode,
-				"old_frequency_name":               oldName,
-				"old_frequency_type":               oldType,
-				"old_compounding_periods_per_year": oldPeriods,
-				"old_days_per_period":              oldDays,
-				"old_description":                  oldDesc,
-				"old_is_active":                    oldIsActive,
-			})
-		}
-
-		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+rows.Err().Error())
-			api.LogError("Row iteration error in GetCompoundingFrequencyAuditHistory: %v", rows.Err())
-			return
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"audit_logs":           out,
-		})
-		api.LogInfo("Retrieved %d compounding frequency audit history records", len(out))
 	}
 }
 
@@ -1372,6 +1219,7 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE a.frequency_id = ANY($1::text[]) 
 				  AND a.action_type = 'DELETE' 
 				  AND a.processing_status = 'APPROVED'
+				  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			)
 		`, req.FrequencyIDs)
 
@@ -1502,7 +1350,7 @@ func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Transaction start failed")
+			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrTxStartFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}

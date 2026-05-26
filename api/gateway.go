@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -184,7 +183,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	clientIP := extractClientIP(r)
 	session, mfaPending, err := authService.Login(req.Username, req.Password, clientIP)
 	if err != nil {
-		log.Printf("Login failed for %s from %s: %v", req.Username, clientIP, err)
+		logger.LogError("Login failed for %s from %s: %v", req.Username, clientIP, err)
 		w.Header().Set(headerContentType, contentTypeJSON)
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -569,7 +568,7 @@ func StartGateway(port string, pathPrefix string) {
 	if gatewayPool != nil {
 		sseServer.OnConnect = func(userID string) {
 			if err := dinojobs.PushUnreadCountToUser(context.Background(), gatewayPool, userID); err != nil {
-				log.Printf("[SSE] PushUnreadCountToUser error for %s: %v", userID, err)
+				logger.LogError("[SSE] PushUnreadCountToUser error for %s: %v", userID, err)
 			}
 		}
 	}
@@ -747,9 +746,9 @@ func StartGateway(port string, pathPrefix string) {
 			mux.HandleFunc("/auth/sso/callback/", withCORS(auth.SSOCallbackHandler(ssoConfig, authService.DB())))
 			mux.HandleFunc("/auth/sso/logout", withCORS(auth.SSOLogoutHandler(ssoConfig, authService.DB())))
 		}
-		log.Println("SSO endpoints enabled")
+		logger.LogInfo("SSO endpoints enabled")
 	} else {
-		log.Println("SSO endpoints disabled — set AZURE_CLIENT_ID or GOOGLE_CLIENT_ID to enable")
+		logger.LogInfo("SSO endpoints disabled — set AZURE_CLIENT_ID or GOOGLE_CLIENT_ID to enable")
 	}
 
 	// MFA (TOTP)
@@ -760,7 +759,7 @@ func StartGateway(port string, pathPrefix string) {
 		mux.HandleFunc("/auth/mfa/verify", withCORS(auth.MFAVerifyHandler(mfaDB)))
 		mux.HandleFunc("/auth/mfa/disable", withCORS(auth.MFADisableHandler(mfaDB)))
 		mux.HandleFunc("/auth/mfa/status", withCORS(auth.MFAStatusHandler(mfaDB)))
-		log.Println("MFA (TOTP) endpoints enabled")
+		logger.LogInfo("MFA (TOTP) endpoints enabled")
 	}
 
 	// Password Reset (Forgot / Reset)
@@ -769,7 +768,7 @@ func StartGateway(port string, pathPrefix string) {
 		mux.HandleFunc("/auth/forgot-password", withCORS(auth.ForgotPasswordHandler(pwDB)))
 		mux.HandleFunc("/auth/reset-password", withCORS(auth.ResetPasswordHandler(pwDB)))
 		mux.HandleFunc("/auth/validate-reset-token", withCORS(auth.ValidateResetTokenHandler(pwDB)))
-		log.Println("Password reset endpoints enabled")
+		logger.LogInfo("Password reset endpoints enabled")
 	}
 
 	mux.HandleFunc("/fx/", createReverseProxy("http://localhost:3143"))
@@ -785,24 +784,67 @@ func StartGateway(port string, pathPrefix string) {
 		w.Write([]byte("API Gateway is active"))
 	}))
 
+	mux.HandleFunc("/health/db", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(headerContentType, contentTypeJSON)
+
+		if gatewayPool == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "unhealthy",
+				"db":     "not configured",
+			})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+
+		start := time.Now()
+		err := gatewayPool.Ping(ctx)
+		latency := time.Since(start)
+
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":  "unhealthy",
+				"db":      "disconnected",
+				"error":   err.Error(),
+				"latency": latency.String(),
+			})
+			return
+		}
+
+		stat := gatewayPool.Stat()
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":           "healthy",
+			"db":               "connected",
+			"latency":          latency.String(),
+			"total_conns":      stat.TotalConns(),
+			"idle_conns":       stat.IdleConns(),
+			"acquired_conns":   stat.AcquiredConns(),
+		})
+	}))
+
 	mux.HandleFunc("/", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		logr := logger.GlobalLogger
 		msg := "[Gateway] [Error] " + r.URL.Path + " from " + r.RemoteAddr + " (route not found)"
 		if logr != nil {
 			logr.LogAudit(msg)
 		} else {
-			log.Println(msg)
+			logger.LogInfo("%s", msg)
 		}
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte("404 - Route not found"))
 	}))
+	
 	u := os.Getenv("PORT")
 	if port != (u) && u != "" {
-		log.Printf("Prioitizing env Port %s over yaml port %s (if deployment didn't have that port open)", os.Getenv("PORT"), port)
+		logger.LogInfo("Prioitizing env Port %s over yaml port %s (if deployment didn't have that port open)", os.Getenv("PORT"), port)
 		port = os.Getenv("PORT")
 	}
 	mux.Handle("/gateway/metrics", observability.MetricsHandler("gateway"))
-	log.Printf("API Gateway listening on :%s (path prefix: %s)", port, pathPrefix)
+	logger.LogInfo("API Gateway listening on :%s (path prefix: %s)", port, pathPrefix)
 	handler := observability.WrapHTTP("gateway", encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux, pathPrefix)))))
 	// handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux))))
 	cert := os.Getenv("TLS_CERT")
@@ -811,10 +853,10 @@ func StartGateway(port string, pathPrefix string) {
 	if cert != "" && key != "" {
 		err = http.ListenAndServeTLS(":"+port, cert, key, handler)
 	} else {
-		log.Printf("TLS_CERT or TLS_KEY not set; starting HTTP on :%s", port)
+		logger.LogInfo("TLS_CERT or TLS_KEY not set; starting HTTP on :%s", port)
 		err = http.ListenAndServe(":"+port, handler)
 	}
 	if err != nil {
-		log.Fatalf("Gateway server failed: %v", err)
+		logger.LogError("Gateway server failed: %v", err)
 	}
 }

@@ -2,12 +2,13 @@ package investmentsuite
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/investment/uploadutil"
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -60,7 +61,7 @@ func GetConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.investment_confirmation
 			WHERE confirmation_id = $1
 		`, req.ConfirmationID).Scan(&uploadS3Key); err != nil {
-			api.RespondWithResult(w, false, "file not found")
+			api.RespondWithResult(w, false, constants.ErrFileNotFound)
 			return
 		}
 
@@ -98,7 +99,7 @@ func GetConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfirmationIDs) == 0 {
-			api.RespondWithResult(w, false, "confirmation_ids required")
+			api.RespondWithResult(w, false, constants.ConfirmationIDsRequired)
 			return
 		}
 
@@ -175,13 +176,7 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -190,6 +185,19 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		uploadS3Key := ""
 		if isMultipart {
+			if err := uploadutil.EnsureUniqueMultipartUpload(ctx, pgxPool, s3storage.CollectMultipartFiles(r.MultipartForm, "file", "files"), `
+				SELECT upload_s3_key
+				FROM investment.investment_confirmation
+				WHERE COALESCE(is_deleted, false) = false
+				  AND COALESCE(upload_s3_key, '') <> ''
+			`); err != nil {
+				if errors.Is(err, uploadutil.ErrFileAlreadyUploaded) {
+					api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
+					return
+				}
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+err.Error())
+				return
+			}
 			var uploadErr error
 			uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, "investment-confirmation", userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "file", "files"))
 			if uploadErr != nil {
@@ -345,13 +353,7 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -480,13 +482,7 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -610,13 +606,7 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -755,17 +745,11 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfirmationIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_ids required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ConfirmationIDsRequired)
 			return
 		}
 
-		requestedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
+		requestedBy := api.GetUserNameFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -823,19 +807,13 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -847,6 +825,7 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (confirmation_id) action_id, confirmation_id, actiontype, processing_status
 			FROM investment.auditactioninvestmentconfirmation
 			WHERE confirmation_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY confirmation_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ConfirmationIDs)
@@ -1013,19 +992,13 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -1037,6 +1010,7 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (confirmation_id) action_id, confirmation_id, processing_status
 			FROM investment.auditactioninvestmentconfirmation
 			WHERE confirmation_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY confirmation_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ConfirmationIDs)
@@ -1142,6 +1116,7 @@ func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []str
 				a.checker_comment,
 				a.reason
 			FROM investment.auditactioninvestmentconfirmation a
+			WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY a.confirmation_id, a.requested_at DESC
 		),
 		history AS (
@@ -1326,6 +1301,7 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactioninvestmentconfirmation a
+				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY a.confirmation_id, a.requested_at DESC
 			),
 			history AS (
@@ -1499,6 +1475,7 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					confirmation_id,
 					processing_status
 				FROM investment.auditactioninvestmentconfirmation
+				WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY confirmation_id, requested_at DESC
 			)
 			SELECT
@@ -1972,23 +1949,17 @@ func ConfirmInvestment(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfirmationIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_ids required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ConfirmationIDsRequired)
 			return
 		}
 
-		confirmedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				confirmedBy = s.Name
-				break
-			}
-		}
+		confirmedBy := api.GetUserNameFromCtx(r.Context())
 		if confirmedBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		result, err := processInvestmentConfirmations(pgxPool, ctx, req.UserID, confirmedBy, req.ConfirmationIDs)
 		if err != nil {

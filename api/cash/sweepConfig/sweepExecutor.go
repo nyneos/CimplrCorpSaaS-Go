@@ -628,7 +628,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Commit
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "Failed to commit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 

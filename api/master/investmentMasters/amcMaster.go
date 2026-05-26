@@ -2,11 +2,10 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -228,16 +227,14 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
-		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		userName := session.Email
+		if userName == "" {
+			userName = session.Name
 		}
 
 		// === Step 2: Parse uploaded CSV ===
@@ -282,7 +279,7 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -293,13 +290,13 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// S3 upload before opening transaction
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
 				folder := s3storage.GetStoragePrefix("master-amc")
-				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -410,6 +407,20 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			committed = true
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        "master-amc",
+				OriginalFileName: fh.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(copyRows),
+				InsertedCount:    len(copyRows),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userName,
+				UploadedAt:       time.Now().UTC(),
+			})
 			batchIDs = append(batchIDs, uuid.New().String())
 		}
 
@@ -454,13 +465,7 @@ func CreateAMCsingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// --- Get user email from active sessions ---
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -469,7 +474,7 @@ func CreateAMCsingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyAMCError(err, "Transaction start failed")
+			msg, status := getUserFriendlyAMCError(err, constants.ErrTxStartFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -579,13 +584,7 @@ func CreateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// 🔍 Identify user
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -702,13 +701,7 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -864,13 +857,7 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// --- Identify user ---
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -879,7 +866,7 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyAMCError(err, "Transaction start failed")
+			msg, status := getUserFriendlyAMCError(err, constants.ErrTxStartFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -991,13 +978,7 @@ func DeleteAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		requestedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				requestedBy = s.Email
-				break
-			}
-		}
+		requestedBy := api.GetUserEmailFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1049,19 +1030,13 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Email
-				break
-			}
-		}
+		checkerBy := api.GetUserEmailFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrTxBeginFailedCapitalized)
@@ -1073,7 +1048,7 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (amc_id) action_id, amc_id, processing_status
 			FROM investment.auditactionamc
-			WHERE amc_id = ANY($1)
+			WHERE amc_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY amc_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.AmcIDs)
 		if err != nil {
@@ -1129,19 +1104,13 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// 🔍 Identify the checker
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Email
-				break
-			}
-		}
+		checkerBy := api.GetUserEmailFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrTxBeginFailedCapitalized)
@@ -1154,7 +1123,7 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (amc_id) 
 				action_id, amc_id, actiontype, processing_status
 			FROM investment.auditactionamc
-			WHERE amc_id = ANY($1)
+			WHERE amc_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY amc_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.AmcIDs)
 		if err != nil {
@@ -1253,6 +1222,7 @@ func GetApprovedActiveAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH latest AS (
 				SELECT DISTINCT ON (amc_id) amc_id, processing_status,requested_at,checker_at
 				FROM investment.auditactionamc
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY amc_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 			)
 			SELECT m.amc_id, m.amc_name, m.internal_amc_code
@@ -1304,6 +1274,7 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 					FROM investment.auditactionamc a
+					WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
 					ORDER BY a.amc_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (

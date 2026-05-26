@@ -3,8 +3,8 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -222,7 +222,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -312,13 +312,13 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// S3 upload before opening transaction
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
 				folder := s3storage.GetStoragePrefix("master-demat")
-				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -406,6 +406,20 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			committed = true
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        "master-demat",
+				OriginalFileName: fh.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(copyRows),
+				InsertedCount:    len(copyRows),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userName,
+				UploadedAt:       time.Now().UTC(),
+			})
 
 			results = append(results, UploadDematResult{Success: true, BatchID: uuid.New().String()})
 		}
@@ -1021,7 +1035,7 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -1032,7 +1046,7 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (demat_id) action_id, demat_id, actiontype, processing_status
 			FROM investment.auditactiondemat
-			WHERE demat_id = ANY($1)
+			WHERE demat_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY demat_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.DematIDs)
@@ -1142,7 +1156,7 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -1153,7 +1167,7 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (demat_id) action_id, demat_id, processing_status
 			FROM investment.auditactiondemat
-			WHERE demat_id = ANY($1)
+			WHERE demat_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY demat_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.DematIDs)
@@ -1258,6 +1272,7 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactiondemat a
+				WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.demat_id, a.requested_at DESC
 			),
 			history AS (

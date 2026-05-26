@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
@@ -21,7 +20,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 type itemInfo struct {
 	ID        string
@@ -39,6 +39,7 @@ func existingProjectionUploadKeys(ctx context.Context, pgxPool *pgxpool.Pool) ([
 		SELECT DISTINCT upload_s3_key
 		FROM cimplrcorpsaas.cashflow_proposal
 		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
+		  AND COALESCE(is_deleted, false) = false
 	`)
 	if err != nil {
 		return nil, err
@@ -135,7 +136,7 @@ func uploadCashflowProposalService(
 			_ = tx.Rollback(ctx)
 			if s3Uploaded && s3Key != "" {
 				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
-					log.Printf("[CASHFLOW-PROJECTION-UPLOAD] cleanup failed for key=%s: %v", s3Key, cleanupErr)
+					logger.LogError("[CASHFLOW-PROJECTION-UPLOAD] cleanup failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
 		}
@@ -150,7 +151,7 @@ func uploadCashflowProposalService(
 	if err != nil {
 		return "", 0, http.StatusUnprocessableEntity, errors.New(parseConstraintError(err))
 	}
-	log.Printf("Created proposal %s", proposalID)
+	logger.LogInfo("Created proposal %s", proposalID)
 
 	if s3storage.IsS3UploadEnabled() {
 		folder := s3storage.GetStoragePrefix("projection")
@@ -335,7 +336,7 @@ func uploadCashflowProposalService(
 	}
 	committed = true
 
-	log.Printf("Committed proposal %s (%d items, %d monthly rows)", proposalID, len(itemInfos), len(itemInfos)*12)
+	logger.LogInfo("Committed proposal %s (%d items, %d monthly rows)", proposalID, len(itemInfos), len(itemInfos)*12)
 	return proposalID, len(copyRows), 0, nil
 }
 

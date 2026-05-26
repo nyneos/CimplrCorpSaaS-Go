@@ -58,6 +58,7 @@ func ListAISuggestedRulesHandler(pool *pgxpool.Pool) http.Handler {
 			LEFT JOIN cimplrcorpsaas.rule_scope rs ON rs.scope_id = r.scope_id
 			WHERE r.rule_status = 'AI_SUGGESTED'
 			  AND r.is_active = FALSE
+			  AND COALESCE(r.is_deleted, false) = false
 			ORDER BY r.suggested_at DESC NULLS LAST
 			LIMIT 200
 		`)

@@ -3,7 +3,6 @@ package investment
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -13,7 +12,7 @@ import (
 
 func GetAMFISchemeAMCEnriched(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.Background()
+		ctx := r.Context()
 
 		query := `
 			WITH distinct_amfi AS (
@@ -60,7 +59,7 @@ func GetAMFISchemeAMCEnriched(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.Background()
+		ctx := r.Context()
 
 		var req struct {
 			AMCs []string `json:"amcs"` // multiple AMC names or IDs

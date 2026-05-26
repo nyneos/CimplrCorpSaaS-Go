@@ -120,7 +120,7 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 
 			for _, rootEntityId := range rootEntityIds {
 				LogError("Processing root entity_id: %s for user_id: %s", rootEntityId, userID)
-			buRows, buErr := pgxPool.Query(r.Context(), `
+				buRows, buErr := pgxPool.Query(r.Context(), `
              WITH RECURSIVE descendants AS (
     -- Start from the root entity
     SELECT 
@@ -131,6 +131,7 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
         SELECT aa.processing_status
         FROM auditactionentity aa
         WHERE aa.entity_id = me.entity_id
+          AND aa.actiontype IN ('CREATE','EDIT','DELETE')
         ORDER BY aa.requested_at DESC
         LIMIT 1
     ) astatus ON TRUE
@@ -154,6 +155,7 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
         SELECT aa.processing_status
         FROM auditactionentity aa
         WHERE aa.entity_id = child.entity_id
+          AND aa.actiontype IN ('CREATE','EDIT','DELETE')
         ORDER BY aa.requested_at DESC
         LIMIT 1
     ) astatus ON TRUE
@@ -199,6 +201,7 @@ INNER JOIN LATERAL (
 	SELECT aac.processing_status
 	FROM auditactioncurrency aac
 	WHERE aac.currency_id = mc.currency_id
+	  AND aac.actiontype IN ('CREATE','EDIT','DELETE')
 	ORDER BY aac.requested_at DESC
 	LIMIT 1
 ) astatus ON TRUE
@@ -234,6 +237,7 @@ INNER JOIN LATERAL (
 	SELECT aab.processing_status
 	FROM auditactionbank aab
 	WHERE aab.bank_id = mb.bank_id
+	  AND aab.actiontype IN ('CREATE','EDIT','DELETE')
 	ORDER BY aab.requested_at DESC
 	LIMIT 1
 ) astatus ON TRUE
@@ -264,6 +268,7 @@ INNER JOIN LATERAL (
 	SELECT aa.processing_status
 	FROM auditactionbankaccount aa
 	WHERE aa.account_id = a.account_id
+	  AND aa.actiontype IN ('CREATE','EDIT','DELETE')
 	ORDER BY aa.requested_at DESC
 	LIMIT 1
 ) astatus ON TRUE
@@ -272,6 +277,7 @@ INNER JOIN LATERAL (
 	SELECT aab.processing_status
 	FROM auditactionbank aab
 	WHERE aab.bank_id = mb.bank_id
+	  AND aab.actiontype IN ('CREATE','EDIT','DELETE')
 	ORDER BY aab.requested_at DESC
 	LIMIT 1
 ) bastatus ON TRUE

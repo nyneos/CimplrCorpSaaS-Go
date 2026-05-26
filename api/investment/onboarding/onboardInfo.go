@@ -371,7 +371,7 @@ func GetBatchInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.BatchID == "" {
-			api.RespondWithError(w, 400, "batch_id required")
+			api.RespondWithError(w, 400, constants.BatchIDsRequired)
 			return
 		}
 		if req.UserID == "" {

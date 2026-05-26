@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"html"
-	"log"
 	"math"
 	"regexp"
 	"sort"
@@ -17,7 +16,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgtype"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // ExtractVariables returns a list of unique variable names found in the template
 // variables are of the form {{VarName}}
@@ -96,7 +96,7 @@ func EvaluateTemplate(tpl string, payload map[string]interface{}) (string, error
 		evaluated, err := evaluateFunction(name, args, payload)
 		if err != nil {
 			// Log with full context so the broken template is easy to find in logs.
-			log.Printf("[TEMPLATE-ENGINE] function %s(%s) failed: %v", name, argsRaw, err)
+			logger.LogInfo("[TEMPLATE-ENGINE] function %s(%s) failed: %v", name, argsRaw, err)
 			evalErrors = append(evalErrors, fmt.Sprintf("%s: %v", name, err))
 			// Replace the broken call with empty string so rendering continues.
 			result = result[:start] + "" + result[end+1:]

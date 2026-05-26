@@ -7,13 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // GetFundAvailability returns combined actuals and projections data
 // with flexible period aggregation (daily/weekly/monthly/quarterly/yearly)
@@ -135,7 +135,13 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			},
 		}
 
-		api.RespondWithPayload(w, true, "", response)
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"fund_availability": response,
+			},
+		})
 	}
 }
 
@@ -171,7 +177,7 @@ func fetchActuals(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endDate 
 			JOIN cimplrcorpsaas.auditactionbankstatement a 
 				ON a.bankstatementid = bs.bank_statement_id
 			WHERE a.processing_status = 'APPROVED'
-			ORDER BY bs.bank_statement_id, a.requested_at DESC
+			ORDER BY bs.bank_statement_id, a.requested_at DESC, a.action_id DESC
 		)
 		SELECT 
 			mba.entity_id,
@@ -312,7 +318,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 	// Users create projections with their own entity/bank names, so we show all approved projections
 	// filtered only by date range
 
-	log.Printf("[fetchProjections] Date range: %s to %s (showing ALL approved projections)",
+	logger.LogInfo("[fetchProjections] Date range: %s to %s (showing ALL approved projections)",
 		asOfDate.Format(constants.DateFormat), endDate.Format(constants.DateFormat))
 
 	// First, check if there are ANY approved proposals
@@ -321,12 +327,12 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 		JOIN cimplrcorpsaas.audit_action_cashflow_proposal a ON a.proposal_id = p.proposal_id
 		WHERE a.processing_status = 'APPROVED'`
 	pgxPool.QueryRow(ctx, countQ).Scan(&approvedCount)
-	log.Printf("[fetchProjections] Total approved proposals in DB: %d", approvedCount)
+	logger.LogInfo("[fetchProjections] Total approved proposals in DB: %d", approvedCount)
 
 	// Check how many projection records exist
 	var projCount int
 	pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.cashflow_projection_monthly`).Scan(&projCount)
-	log.Printf("[fetchProjections] Total projection records in DB: %d", projCount)
+	logger.LogInfo("[fetchProjections] Total projection records in DB: %d", projCount)
 
 	// Check how many would match WITHOUT entity/bank filters (just date range)
 	var dateMatchCount int
@@ -339,7 +345,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 			FROM cimplrcorpsaas.cashflow_proposal p
 			JOIN cimplrcorpsaas.audit_action_cashflow_proposal a ON a.proposal_id = p.proposal_id
 			WHERE a.processing_status = 'APPROVED'
-			ORDER BY p.proposal_id, a.requested_at DESC
+			ORDER BY p.proposal_id, a.requested_at DESC, a.action_id DESC
 		) ap ON ap.proposal_id = i.proposal_id
 		WHERE (
 			pm.year > EXTRACT(YEAR FROM $1::timestamp)::int 
@@ -351,7 +357,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 		)
 	`)
 	pgxPool.QueryRow(ctx, dateOnlyQ, asOfDate, endDate).Scan(&dateMatchCount)
-	log.Printf("[fetchProjections] Records matching date range (no entity/bank filter): %d", dateMatchCount)
+	logger.LogInfo("[fetchProjections] Records matching date range (no entity/bank filter): %d", dateMatchCount)
 
 	// Check sample entity names in proposal items
 	sampleQ := `SELECT DISTINCT i.entity_name FROM cimplrcorpsaas.cashflow_proposal_item i LIMIT 5`
@@ -363,7 +369,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 		sampleEntities = append(sampleEntities, entName)
 	}
 	sampleRows.Close()
-	log.Printf("[fetchProjections] Sample entity_name values in proposal_item: %v", sampleEntities)
+	logger.LogInfo("[fetchProjections] Sample entity_name values in proposal_item: %v", sampleEntities)
 
 	query := fmt.Sprintf(`
 		WITH approved_proposals AS (
@@ -375,7 +381,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 			JOIN cimplrcorpsaas.audit_action_cashflow_proposal a 
 				ON a.proposal_id = p.proposal_id
 			WHERE a.processing_status = 'APPROVED'
-			ORDER BY p.proposal_id, a.requested_at DESC
+			ORDER BY p.proposal_id, a.requested_at DESC, a.action_id DESC
 		)
 		SELECT 
 			COALESCE(me.entity_id, i.entity_name, '') AS entity_id,
@@ -415,15 +421,15 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 		ORDER BY me.entity_id, i.bank_name, i.bank_account_number, pm.year, pm.month
 	`)
 
-	log.Printf("[fetchProjections] Executing query...")
+	logger.LogInfo("[fetchProjections] Executing query...")
 	rows, err := pgxPool.Query(ctx, query, asOfDate, endDate)
 	if err != nil {
-		log.Printf("[fetchProjections] Query error: %v", err)
+		logger.LogError("[fetchProjections] Query error: %v", err)
 		return nil, err
 	}
 	defer rows.Close()
 
-	log.Printf("[fetchProjections] Query executed, reading rows...")
+	logger.LogInfo("[fetchProjections] Query executed, reading rows...")
 	rowCount := 0
 
 	// Group data
@@ -458,13 +464,13 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 		var amount float64
 
 		if err := rows.Scan(&entityID, &entityName, &bankName, &bankAccount, &currencyCode, &usage, &flow, &categoryID, &categoryName, &description, &maturityDate, &isRecurring, &recurrenceFreq, &year, &month, &amount); err != nil {
-			log.Printf("[fetchProjections] Row scan error: %v", err)
+			logger.LogError("[fetchProjections] Row scan error: %v", err)
 			return nil, err
 		}
 
 		rowCount++
 		if rowCount <= 3 {
-			log.Printf("[fetchProjections] Sample row %d: entity=%s/%s bank=%s account=%s year=%d month=%d amount=%.2f",
+			logger.LogInfo("[fetchProjections] Sample row %d: entity=%s/%s bank=%s account=%s year=%d month=%d amount=%.2f",
 				rowCount, entityID, entityName, bankName, bankAccount, year, month, amount)
 		}
 
@@ -499,7 +505,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 		return nil, rows.Err()
 	}
 
-	log.Printf("[fetchProjections] Total rows fetched: %d, Found %d unique projection groups", rowCount, len(groups))
+	logger.LogInfo("[fetchProjections] Total rows fetched: %d, Found %d unique projection groups", rowCount, len(groups))
 
 	// Convert to output format
 	result := make([]map[string]interface{}, 0, len(groups))

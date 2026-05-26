@@ -3,7 +3,6 @@ package counterpartyHub
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"context"
@@ -80,13 +79,7 @@ func CreatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -175,13 +168,7 @@ func CreatePaymentNetworkBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -261,13 +248,7 @@ func UpdatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -378,13 +359,7 @@ func BulkApprovePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -461,13 +436,7 @@ func BulkRejectPaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -518,13 +487,7 @@ func BulkDeletePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return

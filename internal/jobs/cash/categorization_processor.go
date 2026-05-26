@@ -73,10 +73,11 @@ func RunCategorizationScheduler(cfg *CategorizationConfig, db *pgxpool.Pool) err
 
 	c := cron.New(cron.WithLocation(loc))
 	_, err = c.AddFunc(cfg.Schedule, func() {
-		auditLog(fmt.Sprintf("Starting smart-categorization job at %s", time.Now().In(loc).Format(time.RFC3339)))
-		if err := ProcessUncategorizedTransactions(db, cfg.BatchSize); err != nil {
-			auditLog(fmt.Sprintf("Smart-categorization job failed: %v", err))
-			log.Printf("ERROR: Smart-categorization job failed: %v", err)
+		logger.GlobalLogger.LogAudit(fmt.Sprintf("Starting auto-categorization job at %s", time.Now().In(loc).Format(time.RFC3339)))
+		err := ProcessUncategorizedTransactions(db, cfg.BatchSize)
+		if err != nil {
+			logger.GlobalLogger.LogAudit(fmt.Sprintf("Auto-categorization job failed: %v", err))
+			logger.LogError("ERROR: Auto-categorization job failed: %v", err)
 		} else {
 			auditLog("Smart-categorization job completed successfully")
 		}
@@ -86,8 +87,9 @@ func RunCategorizationScheduler(cfg *CategorizationConfig, db *pgxpool.Pool) err
 	}
 
 	c.Start()
-	auditLog(fmt.Sprintf("Auto-categorization scheduler started: %s (%s)", cfg.Schedule, cfg.TimeZone))
-	log.Printf("[AUDIT] Auto-categorization scheduler started: %s (%s)", cfg.Schedule, cfg.TimeZone)
+	logger.GlobalLogger.LogAudit(fmt.Sprintf("Auto-categorization scheduler started with schedule: %s (timezone: %s)", cfg.Schedule, cfg.TimeZone))
+	logger.LogAudit("Auto-categorization scheduler started: %s (%s)", cfg.Schedule, cfg.TimeZone)
+
 	return nil
 }
 
@@ -106,7 +108,14 @@ func RunCategorizationScheduler(cfg *CategorizationConfig, db *pgxpool.Pool) err
 //  5. For each batch: process narration → filter rules → run waterfall → collect results.
 //  6. Persist via PersistBatch (pgx.Batch pipeline, 4 ops per item).
 //  7. Track affected bank statements and insert audit approval rows afterwards.
-func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
+//
+// Pass an optional bankStatementID to restrict processing to a single statement.
+// If empty (or not supplied), all eligible transactions are processed.
+func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankStatementID ...string) error {
+	filterBSID := ""
+	if len(bankStatementID) > 0 {
+		filterBSID = bankStatementID[0]
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
 	defer cancel()
 
@@ -128,9 +137,27 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 	}
 
 	// ── 0. Advisory lock — prevent concurrent runs ────────────────────────────
+	// Targeted runs (specific bankStatementID) use a per-statement lock key so
+	// they don't block each other or the global cron batch.
+	//
+	// IMPORTANT: pg_try_advisory_lock is session-level. We must acquire the lock
+	// on a dedicated connection and explicitly unlock before releasing it, so the
+	// lock is not left held on a pooled connection indefinitely.
+	lockKey := "smart-cat-batch"
+	if filterBSID != "" {
+		lockKey = "smart-cat-bs-" + filterBSID
+	}
+	lockConn, err := db.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire lock connection: %w", err)
+	}
+	defer func() {
+		lockConn.QueryRow(ctx, `SELECT pg_advisory_unlock(hashtext($1))`, lockKey).Scan(new(bool)) //nolint:errcheck
+		lockConn.Release()
+	}()
 	var lockAcquired bool
-	if err := db.QueryRow(ctx,
-		`SELECT pg_try_advisory_lock(hashtext('smart-cat-batch'))`,
+	if err := lockConn.QueryRow(ctx,
+		`SELECT pg_try_advisory_lock(hashtext($1))`, lockKey,
 	).Scan(&lockAcquired); err != nil {
 		return fmt.Errorf("advisory lock check: %w", err)
 	}
@@ -138,15 +165,28 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		auditLog("Smart-categorization: another instance is already running — skipping")
 		return nil
 	}
-	defer func() {
-		if _, err := db.Exec(ctx, `SELECT pg_advisory_unlock(hashtext('smart-cat-batch'))`); err != nil {
-			log.Printf("[SMART-CAT] advisory unlock error: %v", err)
-		}
-	}()
+	// ── 2. Count total eligible transactions ──────────────────────────────────
+	var totalCount int
+	if err := db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM cimplrcorpsaas.bank_statement_transactions t
+		JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
+		WHERE t.bank_statement_id IS NOT NULL
+		  AND (t.classification_step IS NULL OR t.classification_step NOT IN ('CORRECTION', 'CONFIRMATION'))
+		  AND ($1 = '' OR t.bank_statement_id::text = $1)
+		  AND COALESCE(bs.is_deleted, false) = false
+	`, filterBSID).Scan(&totalCount); err != nil {
+		return fmt.Errorf("count transactions: %w", err)
+	}
+	if totalCount == 0 {
+		auditLog("No transactions found for smart-categorization")
+		return nil
+	}
+	logger.LogAudit("Total transactions to consider for recategorization: %d", totalCount)
+	log.Printf("[AUDIT] Smart-categorization: %d transactions to process (workers=%d batch=%d)", totalCount, workerCount, batchSize)
 
-	auditLog("Smart-categorization: loading rules and caches…")
-
-	// ── 1. Pre-load rules and caches ──────────────────────────────────────────
+	// Load all rules once
+	logger.LogAudit("Loading all active categorization rules for recategorization...")
 	allRules, err := cat.LoadAllSmartRules(ctx, db)
 	if err != nil {
 		return fmt.Errorf("load rules: %w", err)
@@ -155,21 +195,6 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 	if err != nil {
 		return fmt.Errorf("load caches: %w", err)
 	}
-
-	// ── 2. Count total eligible transactions ──────────────────────────────────
-	var totalCount int
-	if err := db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions
-		WHERE bank_statement_id IS NOT NULL
-		  AND (classification_step IS NULL OR classification_step NOT IN ('CORRECTION', 'CONFIRMATION'))
-	`).Scan(&totalCount); err != nil {
-		return fmt.Errorf("count transactions: %w", err)
-	}
-	if totalCount == 0 {
-		auditLog("No transactions found for smart-categorization")
-		return nil
-	}
-	log.Printf("[AUDIT] Smart-categorization: %d transactions to process (workers=%d batch=%d)", totalCount, workerCount, batchSize)
 
 	// ── 3. Keyset-cursor batch loop ───────────────────────────────────────────
 	// Keyset on transaction_id is stable — rows that get classified mid-run don't
@@ -203,9 +228,11 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 			        t.classification_step IS NULL
 			        OR t.classification_step NOT IN ('CORRECTION', 'CONFIRMATION')
 			  )
+			  AND ($3 = '' OR t.bank_statement_id::text = $3)
+			  AND COALESCE(bs.is_deleted, false) = false
 			ORDER BY t.transaction_id
 			LIMIT $2
-		`, lastID, batchSize)
+		`, lastID, batchSize, filterBSID)
 		if err != nil {
 			return fmt.Errorf("query batch after id=%d: %w", lastID, err)
 		}
@@ -284,8 +311,9 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		totalUpdated += len(persistItems)
 		totalProcessed += len(batch)
 
+		// small progress log
 		if time.Since(progressAt) > 30*time.Second {
-			log.Printf("[AUDIT] Smart-categorization progress: processed=%d/%d updated=%d", totalProcessed, totalCount, totalUpdated)
+			logger.LogAudit("Recategorization progress: processed %d/%d, updated %d", totalProcessed, totalCount, totalUpdated)
 			progressAt = time.Now()
 		}
 	}

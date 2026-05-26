@@ -57,7 +57,7 @@ func AiBulkSuggestHandler(pool *pgxpool.Pool) http.Handler {
 			return
 		}
 
-		aiConfigured := os.Getenv("AI_INFERENCE_URL") != "" && os.Getenv("AI_INFERENCE_KEY") != ""
+		aiConfigured := os.Getenv("SMART_CAT_AI_URL") != "" && os.Getenv("SMART_CAT_AI_KEY") != ""
 
 		ctx := r.Context()
 

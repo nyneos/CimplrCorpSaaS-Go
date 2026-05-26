@@ -10,12 +10,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 const approvedBankAccountsKey = api.ApprovedBankAccountsKey
@@ -38,6 +40,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			r.Body.Close()
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
 
+			lightDashboardRequest := isLightDashboardPrevalidationPath(r.URL.Path)
 			userID, err := validation.ExtractUserID(r)
 			if err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
@@ -73,7 +76,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			if err != nil {
 				if err == http.ErrMissingFile {
 					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": "No accessible business units found"})
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": constants.ErrNoAccessibleBusinessUnit})
 					return
 				}
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve entity hierarchy: "+err.Error())
@@ -91,12 +94,14 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 					entityNames = allEntityNames
 				}
 
-				all, errs := LoadEverythingIntoContext(ctx, db)
-				for k, v := range all {
-					ctx = context.WithValue(ctx, k, v)
-				}
-				if len(errs) > 0 {
-					ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
+				if !lightDashboardRequest {
+					all, errs := LoadEverythingIntoContext(ctx, db)
+					for k, v := range all {
+						ctx = context.WithValue(ctx, k, v)
+					}
+					if len(errs) > 0 {
+						ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
+					}
 				}
 				ctx = context.WithValue(ctx, "is_admin_override", true)
 				ctx = context.WithValue(ctx, "admin_override_by", "user")
@@ -112,12 +117,6 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				if !roleMatched && session.RoleCode != "" && IsRoleAdminName(session.RoleCode) {
 					roleMatched = true
 					matchedRoles = append(matchedRoles, session.RoleCode)
-				}
-				for _, rc := range session.RoleCodes {
-					if !roleMatched && IsRoleAdminName(rc) {
-						roleMatched = true
-						matchedRoles = append(matchedRoles, rc)
-					}
 				}
 				// fallback to DB role lookup only if session had no role info
 				if !roleMatched {
@@ -138,17 +137,19 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 						entityIDs = allEntityIDs
 						entityNames = allEntityNames
 					}
-					all, errs := LoadEverythingIntoContext(ctx, db)
-					for k, v := range all {
-						ctx = context.WithValue(ctx, k, v)
+					if !lightDashboardRequest {
+						all, errs := LoadEverythingIntoContext(ctx, db)
+						for k, v := range all {
+							ctx = context.WithValue(ctx, k, v)
+						}
+						if len(errs) > 0 {
+							ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
+						}
 					}
 					// attach matched role info and audit
 					ctx = context.WithValue(ctx, "is_admin_override", true)
 					ctx = context.WithValue(ctx, "admin_override_by", "role")
 					ctx = context.WithValue(ctx, "admin_override_role", matchedRoles)
-					if len(errs) > 0 {
-						ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
-					}
 					// audit log
 					fmt.Printf("[AUDIT] AdminOverride applied for user=%s by=role matched=%v", userID, matchedRoles)
 					adminOverrideApplied = true
@@ -158,7 +159,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			// IMPORTANT: if admin override is enabled but not applied for this user,
 			// we must still load the standard approval context; otherwise bank/currency/account
 			// validations will fail for every request.
-			if !adminOverrideApplied {
+			if !adminOverrideApplied && !lightDashboardRequest {
 				banks, _ := loadApprovedBanks(ctx, db)
 				currencies, _ := loadApprovedCurrencies(ctx, db)
 				cashFlowCategories, _ := loadApprovedCashFlowCategories(ctx, db)
@@ -169,53 +170,53 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				folios, _ := loadApprovedFolios(ctx, db)
 				demats, _ := loadApprovedDemats(ctx, db)
 
-				// log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
-				// log.Printf("User ID: %s\n", userID)
-				// log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
-				// log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
+				// logger.LogInfo("\n========== PREVALIDATION DEBUG ==========\n")
+				// logger.LogInfo("User ID: %s\n", userID)
+				// logger.LogInfo("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
+				// logger.LogInfo("\nEntity Hierarchy (%d entities):\n", len(entityNames))
 				// for i, name := range entityNames {
-				// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
+				// 	logger.LogInfo("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
 				// }
-				// log.Printf("\nApproved AMCs (%d):\n", len(amcs))
+				// logger.LogInfo("\nApproved AMCs (%d):\n", len(amcs))
 				// for i, amc := range amcs {
 				// 	if i < 5 || i >= len(amcs)-2 {
-				// 		log.Printf("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
+				// 		logger.LogInfo("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
 				// 	} else if i == 5 {
-				// 		log.Printf(constants.FormatLogMore, len(amcs)-7)
+				// 		logger.LogInfo(constants.FormatLogMore, len(amcs)-7)
 				// 	}
 				// }
-				// log.Printf("\nApproved Schemes (%d):\n", len(schemes))
+				// logger.LogInfo("\nApproved Schemes (%d):\n", len(schemes))
 				// if len(schemes) > 0 {
-				// 	log.Printf("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
+				// 	logger.LogInfo("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
 				// 	if len(schemes) > 1 {
-				// 		log.Printf(constants.FormatLogMore, len(schemes)-1)
+				// 		logger.LogInfo(constants.FormatLogMore, len(schemes)-1)
 				// 	}
 				// }
-				// log.Printf("\nApproved DPs (%d):\n", len(dps))
+				// logger.LogInfo("\nApproved DPs (%d):\n", len(dps))
 				// for i, dp := range dps {
-				// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
+				// 	logger.LogInfo("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
 				// }
-				// log.Printf("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
+				// logger.LogInfo("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
 				// for i, acc := range bankAccounts {
-				// 	log.Printf("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
+				// 	logger.LogInfo("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
 				// 		i+1, acc["account_id"], acc["account_number"], acc["account_name"], acc["bank_name"], acc["entity_name"])
 				// }
-				// log.Printf("\nApproved Folios (%d):\n", len(folios))
+				// logger.LogInfo("\nApproved Folios (%d):\n", len(folios))
 				// for i, f := range folios {
 				// 	if i < 5 || i >= len(folios)-2 {
-				// 		log.Printf("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
+				// 		logger.LogInfo("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
 				// 	} else if i == 5 {
-				// 		log.Printf(constants.FormatLogMore, len(folios)-7)
+				// 		logger.LogInfo(constants.FormatLogMore, len(folios)-7)
 				// 	}
 				// }
-				// log.Printf("\nApproved Demats (%d):\n", len(demats))
+				// logger.LogInfo("\nApproved Demats (%d):\n", len(demats))
 				// for i, d := range demats {
-				// 	log.Printf("  [%d] %s (ID: %s, DP: %s)\n", i+1, d["demat_account_number"], d["demat_id"], d["dp_id"])
+				// 	logger.LogInfo("  [%d] %s (ID: %s, DP: %s)\n", i+1, d["demat_account_number"], d["demat_id"], d["dp_id"])
 				// 	if i >= 20 {
 				// 		break
 				// 	}
 				// }
-				// log.Printf("=========================================\n\n")
+				// logger.LogInfo("=========================================\n\n")
 
 				ctx = context.WithValue(ctx, "BankInfo", banks)
 				ctx = context.WithValue(ctx, "ActiveCurrencies", currencies)
@@ -227,53 +228,53 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				ctx = context.WithValue(ctx, "ApprovedFolios", folios)
 				ctx = context.WithValue(ctx, "ApprovedDemats", demats)
 			}
-			// log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
-			// log.Printf("User ID: %s\n", userID)
-			// log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
-			// log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
+			// logger.LogInfo("\n========== PREVALIDATION DEBUG ==========\n")
+			// logger.LogInfo("User ID: %s\n", userID)
+			// logger.LogInfo("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
+			// logger.LogInfo("\nEntity Hierarchy (%d entities):\n", len(entityNames))
 			// for i, name := range entityNames {
-			// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
+			// 	logger.LogInfo("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
 			// }
-			// log.Printf("\nApproved AMCs (%d):\n", len(amcs))
+			// logger.LogInfo("\nApproved AMCs (%d):\n", len(amcs))
 			// for i, amc := range amcs {
 			// 	if i < 5 || i >= len(amcs)-2 {
-			// 		log.Printf("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
+			// 		logger.LogInfo("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
 			// 	} else if i == 5 {
-			// 		log.Printf(constants.FormatLogMore, len(amcs)-7)
+			// 		logger.LogInfo(constants.FormatLogMore, len(amcs)-7)
 			// 	}
 			// }
-			// log.Printf("\nApproved Schemes (%d):\n", len(schemes))
+			// logger.LogInfo("\nApproved Schemes (%d):\n", len(schemes))
 			// if len(schemes) > 0 {
-			// 	log.Printf("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
+			// 	logger.LogInfo("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
 			// 	if len(schemes) > 1 {
-			// 		log.Printf(constants.FormatLogMore, len(schemes)-1)
+			// 		logger.LogInfo(constants.FormatLogMore, len(schemes)-1)
 			// 	}
 			// }
-			// log.Printf("\nApproved DPs (%d):\n", len(dps))
+			// logger.LogInfo("\nApproved DPs (%d):\n", len(dps))
 			// for i, dp := range dps {
-			// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
+			// 	logger.LogInfo("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
 			// }
-			// log.Printf("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
+			// logger.LogInfo("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
 			// for i, acc := range bankAccounts {
-			// 	log.Printf("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
+			// 	logger.LogInfo("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
 			// 		i+1, acc["account_id"], acc["account_number"], acc["account_name"], acc["bank_name"], acc["entity_name"])
 			// }
-			// log.Printf("\nApproved Folios (%d):\n", len(folios))
+			// logger.LogInfo("\nApproved Folios (%d):\n", len(folios))
 			// for i, f := range folios {
 			// 	if i < 5 || i >= len(folios)-2 {
-			// 		log.Printf("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
+			// 		logger.LogInfo("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
 			// 	} else if i == 5 {
-			// 		log.Printf(constants.FormatLogMore, len(folios)-7)
+			// 		logger.LogInfo(constants.FormatLogMore, len(folios)-7)
 			// 	}
 			// }
-			// log.Printf("\nApproved Demats (%d):\n", len(demats))
+			// logger.LogInfo("\nApproved Demats (%d):\n", len(demats))
 			// for i, d := range demats {
-			// 	log.Printf("  [%d] %s (ID: %s, DP: %s)\n", i+1, d["demat_account_number"], d["demat_id"], d["dp_id"])
+			// 	logger.LogInfo("  [%d] %s (ID: %s, DP: %s)\n", i+1, d["demat_account_number"], d["demat_id"], d["dp_id"])
 			// 	if i >= 20 {
 			// 		break
 			// 	}
 			// }
-			// log.Printf("=========================================\n\n")
+			// logger.LogInfo("=========================================\n\n")
 
 			ctx = context.WithValue(ctx, "user_id", userID)
 			ctx = context.WithValue(ctx, "session", session)
@@ -286,34 +287,44 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			ctx = context.WithValue(ctx, api.EntityIDsKey, entityIDs)
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
 
-			// Additional context debug dump (always log so we can inspect admin override and normal flows)
-			entityIDsDump := api.GetEntityIDsFromCtx(ctx)
-			bankNamesDump := api.GetBankNamesFromCtx(ctx)
-			currCodesDump := api.GetCurrencyCodesFromCtx(ctx)
-			// approved accounts stored as []map[string]string under "ApprovedBankAccounts"
-			acctNums := make([]string, 0)
-			if v := ctx.Value(approvedBankAccountsKey); v != nil {
-				if bankAccounts, ok := v.([]map[string]string); ok {
-					for _, a := range bankAccounts {
-						if s, has := a["account_number"]; has && strings.TrimSpace(s) != "" {
-							acctNums = append(acctNums, strings.TrimSpace(s))
+			if prevalidationDebugEnabled() {
+				entityIDsDump := api.GetEntityIDsFromCtx(ctx)
+				bankNamesDump := api.GetBankNamesFromCtx(ctx)
+				currCodesDump := api.GetCurrencyCodesFromCtx(ctx)
+				acctNums := make([]string, 0)
+				if v := ctx.Value(approvedBankAccountsKey); v != nil {
+					if bankAccounts, ok := v.([]map[string]string); ok {
+						for _, a := range bankAccounts {
+							if s, has := a["account_number"]; has && strings.TrimSpace(s) != "" {
+								acctNums = append(acctNums, strings.TrimSpace(s))
+							}
 						}
 					}
 				}
+				logger.LogInfo("[PREVALIDATION CONTEXT] user=%s entities=%v banks=%v accounts_count=%d currencies=%v is_admin_override=%v admin_override_by=%v\n",
+					userID,
+					entityIDsDump,
+					bankNamesDump,
+					len(acctNums),
+					currCodesDump,
+					ctx.Value("is_admin_override"),
+					ctx.Value("admin_override_by"),
+				)
 			}
-			log.Printf("[PREVALIDATION CONTEXT] user=%s entities=%v banks=%v accounts_count=%d currencies=%v is_admin_override=%v admin_override_by=%v\n",
-				userID,
-				entityIDsDump,
-				bankNamesDump,
-				len(acctNums),
-				currCodesDump,
-				ctx.Value("is_admin_override"),
-				ctx.Value("admin_override_by"),
-			)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+func isLightDashboardPrevalidationPath(path string) bool {
+	return strings.HasPrefix(path, "/dash/investment/") ||
+		strings.HasPrefix(path, "/dash/benchmarks/") ||
+		strings.HasPrefix(path, "/dash/cash/forecast/")
+}
+
+func prevalidationDebugEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("PREVALIDATION_DEBUG")), "true")
 }
 func GetUserIDFromContext(ctx context.Context) string {
 	if userID, ok := ctx.Value("user_id").(string); ok {
@@ -450,7 +461,7 @@ func loadApprovedBanks(ctx context.Context, db *pgxpool.Pool) ([]map[string]stri
 				bank_id, 
 				processing_status
 			FROM auditactionbank
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY bank_id, requested_at DESC
 		)
 		SELECT 
@@ -492,7 +503,7 @@ func loadApprovedCurrencies(ctx context.Context, db *pgxpool.Pool) ([]map[string
 				currency_id, 
 				processing_status
 			FROM auditactioncurrency
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY currency_id, requested_at DESC
 		)
 		SELECT 
@@ -533,7 +544,7 @@ func loadApprovedCashFlowCategories(ctx context.Context, db *pgxpool.Pool) ([]ma
 				category_id, 
 				processing_status
 			FROM auditactioncashflowcategory
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY category_id, requested_at DESC
 		)
 		SELECT 
@@ -575,7 +586,7 @@ func loadApprovedAMCs(ctx context.Context, db *pgxpool.Pool) ([]map[string]strin
 				amc_id, 
 				processing_status
 			FROM investment.auditactionamc
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY amc_id, requested_at DESC
 		)
 		SELECT 
@@ -617,7 +628,7 @@ func loadApprovedSchemes(ctx context.Context, db *pgxpool.Pool) ([]map[string]st
 				scheme_id, 
 				processing_status
 			FROM investment.auditactionscheme
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY scheme_id, requested_at DESC
 		)
 		SELECT 
@@ -663,7 +674,7 @@ func loadApprovedDPs(ctx context.Context, db *pgxpool.Pool) ([]map[string]string
 				dp_id, 
 				processing_status
 			FROM investment.auditactiondp
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY dp_id, requested_at DESC
 		)
 		SELECT 
@@ -707,7 +718,7 @@ func loadApprovedBankAccounts(ctx context.Context, db *pgxpool.Pool) ([]map[stri
 				account_id, 
 				processing_status
 			FROM public.auditactionbankaccount
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY account_id, requested_at DESC
 		)
 		SELECT 
@@ -756,17 +767,22 @@ func loadApprovedFolios(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 				folio_id,
 				processing_status
 			FROM investment.auditactionfolio
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY folio_id, requested_at DESC
 		)
 		SELECT
 			m.folio_id,
 			m.folio_number,
 			COALESCE(m.amc_name,'') AS amc_name,
-			COALESCE(m.scheme_id,'') AS scheme_id,
+			COALESCE(fsm.scheme_ids,'') AS scheme_id,
 			COALESCE(m.entity_name,'') AS entity_name
 		FROM investment.masterfolio m
 		JOIN latest_approved l ON l.folio_id = m.folio_id
+		LEFT JOIN LATERAL (
+			SELECT string_agg(DISTINCT f.scheme_id::text, ',') AS scheme_ids
+			FROM investment.folioschememapping f
+			WHERE f.folio_id = m.folio_id
+		) fsm ON true
 		WHERE UPPER(m.status) = 'ACTIVE'
 		  AND COALESCE(m.is_deleted, false) = false
 		ORDER BY m.folio_number
@@ -802,7 +818,7 @@ func loadApprovedDemats(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 				demat_id,
 				processing_status
 			FROM investment.auditactiondemat
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY demat_id, requested_at DESC
 		)
 		SELECT

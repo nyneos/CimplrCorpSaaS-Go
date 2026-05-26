@@ -3,6 +3,7 @@ package exposures
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"errors"
 	"net/http"
@@ -10,8 +11,15 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+const fxAdditionalFileAuditTable = "cimplrcorpsaas.fx_additional_file_audit"
+
+type fxAdditionalFileExec interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+}
 
 func ListAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewListHandler(pool, exposureAdditionalFilesConfig())
@@ -33,16 +41,37 @@ func DeleteAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, exposureAdditionalFilesConfig())
 }
 
+func AuditAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, exposureAdditionalFilesConfig())
+}
+
+func ApproveAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, exposureAdditionalFilesConfig())
+}
+
+func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, exposureAdditionalFilesConfig())
+}
+
 func exposureAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:        "fx-exposure",
-		ParentIDField: "exposure_header_id",
-		List:          listExposureAdditionalFiles,
-		Create:        createExposureAdditionalFile,
-		GetOne:        getExposureAdditionalFile,
-		GetMany:       getExposureAdditionalFiles,
-		SoftDelete:    deleteExposureAdditionalFile,
+		Module:                "fx-exposure",
+		AuditSource:           "FX_EXPOSURE",
+		AuditTableName:        fxAdditionalFileAuditTable,
+		ParentIDField:         "exposure_header_id",
+		List:                  listExposureAdditionalFiles,
+		CreateReturning:       createExposureAdditionalFile,
+		GetOne:                getExposureAdditionalFile,
+		GetAnyFile:            getAnyExposureAdditionalFile,
+		GetMany:               getExposureAdditionalFiles,
+		SoftDelete:            deleteExposureAdditionalFile,
+		SoftDeleteTx:          deleteExposureAdditionalFileTx,
+		RecordMainUploadAudit: recordExposureMainUploadAudit,
 	}
+}
+
+func recordExposureMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionexposure", "exposure_header_id", "actiontype", parentID, payload)
 }
 
 func listExposureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
@@ -58,12 +87,12 @@ func listExposureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parent
 	`), parentID, names)
 }
 
-func createExposureAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
+func createExposureAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
 	names, err := fxEntityNames(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "public.exposure_header_files", "exposure_header_id", input, `
+	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "public.exposure_header_files", "exposure_header_id", input, `
 		SELECT h.exposure_header_id AS parent_id
 		FROM public.exposure_headers h
 		WHERE h.exposure_header_id::text = $8
@@ -72,14 +101,26 @@ func createExposureAdditionalFile(ctx context.Context, tx pgx.Tx, input addition
 }
 
 func getExposureAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getExposureAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnyExposureAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getExposureAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getExposureAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
 	names, err := fxEntityNames(ctx)
 	if err != nil {
 		return nil, err
 	}
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
+	}
 	return additionalfiles.FirstFile(ctx, pool, exposureFileQuery(`
 		WHERE f.exposure_header_id::text = $1
 		  AND f.file_id::text = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  `+deletedClause+`
 		  AND LOWER(TRIM(h.entity)) = ANY($3)
 	`), parentID, fileID, names)
 }
@@ -104,11 +145,19 @@ func getExposureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentI
 }
 
 func deleteExposureAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteExposureAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteExposureAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteExposureAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteExposureAdditionalFileExec(ctx context.Context, exec fxAdditionalFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	names, err := fxEntityNames(ctx)
 	if err != nil {
 		return false, err
 	}
-	result, execErr := pool.Exec(ctx, `
+	result, execErr := exec.Exec(ctx, `
 		UPDATE public.exposure_header_files f
 		SET is_deleted = TRUE,
 		    deleted_by = $3,
@@ -143,7 +192,7 @@ func fxEntityNames(ctx context.Context) ([]string, error) {
 		}
 	}
 	if len(lowered) == 0 {
-		return nil, errors.New("no accessible business units found")
+		return nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
 	return lowered, nil
 }

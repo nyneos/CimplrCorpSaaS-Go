@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"mime/multipart"
 	"net/http"
 	"strings"
@@ -22,7 +21,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // V2 Data structures for new JSONB staging architecture
 type StagingBatchTransaction struct {
@@ -95,7 +95,7 @@ const (
 
 // Helper function for consistent error responses
 func respondWithErrorTransactionV2(w http.ResponseWriter, status int, errMsg string) {
-	log.Printf("[ERROR] %s", errMsg)
+	logger.LogError("%s", errMsg)
 	w.Header().Set(ContentTypeJSON, ApplicationJSON)
 	w.WriteHeader(status)
 	response := map[string]interface{}{
@@ -191,7 +191,7 @@ func (bp *TransactionBatchProcessor) BatchInsertStagingTransactionsWithTx(ctx co
 			transType := transactions[i].TransactionType
 			errorMsg := fmt.Sprintf("Record %d (%s): %v", i+1, transType, err)
 			errors = append(errors, errorMsg)
-			log.Printf("ERROR: Failed to insert staging transaction: %s", errorMsg)
+			logger.LogError("ERROR: Failed to insert staging transaction: %s", errorMsg)
 		} else {
 			successCount++
 		}
@@ -202,7 +202,7 @@ func (bp *TransactionBatchProcessor) BatchInsertStagingTransactionsWithTx(ctx co
 			successCount, len(errors), strings.Join(errors, "; "))
 	}
 
-	log.Printf("Successfully inserted %d staging transactions", successCount)
+	logger.LogInfo("Successfully inserted %d staging transactions", successCount)
 	return nil
 }
 
@@ -248,7 +248,7 @@ func (bp *TransactionBatchProcessor) BatchInsertPayables(ctx context.Context, pa
 			entity := payables[i].EntityName
 			errorMsg := fmt.Sprintf("Payable %d (Invoice: %s, Entity: %s): %v", i+1, invoiceNum, entity, err)
 			errors = append(errors, errorMsg)
-			log.Printf("ERROR: Failed to insert payable: %s", errorMsg)
+			logger.LogError("ERROR: Failed to insert payable: %s", errorMsg)
 		} else {
 			successCount++
 			payableIDs = append(payableIDs, payableID)
@@ -318,7 +318,7 @@ func (bp *TransactionBatchProcessor) BatchInsertReceivables(ctx context.Context,
 			entity := receivables[i].EntityName
 			errorMsg := fmt.Sprintf("Receivable %d (Invoice: %s, Entity: %s): %v", i+1, invoiceNum, entity, err)
 			errors = append(errors, errorMsg)
-			log.Printf("ERROR: Failed to insert receivable: %s", errorMsg)
+			logger.LogError("ERROR: Failed to insert receivable: %s", errorMsg)
 		} else {
 			successCount++
 			receivableIDs = append(receivableIDs, receivableID)
@@ -477,12 +477,12 @@ func processTransactionFileData(file multipart.File, filename, transactionType s
 	} else if strings.HasSuffix(strings.ToLower(filename), ".xlsx") || strings.HasSuffix(strings.ToLower(filename), ".xls") {
 		rawPayloads, err = processTransactionExcelFile(file, transactionType)
 	} else {
-		log.Printf("Unsupported file type: %s", filename)
+		logger.LogInfo("Unsupported file type: %s", filename)
 		return nil
 	}
 
 	if err != nil {
-		log.Printf("Failed to process transaction file %s: %v", filename, err)
+		logger.LogError("Failed to process transaction file %s: %v", filename, err)
 		return nil
 	}
 
@@ -515,7 +515,7 @@ func processTransactionCSVFile(file io.Reader, transactionType string) ([]json.R
 
 		jsonData, err := json.Marshal(rowData)
 		if err != nil {
-			log.Printf("Failed to marshal transaction row %d: %v", i+1, err)
+			logger.LogError("Failed to marshal transaction row %d: %v", i+1, err)
 			continue
 		}
 
@@ -565,7 +565,7 @@ func processTransactionExcelFile(file io.Reader, transactionType string) ([]json
 
 		jsonData, err := json.Marshal(rowData)
 		if err != nil {
-			log.Printf("Failed to marshal transaction row %d: %v", i+1, err)
+			logger.LogError("Failed to marshal transaction row %d: %v", i+1, err)
 			continue
 		}
 

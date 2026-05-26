@@ -2,7 +2,6 @@ package investmentsuite
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"encoding/json"
@@ -163,7 +162,7 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail, ok := resolveUserEmail(req.UserID)
+		userEmail, ok := resolveUserEmail(ctx)
 		if !ok {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -241,7 +240,7 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail, ok := resolveUserEmail(req.UserID)
+		userEmail, ok := resolveUserEmail(ctx)
 		if !ok {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -265,7 +264,7 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := syncProposalAllocations(ctx, tx, req.ProposalID, req.Allocations); err != nil {
+		if err := syncProposalAllocations(ctx, tx, req.ProposalID, req.Allocations, userEmail); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to upsert allocations: %v", err))
 			return
 		}
@@ -325,7 +324,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			return
 		}
 
-		userEmail, ok := resolveUserEmail(req.UserID)
+		userEmail, ok := resolveUserEmail(ctx)
 		if !ok {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -351,6 +350,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 					ROW_NUMBER() OVER (PARTITION BY proposal_id ORDER BY requested_at DESC) AS rn
 				FROM investment.auditactionproposal
 				WHERE proposal_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			)
 			SELECT action_id, proposal_id, actiontype, processing_status
 			FROM ranked
@@ -552,7 +552,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail, ok := resolveUserEmail(req.UserID)
+		userEmail, ok := resolveUserEmail(ctx)
 		if !ok {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -579,6 +579,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 					processing_status
 				FROM investment.auditactionproposal
 				WHERE proposal_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			)
 			SELECT proposal_id
 			FROM ranked
@@ -702,6 +703,7 @@ func fetchProposalRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([
 				checker_comment,
 				reason
 			FROM investment.auditactionproposal
+			WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY proposal_id, requested_at DESC
 		),
 		history AS (
@@ -815,6 +817,7 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 					checker_comment,
 					reason
 				FROM investment.auditactionproposal
+				WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY proposal_id, requested_at DESC
 			),
 			history AS (
@@ -940,6 +943,7 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 					checker_comment,
 					reason
 				FROM investment.auditactionproposal
+				WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY proposal_id, requested_at DESC
 			),
 			history AS (
@@ -1037,6 +1041,7 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				old_current_holding
 			FROM investment.investment_proposal_allocation
 			WHERE proposal_id = $1
+			  AND COALESCE(is_deleted, false) = false
 			ORDER BY id
 		`
 		allocRows, err := pool.Query(ctx, allocSQL, req.ProposalID)
@@ -1494,11 +1499,9 @@ func validateUpdateProposalRequest(req *UpdateProposalRequest) error {
 	return nil
 }
 
-func resolveUserEmail(userID string) (string, bool) {
-	for _, s := range auth.GetActiveSessions() {
-		if s.UserID == userID {
-			return s.Name, true
-		}
+func resolveUserEmail(ctx context.Context) (string, bool) {
+	if s := api.GetSessionFromCtx(ctx); s != nil {
+		return s.Name, true
 	}
 	return "", false
 }
@@ -1617,9 +1620,9 @@ func insertAllocations(ctx context.Context, tx pgx.Tx, proposalID string, alloca
 	return ids, nil
 }
 
-func syncProposalAllocations(ctx context.Context, tx pgx.Tx, proposalID string, allocations []ProposalAllocationUpsertInput) error {
+func syncProposalAllocations(ctx context.Context, tx pgx.Tx, proposalID string, allocations []ProposalAllocationUpsertInput, deletedBy string) error {
 	const (
-		fetchSQL  = `SELECT id FROM investment.investment_proposal_allocation WHERE proposal_id=$1`
+		fetchSQL  = `SELECT id FROM investment.investment_proposal_allocation WHERE proposal_id=$1 AND COALESCE(is_deleted, false) = false`
 		updateSQL = `
 			UPDATE investment.investment_proposal_allocation
 			SET scheme_id=$1,
@@ -1642,7 +1645,11 @@ func syncProposalAllocations(ctx context.Context, tx pgx.Tx, proposalID string, 
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 			RETURNING id
 		`
-		deleteSQL = `DELETE FROM investment.investment_proposal_allocation WHERE proposal_id=$1 AND id = ANY($2)`
+		deleteSQL = `
+			UPDATE investment.investment_proposal_allocation
+			SET is_deleted=true, deleted_at=now(), deleted_by=$3
+			WHERE proposal_id=$1 AND id = ANY($2)
+		`
 	)
 
 	rows, err := tx.Query(ctx, fetchSQL, proposalID)
@@ -1701,7 +1708,7 @@ func syncProposalAllocations(ctx context.Context, tx pgx.Tx, proposalID string, 
 		for id := range existing {
 			ids = append(ids, id)
 		}
-		if _, err := tx.Exec(ctx, deleteSQL, proposalID, ids); err != nil {
+		if _, err := tx.Exec(ctx, deleteSQL, proposalID, ids, deletedBy); err != nil {
 			return err
 		}
 	}

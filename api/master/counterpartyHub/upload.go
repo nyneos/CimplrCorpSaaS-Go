@@ -2,8 +2,8 @@ package counterpartyHub
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"bytes"
 	"context"
@@ -42,7 +42,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		cpType := strings.ToUpper(strings.TrimSpace(r.FormValue("counterparty_type")))
 
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		validTypes := map[string]bool{
@@ -54,13 +54,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -75,18 +69,18 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to read file: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
 
-		s3Key := ""
+		s3Key, storedFileName := "", ""
 		if s3storage.IsS3UploadEnabled() {
 			folder := s3storage.GetStoragePrefix("master-counterparty-hub")
-			storedFileName := s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
+			storedFileName = s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 				return
 			}
 		}
@@ -182,6 +176,20 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "id": id, "counterparty_type": cpType})
 		}
 
+		bulkuploadaudit.Record(r.Context(), pgxPool, bulkuploadaudit.Entry{
+			ModuleKey:        "master-counterparty-hub",
+			OriginalFileName: header.Filename,
+			StoredFileName:   storedFileName,
+			UploadS3Key:      s3Key,
+			ContentType:      contentType,
+			FileSize:         int64(len(fileBytes)),
+			TotalRows:        len(rows),
+			InsertedCount:    len(inserted),
+			ErrorCount:       len(errList),
+			Status:           bulkuploadaudit.StatusFor(len(inserted), len(errList)),
+			UploadedBy:       userEmail,
+			UploadedAt:       time.Now().UTC(),
+		})
 		api.RespondWithPayload(w, len(inserted) > 0, "", map[string]interface{}{
 			"inserted_count": len(inserted),
 			"error_count":    len(errList),
@@ -535,17 +543,11 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		formType := strings.ToUpper(strings.TrimSpace(r.FormValue("counterparty_type")))
 
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -560,18 +562,18 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to read file: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
 
-		s3Key := ""
+		s3Key, storedFileName := "", ""
 		if s3storage.IsS3UploadEnabled() {
 			folder := s3storage.GetStoragePrefix("master-counterparty-hub-v2")
-			storedFileName := s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
+			storedFileName = s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 				return
 			}
 		}
@@ -600,92 +602,105 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var inserted, errList []map[string]interface{}
 
 		for i, row := range rows {
-			req := hubV2RequestFromRow(row, formType, userID)
+			func(i int, row map[string]string) {
+				req := hubV2RequestFromRow(row, formType, userID)
 
-			if err := validateHubCreateRequest(req); err != nil {
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": err.Error(),
-					"counterparty_code": req.CounterpartyCode,
+				if err := validateHubCreateRequest(req); err != nil {
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": err.Error(),
+						"counterparty_code": req.CounterpartyCode,
+					})
+					return
+				}
+
+				tx, err := pgxPool.Begin(ctx)
+				if err != nil {
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": constants.ErrTransactionFailed,
+					})
+					return
+				}
+				defer tx.Rollback(ctx)
+
+				var cpID string
+				err = tx.QueryRow(ctx, `
+					INSERT INTO apibox_svc.counterparty (
+						counterparty_code, counterparty_name, short_name, counterparty_type,
+						country, primary_currency, lei, effective_from, rm_email, notes,
+						status, created_by
+					) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'DRAFT',$11)
+					RETURNING counterparty_id`,
+					strings.ToUpper(req.CounterpartyCode), req.CounterpartyName, nilIfEmpty(req.ShortName),
+					req.CounterpartyType, strings.ToUpper(req.Country), strings.ToUpper(req.PrimaryCurrency),
+					nilIfEmpty(req.LEI), req.EffectiveFrom, nilIfEmpty(req.RMEmail), nilIfEmpty(req.Notes),
+					userEmail,
+				).Scan(&cpID)
+				if err != nil {
+					msg, _ := getUserFriendlyCounterpartyError(err, "counterparty insert failed")
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": msg,
+						"counterparty_code": req.CounterpartyCode,
+					})
+					return
+				}
+
+				typedID, err := insertTypedDetail(ctx, tx, cpID, req.CounterpartyType, reqToFieldsMap(req))
+				if err != nil {
+					msg, _ := getUserFriendlyCounterpartyError(err, "typed insert failed")
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": msg,
+						"counterparty_code": req.CounterpartyCode,
+					})
+					return
+				}
+
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO apibox_svc.audit_counterparty
+						(counterparty_id, action_type, processing_status, requested_by, requested_at)
+					VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, cpID, userEmail); err != nil {
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": constants.ErrAuditInsertFailed,
+					})
+					return
+				}
+
+				if err := insertTypedAudit(ctx, tx, req.CounterpartyType, typedID, cpID, userEmail); err != nil {
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": constants.ErrAuditInsertFailed,
+					})
+					return
+				}
+
+				if err := tx.Commit(ctx); err != nil {
+					errList = append(errList, map[string]interface{}{
+						"row_index": i, "success": false, "error": constants.ErrCommitFailed + err.Error(),
+					})
+					return
+				}
+
+				inserted = append(inserted, map[string]interface{}{
+					"success": true, "row_index": i,
+					"counterparty_id":   cpID,
+					"counterparty_code": strings.ToUpper(req.CounterpartyCode),
+					"counterparty_type": req.CounterpartyType,
 				})
-				continue
-			}
-
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": constants.ErrTransactionFailed,
-				})
-				continue
-			}
-
-			var cpID string
-			err = tx.QueryRow(ctx, `
-				INSERT INTO apibox_svc.counterparty (
-					counterparty_code, counterparty_name, short_name, counterparty_type,
-					country, primary_currency, lei, effective_from, rm_email, notes,
-					status, created_by
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'DRAFT',$11)
-				RETURNING counterparty_id`,
-				strings.ToUpper(req.CounterpartyCode), req.CounterpartyName, nilIfEmpty(req.ShortName),
-				req.CounterpartyType, strings.ToUpper(req.Country), strings.ToUpper(req.PrimaryCurrency),
-				nilIfEmpty(req.LEI), req.EffectiveFrom, nilIfEmpty(req.RMEmail), nilIfEmpty(req.Notes),
-				userEmail,
-			).Scan(&cpID)
-			if err != nil {
-				_ = tx.Rollback(ctx)
-				msg, _ := getUserFriendlyCounterpartyError(err, "counterparty insert failed")
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": msg,
-					"counterparty_code": req.CounterpartyCode,
-				})
-				continue
-			}
-
-			typedID, err := insertTypedDetail(ctx, tx, cpID, req.CounterpartyType, reqToFieldsMap(req))
-			if err != nil {
-				_ = tx.Rollback(ctx)
-				msg, _ := getUserFriendlyCounterpartyError(err, "typed insert failed")
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": msg,
-					"counterparty_code": req.CounterpartyCode,
-				})
-				continue
-			}
-
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO apibox_svc.audit_counterparty
-					(counterparty_id, action_type, processing_status, requested_by, requested_at)
-				VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, cpID, userEmail); err != nil {
-				_ = tx.Rollback(ctx)
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": constants.ErrAuditInsertFailed,
-				})
-				continue
-			}
-
-			if err := insertTypedAudit(ctx, tx, req.CounterpartyType, typedID, cpID, userEmail); err != nil {
-				_ = tx.Rollback(ctx)
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": constants.ErrAuditInsertFailed,
-				})
-				continue
-			}
-
-			if err := tx.Commit(ctx); err != nil {
-				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": constants.ErrCommitFailed + err.Error(),
-				})
-				continue
-			}
-
-			inserted = append(inserted, map[string]interface{}{
-				"success": true, "row_index": i,
-				"counterparty_id":   cpID,
-				"counterparty_code": strings.ToUpper(req.CounterpartyCode),
-				"counterparty_type": req.CounterpartyType,
-			})
+			}(i, row)
 		}
 
+		bulkuploadaudit.Record(r.Context(), pgxPool, bulkuploadaudit.Entry{
+			ModuleKey:        "master-counterparty-hub-v2",
+			OriginalFileName: header.Filename,
+			StoredFileName:   storedFileName,
+			UploadS3Key:      s3Key,
+			ContentType:      contentType,
+			FileSize:         int64(len(fileBytes)),
+			TotalRows:        len(rows),
+			InsertedCount:    len(inserted),
+			ErrorCount:       len(errList),
+			Status:           bulkuploadaudit.StatusFor(len(inserted), len(errList)),
+			UploadedBy:       userEmail,
+			UploadedAt:       time.Now().UTC(),
+		})
 		api.RespondWithPayload(w, len(inserted) > 0, "", map[string]interface{}{
 			"inserted_count": len(inserted),
 			"error_count":    len(errList),

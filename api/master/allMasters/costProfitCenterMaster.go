@@ -3,12 +3,12 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -19,6 +19,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 // getUserFriendlyCostProfitCenterError converts database errors to user-friendly messages
@@ -261,6 +263,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					LEFT JOIN LATERAL (
 						SELECT processing_status FROM auditactioncostprofitcenter
 						WHERE centre_id = m.centre_id
+						AND actiontype IN ('CREATE','EDIT','DELETE')
 						ORDER BY requested_at DESC LIMIT 1
 					) a ON TRUE
 					WHERE m.centre_code = $1
@@ -285,7 +288,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				defer func() {
 					if !committed {
 						if rerr := tx.Rollback(ctx); rerr != nil {
-							log.Println("rollback failed:", rerr)
+							logger.LogError("rollback failed: %v", rerr)
 						}
 					}
 				}()
@@ -686,7 +689,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							computedIsTop = true
 						} else {
 							var plevel int
-							if err := pgxPool.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1`, pcode).Scan(&plevel); err != nil {
+							if err := pgxPool.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, pcode).Scan(&plevel); err != nil {
 								results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent centre not found: " + pcode, "centre_id": row.CentreID})
 								return
 							}
@@ -844,7 +847,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -905,13 +908,13 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			columns := append([]string{"upload_batch_id"}, headerNorm...)
 
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-costprofit-center")
-				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
+				folder := s3storage.GetStoragePrefix(constants.FormatMasterCostProfitCenter)
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -986,7 +989,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			srcColsStr := strings.Join(selectExprs, ", ")
 
 			// Build insert: don't include centre_id column (DB default will populate it). Use ON CONFLICT DO NOTHING.
-			insertSQL := fmt.Sprintf(`INSERT INTO mastercostprofitcenter (%s, upload_s3_key) SELECT %s, $2 FROM input_costprofitcenter s WHERE s.upload_batch_id = $1 ON CONFLICT (centre_code) DO NOTHING RETURNING centre_id, centre_code`, tgtColsStr, srcColsStr)
+			insertSQL := fmt.Sprintf(`INSERT INTO mastercostprofitcenter (%s, upload_s3_key) SELECT %s, $2 FROM input_costprofitcenter s WHERE s.upload_batch_id = $1 ON CONFLICT DO NOTHING RETURNING centre_id, centre_code`, tgtColsStr, srcColsStr)
 
 			var s3KeyPtr *string
 			if s3Key != "" {
@@ -1014,7 +1017,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM mastercostprofitcenter m
 				WHERE m.centre_code IN (
 					SELECT DISTINCT centre_code FROM input_costprofitcenter WHERE upload_batch_id = $1
-				)
+				) AND COALESCE(m.is_deleted, false) = false
 			`, batchID)
 			if err == nil {
 				defer existingRows.Close()
@@ -1097,7 +1100,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if cid, ok := codeToID[cc]; ok {
 						childID = cid
 					} else {
-						if err := tx.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, cc).Scan(&childID); err != nil {
+						if err := tx.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, cc).Scan(&childID); err != nil {
 							// cannot resolve child - skip
 							continue
 						}
@@ -1109,7 +1112,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						if pid, ok := codeToID[pc]; ok {
 							parentID = pid
 						} else {
-							if err := tx.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, pc).Scan(&parentID); err != nil {
+							if err := tx.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, pc).Scan(&parentID); err != nil {
 								// cannot resolve parent - skip relationship
 								continue
 							}
@@ -1125,7 +1128,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 						// Update child master: set parent and compute level
 						var parentLevel int
-						if err := tx.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1`, pc).Scan(&parentLevel); err == nil {
+						if err := tx.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, pc).Scan(&parentLevel); err == nil {
 							_, _ = tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_code=$1, centre_level=$2, is_top_level_centre=false WHERE centre_id=$3`, pc, parentLevel+1, childID)
 						} else {
 							// parent exists but level unknown - at least set parent code
@@ -1164,6 +1167,20 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			committed = true
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        constants.FormatMasterCostProfitCenter,
+				OriginalFileName: fh.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(dataRows),
+				InsertedCount:    len(dataRows),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userEmail,
+				UploadedAt:       time.Now().UTC(),
+			})
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -1207,6 +1224,7 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
             WITH latest AS (
                 SELECT DISTINCT ON (centre_id) centre_id, processing_status
                 FROM auditactioncostprofitcenter
+                WHERE actiontype IN ('CREATE','EDIT','DELETE')
                 ORDER BY centre_id, requested_at DESC
             )
             SELECT m.centre_id, m.centre_code, m.centre_name, m.centre_type
@@ -1261,7 +1279,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[DEBUG] GetCostProfitCenterHierarchy - UserID: %s, Accessible Entities: %v, Requested Entity: %s, Requested Currency: %s",
+		logger.LogInfo("[DEBUG] GetCostProfitCenterHierarchy - UserID: %s, Accessible Entities: %v, Requested Entity: %s, Requested Currency: %s",
 			req.UserID, entities, req.Entity, req.Currency)
 
 		// Build WHERE clause with filters
@@ -1280,7 +1298,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			if !hasAccess {
-				log.Printf("[DEBUG] User %s does not have access to entity: %s", req.UserID, req.Entity)
+				logger.LogInfo("[DEBUG] User %s does not have access to entity: %s", req.UserID, req.Entity)
 				api.RespondWithError(w, http.StatusForbidden, "You don't have access to the requested entity")
 				return
 			}
@@ -1307,8 +1325,10 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		whereClause := strings.Join(whereClauses, " AND ")
 
-		log.Printf("[DEBUG] WHERE clause: %s", whereClause)
-		log.Printf("[DEBUG] Query args: %v", args)
+		logger.LogInfo("[DEBUG] WHERE clause: %s", whereClause)
+		logger.LogInfo("[DEBUG] Query args: %v", args)
+		logger.LogInfo("[DEBUG] WHERE clause: %s", whereClause)
+		logger.LogInfo("[DEBUG] Query args: %v", args)
 
 		query := fmt.Sprintf(`
             SELECT 
@@ -1343,6 +1363,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
                 SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason
                 FROM auditactioncostprofitcenter a
                 WHERE a.centre_id = m.centre_id
+                AND a.actiontype IN ('CREATE','EDIT','DELETE')
                 ORDER BY requested_at DESC
                 LIMIT 1
             ) a ON TRUE
@@ -1585,7 +1606,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// resolve parent code to id
 				if _, ok := codeToID[pcode]; !ok {
 					var pid string
-					if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, pcode).Scan(&pid); err == nil {
+					if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, pcode).Scan(&pid); err == nil {
 						codeToID[pcode] = pid
 					} else {
 						// skip if parent code not found
@@ -1594,7 +1615,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if _, ok := codeToID[ccode]; !ok {
 					var cid string
-					if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, ccode).Scan(&cid); err == nil {
+					if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, ccode).Scan(&cid); err == nil {
 						codeToID[ccode] = cid
 					} else {
 						// skip if child not found
@@ -1661,8 +1682,10 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		log.Printf("[DEBUG] GetCostProfitCenterHierarchy - Total centres in entityMap: %d, Top-level centres: %d", len(entityMap), len(topLevel))
-		log.Printf("[DEBUG] GetCostProfitCenterHierarchy - Returning %d top-level items", len(topLevel))
+		logger.LogInfo("[DEBUG] GetCostProfitCenterHierarchy - Total centres in entityMap: %d, Top-level centres: %d", len(entityMap), len(topLevel))
+		logger.LogInfo("[DEBUG] GetCostProfitCenterHierarchy - Returning %d top-level items", len(topLevel))
+		logger.LogInfo("[DEBUG] GetCostProfitCenterHierarchy - Total centres in entityMap: %d, Top-level centres: %d", len(entityMap), len(topLevel))
+		logger.LogInfo("[DEBUG] GetCostProfitCenterHierarchy - Returning %d top-level items", len(topLevel))
 
 		api.RespondWithPayload(w, true, "", topLevel)
 	}
@@ -1693,7 +1716,7 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[DEBUG] FindParentCostProfitCenterAtLevel - UserID: %s, Level: %d, Accessible Entities: %v", req.UserID, req.Level, entities)
+		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - UserID: %s, Level: %d, Accessible Entities: %v", req.UserID, req.Level, entities)
 
 		// Build entity filter
 		args := []interface{}{req.Level - 1}
@@ -1714,8 +1737,10 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND %s
 		`, entityFilter)
 
-		log.Printf("[DEBUG] FindParentCostProfitCenterAtLevel - Query: %s", q)
-		log.Printf("[DEBUG] FindParentCostProfitCenterAtLevel - Args: %v", args)
+		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - Query: %s", q)
+		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - Args: %v", args)
+		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - Query: %s", q)
+		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - Args: %v", args)
 
 		rows, err := pgxPool.Query(context.Background(), q, args...)
 		if err != nil {
@@ -1742,7 +1767,7 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		log.Printf("[DEBUG] FindParentCostProfitCenterAtLevel - Found %d results", len(results))
+		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - Found %d results", len(results))
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
@@ -1942,9 +1967,22 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
+		}
+		defer tx.Rollback(ctx)
+
 		// Update audit rows to REJECTED and return affected rows
 		query := `UPDATE auditactioncostprofitcenter SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE centre_id = ANY($3) RETURNING action_id, centre_id`
-		rows2, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
+		rows2, err := tx.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to reject centre actions")
 			if statusCode == http.StatusOK {
@@ -1970,6 +2008,16 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
 		if !success {
 			resp["message"] = constants.ErrNoRowsUpdated
+		}
+		if err := tx.Commit(ctx); err != nil {
+			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrCommitFailedCapitalized)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
 		}
 		json.NewEncoder(w).Encode(resp)
 	}
@@ -2066,9 +2114,22 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
+		}
+		defer tx.Rollback(ctx)
+
 		// Update audit rows to APPROVED and return affected rows including action type
 		query := `UPDATE auditactioncostprofitcenter SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE centre_id = ANY($3) RETURNING action_id, centre_id, actiontype`
-		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToApprove)
+		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToApprove)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to approve centre actions")
 			if statusCode == http.StatusOK {
@@ -2096,7 +2157,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		// Set is_deleted=true for approved DELETE actions
 		if len(deleteIDs) > 0 {
 			updQ := `UPDATE mastercostprofitcenter SET is_deleted=true WHERE centre_id = ANY($1)`
-			if _, err := pgxPool.Exec(ctx, updQ, deleteIDs); err != nil {
+			if _, err := tx.Exec(ctx, updQ, deleteIDs); err != nil {
 				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to mark centres as deleted")
 				if statusCode == http.StatusOK {
 					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -2113,6 +2174,16 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
 		if !success {
 			resp["message"] = constants.ErrNoRowsUpdated
+		}
+		if err := tx.Commit(ctx); err != nil {
+			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrCommitFailedCapitalized)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
 		}
 		json.NewEncoder(w).Encode(resp)
 	}
@@ -2184,7 +2255,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -2253,13 +2324,13 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				copyRows[i] = vals
 			}
 
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-costprofit-center")
-				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				folder := s3storage.GetStoragePrefix(constants.FormatMasterCostProfitCenter)
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -2288,7 +2359,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}()
 
 			if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'"); err != nil {
-				log.Printf("warning: failed to set local statement_timeout: %v", err)
+				logger.LogError("warning: failed to set local statement_timeout: %v", err)
 			}
 
 			_, err = tx.CopyFrom(ctx, pgx.Identifier{"mastercostprofitcenter"}, validCols, pgx.CopyFromRows(copyRows))
@@ -2302,13 +2373,27 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			committed = true
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        constants.FormatMasterCostProfitCenter,
+				OriginalFileName: fh.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(copyRows),
+				InsertedCount:    len(copyRows),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userName,
+				UploadedAt:       time.Now().UTC(),
+			})
 
 			// Async sync + audit - pass the centre codes so we can find the newly inserted rows
 			go func(userName string, centreCodes []string) {
 				ctx2 := context.Background()
 				tx2, err := pgxPool.Begin(ctx2)
 				if err != nil {
-					log.Printf("Async tx begin failed: %v", err)
+					logger.LogError("Async tx begin failed: %v", err)
 					return
 				}
 				defer tx2.Rollback(ctx2)
@@ -2340,10 +2425,11 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					SELECT DISTINCT p.centre_code, c.centre_code, 'Active'
 					FROM mastercostprofitcenter c
 					JOIN mastercostprofitcenter p ON c.parent_centre_code = p.centre_code
+					WHERE COALESCE(c.is_deleted, false) = false AND COALESCE(p.is_deleted, false) = false
 					ON CONFLICT DO NOTHING;
 				`)
 				if err != nil {
-					log.Printf("Hierarchy sync failed: %v", err)
+					logger.LogError("Hierarchy sync failed: %v", err)
 				}
 
 				// Insert audit rows for the centre_codes we just uploaded. Use centre_code to locate rows
@@ -2367,7 +2453,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						FROM mastercostprofitcenter
 						WHERE centre_code = ANY($2)
 						`, userName, uniqList); err != nil {
-							log.Printf("Audit insert failed: %v", err)
+							logger.LogError("Audit insert failed: %v", err)
 						}
 					}
 				}

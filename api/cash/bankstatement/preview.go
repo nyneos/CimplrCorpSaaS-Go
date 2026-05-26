@@ -92,13 +92,13 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 					http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
 					return
 				}
-				http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
+				http.Error(w, constants.ErrFailedToReadFile+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		} else {
 			fileBytes, err = io.ReadAll(file)
 			if err != nil {
-				http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
+				http.Error(w, constants.ErrFailedToReadFile+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
@@ -574,7 +574,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 					newRows = append(newRows, rows[i:]...)
 					rows = newRows
 					txnHeaderIdx = i
-					
+
 					// Fix shifted columns in the data rows for this headless table
 					for r := txnHeaderIdx + 1; r < len(rows); r++ {
 						if len(rows[r]) >= 14 {

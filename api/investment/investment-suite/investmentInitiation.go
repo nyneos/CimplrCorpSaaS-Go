@@ -2,7 +2,6 @@ package investmentsuite
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
 	"bufio"
@@ -90,13 +89,7 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -212,13 +205,7 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -366,13 +353,7 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -489,13 +470,7 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -630,13 +605,7 @@ func DeleteInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		requestedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				requestedBy = s.Email
-				break
-			}
-		}
+		requestedBy := api.GetUserEmailFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -694,19 +663,13 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Email
-				break
-			}
-		}
+		checkerBy := api.GetUserEmailFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -718,6 +681,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (initiation_id) action_id, initiation_id, actiontype, processing_status
 			FROM investment.auditactioninitiation
 			WHERE initiation_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY initiation_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.InitiationIDs)
@@ -854,19 +818,13 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Email
-				break
-			}
-		}
+		checkerBy := api.GetUserEmailFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -878,6 +836,7 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (initiation_id) action_id, initiation_id, processing_status
 			FROM investment.auditactioninitiation
 			WHERE initiation_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY initiation_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.InitiationIDs)
@@ -962,6 +921,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.initiation_id, a.actiontype, a.processing_status, a.action_id,
 					a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason
 				FROM investment.auditactioninitiation a
+				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY a.initiation_id, a.requested_at DESC
 			),
 			history AS (
@@ -1179,6 +1139,7 @@ func fetchInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []strin
 				a.initiation_id, a.actiontype, a.processing_status, a.action_id,
 				a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason
 			FROM investment.auditactioninitiation a
+			WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY a.initiation_id, a.requested_at DESC
 		),
 		history AS (

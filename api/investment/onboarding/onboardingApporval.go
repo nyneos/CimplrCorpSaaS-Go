@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5"
@@ -63,14 +62,7 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Get user email from session
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, 401, constants.ErrInvalidSession)
 			return
@@ -230,7 +222,7 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 	auditQuery := `
 		SELECT DISTINCT ON (amc_id) action_id, amc_id, actiontype, processing_status
 		FROM investment.auditactionamc
-		WHERE amc_id = ANY($1)
+		WHERE amc_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 		ORDER BY amc_id, requested_at DESC
 	`
 
@@ -350,7 +342,7 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 	auditQuery := `
 		SELECT DISTINCT ON (scheme_id) action_id, scheme_id, actiontype, processing_status
 		FROM investment.auditactionscheme
-		WHERE scheme_id = ANY($1)
+		WHERE scheme_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 		ORDER BY scheme_id, requested_at DESC
 	`
 
@@ -455,7 +447,7 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 	auditQuery := `
 		SELECT DISTINCT ON (dp_id) action_id, dp_id, actiontype, processing_status
 		FROM investment.auditactiondp
-		WHERE dp_id = ANY($1)
+		WHERE dp_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 		ORDER BY dp_id, requested_at DESC
 	`
 
@@ -561,7 +553,7 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 	auditQuery := `
 		SELECT DISTINCT ON (demat_id) action_id, demat_id, actiontype, processing_status
 		FROM investment.auditactiondemat
-		WHERE demat_id = ANY($1)
+		WHERE demat_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 		ORDER BY demat_id, requested_at DESC
 	`
 
@@ -667,7 +659,7 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 	auditQuery := `
 		SELECT DISTINCT ON (folio_id) action_id, folio_id, actiontype, processing_status
 		FROM investment.auditactionfolio
-		WHERE folio_id = ANY($1)
+		WHERE folio_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 		ORDER BY folio_id, requested_at DESC
 	`
 

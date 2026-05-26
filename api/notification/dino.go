@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"time"
@@ -16,7 +15,8 @@ import (
 	"CimplrCorpSaas/internal/observability"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	const serviceName = "notification"
@@ -34,12 +34,12 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 			var err error
 			pool, err = pgxpool.New(context.Background(), dsn)
 			if err != nil {
-				log.Fatalf("failed to connect to pgxpool DB: %v", err)
+				logger.LogError("failed to connect to pgxpool DB: %v", err)
 			}
 			pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := pool.Ping(pingCtx); err != nil {
-				log.Fatalf("Notification: failed to verify pgxpool DB connectivity at startup: %v", err)
+				logger.LogError("Notification: failed to verify pgxpool DB connectivity at startup: %v", err)
 			}
 		}
 	}
@@ -94,8 +94,8 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	push.RegisterSubscriptionRoutes(mux, pool)
 	mux.Handle("/notification/metrics", observability.MetricsHandler(serviceName))
 
-	log.Printf("Notification Service started on :%s", port)
+	logger.LogInfo("Notification Service started on :%s", port)
 	if err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux)); err != nil {
-		log.Fatalf("Notification Service failed: %v", err)
+		logger.LogError("Notification Service failed: %v", err)
 	}
 }

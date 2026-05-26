@@ -2,11 +2,12 @@ package accountingworkbench
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/uploadutil"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -59,7 +60,7 @@ func GetFVODownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.accounting_fvo
 			WHERE fvo_id = $1
 		`, req.FVOID).Scan(&uploadS3Key); err != nil {
-			api.RespondWithResult(w, false, "file not found")
+			api.RespondWithResult(w, false, constants.ErrFileNotFound)
 			return
 		}
 
@@ -188,13 +189,7 @@ func CreateFVOSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -203,6 +198,21 @@ func CreateFVOSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		uploadS3Key := ""
 		if isMultipart {
+			if err := uploadutil.EnsureUniqueMultipartUpload(ctx, pgxPool, s3storage.CollectMultipartFiles(r.MultipartForm, "file", "files", "attachment"), `
+				SELECT fvo.upload_s3_key
+				FROM investment.accounting_fvo fvo
+				JOIN investment.accounting_activity act ON act.activity_id = fvo.activity_id
+				WHERE COALESCE(fvo.is_deleted, false) = false
+				  AND COALESCE(act.is_deleted, false) = false
+				  AND COALESCE(fvo.upload_s3_key, '') <> ''
+			`); err != nil {
+				if errors.Is(err, uploadutil.ErrFileAlreadyUploaded) {
+					api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
+					return
+				}
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+err.Error())
+				return
+			}
 			var uploadErr error
 			uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, "investment-fvo", userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "file", "files", "attachment"))
 			if uploadErr != nil {
@@ -349,13 +359,7 @@ func CreateFVOBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, "Invalid user session")
 			return
@@ -478,13 +482,7 @@ func UpdateFVO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -598,6 +596,7 @@ func GetFVOsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactionaccountingactivity a
+				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY a.activity_id, a.requested_at DESC
 			)
 			SELECT

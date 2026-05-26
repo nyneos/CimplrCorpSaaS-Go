@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
@@ -11,13 +12,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-	"path/filepath"
 
-	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -82,7 +83,7 @@ func getUserFriendlyPenaltyError(err error, context string) (string, int) {
 		return "", http.StatusOK
 	}
 
-	// Unwrap pgconn.PgError first — most specific handler
+	// Unwrap pgconn.PgError first â€” most specific handler
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		api.LogError("PgError [%s] constraint=%s table=%s detail=%s", pgErr.Code, pgErr.ConstraintName, pgErr.TableName, pgErr.Detail)
@@ -95,6 +96,9 @@ func getUserFriendlyPenaltyError(err error, context string) (string, int) {
 		case "23503": // foreign_key_violation
 			return "Referenced record not found or is invalid.", http.StatusOK
 		case "23514": // check_violation
+			if pgErr.Detail != "" {
+				return fmt.Sprintf("Invalid value: check constraint '%s' failed (%s)", pgErr.ConstraintName, pgErr.Detail), http.StatusBadRequest
+			}
 			return fmt.Sprintf("Invalid value: check constraint '%s' failed", pgErr.ConstraintName), http.StatusBadRequest
 		case "22P02": // invalid_text_representation (enum cast failure)
 			return "Invalid enum value provided for one of the fields", http.StatusBadRequest
@@ -649,7 +653,7 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, "Transaction start failed")
+			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTxStartFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1182,7 +1186,7 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
             SELECT audit_id, penalty_id, action_type, processing_status
             FROM investment.fd_audit_penalty_structure
-            WHERE penalty_id = ANY($1::text[]) AND processing_status LIKE 'PENDING%'
+            WHERE penalty_id = ANY($1::text[]) AND processing_status LIKE 'PENDING%' AND action_type IN ('CREATE','EDIT','DELETE')
             FOR UPDATE
         `
 
@@ -1342,9 +1346,9 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		 ctx := r.Context()
-		 // Cast date columns to text (YYYY-MM-DD) so pgx can scan into string vars
-		 baseQuery := `
+		ctx := r.Context()
+		// Cast date columns to text (YYYY-MM-DD) so pgx can scan into string vars
+		baseQuery := `
 		     SELECT m.penalty_id, m.bank_code,
 			     COALESCE(mb.bank_name,'') AS bank_name,
 			     COALESCE(mb.bank_short_name,'') AS bank_short_name,
@@ -1472,6 +1476,7 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_effective_to,
 					a.old_is_active
 				FROM investment.fd_audit_penalty_structure a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.penalty_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (
@@ -1586,254 +1591,6 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		penaltyID := r.URL.Query().Get("penalty_id")
-
-		var q string
-		var args []interface{}
-
-		if penaltyID != "" {
-			q = `
-				SELECT
-					a.audit_id,
-					a.penalty_id,
-					a.action_type,
-					a.processing_status,
-					COALESCE(a.reason,'') AS reason,
-					COALESCE(a.requested_by,'') AS requested_by,
-					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-					COALESCE(a.checker_by,'') AS checker_by,
-					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-					COALESCE(a.checker_comment,'') AS checker_comment,
-
-					-- Current values from master
-					COALESCE(m.bank_code,'') AS bank_code,
-					m.min_amount_range,
-					m.max_amount_range,
-					COALESCE(m.min_tenor_days,0) AS min_tenor_days,
-					COALESCE(m.max_tenor_days,0) AS max_tenor_days,
-					m.min_held_days,
-					m.max_held_days,
-					COALESCE(m.penalty_type,'') AS penalty_type,
-					COALESCE(m.penalty_value,0) AS penalty_value,
-					COALESCE(m.calculation_method,'') AS calculation_method,
-					m.no_interest_if_withdrawn_before,
-					COALESCE(m.description,'') AS description,
-					TO_CHAR(m.effective_from,'YYYY-MM-DD') AS effective_from,
-					TO_CHAR(m.effective_to,'YYYY-MM-DD') AS effective_to,
-					COALESCE(m.is_active,false) AS is_active,
-					COALESCE(m.is_deleted,false) AS is_deleted,
-
-					-- Old values from audit
-					COALESCE(a.old_bank_code,'') AS old_bank_code,
-					a.old_min_amount_range,
-					a.old_max_amount_range,
-					COALESCE(a.old_min_tenor_days,0) AS old_min_tenor_days,
-					COALESCE(a.old_max_tenor_days,0) AS old_max_tenor_days,
-					a.old_min_held_days,
-					a.old_max_held_days,
-					COALESCE(a.old_penalty_type,'') AS old_penalty_type,
-					COALESCE(a.old_penalty_value,0) AS old_penalty_value,
-					COALESCE(a.old_calculation_method,'') AS old_calculation_method,
-					a.old_no_interest_if_withdrawn_before,
-					COALESCE(a.old_description,'') AS old_description,
-					TO_CHAR(a.old_effective_from,'YYYY-MM-DD') AS old_effective_from,
-					TO_CHAR(a.old_effective_to,'YYYY-MM-DD') AS old_effective_to,
-					COALESCE(a.old_is_active,false) AS old_is_active
-
-				FROM investment.fd_audit_penalty_structure a
-				LEFT JOIN investment.fd_penalty_structure_master m ON m.penalty_id = a.penalty_id
-				WHERE a.penalty_id = $1
-				ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
-			`
-			args = append(args, penaltyID)
-		} else {
-			q = `
-				SELECT
-					a.audit_id,
-					a.penalty_id,
-					a.action_type,
-					a.processing_status,
-					COALESCE(a.reason,'') AS reason,
-					COALESCE(a.requested_by,'') AS requested_by,
-					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-					COALESCE(a.checker_by,'') AS checker_by,
-					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-					COALESCE(a.checker_comment,'') AS checker_comment,
-
-					-- Current values from master
-					COALESCE(m.bank_code,'') AS bank_code,
-					COALESCE(mb.bank_name,'') AS bank_name,
-					COALESCE(mb.bank_short_name,'') AS bank_short_name,
-					m.min_amount_range,
-					m.max_amount_range,
-					COALESCE(m.min_tenor_days,0) AS min_tenor_days,
-					COALESCE(m.max_tenor_days,0) AS max_tenor_days,
-					m.min_held_days,
-					m.max_held_days,
-					COALESCE(m.penalty_type,'') AS penalty_type,
-					COALESCE(m.penalty_value,0) AS penalty_value,
-					COALESCE(m.calculation_method,'') AS calculation_method,
-					m.no_interest_if_withdrawn_before,
-					COALESCE(m.description,'') AS description,
-					TO_CHAR(m.effective_from,'YYYY-MM-DD') AS effective_from,
-					TO_CHAR(m.effective_to,'YYYY-MM-DD') AS effective_to,
-					COALESCE(m.is_active,false) AS is_active,
-					COALESCE(m.is_deleted,false) AS is_deleted,
-
-					-- Old values from audit
-					COALESCE(a.old_bank_code,'') AS old_bank_code,
-					a.old_min_amount_range,
-					a.old_max_amount_range,
-					COALESCE(a.old_min_tenor_days,0) AS old_min_tenor_days,
-					COALESCE(a.old_max_tenor_days,0) AS old_max_tenor_days,
-					a.old_min_held_days,
-					a.old_max_held_days,
-					COALESCE(a.old_penalty_type,'') AS old_penalty_type,
-					COALESCE(a.old_penalty_value,0) AS old_penalty_value,
-					COALESCE(a.old_calculation_method,'') AS old_calculation_method,
-					a.old_no_interest_if_withdrawn_before,
-					COALESCE(a.old_description,'') AS old_description,
-					TO_CHAR(a.old_effective_from,'YYYY-MM-DD') AS old_effective_from,
-					TO_CHAR(a.old_effective_to,'YYYY-MM-DD') AS old_effective_to,
-					COALESCE(a.old_is_active,false) AS old_is_active
-
-				FROM investment.fd_audit_penalty_structure a
-				LEFT JOIN investment.fd_penalty_structure_master m ON m.penalty_id = a.penalty_id
-				LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
-				ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
-				LIMIT 1000
-			`
-		}
-
-		rows, err := pgxPool.Query(ctx, q, args...)
-		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
-			return
-		}
-		defer rows.Close()
-
-		out := make([]map[string]interface{}, 0)
-
-		for rows.Next() {
-			// Audit fields
-			var auditID, penID, actionType, processStatus, reason, reqBy, reqAt, checkerBy, checkerAt, checkerComment string
-
-			// Current values
-			var curBank, curBankName, curBankShortName, curPenaltyType, curCalcMethod, curDesc string
-			var curMinAmt, curMaxAmt *float64
-			var curPenaltyValue float64
-			var curMinTenor, curMaxTenor int
-			var curMinHeld, curMaxHeld, curNoInterest *int
-			var curEffFrom, curEffTo string
-			var curIsActive, curIsDeleted bool
-
-			// Old values
-			var oldBank, oldPenaltyType, oldCalcMethod, oldDesc string
-			var oldMinAmt, oldMaxAmt *float64
-			var oldPenaltyValue float64
-			var oldMinTenor, oldMaxTenor int
-			var oldMinHeld, oldMaxHeld, oldNoInterest *int
-			var oldEffFrom, oldEffTo string
-			var oldIsActive bool
-
-			if err := rows.Scan(
-				// Audit
-				&auditID, &penID, &actionType, &processStatus, &reason, &reqBy, &reqAt, &checkerBy, &checkerAt, &checkerComment,
-				// Current values (order must match SELECT)
-				&curBank, &curBankName, &curBankShortName, &curMinAmt, &curMaxAmt, &curMinTenor, &curMaxTenor, &curMinHeld, &curMaxHeld,
-				&curPenaltyType, &curPenaltyValue, &curCalcMethod, &curNoInterest, &curDesc, &curEffFrom, &curEffTo, &curIsActive, &curIsDeleted,
-				// Old values
-				&oldBank, &oldMinAmt, &oldMaxAmt, &oldMinTenor, &oldMaxTenor, &oldMinHeld, &oldMaxHeld,
-				&oldPenaltyType, &oldPenaltyValue, &oldCalcMethod, &oldNoInterest, &oldDesc, &oldEffFrom, &oldEffTo, &oldIsActive,
-			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
-				api.LogError("Database scan error in GetPenaltyStructureAuditHistory: %v", err)
-				return
-			}
-
-			out = append(out, map[string]interface{}{
-				// Audit
-				"audit_id":          auditID,
-				"penalty_id":        penID,
-				"action_type":       actionType,
-				"processing_status": processStatus,
-				"reason":            reason,
-				"requested_by":      reqBy,
-				"requested_at":      reqAt,
-				"checker_by":        checkerBy,
-				"checker_at":        checkerAt,
-				"checker_comment":   checkerComment,
-
-				// Current/New values
-				"bank_code": curBank,
-				"bank_name": func() string {
-					n, _ := bankNameShortFromCode(ctx, curBank)
-					if n == "" {
-						return curBankName
-					}
-					return n
-				}(),
-				"bank_short_name": func() string {
-					_, s := bankNameShortFromCode(ctx, curBank)
-					if s == "" {
-						return curBankShortName
-					}
-					return s
-				}(),
-				"min_amount_range":                curMinAmt,
-				"max_amount_range":                curMaxAmt,
-				"min_tenor_days":                  curMinTenor,
-				"max_tenor_days":                  curMaxTenor,
-				"min_held_days":                   curMinHeld,
-				"max_held_days":                   curMaxHeld,
-				"penalty_type":                    curPenaltyType,
-				"penalty_value":                   curPenaltyValue,
-				"calculation_method":              curCalcMethod,
-				"no_interest_if_withdrawn_before": curNoInterest,
-				"description":                     curDesc,
-				"effective_from":                  curEffFrom,
-				"effective_to":                    curEffTo,
-				"is_active":                       curIsActive,
-				"is_deleted":                      curIsDeleted,
-
-				// Old values
-				"old_bank_code":                       oldBank,
-				"old_min_amount_range":                oldMinAmt,
-				"old_max_amount_range":                oldMaxAmt,
-				"old_min_tenor_days":                  oldMinTenor,
-				"old_max_tenor_days":                  oldMaxTenor,
-				"old_min_held_days":                   oldMinHeld,
-				"old_max_held_days":                   oldMaxHeld,
-				"old_penalty_type":                    oldPenaltyType,
-				"old_penalty_value":                   oldPenaltyValue,
-				"old_calculation_method":              oldCalcMethod,
-				"old_no_interest_if_withdrawn_before": oldNoInterest,
-				"old_description":                     oldDesc,
-				"old_effective_from":                  oldEffFrom,
-				"old_effective_to":                    oldEffTo,
-				"old_is_active":                       oldIsActive,
-			})
-		}
-
-		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+rows.Err().Error())
-			api.LogError("Row iteration error in GetPenaltyStructureAuditHistory: %v", rows.Err())
-			return
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"audit_logs":           out,
-		})
-		api.LogInfo("Retrieved %d penalty audit history records", len(out))
-	}
-}
-
 func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Expect multipart form with 'file' and form value 'user_id'
@@ -1857,13 +1614,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Resolve user session
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1871,18 +1622,18 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to read file: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
 
-		s3Key := ""
+		s3Key, storedFileName := "", ""
 		if s3storage.IsS3UploadEnabled() {
 			folder := s3storage.GetStoragePrefix("master-penalty-structure")
-			storedFileName := s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
+			storedFileName = s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 				return
 			}
 		}
@@ -2149,6 +1900,20 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+			ModuleKey:        "master-penalty-structure",
+			OriginalFileName: handler.Filename,
+			StoredFileName:   storedFileName,
+			UploadS3Key:      s3Key,
+			ContentType:      contentType,
+			FileSize:         int64(len(fileBytes)),
+			TotalRows:        len(data),
+			InsertedCount:    len(insertedRecords),
+			ErrorCount:       len(data) - len(insertedRecords),
+			Status:           bulkuploadaudit.StatusFor(len(insertedRecords), len(data)-len(insertedRecords)),
+			UploadedBy:       userEmail,
+			UploadedAt:       time.Now().UTC(),
+		})
 		allResults := insertedRecords
 		success := len(insertedRecords) > 0
 		api.RespondWithPayload(w, success, "", allResults)

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -41,7 +42,7 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 		if req.Status == "" {
 			req.Status = "PENDING"
 		}
-		if req.Limit <= 0 || req.Limit > 500 {
+		if req.Limit <= 0 {
 			req.Limit = 100
 		}
 
@@ -68,7 +69,8 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			    ON bs.bank_statement_id = t.bank_statement_id
 			LEFT JOIN public.masterbankaccount mba ON mba.account_number = bs.account_number
 			LEFT JOIN public.mastercashflowcategory mc ON mc.category_id::text = q.suggested_cat
-			WHERE q.status = $1`
+			WHERE q.status = $1
+			  AND COALESCE(bs.is_deleted, false) = false`
 
 		args := []interface{}{req.Status}
 		n := 2
@@ -129,7 +131,7 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 				"entity_id":          entityID,
 			}
 			if valueDate != nil {
-				row["value_date"] = valueDate.Format("2006-01-02")
+				row["value_date"] = valueDate.Format(constants.DateFormat)
 			}
 			out = append(out, row)
 		}
@@ -141,7 +143,8 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			FROM cimplrcorpsaas.categorization_review_queue q
 			JOIN cimplrcorpsaas.bank_statement_transactions t ON t.transaction_id = q.transaction_id
 			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
-			WHERE q.status = $1`
+			WHERE q.status = $1
+			  AND COALESCE(bs.is_deleted, false) = false`
 		cntArgs := []interface{}{req.Status}
 		cn := 2
 		if req.EntityID != "" {
@@ -236,13 +239,18 @@ func ReviewActionHandler(pool *pgxpool.Pool) http.Handler {
 			defer confirmTx.Rollback(ctx) //nolint:errcheck
 
 			// 1. Write category + mark as human-confirmed on the transaction
-			if _, opErr = confirmTx.Exec(ctx, `
+			var confirmTag pgconn.CommandTag
+			if confirmTag, opErr = confirmTx.Exec(ctx, `
 				UPDATE cimplrcorpsaas.bank_statement_transactions
 				SET category_id=$1,
 				    classification_step='CONFIRMATION',
 				    confidence_score=$2
 				WHERE transaction_id=$3
 			`, *suggestedCat, conf, req.TransactionID); opErr != nil {
+				break
+			}
+			if confirmTag.RowsAffected() == 0 {
+				opErr = fmt.Errorf("transaction %d not found", req.TransactionID)
 				break
 			}
 			// 2. Immutable audit log entry — classified_by = analyst name
@@ -418,12 +426,16 @@ func applyCorrection(ctx context.Context, pool *pgxpool.Pool, txnID int64, categ
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	// 1. Update transaction
-	if _, err := tx.Exec(ctx, `
+	updateTag, err := tx.Exec(ctx, `
 		UPDATE cimplrcorpsaas.bank_statement_transactions
 		SET category_id=$1, classification_step='CORRECTION', confidence_score=0.99
 		WHERE transaction_id=$2
-	`, categoryID, txnID); err != nil {
+	`, categoryID, txnID)
+	if err != nil {
 		return fmt.Errorf("update category: %w", err)
+	}
+	if updateTag.RowsAffected() == 0 {
+		return fmt.Errorf("transaction %d not found", txnID)
 	}
 
 	// 2. Save correction for Step 4 future lookups.

@@ -18,7 +18,6 @@ package counterpartyHub
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"context"
@@ -296,13 +295,7 @@ func CreateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -439,13 +432,7 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -480,55 +467,23 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// Try approval engine path
-			var instanceEyeID string
-			engineErr := pgxPool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
-					AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER' AND m.is_active = true
-					AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER')
-					AND m.user_id = $2
-				WHERE i.record_id = $1
-					AND i.module_code = 'COUNTERPARTY_HUB'
-					AND i.status = 'PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, cpID, req.UserID,
-			).Scan(&instanceEyeID)
-
-			if engineErr == nil && instanceEyeID != "" {
-				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
-					InstanceEyeID: instanceEyeID,
-					ActorUserID:   req.UserID,
-					ActorEmail:    userEmail,
-					ActionType:    approvalengine.ActionApproved,
-					Comment:       req.Comment,
-				}); err != nil {
-					errs = append(errs, cpID+": "+err.Error())
-					continue
-				}
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "COUNTERPARTY_HUB", RecordID: cpID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
+			if actionErr != nil {
+				errs = append(errs, cpID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
 				engineActed++
 
 				// Check if instance is now fully APPROVED → flip status
-				var instStatus string
-				_ = pgxPool.QueryRow(ctx, `
-					SELECT i.status FROM uam.approval_instance i
-					JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
-					WHERE ie.instance_eye_id = $1`, instanceEyeID).Scan(&instStatus)
-				if instStatus == "APPROVED" {
+				if actionRes.InstanceStatus == "APPROVED" {
 					activateCounterparty(ctx, pgxPool, cpID, cpType, userEmail, req.Comment)
 				}
 			} else {
-				// Check if another user's pending instance blocks this approver
-				var anyPending int
-				_ = pgxPool.QueryRow(ctx, `
-					SELECT COUNT(*) FROM uam.approval_instance
-					WHERE record_id=$1 AND module_code='COUNTERPARTY_HUB' AND status='PENDING'`,
-					cpID).Scan(&anyPending)
-				if anyPending > 0 {
-					errs = append(errs, cpID+": not your turn in the approval sequence")
+				if actionRes.CancelledStale {
+					api.LogInfo("[CounterpartyHub] Cancelled stale approval instance for counterparty=%s: %s", cpID, actionRes.Reason)
+				} else if actionRes.Reason != "" {
+					errs = append(errs, cpID+": "+actionRes.Reason)
 					continue
 				}
 
@@ -913,13 +868,7 @@ func CreateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1054,13 +1003,7 @@ func UpdateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1278,13 +1221,7 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1304,6 +1241,28 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errList = append(errList, map[string]interface{}{
 					"counterparty_id": cpID, "success": false,
 					"error": constants.ErrMakerCheckerSamePerson,
+				})
+				continue
+			}
+
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "COUNTERPARTY_HUB", RecordID: cpID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
+			if actionErr != nil {
+				errList = append(errList, map[string]interface{}{
+					"counterparty_id": cpID, "success": false, "error": actionErr.Error(),
+				})
+				continue
+			}
+			if actionRes.Acted {
+				rejected = append(rejected, map[string]interface{}{
+					"counterparty_id": cpID, "success": true, "approval_engine": true,
+				})
+				continue
+			}
+			if actionRes.CancelledStale {
+				api.LogInfo("[CounterpartyHub] Cancelled stale approval instance for counterparty=%s: %s", cpID, actionRes.Reason)
+			} else if actionRes.Reason != "" {
+				errList = append(errList, map[string]interface{}{
+					"counterparty_id": cpID, "success": false, "error": actionRes.Reason,
 				})
 				continue
 			}
@@ -1406,13 +1365,7 @@ func BulkDeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return

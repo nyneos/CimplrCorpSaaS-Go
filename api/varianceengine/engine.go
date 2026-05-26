@@ -5,7 +5,7 @@ package varianceengine
 // Usage (any module):
 //   items := varianceengine.Compare("FD_CLOSURE", closureID, entityID, runID, rules)
 //   varianceengine.PersistVariances(ctx, pool, items)
-//   varianceengine.UpdateRecordFlags(ctx, pool, "investment.fd_closure_request", "closure_request_id", closureID, runID, items)
+//   varianceengine.UpdateRecordFlags(ctx, pool, constants.QuerryClosureRequest, "closure_request_id", closureID, runID, items)
 
 import (
 	"CimplrCorpSaas/api/constants"
@@ -16,8 +16,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+type QueryExecutor interface {
+	Exec(ctx context.Context, sql string, arguments ...interface{}) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -153,7 +160,7 @@ func Compare(moduleCode, recordID, entityID, runID string, rules []Rule) []Varia
 // PersistVariances upserts variance rows into public.variance_log.
 // Only items where HasVariance=true are written.
 // If an OPEN row already exists for (record_id, field_name) it is updated rather than duplicated.
-func PersistVariances(ctx context.Context, pool *pgxpool.Pool, items []VarianceItem) error {
+func PersistVariances(ctx context.Context, pool QueryExecutor, items []VarianceItem) error {
 	for i, item := range items {
 		if !item.HasVariance {
 			continue
@@ -202,8 +209,8 @@ func PersistVariances(ctx context.Context, pool *pgxpool.Pool, items []VarianceI
 
 // UpdateRecordFlags stamps has_variance, has_unresolved_variance, last_validated_at,
 // last_variance_run_id on the calling module's record.
-// table: "investment.fd_closure_request", pkCol: "closure_request_id"
-func UpdateRecordFlags(ctx context.Context, pool *pgxpool.Pool, table, pkCol, pkVal, runID string, items []VarianceItem) error {
+// table: constants.QuerryClosureRequest, pkCol: "closure_request_id"
+func UpdateRecordFlags(ctx context.Context, pool QueryExecutor, table, pkCol, pkVal, runID string, items []VarianceItem) error {
 	hasAny := false
 	hasUnresolved := false
 	for _, item := range items {
@@ -229,7 +236,7 @@ func UpdateRecordFlags(ctx context.Context, pool *pgxpool.Pool, table, pkCol, pk
 //
 //	the user fixes a value → re-calls /validate → engine produces HasVariance=false for that field
 //	→ AutoResolveCleared fires → OPEN row becomes RESOLVED automatically.
-func AutoResolveCleared(ctx context.Context, pool *pgxpool.Pool, recordID string, items []VarianceItem, resolvedBy, resolvedByEmail string) error {
+func AutoResolveCleared(ctx context.Context, pool QueryExecutor, recordID string, items []VarianceItem, resolvedBy, resolvedByEmail string) error {
 	for _, item := range items {
 		if item.HasVariance {
 			continue // still has a difference — leave OPEN
@@ -262,7 +269,7 @@ func AutoResolveCleared(ctx context.Context, pool *pgxpool.Pool, recordID string
 
 // RefreshUnresolvedFlag re-queries variance_log after a resolve/exception action
 // and updates has_unresolved_variance on the parent record.
-func RefreshUnresolvedFlag(ctx context.Context, pool *pgxpool.Pool, table, pkCol, recordID string) error {
+func RefreshUnresolvedFlag(ctx context.Context, pool QueryExecutor, table, pkCol, recordID string) error {
 	var openCount int
 	_ = pool.QueryRow(ctx,
 		`SELECT COUNT(*) FROM public.variance_log WHERE record_id=$1 AND status='OPEN'`,
@@ -275,7 +282,7 @@ func RefreshUnresolvedFlag(ctx context.Context, pool *pgxpool.Pool, table, pkCol
 // ─── DB: ResolveVariance ─────────────────────────────────────────────────────
 
 // ResolveVariance marks one variance_log row RESOLVED or EXCEPTION.
-func ResolveVariance(ctx context.Context, pool *pgxpool.Pool, req ResolveRequest) error {
+func ResolveVariance(ctx context.Context, pool QueryExecutor, req ResolveRequest) error {
 	if req.Resolution != StatusResolved && req.Resolution != StatusException {
 		return fmt.Errorf("invalid resolution %q — must be RESOLVED or EXCEPTION", req.Resolution)
 	}
@@ -294,7 +301,7 @@ func ResolveVariance(ctx context.Context, pool *pgxpool.Pool, req ResolveRequest
 // ─── DB: GetVariances ────────────────────────────────────────────────────────
 
 // GetVariances returns all variance_log rows for a record_id, newest first.
-func GetVariances(ctx context.Context, pool *pgxpool.Pool, recordID string) ([]map[string]interface{}, error) {
+func GetVariances(ctx context.Context, pool QueryExecutor, recordID string) ([]map[string]interface{}, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT variance_id, module_code, record_id, entity_id, run_id,
 		       field_name, variance_type, expected_value, actual_value,

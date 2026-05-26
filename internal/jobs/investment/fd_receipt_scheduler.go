@@ -3,17 +3,17 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // StartReceiptReconcileWorker runs a daily background job that auto-triggers
 // receipt reconciliation for all active entities that have CAPTURED or
 // APPROVAL_PENDING receipts which have not yet been reconciled.
 func StartReceiptReconcileWorker(db *pgxpool.Pool) {
-	log.Println("[fd_receipt_scheduler] Worker started")
+	logger.LogInfo("[fd_receipt_scheduler] Worker started")
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 
@@ -39,7 +39,7 @@ func runAutoReconcile(db *pgxpool.Pool) {
 		  AND reconcile_status IN ('PENDING','UNMATCHED')
 		GROUP BY entity_id, entity_name`)
 	if err != nil {
-		log.Printf("[fd_receipt_scheduler] entity query error: %v", err)
+		logger.LogError("[fd_receipt_scheduler] entity query error: %v", err)
 		return
 	}
 	defer rows.Close()
@@ -70,10 +70,10 @@ func runAutoReconcile(db *pgxpool.Pool) {
 			runID, e.EntityID, e.EntityName, e.PeriodStart, e.PeriodEnd,
 		)
 		if err != nil {
-			log.Printf("[fd_receipt_scheduler] insert run row error for %s: %v", e.EntityID, err)
+			logger.LogError("[fd_receipt_scheduler] insert run row error for %s: %v", e.EntityID, err)
 			continue
 		}
-		log.Printf("[fd_receipt_scheduler] auto-reconcile triggered: run=%s entity=%s", runID, e.EntityID)
+		logger.LogInfo("[fd_receipt_scheduler] auto-reconcile triggered: run=%s entity=%s", runID, e.EntityID)
 	}
-	log.Printf("[fd_receipt_scheduler] cycle complete — %d entity(-ies) processed", len(entities))
+	logger.LogInfo("[fd_receipt_scheduler] cycle complete — %d entity(-ies) processed", len(entities))
 }

@@ -2,8 +2,8 @@ package allMaster
 
 import (
 	api "CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
-	exposures "CimplrCorpSaas/api/fx/exposures"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
+	"CimplrCorpSaas/api/utils"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"encoding/json"
 	"fmt"
@@ -103,14 +103,7 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Missing user_id in body")
 			return
 		}
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				createdBy = s.Name
-				break
-			}
-		}
+		createdBy := api.GetUserNameFromCtx(r.Context())
 		if createdBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "User session not found or Name missing")
 			return
@@ -279,14 +272,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrMissingUserID})
 			return
 		}
-		updatedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				updatedBy = s.Name
-				break
-			}
-		}
+		updatedBy := api.GetUserNameFromCtx(r.Context())
 		if updatedBy == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "User session not found"})
@@ -596,7 +582,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						OldOptionalCodeValue string
 					}
 					existingClearing := make([]existingClearingRow, 0)
-					selClearing := `SELECT code_type, code_value, optional_code_type, optional_code_value, old_code_type, old_code_value, old_optional_code_type, old_optional_code_value FROM masterclearingcode WHERE account_id=$1 ORDER BY clearing_id`
+					selClearing := `SELECT code_type, code_value, optional_code_type, optional_code_value, old_code_type, old_code_value, old_optional_code_type, old_optional_code_value FROM masterclearingcode WHERE account_id=$1 AND COALESCE(is_deleted, false) = false ORDER BY clearing_id`
 					erows, _ := tx.Query(ctx, selClearing, updatedAccountID)
 					if erows != nil {
 						defer erows.Close()
@@ -640,8 +626,9 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 					}
 
-					if _, delErr := tx.Exec(ctx, `DELETE FROM masterclearingcode WHERE account_id=$1`, updatedAccountID); delErr != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to delete old clearing codes: " + delErr.Error(), "account_id": updatedAccountID})
+					// mark existing clearing codes as deleted (soft-delete)
+					if _, delErr := tx.Exec(ctx, `UPDATE masterclearingcode SET is_deleted = true WHERE account_id=$1`, updatedAccountID); delErr != nil {
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to soft-delete old clearing codes: " + delErr.Error(), "account_id": updatedAccountID})
 						return
 					}
 
@@ -716,14 +703,7 @@ func BulkDeleteBankAccountAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		sessions := auth.GetActiveSessions()
-		requestedBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
+		requestedBy := api.GetUserNameFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -759,14 +739,7 @@ func BulkRejectBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide account_ids")
 			return
 		}
-		sessions := auth.GetActiveSessions()
-		checkerBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -806,25 +779,18 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide account_ids")
 			return
 		}
-		sessions := auth.GetActiveSessions()
-		checkerBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		// First, delete audit rows that requested DELETE (pending delete approval)
+		// First, handle audit rows that requested DELETE (Soft Delete)
 		var delRows pgx.Rows
 		var delErr error
 		var deleted []string
 		var accountIDsToDelete []string
-		delQuery := `DELETE FROM auditactionbankaccount WHERE account_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, account_id`
-		delRows, delErr = pgxPool.Query(r.Context(), delQuery, pq.Array(req.AccountIDs))
+		delQuery := `UPDATE auditactionbankaccount SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2 WHERE account_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, account_id`
+		delRows, delErr = pgxPool.Query(r.Context(), delQuery, checkerBy, req.Comment, pq.Array(req.AccountIDs))
 		if delErr == nil {
 			defer delRows.Close()
 			for delRows.Next() {
@@ -950,6 +916,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 					aa.requested_at,
 					aa.checker_at
 				FROM auditactionbankaccount aa
+				WHERE aa.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY aa.account_id, aa.requested_at DESC
 			),
 			clearing AS (
@@ -957,6 +924,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 					c.account_id,
 					STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
 				FROM public.masterclearingcode c
+				WHERE COALESCE(c.is_deleted, false) = false
 				GROUP BY c.account_id
 			)
 			SELECT
@@ -1249,13 +1217,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Step 2: Fetch user name from active sessions
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
+		userName := api.GetUserNameFromCtx(r.Context())
 		if userName == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -1286,7 +1248,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -1330,13 +1292,13 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				headerNorm[i] = hn
 			}
 
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
 				folder := s3storage.GetStoragePrefix("master-bank-account")
-				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -1585,7 +1547,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							continue
 						}
 						if s, ok := v.(string); ok {
-							norm := exposures.NormalizeDate(s)
+							norm := utils.NormalizeDateString(s)
 							if norm == "" {
 								newCopyRows[i][colIdx+1] = nil
 							} else {
@@ -1692,6 +1654,8 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				// Insert into masterclearingcode (NEW) only when master rows were created
+				// Scope join to newly inserted account IDs to avoid matching soft-deleted accounts
+				// with the same account_number+bank_id that still have active clearing codes.
 				_, err = tx.Exec(ctx, `
 					INSERT INTO masterclearingcode (
 						account_id, code_type, code_value, optional_code_type, optional_code_value
@@ -1706,9 +1670,10 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					JOIN masterbankaccount m
 						ON m.account_number = i.account_number
 						AND m.bank_id::text = i.bank_id::text
+						AND m.account_id = ANY($2)
 					WHERE i.upload_batch_id = $1
 					AND i.clearing_code_type IS NOT NULL
-				`, batchID)
+				`, batchID, ids)
 				if err != nil {
 					tx.Rollback(ctx)
 					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert clearing codes: "+err.Error())
@@ -1722,6 +1687,20 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			committed = true
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        "master-bank-account",
+				OriginalFileName: fh.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(dataRows),
+				InsertedCount:    len(insertedRows),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userName,
+				UploadedAt:       time.Now().UTC(),
+			})
 		}
 
 		// Success Response
@@ -1776,6 +1755,7 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM auditactionbankaccount aa
 				WHERE aa.account_id = a.account_id
+				  AND aa.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) astatus ON TRUE
@@ -2012,7 +1992,10 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
                         'old_code_value', COALESCE(c.old_code_value, '')
                     ))
                     FROM masterclearingcode c
-                    WHERE c.account_id = a.account_id
+                    WHERE c.account_id = a.account_id AND COALESCE(c.is_deleted, false) = false
+                    ORDER BY c.clearing_id
+                    WHERE c.account_id = a.account_id AND COALESCE(c.is_deleted, false) = false
+                    ORDER BY c.clearing_id
                 ), '[]'::json
             ) AS clearing_codes,
             b.bank_id,
@@ -2122,7 +2105,7 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		} // fetch audit info for this account
 		auditMap := make(map[string]map[string]interface{})
-		auditQuery := `SELECT DISTINCT ON (account_id) account_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankaccount WHERE account_id=$1 ORDER BY account_id, requested_at DESC`
+		auditQuery := `SELECT DISTINCT ON (account_id) account_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankaccount WHERE account_id=$1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY account_id, requested_at DESC`
 		arows, err := pgxPool.Query(ctx, auditQuery, req.AccountID)
 		if err == nil {
 			defer arows.Close()
@@ -2492,6 +2475,7 @@ LEFT JOIN LATERAL (
     SELECT *
     FROM auditactionbankaccount aa
     WHERE aa.account_id = a.account_id
+      AND aa.actiontype IN ('CREATE','EDIT','DELETE')
     ORDER BY aa.requested_at DESC
     LIMIT 1
 ) aa ON TRUE

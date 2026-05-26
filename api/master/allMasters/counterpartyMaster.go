@@ -2,9 +2,9 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/utils/s3storage"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -326,6 +326,7 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH latest AS (
 				SELECT DISTINCT ON (counterparty_id) counterparty_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason
 				FROM auditactioncounterparty
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY counterparty_id, requested_at DESC
 			)
 	     SELECT m.counterparty_id, m.input_method, m.counterparty_name, m.old_counterparty_name, m.counterparty_code, m.old_counterparty_code, m.counterparty_type, m.old_counterparty_type, m.address, m.old_address, m.status, m.old_status, m.country, m.old_country, m.contact, m.old_contact, m.email, m.old_email, m.eff_from, m.old_eff_from, m.eff_to, m.old_eff_to, m.tags, m.old_tags, m.is_deleted,
@@ -626,6 +627,7 @@ func GetApprovedActiveCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH latest AS (
 				SELECT DISTINCT ON (counterparty_id) counterparty_id, processing_status
 				FROM auditactioncounterparty
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY counterparty_id, requested_at DESC
 			)
 			SELECT m.counterparty_id, m.counterparty_name, m.counterparty_code, m.counterparty_type
@@ -1039,20 +1041,15 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		checkerBy := session.Name
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
+		defer tx.Rollback(ctx)
 
-		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) ORDER BY counterparty_id, requested_at DESC`
+		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY counterparty_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.CounterpartyIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
@@ -1114,7 +1111,6 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		committed = true
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
 }
@@ -1139,20 +1135,15 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		checkerBy := session.Name
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
+		defer tx.Rollback(ctx)
 
-		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, actiontype, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) ORDER BY counterparty_id, requested_at DESC`
+		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, actiontype, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY counterparty_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.CounterpartyIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
@@ -1229,7 +1220,6 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		committed = true
 		api.RespondWithPayload(w, true, "", updated)
 	}
 }
@@ -1280,7 +1270,7 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -1325,13 +1315,13 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			columns := append([]string{"upload_batch_id"}, headerNorm...)
 
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-counterparty")
-				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				folder := s3storage.GetStoragePrefix(constants.ErrMasterCounterparty)
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -1428,6 +1418,20 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			committed = true
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        constants.ErrMasterCounterparty,
+				OriginalFileName: fh.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(dataRows),
+				InsertedCount:    len(newIDs),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userName,
+				UploadedAt:       time.Now().UTC(),
+			})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
@@ -1496,7 +1500,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -1572,13 +1576,13 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Prepend the generated columns to validCols
 			validCols = append([]string{"counterparty_id", "input_method"}, validCols...)
 
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-counterparty")
-				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				folder := s3storage.GetStoragePrefix(constants.ErrMasterCounterparty)
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -1623,7 +1627,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					INSERT INTO auditactioncounterparty(counterparty_id, actiontype, processing_status, requested_by, requested_at)
 					SELECT counterparty_id, 'CREATE', 'PENDING_APPROVAL', $1, now()
 					FROM mastercounterparty
-					WHERE counterparty_code = ANY($2);
+					WHERE counterparty_code = ANY($2) AND COALESCE(is_deleted, false) = false;
 				`
 				if _, err := tx.Exec(ctx, auditSQL, userName, counterpartyCodes); err != nil {
 					api.RespondWithError(w, http.StatusInternalServerError,
@@ -1638,6 +1642,20 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			committed = true
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        constants.ErrMasterCounterparty,
+				OriginalFileName: fh.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(copyRows),
+				InsertedCount:    len(copyRows),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userName,
+				UploadedAt:       time.Now().UTC(),
+			})
 
 			batchIDs = append(batchIDs, uuid.New().String())
 		}
@@ -1716,7 +1734,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -1778,13 +1796,13 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				copyRows[i] = vals
 			}
 
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-counterparty")
-				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				folder := s3storage.GetStoragePrefix(constants.ErrMasterCounterparty)
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -1895,6 +1913,20 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			committed = true
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        "master-counterparty-bank",
+				OriginalFileName: fh.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(copyRows),
+				InsertedCount:    len(copyRows),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userName,
+				UploadedAt:       time.Now().UTC(),
+			})
 
 			batchIDs = append(batchIDs, uuid.New().String())
 		}

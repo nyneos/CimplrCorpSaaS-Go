@@ -10,12 +10,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 func StartMasterService(db *sql.DB, port string) {
@@ -30,13 +31,13 @@ func StartMasterService(db *sql.DB, port string) {
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
-		log.Fatalf("failed to connect to pgxpool DB: %v", err)
+		logger.LogError("failed to connect to pgxpool DB: %v", err)
 	}
 	defer pgxPool.Close()
 	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := pgxPool.Ping(pingCtx); err != nil {
-		log.Fatalf("Master: failed to verify pgxpool DB connectivity at startup: %v", err)
+		logger.LogError("Master: failed to verify pgxpool DB connectivity at startup: %v", err)
 	}
 
 	mux.HandleFunc("/master/health", func(w http.ResponseWriter, r *http.Request) {
@@ -54,6 +55,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/v2/costprofit-center/delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.DeleteCostProfitCenter(pgxPool)))
 	mux.Handle("/master/costprofit-center/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectCostProfitCenterActions(pgxPool)))
 	mux.Handle("/master/costprofit-center/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveCostProfitCenterActions(pgxPool)))
+	mux.Handle("/master/costprofit-center/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCostProfitCenterAuditHistory(pgxPool)))
 
 	mux.Handle("/master/costprofit-center/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCostProfitCenterSimple(pgxPool)))
 
@@ -66,6 +68,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/v2/payablereceivable/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectPayableReceivableActions(pgxPool)))
 	mux.Handle("/master/payablereceivable/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadPayableReceivable(pgxPool)))
 	mux.Handle("/master/v2/payablereceivable/approved-active", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetApprovedActivePayableReceivable(pgxPool)))
+	mux.Handle("/master/payablereceivable/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetPayableReceivableAuditHistory(pgxPool)))
 
 	// Counterparty Master routes
 	mux.Handle("/master/v2/counterparty/create", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateCounterparties(pgxPool)))
@@ -77,6 +80,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/v2/counterparty/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCounterparty(pgxPool)))
 
 	mux.Handle("/master/counterparty/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCounterpartySimple(pgxPool)))
+	mux.Handle("/master/counterparty/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCounterpartyAuditHistory(pgxPool)))
 	mux.Handle("/master/counterparty/banks/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCounterpartyBankSimple(pgxPool)))
 
 	mux.Handle("/master/counterparty/approved-active", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetApprovedActiveCounterparties(pgxPool)))
@@ -95,6 +99,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/glaccount/approved-active", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetApprovedActiveGLAccounts(pgxPool)))
 	mux.Handle("/master/v2/glaccount/find-parent-at-level", middlewares.PreValidationMiddleware(pgxPool)(allMaster.FindParentGLAccountAtLevel(pgxPool)))
 	mux.Handle("/master/glaccount/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadGLAccountSimple(pgxPool)))
+	mux.Handle("/master/glaccount/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetGLAccountMasterAuditHistory(pgxPool)))
 
 	// Cash Flow Category Master routes
 	mux.Handle("/master/cashflow-category/delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.DeleteCashFlowCategory(pgxPool)))
@@ -104,28 +109,31 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/v2/cashflow-category/updatebulk", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UpdateCashFlowCategoryBulk(pgxPool)))
 	mux.Handle("/master/cashflow-category/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectCashFlowCategoryActions(pgxPool)))
 	mux.Handle("/master/cashflow-category/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveCashFlowCategoryActions(pgxPool)))
+	mux.Handle("/master/cashflow-category/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCashFlowCategoryAuditHistory(pgxPool)))
 	mux.Handle("/master/v2/cashflow-category/bulk-create-sync", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateAndSyncCashFlowCategories(pgxPool)))
 	mux.Handle("/master/cashflow-category/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCashFlowCategory(pgxPool)))
 
 	mux.Handle("/master/cashflow-category/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCashFlowCategorySimple(pgxPool)))
 	// Currency Master routes (pgx-backed)
-	mux.Handle("/master/currency/create", (allMaster.CreateCurrencyMaster(pgxPool)))
-	mux.Handle("/master/currency/all", (allMaster.GetAllCurrencyMaster(pgxPool)))
-	mux.Handle("/master/currency/update", (allMaster.UpdateCurrencyMasterBulk(pgxPool)))
-	mux.Handle("/master/currency/bulk-approve", (allMaster.BulkApproveAuditActions(pgxPool)))
-	mux.Handle("/master/currency/bulk-reject", (allMaster.BulkRejectAuditActions(pgxPool)))
-	mux.Handle("/master/currency/bulk-delete", (allMaster.BulkDeleteCurrencyAudit(pgxPool)))
-	mux.Handle("/master/currency/active-approved", (allMaster.GetActiveApprovedCurrencyCodes(pgxPool)))
+	mux.Handle("/master/currency/create", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateCurrencyMaster(pgxPool)))
+	mux.Handle("/master/currency/all", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetAllCurrencyMaster(pgxPool)))
+	mux.Handle("/master/currency/update", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UpdateCurrencyMasterBulk(pgxPool)))
+	mux.Handle("/master/currency/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveAuditActions(pgxPool)))
+	mux.Handle("/master/currency/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectAuditActions(pgxPool)))
+	mux.Handle("/master/currency/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkDeleteCurrencyAudit(pgxPool)))
+	mux.Handle("/master/currency/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCurrencyMasterAuditHistory(pgxPool)))
+	mux.Handle("/master/currency/active-approved", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetActiveApprovedCurrencyCodes(pgxPool)))
 
 	// Bank Master routes (pgx-backed)
-	mux.Handle("/master/bank/create", (allMaster.CreateBankMaster(pgxPool)))
-	mux.Handle("/master/bank/upload", (allMaster.UploadBank(pgxPool)))
-	mux.Handle("/master/bank/all", (allMaster.GetAllBankMaster(pgxPool)))
-	mux.Handle("/master/bank/names", (allMaster.GetBankNamesWithID(pgxPool)))
-	mux.Handle("/master/bank/update", (allMaster.UpdateBankMasterBulk(pgxPool)))
-	mux.Handle("/master/bank/bulk-approve", (allMaster.BulkApproveBankAuditActions(pgxPool)))
-	mux.Handle("/master/bank/bulk-reject", (allMaster.BulkRejectBankAuditActions(pgxPool)))
-	mux.Handle("/master/bank/bulk-delete", (allMaster.BulkDeleteBankAudit(pgxPool)))
+	mux.Handle("/master/bank/create", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateBankMaster(pgxPool)))
+	mux.Handle("/master/bank/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadBank(pgxPool)))
+	mux.Handle("/master/bank/all", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetAllBankMaster(pgxPool)))
+	mux.Handle("/master/bank/names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetBankNamesWithID(pgxPool)))
+	mux.Handle("/master/bank/update", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UpdateBankMasterBulk(pgxPool)))
+	mux.Handle("/master/bank/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveBankAuditActions(pgxPool)))
+	mux.Handle("/master/bank/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectBankAuditActions(pgxPool)))
+	mux.Handle("/master/bank/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkDeleteBankAudit(pgxPool)))
+	mux.Handle("/master/bank/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetBankMasterAuditHistory(pgxPool)))
 
 	// Bank Account Master routes
 	mux.Handle("/master/bankaccount/create", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateBankAccountMaster(pgxPool)))
@@ -133,6 +141,7 @@ func StartMasterService(db *sql.DB, port string) {
 	// mux.Handle("/master/bankaccount/all", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetAllBankAccountMaster(pgxPool)))
 	mux.Handle("/master/bankaccount/update", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UpdateBankAccountMasterBulk(pgxPool)))
 	mux.Handle("/master/bankaccount/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkDeleteBankAccountAudit(pgxPool)))
+	mux.Handle("/master/bankaccount/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetBankAccountAuditHistory(pgxPool)))
 	mux.Handle("/master/bankaccount/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectBankAccountAuditActions(pgxPool)))
 	mux.Handle("/master/bankaccount/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveBankAccountAuditActions(pgxPool)))
 	mux.Handle("/master/bankaccount/names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetBankNamesWithIDForAccount(pgxPool)))
@@ -163,6 +172,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/entitycash/delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.DeleteCashEntity(pgxPool)))
 	mux.Handle("/master/entitycash/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveCashEntityActions(pgxPool)))
 	mux.Handle("/master/entitycash/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectCashEntityActions(pgxPool)))
+	mux.Handle("/master/entitycash/audit-history", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetEntityCashAuditHistory(pgxPool)))
 	mux.Handle("/master/entitycash/assigned-names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetAssignedCashEntityNamesWithID(pgxPool)))
 	mux.Handle("/master/entitycash/all-names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCashEntityNamesWithID(pgxPool)))
 
@@ -176,6 +186,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/amc/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetAMCsWithAudit(pgxPool)))
 	mux.Handle("/master/amc/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetApprovedActiveAMCs(pgxPool)))
 	mux.Handle("/master/amc/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadAMCSimple(pgxPool)))
+	mux.Handle("/master/amc/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetAMCAuditHistory(pgxPool)))
 
 	// Scheme Master routes
 	mux.Handle("/master/scheme/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadSchemeSimple(pgxPool)))
@@ -189,6 +200,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/scheme/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetApprovedActiveSchemes(pgxPool)))
 	mux.Handle("/master/scheme/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetSchemesWithAudit(pgxPool)))
 	mux.Handle("/master/scheme/by-amc", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetApprovedActiveSchemesByAMC(pgxPool)))
+	mux.Handle("/master/scheme/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetSchemeAuditHistory(pgxPool)))
 
 	// DP Master routes
 	mux.Handle("/master/dp/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadDPSimple(pgxPool)))
@@ -201,6 +213,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/dp/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectDPActions(pgxPool)))
 	mux.Handle("/master/dp/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetApprovedActiveDPs(pgxPool)))
 	mux.Handle("/master/dp/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDPsWithAudit(pgxPool)))
+	mux.Handle("/master/dp/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDPAuditHistory(pgxPool)))
 
 	// Demat Master routes
 	mux.Handle("/master/demat/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadDematSimple(pgxPool)))
@@ -213,6 +226,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/demat/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectDematActions(pgxPool)))
 	mux.Handle("/master/demat/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetApprovedActiveDemats(pgxPool)))
 	mux.Handle("/master/demat/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDematsWithAudit(pgxPool)))
+	mux.Handle("/master/demat/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDematAuditHistory(pgxPool)))
 
 	// Interest Type Master routes
 	mux.Handle("/master/interest-type/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateInterestTypeSingle(pgxPool)))
@@ -283,6 +297,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/folio/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectFolioActions(pgxPool)))
 	mux.Handle("/master/folio/meta", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetSingleFolioWithAudit(pgxPool)))
 	mux.Handle("/master/folio/schemes-by-approved", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetSchemesByApprovedFolios(pgxPool)))
+	mux.Handle("/master/folio/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetFolioAuditHistory(pgxPool)))
 
 	// AMFI Config Master routes
 	mux.Handle("/master/amfi/scheme", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetAMFISchemeMasterSimple(pgxPool)))
@@ -312,6 +327,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/calendar/holiday/update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateHoliday(pgxPool)))
 	mux.Handle("/master/calendar/update-with-holidays", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateCalendarWithHolidays(pgxPool)))
 	mux.Handle("/master/calendar/years", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetPastYearsHolidays(pgxPool)))
+	mux.Handle("/master/calendar/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetCalendarAuditHistory(pgxPool)))
 
 	// Day Count Convention Master routes
 	mux.Handle("/master/day-count-convention/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateDayCountConventionSingle(pgxPool)))
@@ -364,6 +380,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/bank/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(bankMF.Download))
 	mux.Handle("/master/bank/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankMF.DownloadBulk))
 	mux.Handle("/master/bank/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(bankMF.Delete))
+	mux.Handle("/master/bank/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(bankMF.Audit))
+	mux.Handle("/master/bank/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(bankMF.ApproveDelete))
+	mux.Handle("/master/bank/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(bankMF.RejectDelete))
 
 	// Currency Master
 	currencyMF := allMaster.CurrencyMasterFilesHandlers(pgxPool)
@@ -372,6 +391,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/currency/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(currencyMF.Download))
 	mux.Handle("/master/currency/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(currencyMF.DownloadBulk))
 	mux.Handle("/master/currency/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(currencyMF.Delete))
+	mux.Handle("/master/currency/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(currencyMF.Audit))
+	mux.Handle("/master/currency/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(currencyMF.ApproveDelete))
+	mux.Handle("/master/currency/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(currencyMF.RejectDelete))
 
 	// Bank Account Master
 	bankAccountMF := allMaster.BankAccountMasterFilesHandlers(pgxPool)
@@ -380,6 +402,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/bankaccount/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(bankAccountMF.Download))
 	mux.Handle("/master/bankaccount/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankAccountMF.DownloadBulk))
 	mux.Handle("/master/bankaccount/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(bankAccountMF.Delete))
+	mux.Handle("/master/bankaccount/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(bankAccountMF.Audit))
+	mux.Handle("/master/bankaccount/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(bankAccountMF.ApproveDelete))
+	mux.Handle("/master/bankaccount/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(bankAccountMF.RejectDelete))
 
 	// Counterparty Master
 	counterpartyMF := allMaster.CounterpartyMasterFilesHandlers(pgxPool)
@@ -388,6 +413,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/counterparty/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(counterpartyMF.Download))
 	mux.Handle("/master/counterparty/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(counterpartyMF.DownloadBulk))
 	mux.Handle("/master/counterparty/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(counterpartyMF.Delete))
+	mux.Handle("/master/counterparty/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(counterpartyMF.Audit))
+	mux.Handle("/master/counterparty/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(counterpartyMF.ApproveDelete))
+	mux.Handle("/master/counterparty/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(counterpartyMF.RejectDelete))
 
 	// GL Account Master
 	glAccountMF := allMaster.GLAccountMasterFilesHandlers(pgxPool)
@@ -396,6 +424,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/glaccount/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(glAccountMF.Download))
 	mux.Handle("/master/glaccount/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(glAccountMF.DownloadBulk))
 	mux.Handle("/master/glaccount/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(glAccountMF.Delete))
+	mux.Handle("/master/glaccount/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(glAccountMF.Audit))
+	mux.Handle("/master/glaccount/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(glAccountMF.ApproveDelete))
+	mux.Handle("/master/glaccount/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(glAccountMF.RejectDelete))
 
 	// Cash Flow Category Master
 	cashflowCategoryMF := allMaster.CashFlowCategoryMasterFilesHandlers(pgxPool)
@@ -404,6 +435,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/cashflow-category/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(cashflowCategoryMF.Download))
 	mux.Handle("/master/cashflow-category/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(cashflowCategoryMF.DownloadBulk))
 	mux.Handle("/master/cashflow-category/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(cashflowCategoryMF.Delete))
+	mux.Handle("/master/cashflow-category/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(cashflowCategoryMF.Audit))
+	mux.Handle("/master/cashflow-category/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(cashflowCategoryMF.ApproveDelete))
+	mux.Handle("/master/cashflow-category/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(cashflowCategoryMF.RejectDelete))
 
 	// Cost Profit Center Master
 	costProfitCenterMF := allMaster.CostProfitCenterMasterFilesHandlers(pgxPool)
@@ -412,6 +446,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/costprofit-center/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(costProfitCenterMF.Download))
 	mux.Handle("/master/costprofit-center/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(costProfitCenterMF.DownloadBulk))
 	mux.Handle("/master/costprofit-center/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(costProfitCenterMF.Delete))
+	mux.Handle("/master/costprofit-center/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(costProfitCenterMF.Audit))
+	mux.Handle("/master/costprofit-center/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(costProfitCenterMF.ApproveDelete))
+	mux.Handle("/master/costprofit-center/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(costProfitCenterMF.RejectDelete))
 
 	// Payable Receivable Master
 	payableReceivableMF := allMaster.PayableReceivableMasterFilesHandlers(pgxPool)
@@ -420,6 +457,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/payablereceivable/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(payableReceivableMF.Download))
 	mux.Handle("/master/payablereceivable/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(payableReceivableMF.DownloadBulk))
 	mux.Handle("/master/payablereceivable/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(payableReceivableMF.Delete))
+	mux.Handle("/master/payablereceivable/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(payableReceivableMF.Audit))
+	mux.Handle("/master/payablereceivable/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(payableReceivableMF.ApproveDelete))
+	mux.Handle("/master/payablereceivable/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(payableReceivableMF.RejectDelete))
 
 	// Entity Cash Master
 	entityCashMF := allMaster.EntityCashMasterFilesHandlers(pgxPool)
@@ -428,6 +468,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/entitycash/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(entityCashMF.Download))
 	mux.Handle("/master/entitycash/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(entityCashMF.DownloadBulk))
 	mux.Handle("/master/entitycash/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(entityCashMF.Delete))
+	mux.Handle("/master/entitycash/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(entityCashMF.Audit))
+	mux.Handle("/master/entitycash/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(entityCashMF.ApproveDelete))
+	mux.Handle("/master/entitycash/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(entityCashMF.RejectDelete))
 
 	// Entity Master
 	entityMF := allMaster.EntityMasterFilesHandlers(pgxPool)
@@ -436,6 +479,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/entity/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(entityMF.Download))
 	mux.Handle("/master/entity/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(entityMF.DownloadBulk))
 	mux.Handle("/master/entity/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(entityMF.Delete))
+	mux.Handle("/master/entity/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(entityMF.Audit))
+	mux.Handle("/master/entity/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(entityMF.ApproveDelete))
+	mux.Handle("/master/entity/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(entityMF.RejectDelete))
 
 	// AMC Master
 	amcMF := investmentMasters.AMCMasterFilesHandlers(pgxPool)
@@ -444,6 +490,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/amc/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(amcMF.Download))
 	mux.Handle("/master/amc/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(amcMF.DownloadBulk))
 	mux.Handle("/master/amc/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(amcMF.Delete))
+	mux.Handle("/master/amc/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(amcMF.Audit))
+	mux.Handle("/master/amc/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(amcMF.ApproveDelete))
+	mux.Handle("/master/amc/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(amcMF.RejectDelete))
 
 	// Scheme Master
 	schemeMF := investmentMasters.SchemeMasterFilesHandlers(pgxPool)
@@ -452,6 +501,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/scheme/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(schemeMF.Download))
 	mux.Handle("/master/scheme/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(schemeMF.DownloadBulk))
 	mux.Handle("/master/scheme/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(schemeMF.Delete))
+	mux.Handle("/master/scheme/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(schemeMF.Audit))
+	mux.Handle("/master/scheme/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(schemeMF.ApproveDelete))
+	mux.Handle("/master/scheme/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(schemeMF.RejectDelete))
 
 	// DP (Depository Participant) Master
 	dpMF := investmentMasters.DPMasterFilesHandlers(pgxPool)
@@ -460,6 +512,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/dp/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(dpMF.Download))
 	mux.Handle("/master/dp/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(dpMF.DownloadBulk))
 	mux.Handle("/master/dp/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(dpMF.Delete))
+	mux.Handle("/master/dp/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(dpMF.Audit))
+	mux.Handle("/master/dp/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(dpMF.ApproveDelete))
+	mux.Handle("/master/dp/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(dpMF.RejectDelete))
 
 	// Demat Master
 	dematMF := investmentMasters.DematMasterFilesHandlers(pgxPool)
@@ -468,6 +523,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/demat/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(dematMF.Download))
 	mux.Handle("/master/demat/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(dematMF.DownloadBulk))
 	mux.Handle("/master/demat/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(dematMF.Delete))
+	mux.Handle("/master/demat/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(dematMF.Audit))
+	mux.Handle("/master/demat/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(dematMF.ApproveDelete))
+	mux.Handle("/master/demat/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(dematMF.RejectDelete))
 
 	// Folio Master
 	folioMF := investmentMasters.FolioMasterFilesHandlers(pgxPool)
@@ -476,6 +534,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/folio/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(folioMF.Download))
 	mux.Handle("/master/folio/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(folioMF.DownloadBulk))
 	mux.Handle("/master/folio/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(folioMF.Delete))
+	mux.Handle("/master/folio/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(folioMF.Audit))
+	mux.Handle("/master/folio/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(folioMF.ApproveDelete))
+	mux.Handle("/master/folio/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(folioMF.RejectDelete))
 
 	// Interest Type Master
 	interestTypeMF := investmentMasters.InterestTypeMasterFilesHandlers(pgxPool)
@@ -484,6 +545,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/interest-type/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(interestTypeMF.Download))
 	mux.Handle("/master/interest-type/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(interestTypeMF.DownloadBulk))
 	mux.Handle("/master/interest-type/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(interestTypeMF.Delete))
+	mux.Handle("/master/interest-type/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(interestTypeMF.Audit))
+	mux.Handle("/master/interest-type/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(interestTypeMF.ApproveDelete))
+	mux.Handle("/master/interest-type/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(interestTypeMF.RejectDelete))
 
 	// Penalty Structure Master
 	penaltyStructureMF := investmentMasters.PenaltyStructureMasterFilesHandlers(pgxPool)
@@ -492,6 +556,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/penalty-structure/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(penaltyStructureMF.Download))
 	mux.Handle("/master/penalty-structure/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(penaltyStructureMF.DownloadBulk))
 	mux.Handle("/master/penalty-structure/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(penaltyStructureMF.Delete))
+	mux.Handle("/master/penalty-structure/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(penaltyStructureMF.Audit))
+	mux.Handle("/master/penalty-structure/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(penaltyStructureMF.ApproveDelete))
+	mux.Handle("/master/penalty-structure/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(penaltyStructureMF.RejectDelete))
 
 	// Compounding Frequency Master
 	compoundingFrequencyMF := investmentMasters.CompoundingFrequencyMasterFilesHandlers(pgxPool)
@@ -500,6 +567,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/compounding-frequency/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(compoundingFrequencyMF.Download))
 	mux.Handle("/master/compounding-frequency/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(compoundingFrequencyMF.DownloadBulk))
 	mux.Handle("/master/compounding-frequency/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(compoundingFrequencyMF.Delete))
+	mux.Handle("/master/compounding-frequency/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(compoundingFrequencyMF.Audit))
+	mux.Handle("/master/compounding-frequency/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(compoundingFrequencyMF.ApproveDelete))
+	mux.Handle("/master/compounding-frequency/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(compoundingFrequencyMF.RejectDelete))
 
 	// TDS Plan Master
 	tdsPlanMF := investmentMasters.TDSPlanMasterFilesHandlers(pgxPool)
@@ -508,6 +578,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/tds-plan/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(tdsPlanMF.Download))
 	mux.Handle("/master/tds-plan/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(tdsPlanMF.DownloadBulk))
 	mux.Handle("/master/tds-plan/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(tdsPlanMF.Delete))
+	mux.Handle("/master/tds-plan/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(tdsPlanMF.Audit))
+	mux.Handle("/master/tds-plan/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(tdsPlanMF.ApproveDelete))
+	mux.Handle("/master/tds-plan/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(tdsPlanMF.RejectDelete))
 
 	// Calendar (Holiday) Master
 	calendarMF := investmentMasters.CalendarMasterFilesHandlers(pgxPool)
@@ -516,6 +589,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/calendar/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(calendarMF.Download))
 	mux.Handle("/master/calendar/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(calendarMF.DownloadBulk))
 	mux.Handle("/master/calendar/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(calendarMF.Delete))
+	mux.Handle("/master/calendar/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(calendarMF.Audit))
+	mux.Handle("/master/calendar/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(calendarMF.ApproveDelete))
+	mux.Handle("/master/calendar/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(calendarMF.RejectDelete))
 
 	// Day Count Convention Master
 	dayCountConventionMF := investmentMasters.DayCountConventionMasterFilesHandlers(pgxPool)
@@ -524,6 +600,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/day-count-convention/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(dayCountConventionMF.Download))
 	mux.Handle("/master/day-count-convention/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(dayCountConventionMF.DownloadBulk))
 	mux.Handle("/master/day-count-convention/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(dayCountConventionMF.Delete))
+	mux.Handle("/master/day-count-convention/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(dayCountConventionMF.Audit))
+	mux.Handle("/master/day-count-convention/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(dayCountConventionMF.ApproveDelete))
+	mux.Handle("/master/day-count-convention/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(dayCountConventionMF.RejectDelete))
 
 	// Bank Config Master
 	bankConfigMF := investmentMasters.BankConfigMasterFilesHandlers(pgxPool)
@@ -532,6 +611,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/bank-config/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(bankConfigMF.Download))
 	mux.Handle("/master/bank-config/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankConfigMF.DownloadBulk))
 	mux.Handle("/master/bank-config/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(bankConfigMF.Delete))
+	mux.Handle("/master/bank-config/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(bankConfigMF.Audit))
+	mux.Handle("/master/bank-config/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(bankConfigMF.ApproveDelete))
+	mux.Handle("/master/bank-config/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(bankConfigMF.RejectDelete))
 
 	// Bank Rate Card Master
 	bankRateCardMF := investmentMasters.BankRateCardMasterFilesHandlers(pgxPool)
@@ -540,13 +622,16 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/bank-rate-card/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(bankRateCardMF.Download))
 	mux.Handle("/master/bank-rate-card/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankRateCardMF.DownloadBulk))
 	mux.Handle("/master/bank-rate-card/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(bankRateCardMF.Delete))
+	mux.Handle("/master/bank-rate-card/additional-files/audit", middlewares.PreValidationMiddleware(pgxPool)(bankRateCardMF.Audit))
+	mux.Handle("/master/bank-rate-card/additional-files/approve-delete", middlewares.PreValidationMiddleware(pgxPool)(bankRateCardMF.ApproveDelete))
+	mux.Handle("/master/bank-rate-card/additional-files/reject-delete", middlewares.PreValidationMiddleware(pgxPool)(bankRateCardMF.RejectDelete))
 
 	// Counterparty Hub Master routes
 	counterpartyHub.RegisterCounterpartyHubRoutes(mux, pgxPool, db)
 
-	log.Printf("Master Service started on :%s", port)
+	logger.LogInfo("Master Service started on :%s", port)
 	err = http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {
-		log.Fatalf("Master Service failed: %v", err)
+		logger.LogError("Master Service failed: %v", err)
 	}
 }

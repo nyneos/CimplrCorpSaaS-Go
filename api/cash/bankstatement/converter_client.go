@@ -15,6 +15,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 // convertSvcResponse mirrors the JSON returned by the conversion service.
@@ -55,7 +57,7 @@ func callConvertXLSX(ctx context.Context, docBytes []byte, filename, password st
 
 func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, password, path string) ([]byte, error) {
 	target := r0() + path
-	log.Printf("[svc] POST %s file=%s size=%d", target, filename, len(docBytes))
+	logger.LogInfo("[svc] POST **** file=%s size=%d", filename, len(docBytes))
 
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -106,7 +108,7 @@ func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, passwor
 	if err != nil {
 		return nil, fmt.Errorf("base64 decode: %w", err)
 	}
-	log.Printf("[svc] done credits_used=%d remaining=%d output=%d bytes",
+	logger.LogInfo("[svc] done credits_used=%d remaining=%d output=%d bytes",
 		result.CreditsUsed, result.RemainingCredits, len(out))
 	return out, nil
 }

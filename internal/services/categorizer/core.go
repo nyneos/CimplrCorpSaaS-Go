@@ -259,11 +259,19 @@ func SmartCategorize(
 		return r
 	}
 
+	// bestGuess tracks the highest-confidence result that fell below MinConfidenceForActuals.
+	// It is returned as the final result when all deterministic steps fail, so the review
+	// queue entry gets a non-NULL suggested_cat even for near-miss matches.
+	var bestGuess *ClassificationResult
+
 	// Step 5: Trigram similarity against confirmed transactions (DB, GIN-indexed)
 	if r, ok := lookupSimilarity(ctx, pool, narration.Stemmed, txn.EntityID, txn); ok {
 		if r.Confidence >= MinConfidenceForActuals {
 			return r
 		}
+		// Below threshold — save as best guess for review queue
+		cp := r
+		bestGuess = &cp
 	}
 
 	// Step 6: Account-level default category (masterbankaccount.cat_inflow / cat_outflow etc.)
@@ -275,10 +283,23 @@ func SmartCategorize(
 	// Step 9: AI / Intelligent Inference — only when all deterministic steps failed.
 	// The LLM call is skipped when AI_INFERENCE_URL is not configured.
 	if r, ok := InferWithAI(ctx, pool, narration, txn); ok {
-		return r
+		if r.Confidence >= MinConfidenceForActuals {
+			return r
+		}
+		// AI gave a low-confidence answer — use it as best guess if better than similarity
+		if bestGuess == nil || r.Confidence > bestGuess.Confidence {
+			cp := r
+			bestGuess = &cp
+		}
 	}
 
-	// Step 10: Unallocated
+	// Step 10: Return best low-confidence guess so the review queue has a suggested_cat.
+	// This avoids NULL suggested_cat for near-miss transactions.
+	if bestGuess != nil {
+		return *bestGuess
+	}
+
+	// Nothing at all — truly unallocated
 	return ClassificationResult{
 		Step:       StepUnallocated,
 		Confidence: 0,

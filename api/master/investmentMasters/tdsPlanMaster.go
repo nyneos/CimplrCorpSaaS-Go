@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"encoding/json"
 	"errors"
@@ -181,6 +182,7 @@ func GetTdsPlansApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_tds_plan_master m
 			INNER JOIN investment.fd_audit_tds_plan a ON a.tds_plan_id = m.tds_plan_id
 			WHERE a.processing_status = 'APPROVED'
+				AND a.action_type IN ('CREATE','EDIT','DELETE')
 				AND m.is_active = true
 				AND COALESCE(m.is_deleted, false) = false
 			ORDER BY m.tds_plan_name
@@ -561,7 +563,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		fileBytes, err := io.ReadAll(file)
 		file.Close()
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -572,13 +574,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -778,13 +774,13 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Bulk insert (similar to CreateTDSPlan)
 		ctx := r.Context()
 
-		s3Key := ""
+		s3Key, storedFileName := "", ""
 		if s3storage.IsS3UploadEnabled() {
 			folder := s3storage.GetStoragePrefix("master-tds-plan")
-			storedFileName := s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
+			storedFileName = s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 				return
 			}
 		}
@@ -941,6 +937,20 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+		bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+			ModuleKey:        "master-tds-plan",
+			OriginalFileName: handler.Filename,
+			StoredFileName:   storedFileName,
+			UploadS3Key:      s3Key,
+			ContentType:      contentType,
+			FileSize:         int64(len(fileBytes)),
+			TotalRows:        len(inserted) + len(errorsList),
+			InsertedCount:    len(inserted),
+			ErrorCount:       len(errorsList),
+			Status:           bulkuploadaudit.StatusFor(len(inserted), len(errorsList)),
+			UploadedBy:       userEmail,
+			UploadedAt:       time.Now().UTC(),
+		})
 		api.LogInfo("Transaction committed successfully")
 
 		if len(inserted) > 0 {
@@ -1017,6 +1027,7 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_is_active,
 					a.old_is_deleted
 				FROM investment.fd_audit_tds_plan a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.tds_plan_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (
@@ -1118,183 +1129,6 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"rows":                 out,
 		})
 		api.LogInfo("Retrieved %d tds plans with audit data", len(out))
-	}
-}
-
-// --- TDS Plan: Audit History ---
-func GetTdsPlanAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		tdsID := r.URL.Query().Get("tds_plan_id")
-
-		var q string
-		var args []interface{}
-
-		if tdsID != "" {
-			q = `
-				SELECT
-					a.audit_id,
-					a.tds_plan_id,
-					a.action_type,
-					a.processing_status,
-					COALESCE(a.reason,'') AS reason,
-					COALESCE(a.requested_by,'') AS requested_by,
-					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-					COALESCE(a.checker_by,'') AS checker_by,
-					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-					COALESCE(a.checker_comment,'') AS checker_comment,
-
-					-- Current/New values from master table
-					COALESCE(m.tds_plan_code,'') AS tds_plan_code,
-					COALESCE(m.tds_plan_name,'') AS tds_plan_name,
-					COALESCE(m.tds_section,'') AS tds_section,
-					COALESCE(m.tds_rate,0) AS tds_rate,
-					COALESCE(m.has_pan,false) AS has_pan,
-					COALESCE(m.threshold_amount,0) AS threshold_amount,
-					COALESCE(m.threshold_type,'') AS threshold_type,
-					COALESCE(m.deduction_timing,'') AS deduction_timing,
-					COALESCE(m.applicable_from,'') AS applicable_from,
-					COALESCE(m.applicable_to,'') AS applicable_to,
-					COALESCE(m.description,'') AS description,
-					COALESCE(m.is_active,false) AS is_active,
-					COALESCE(m.is_deleted,false) AS is_deleted,
-
-					-- Old values from audit table
-					COALESCE(a.old_tds_plan_code,'') AS old_tds_plan_code,
-					COALESCE(a.old_tds_rate,0) AS old_tds_rate,
-					COALESCE(a.old_threshold_amount,0) AS old_threshold_amount,
-					COALESCE(a.old_has_pan,false) AS old_has_pan,
-					COALESCE(a.old_is_active,false) AS old_is_active
-
-				FROM investment.fd_audit_tds_plan a
-				LEFT JOIN investment.fd_tds_plan_master m ON m.tds_plan_id = a.tds_plan_id
-				WHERE a.tds_plan_id = $1
-				ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
-			`
-			args = append(args, tdsID)
-		} else {
-			q = `
-				SELECT
-					a.audit_id,
-					a.tds_plan_id,
-					a.action_type,
-					a.processing_status,
-					COALESCE(a.reason,'') AS reason,
-					COALESCE(a.requested_by,'') AS requested_by,
-					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-					COALESCE(a.checker_by,'') AS checker_by,
-					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-					COALESCE(a.checker_comment,'') AS checker_comment,
-
-					-- Current/New values from master table
-					COALESCE(m.tds_plan_code,'') AS tds_plan_code,
-					COALESCE(m.tds_plan_name,'') AS tds_plan_name,
-					COALESCE(m.tds_section,'') AS tds_section,
-					COALESCE(m.tds_rate,0) AS tds_rate,
-					COALESCE(m.has_pan,false) AS has_pan,
-					COALESCE(m.threshold_amount,0) AS threshold_amount,
-					COALESCE(m.threshold_type,'') AS threshold_type,
-					COALESCE(m.deduction_timing,'') AS deduction_timing,
-					COALESCE(m.applicable_from,'') AS applicable_from,
-					COALESCE(m.applicable_to,'') AS applicable_to,
-					COALESCE(m.description,'') AS description,
-					COALESCE(m.is_active,false) AS is_active,
-					COALESCE(m.is_deleted,false) AS is_deleted,
-
-					-- Old values from audit table
-					COALESCE(a.old_tds_plan_code,'') AS old_tds_plan_code,
-					COALESCE(a.old_tds_rate,0) AS old_tds_rate,
-					COALESCE(a.old_threshold_amount,0) AS old_threshold_amount,
-					COALESCE(a.old_has_pan,false) AS old_has_pan,
-					COALESCE(a.old_is_active,false) AS old_is_active
-
-				FROM investment.fd_audit_tds_plan a
-				LEFT JOIN investment.fd_tds_plan_master m ON m.tds_plan_id = a.tds_plan_id
-				ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
-				LIMIT 1000
-			`
-		}
-
-		rows, err := pgxPool.Query(ctx, q, args...)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
-			return
-		}
-		defer rows.Close()
-
-		out := make([]map[string]interface{}, 0)
-
-		for rows.Next() {
-			var auditID, tid, actionType, processStatus, reason, reqBy, reqAt, checkerBy, checkerAt, checkerComment string
-
-			var currentCode, currentName, currentSection, currentDesc string
-			var currentRate float64
-			var currentHasPan bool
-			var currentThreshold float64
-			var currentThresholdType, currentDeductionTiming string
-			var currentApplicableFrom, currentApplicableTo string
-			var currentIsActive, currentIsDeleted bool
-
-			var oldCode string
-			var oldRate, oldThreshold float64
-			var oldHasPan, oldIsActive bool
-
-			if err := rows.Scan(
-				&auditID, &tid, &actionType, &processStatus, &reason, &reqBy, &reqAt, &checkerBy, &checkerAt, &checkerComment,
-				&currentCode, &currentName, &currentSection, &currentRate, &currentHasPan, &currentThreshold, &currentThresholdType, &currentDeductionTiming, &currentApplicableFrom, &currentApplicableTo, &currentDesc, &currentIsActive, &currentIsDeleted,
-				&oldCode, &oldRate, &oldThreshold, &oldHasPan, &oldIsActive,
-			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
-				api.LogError("Database scan error in GetTdsPlanAuditHistory: %v", err)
-				return
-			}
-
-			out = append(out, map[string]interface{}{
-				"audit_id":          auditID,
-				"tds_plan_id":       tid,
-				"action_type":       actionType,
-				"processing_status": processStatus,
-				"reason":            reason,
-				"requested_by":      reqBy,
-				"requested_at":      reqAt,
-				"checker_by":        checkerBy,
-				"checker_at":        checkerAt,
-				"checker_comment":   checkerComment,
-
-				"tds_plan_code":    currentCode,
-				"tds_plan_name":    currentName,
-				"tds_section":      currentSection,
-				"tds_rate":         currentRate,
-				"has_pan":          currentHasPan,
-				"threshold_amount": currentThreshold,
-				"threshold_type":   currentThresholdType,
-				"deduction_timing": currentDeductionTiming,
-				"applicable_from":  currentApplicableFrom,
-				"applicable_to":    currentApplicableTo,
-				"description":      currentDesc,
-				"is_active":        currentIsActive,
-				"is_deleted":       currentIsDeleted,
-
-				"old_tds_plan_code":    oldCode,
-				"old_tds_rate":         oldRate,
-				"old_threshold_amount": oldThreshold,
-				"old_has_pan":          oldHasPan,
-				"old_is_active":        oldIsActive,
-			})
-		}
-
-		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+rows.Err().Error())
-			api.LogError("Row iteration error in GetTdsPlanAuditHistory: %v", rows.Err())
-			return
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"audit_logs":           out,
-		})
-		api.LogInfo("Retrieved %d tds plan audit history records", len(out))
 	}
 }
 
@@ -1502,6 +1336,7 @@ func BulkApproveTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE a.tds_plan_id = ANY($1::text[]) 
 				  AND a.action_type = 'DELETE' 
 				  AND a.processing_status = 'APPROVED'
+				  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			)
 		`, req.TdsIDs)
 
@@ -1633,7 +1468,7 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyTDSPlanError(err, "Transaction start failed")
+			msg, status := getUserFriendlyTDSPlanError(err, constants.ErrTxStartFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}

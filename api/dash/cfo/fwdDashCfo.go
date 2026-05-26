@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"net/http"
 	"strings"
@@ -14,10 +13,11 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/lib/pq"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
+	logger.LogError("%s", errMsg)
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{

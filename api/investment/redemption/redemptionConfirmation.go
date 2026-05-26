@@ -2,13 +2,14 @@ package redemption
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/uploadutil"
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -134,7 +135,7 @@ func GetRedemptionConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFun
 			FROM investment.redemption_confirmation
 			WHERE redemption_confirm_id = $1
 		`, req.RedemptionConfirmID).Scan(&uploadS3Key); err != nil {
-			api.RespondWithResult(w, false, "file not found")
+			api.RespondWithResult(w, false, constants.ErrFileNotFound)
 			return
 		}
 
@@ -262,13 +263,7 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -277,6 +272,19 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		ctx := r.Context()
 		var uploadS3Key string
 		if statementHeader != nil {
+			if err := uploadutil.EnsureUniqueMultipartUpload(ctx, pgxPool, []*multipart.FileHeader{statementHeader}, `
+				SELECT upload_s3_key
+				FROM investment.redemption_confirmation
+				WHERE COALESCE(is_deleted, false) = false
+				  AND COALESCE(upload_s3_key, '') <> ''
+			`); err != nil {
+				if errors.Is(err, uploadutil.ErrFileAlreadyUploaded) {
+					api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
+					return
+				}
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+err.Error())
+				return
+			}
 			key, err := uploadRedemptionConfirmationStatement(ctx, statementHeader, userEmail)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to store AMC statement: "+err.Error())
@@ -423,13 +431,7 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -439,91 +441,107 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		results := make([]map[string]interface{}, 0, len(req.Rows))
 
 		for _, row := range req.Rows {
-			// Validate
-			if strings.TrimSpace(row.RedemptionID) == "" {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "redemption_id is required"})
-				continue
-			}
-			if row.ActualNAV <= 0 || row.ActualUnits <= 0 || row.GrossProceeds <= 0 {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "actual_nav, actual_units, and gross_proceeds must be > 0"})
-				continue
-			}
-
-			// Calculate net_credited if not provided
-			if row.NetCredited <= 0 {
-				row.NetCredited = row.GrossProceeds - row.ExitLoad - row.TDS - row.STTCharges
-				if row.NetCredited < 0 {
-					row.NetCredited = 0
+			func(row struct {
+				RedemptionID                 string  `json:"redemption_id"`
+				ActualNAV                    float64 `json:"actual_nav"`
+				ActualUnits                  float64 `json:"actual_units"`
+				GrossProceeds                float64 `json:"gross_proceeds"`
+				ExitLoad                     float64 `json:"exit_load,omitempty"`
+				TDS                          float64 `json:"tds,omitempty"`
+				NetCredited                  float64 `json:"net_credited"`
+				STTCharges                   float64 `json:"stt_charges,omitempty"`
+				ResolutionVariance           string  `json:"resolution_variance,omitempty"`
+				ResolutionComment            string  `json:"resolution_comment,omitempty"`
+				VarianceProceeds             float64 `json:"variance_proceeds,omitempty"`
+				FinalRealisedCapitalGainLoss float64 `json:"final_realised_capital_gain_loss,omitempty"`
+				Status                       string  `json:"status,omitempty"`
+			}) {
+				// Validate
+				if strings.TrimSpace(row.RedemptionID) == "" {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "redemption_id is required"})
+					return
 				}
-			}
+				if row.ActualNAV <= 0 || row.ActualUnits <= 0 || row.GrossProceeds <= 0 {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "actual_nav, actual_units, and gross_proceeds must be > 0"})
+					return
+				}
 
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
-				continue
-			}
-			defer tx.Rollback(ctx)
+				// Calculate net_credited if not provided
+				if row.NetCredited <= 0 {
+					row.NetCredited = row.GrossProceeds - row.ExitLoad - row.TDS - row.STTCharges
+					if row.NetCredited < 0 {
+						row.NetCredited = 0
+					}
+				}
 
-			// Validate: sum of confirmed units for this redemption_id shouldn't exceed initiation units
-			var initiationUnits float64
-			var existingConfirmedUnits float64
-			if err := tx.QueryRow(ctx, `
-				SELECT 
-					COALESCE(ri.by_units, 0) AS initiation_units,
-					COALESCE(SUM(rc.actual_units), 0) AS existing_confirmed_units
-				FROM investment.redemption_initiation ri
-				LEFT JOIN investment.redemption_confirmation rc ON rc.redemption_id = ri.redemption_id
-					AND COALESCE(rc.is_deleted, false) = false
-				WHERE ri.redemption_id = $1
-				GROUP BY ri.redemption_id, ri.by_units
-			`, row.RedemptionID).Scan(&initiationUnits, &existingConfirmedUnits); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "Failed to validate redemption: " + err.Error()})
-				continue
-			}
+				tx, err := pgxPool.Begin(ctx)
+				if err != nil {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
+					return
+				}
+				defer tx.Rollback(ctx)
 
-			if existingConfirmedUnits+row.ActualUnits > initiationUnits {
-				results = append(results, map[string]interface{}{"success": false, "error": fmt.Sprintf("Cannot confirm %.2f units. Initiation has %.2f units, already confirmed %.2f units.",
-					row.ActualUnits, initiationUnits, existingConfirmedUnits)})
-				continue
-			}
+				// Validate: sum of confirmed units for this redemption_id shouldn't exceed initiation units
+				var initiationUnits float64
+				var existingConfirmedUnits float64
+				if err := tx.QueryRow(ctx, `
+					SELECT 
+						COALESCE(ri.by_units, 0) AS initiation_units,
+						COALESCE(SUM(rc.actual_units), 0) AS existing_confirmed_units
+					FROM investment.redemption_initiation ri
+					LEFT JOIN investment.redemption_confirmation rc ON rc.redemption_id = ri.redemption_id
+						AND COALESCE(rc.is_deleted, false) = false
+					WHERE ri.redemption_id = $1
+					GROUP BY ri.redemption_id, ri.by_units
+				`, row.RedemptionID).Scan(&initiationUnits, &existingConfirmedUnits); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "Failed to validate redemption: " + err.Error()})
+					return
+				}
 
-			status := "PENDING_CONFIRMATION"
-			if strings.TrimSpace(row.Status) != "" {
-				status = row.Status
-			}
+				if existingConfirmedUnits+row.ActualUnits > initiationUnits {
+					results = append(results, map[string]interface{}{"success": false, "error": fmt.Sprintf("Cannot confirm %.2f units. Initiation has %.2f units, already confirmed %.2f units.",
+						row.ActualUnits, initiationUnits, existingConfirmedUnits)})
+					return
+				}
 
-			var confirmID string
-			if err := tx.QueryRow(ctx, `
-				INSERT INTO investment.redemption_confirmation (
-					redemption_id, actual_nav, actual_units, gross_proceeds,
-					exit_load, tds, net_credited, stt_charges, resolution_variance, resolution_comment,
-					variance_proceeds, final_realised_capital_gain_loss, status
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-				RETURNING redemption_confirm_id
-			`, row.RedemptionID, row.ActualNAV, row.ActualUnits, row.GrossProceeds,
-				row.ExitLoad, row.TDS, row.NetCredited, nullIfZeroFloat(row.STTCharges), row.ResolutionVariance, row.ResolutionComment, nullIfZeroFloat(row.VarianceProceeds), nullIfZeroFloat(row.FinalRealisedCapitalGainLoss), status).Scan(&confirmID); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Insert failed: " + err.Error()})
-				continue
-			}
+				status := "PENDING_CONFIRMATION"
+				if strings.TrimSpace(row.Status) != "" {
+					status = row.Status
+				}
 
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, requested_by, requested_at)
-				VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
-			`, confirmID, userEmail); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
-				continue
-			}
+				var confirmID string
+				if err := tx.QueryRow(ctx, `
+					INSERT INTO investment.redemption_confirmation (
+						redemption_id, actual_nav, actual_units, gross_proceeds,
+						exit_load, tds, net_credited, stt_charges, resolution_variance, resolution_comment,
+						variance_proceeds, final_realised_capital_gain_loss, status
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+					RETURNING redemption_confirm_id
+				`, row.RedemptionID, row.ActualNAV, row.ActualUnits, row.GrossProceeds,
+					row.ExitLoad, row.TDS, row.NetCredited, nullIfZeroFloat(row.STTCharges), row.ResolutionVariance, row.ResolutionComment, nullIfZeroFloat(row.VarianceProceeds), nullIfZeroFloat(row.FinalRealisedCapitalGainLoss), status).Scan(&confirmID); err != nil {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Insert failed: " + err.Error()})
+					return
+				}
 
-			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error()})
-				continue
-			}
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, requested_by, requested_at)
+					VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
+				`, confirmID, userEmail); err != nil {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
+					return
+				}
 
-			results = append(results, map[string]interface{}{
-				constants.ValueSuccess:  true,
-				"redemption_confirm_id": confirmID,
-				"redemption_id":         row.RedemptionID,
-			})
+				if err := tx.Commit(ctx); err != nil {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error()})
+					return
+				}
+
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess:  true,
+					"redemption_confirm_id": confirmID,
+					"redemption_id":         row.RedemptionID,
+				})
+			}(row)
 		}
 
 		createdConfirmIDs := make([]string, 0, len(results))
@@ -564,13 +582,7 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -689,13 +701,7 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
@@ -705,89 +711,95 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		results := make([]map[string]interface{}, 0, len(req.Rows))
 
 		for _, row := range req.Rows {
-			if row.RedemptionConfirmID == "" {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "redemption_confirm_id missing"})
-				continue
-			}
+			func(row struct {
+				RedemptionConfirmID string                 `json:"redemption_confirm_id"`
+				Fields              map[string]interface{} `json:"fields"`
+				Reason              string                 `json:"reason"`
+			}) {
+				if row.RedemptionConfirmID == "" {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "redemption_confirm_id missing"})
+					return
+				}
 
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
-				continue
-			}
-			defer tx.Rollback(ctx)
+				tx, err := pgxPool.Begin(ctx)
+				if err != nil {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
+					return
+				}
+				defer tx.Rollback(ctx)
 
-			sel := `
+				sel := `
 				SELECT redemption_id, actual_nav, actual_units, gross_proceeds,
 					   exit_load, tds, net_credited, status, stt_charges, resolution_variance, resolution_comment,
 					   variance_proceeds, final_realised_capital_gain_loss
 				FROM investment.redemption_confirmation WHERE redemption_confirm_id=$1 FOR UPDATE`
-			var oldVals [13]interface{}
-			if err := tx.QueryRow(ctx, sel, row.RedemptionConfirmID).Scan(
-				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
-				&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12],
-			); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: "fetch failed: " + err.Error()})
-				continue
-			}
-
-			fieldPairs := map[string]int{
-				"redemption_id":                    0,
-				"actual_nav":                       1,
-				"actual_units":                     2,
-				"gross_proceeds":                   3,
-				"exit_load":                        4,
-				"tds":                              5,
-				"net_credited":                     6,
-				constants.KeyStatus:                7,
-				"stt_charges":                      8,
-				"resolution_variance":              9,
-				"resolution_comment":               10,
-				"variance_proceeds":                11,
-				"final_realised_capital_gain_loss": 12,
-			}
-
-			var sets []string
-			var args []interface{}
-			pos := 1
-
-			for k, v := range row.Fields {
-				lk := strings.ToLower(k)
-				if idx, ok := fieldPairs[lk]; ok {
-					oldField := "old_" + lk
-					sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
-					args = append(args, v, oldVals[idx])
-					pos += 2
+				var oldVals [13]interface{}
+				if err := tx.QueryRow(ctx, sel, row.RedemptionConfirmID).Scan(
+					&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
+					&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12],
+				); err != nil {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: "fetch failed: " + err.Error()})
+					return
 				}
-			}
 
-			if len(sets) == 0 {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: "No valid fields"})
-				continue
-			}
+				fieldPairs := map[string]int{
+					"redemption_id":                    0,
+					"actual_nav":                       1,
+					"actual_units":                     2,
+					"gross_proceeds":                   3,
+					"exit_load":                        4,
+					"tds":                              5,
+					"net_credited":                     6,
+					constants.KeyStatus:                7,
+					"stt_charges":                      8,
+					"resolution_variance":              9,
+					"resolution_comment":               10,
+					"variance_proceeds":                11,
+					"final_realised_capital_gain_loss": 12,
+				}
 
-			q := fmt.Sprintf("UPDATE investment.redemption_confirmation SET %s, updated_at=now() WHERE redemption_confirm_id=$%d", strings.Join(sets, ", "), pos)
-			args = append(args, row.RedemptionConfirmID)
+				var sets []string
+				var args []interface{}
+				pos := 1
 
-			if _, err := tx.Exec(ctx, q, args...); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrUpdateFailed + err.Error()})
-				continue
-			}
+				for k, v := range row.Fields {
+					lk := strings.ToLower(k)
+					if idx, ok := fieldPairs[lk]; ok {
+						oldField := "old_" + lk
+						sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
+						args = append(args, v, oldVals[idx])
+						pos += 2
+					}
+				}
 
-			if _, err := tx.Exec(ctx, `
+				if len(sets) == 0 {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: "No valid fields"})
+					return
+				}
+
+				q := fmt.Sprintf("UPDATE investment.redemption_confirmation SET %s, updated_at=now() WHERE redemption_confirm_id=$%d", strings.Join(sets, ", "), pos)
+				args = append(args, row.RedemptionConfirmID)
+
+				if _, err := tx.Exec(ctx, q, args...); err != nil {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrUpdateFailed + err.Error()})
+					return
+				}
+
+				if _, err := tx.Exec(ctx, `
 				INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
 			`, row.RedemptionConfirmID, row.Reason, userEmail); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
-				continue
-			}
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
+					return
+				}
 
-			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrCommitFailed + err.Error()})
-				continue
-			}
+				if err := tx.Commit(ctx); err != nil {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrCommitFailed + err.Error()})
+					return
+				}
 
-			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "redemption_confirm_id": row.RedemptionConfirmID, "requested": userEmail})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "redemption_confirm_id": row.RedemptionConfirmID, "requested": userEmail})
+			}(row)
 		}
 
 		updatedConfirmIDs := make([]string, 0, len(results))
@@ -828,13 +840,7 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		requestedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
+		requestedBy := api.GetUserNameFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -891,19 +897,13 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -915,6 +915,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 			SELECT DISTINCT ON (redemption_confirm_id) action_id, redemption_confirm_id, actiontype, processing_status
 			FROM investment.auditactionredemptionconfirmation
 			WHERE redemption_confirm_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY redemption_confirm_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.RedemptionConfirmIDs)
@@ -1175,19 +1176,13 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -1199,6 +1194,7 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 			SELECT DISTINCT ON (redemption_confirm_id) action_id, redemption_confirm_id, processing_status
 			FROM investment.auditactionredemptionconfirmation
 			WHERE redemption_confirm_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY redemption_confirm_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.RedemptionConfirmIDs)
@@ -1300,6 +1296,7 @@ func fetchRedemptionConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool,
 				a.checker_comment,
 				a.reason
 			FROM investment.auditactionredemptionconfirmation a
+			WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY a.redemption_confirm_id, a.requested_at DESC
 		),
 		history AS (
@@ -1461,6 +1458,7 @@ func GetApprovedRedemptionConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc 
 					redemption_confirm_id,
 					processing_status
 				FROM investment.auditactionredemptionconfirmation
+				WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY redemption_confirm_id, requested_at DESC
 			)
 			SELECT
@@ -2066,19 +2064,13 @@ func ConfirmRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		confirmedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				confirmedBy = s.Name
-				break
-			}
-		}
+		confirmedBy := api.GetUserNameFromCtx(r.Context())
 		if confirmedBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 
 		result, err := processRedemptionConfirmations(pgxPool, ctx, req.UserID, confirmedBy, req.RedemptionConfirmationIDs)
 		if err != nil {

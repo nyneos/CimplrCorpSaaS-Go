@@ -2,10 +2,10 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	exposures "CimplrCorpSaas/api/fx/exposures"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/api/utils"
 	"CimplrCorpSaas/api/utils/s3storage"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -392,6 +392,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					   checker_by, checker_at, checker_comment, reason
 				FROM auditactionpayablereceivable a
 				WHERE a.type_id = m.type_id
+				  AND a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
@@ -713,6 +714,7 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			WITH latest AS (
 				SELECT DISTINCT ON (type_id) type_id, processing_status
 				FROM auditactionpayablereceivable
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY type_id, requested_at DESC
 			)
 			SELECT m.type_id, m.type_code, m.type_name, m.cash_flow_category
@@ -1100,20 +1102,16 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 		checkerBy := session.Name
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
+		defer tx.Rollback(ctx)
+		defer tx.Rollback(ctx)
 
-		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
+		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
@@ -1178,7 +1176,6 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		committed = true
 
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
@@ -1202,19 +1199,15 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 		checkerBy := session.Name
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
-		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, actiontype, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
+		defer tx.Rollback(ctx)
+		defer tx.Rollback(ctx)
+		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, actiontype, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
@@ -1294,7 +1287,6 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		committed = true
 
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
@@ -1355,7 +1347,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -1398,13 +1390,13 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				headerNorm[i] = hn
 			}
 
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
 				folder := s3storage.GetStoragePrefix("master-payable-receivable")
-				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -1483,7 +1475,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						tgt := mappedTargets[k]
 						if v != nil {
 							if s, ok := v.(string); ok && dateCols[tgt] {
-								norm := exposures.NormalizeDate(s)
+								norm := utils.NormalizeDateString(s)
 								if norm == "" {
 									vals[k+1] = nil
 								} else {
@@ -1654,6 +1646,20 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			committed = true
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        "master-payable-receivable",
+				OriginalFileName: fh.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(dataRows),
+				InsertedCount:    len(newIDs),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userName,
+				UploadedAt:       time.Now().UTC(),
+			})
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

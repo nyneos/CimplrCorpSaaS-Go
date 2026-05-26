@@ -6,6 +6,7 @@ import (
 	middlewares "CimplrCorpSaas/api/middlewares"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
+	"CimplrCorpSaas/internal/logger"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -15,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 	"github.com/shakinm/xlsReader/xls"
 	"github.com/xuri/excelize/v2"
@@ -56,7 +57,7 @@ func tryExtractNumbersAsXLSX(data []byte) []byte {
 			xlsxBytes, readErr := io.ReadAll(rc)
 			rc.Close()
 			if readErr == nil && len(xlsxBytes) > 0 {
-				log.Printf("[BANK-PARSE] extracted embedded xlsx '%s' from .numbers file (%d bytes)", f.Name, len(xlsxBytes))
+				logger.LogInfo("[BANK-PARSE] extracted embedded xlsx '%s' from .numbers file (%d bytes)", f.Name, len(xlsxBytes))
 				return xlsxBytes
 			}
 		}
@@ -75,7 +76,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	// 1. Idempotency: Check if file hash already exists
 	var exists bool
-	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1)`, fileHash).Scan(&exists)
+	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1 AND COALESCE(is_deleted, false) = false)`, fileHash).Scan(&exists)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check file hash: %w", err)
 	}
@@ -92,7 +93,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	// If this is an Apple Numbers file, extract the embedded XLSX first
 	if extracted := tryExtractNumbersAsXLSX(tmpFile); extracted != nil {
-		log.Printf("[BANK-PARSE] .numbers file detected — using embedded XLSX (%d bytes)", len(extracted))
+		logger.LogInfo("[BANK-PARSE] .numbers file detected — using embedded XLSX (%d bytes)", len(extracted))
 		tmpFile = extracted
 	}
 
@@ -192,7 +193,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// If caller supplied an explicit account number override, skip all file-based extraction.
 	if strings.TrimSpace(accountNumberOverride) != "" {
 		accountNumber = strings.TrimSpace(accountNumberOverride)
-		log.Printf("[BANK-UPLOAD-DEBUG] Using caller-supplied account_number override=%q", accountNumber)
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] Using caller-supplied account_number override=%q", accountNumber)
 	}
 
 	// If custom mapping is provided, attempt to extract account number and name using the mapped header names.
@@ -336,7 +337,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					if strings.Contains(v, "transactions list") {
 						if m := titleDigitRe.FindString(v); m != "" {
 							accountNumber = strings.ReplaceAll(m, " ", "")
-							log.Printf("[BANK-UPLOAD-DEBUG] Title-line extracted accountNumber=%q", accountNumber)
+							logger.LogInfo("[BANK-UPLOAD-DEBUG] Title-line extracted accountNumber=%q", accountNumber)
 							break
 						}
 					}
@@ -392,9 +393,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// Only scan rows 0..19 (true header area); do NOT scan transaction data rows to
 			// avoid picking up reference numbers from narrative/cheque columns.
 			if found == "" {
-				log.Printf("[BANK-UPLOAD-DEBUG] Label scan found nothing; dumping first 20 rows for inspection")
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Label scan found nothing; dumping first 20 rows for inspection")
 				for i := 0; i < 20 && i < len(rows); i++ {
-					log.Printf("[BANK-UPLOAD-DEBUG] header-row[%d]=%q", i, rows[i])
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] header-row[%d]=%q", i, rows[i])
 				}
 				digitsRe := acctNumberRe
 				for i := 0; i < 20 && i < len(rows); i++ {
@@ -413,12 +414,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 			if found != "" {
 				accountNumber = strings.ReplaceAll(strings.ReplaceAll(found, " ", ""), "-", "")
-				log.Printf("[BANK-UPLOAD-DEBUG] Fallback extracted accountNumber=%q", accountNumber)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Fallback extracted accountNumber=%q", accountNumber)
 			} else {
 				// Dump header rows for debugging when no candidate found
-				log.Printf("[BANK-UPLOAD-DEBUG] Account number not found in header; dumping first 20 rows for inspection")
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Account number not found in header; dumping first 20 rows for inspection")
 				for i := 0; i < 20 && i < len(rows); i++ {
-					log.Printf("[BANK-UPLOAD-DEBUG] row[%d]=%q", i, rows[i])
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] row[%d]=%q", i, rows[i])
 				}
 				return nil, ErrAccountNumberMissing
 			}
@@ -436,7 +437,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	// Lookup entity_id and bank_name from masterbankaccount/masterbank
 	var bankName string
-	log.Printf("[BANK-UPLOAD-DEBUG] Looking up account in masterbankaccount for accountNumber=%q", accountNumber)
+	logger.LogInfo("[BANK-UPLOAD-DEBUG] Looking up account in masterbankaccount for accountNumber=%q", accountNumber)
 	err = db.QueryRowContext(ctx, `
 		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
 		FROM public.masterbankaccount mba
@@ -459,7 +460,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// All matching is done with a SINGLE batch DB query (WHERE account_number = ANY($1))
 			// to avoid N serial round-trips. We then pick the match whose candidate appeared
 			// earliest in the priority-ordered list.
-			log.Printf("[BANK-UPLOAD-DEBUG] Primary account %q not found; scanning filename+header for verified candidates", accountNumber)
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] Primary account %q not found; scanning filename+header for verified candidates", accountNumber)
 
 			candidates := []string{}
 			seen := map[string]bool{}
@@ -550,9 +551,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 			}
 
-			log.Printf("[BANK-UPLOAD-DEBUG] Candidate scan: %d candidates (filename+header rows 0..%d)", len(candidates), headerEnd-1)
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] Candidate scan: %d candidates (filename+header rows 0..%d)", len(candidates), headerEnd-1)
 			for _, c := range candidates {
-				log.Printf("[BANK-UPLOAD-DEBUG] Trying candidate accountNumber=%q", c)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Trying candidate accountNumber=%q", c)
 			}
 
 			// Single batch DB query instead of N serial round-trips
@@ -588,22 +589,22 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 						bankName = ar.bName
 						accountName = ar.aName
 						matched = true
-						log.Printf("[BANK-UPLOAD-DEBUG] Candidate matched accountNumber=%q", cand)
+						logger.LogInfo("[BANK-UPLOAD-DEBUG] Candidate matched accountNumber=%q", cand)
 						break
 					}
 				}
 			}
 
 			if !matched {
-				log.Printf("[BANK-UPLOAD-DEBUG] Account not found in masterbankaccount after candidate scan: %v", candidates)
-				log.Printf("[BANK-UPLOAD-DEBUG] Dumping first 20 rows for inspection:")
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Account not found in masterbankaccount after candidate scan: %v", candidates)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Dumping first 20 rows for inspection:")
 				for i := 0; i < 20 && i < len(rows); i++ {
-					log.Printf("[BANK-UPLOAD-DEBUG] row[%d]=%q", i, rows[i])
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] row[%d]=%q", i, rows[i])
 				}
 				return nil, ErrAccountNotFound
 			}
 		} else {
-			log.Printf("[BANK-UPLOAD-DEBUG] DB error while looking up account %q: %v", accountNumber, err)
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] DB error while looking up account %q: %v", accountNumber, err)
 			return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, err)
 		}
 	}
@@ -640,7 +641,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	storedFileName := s3storage.BuildUploadedFilename(uploadFileName, uploadedBy, time.Now().UTC())
 	folder := s3storage.GetStoragePrefix(bankStatementUploadModule)
-	s3Key := s3storage.BuildNamedS3Key(folder,"",storedFileName)
+	s3Key := s3storage.BuildNamedS3Key(folder, "", storedFileName)
 	var uploadS3Key sql.NullString
 	var s3URL string
 	if s3storage.IsS3UploadEnabled() {
@@ -649,11 +650,11 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 		uploadS3Key = sql.NullString{String: s3Key, Valid: true}
 		if s3URL, err = s3storage.GetDownloadPresignedURL(ctx, s3Key, 0); err != nil {
-			log.Printf("[BANK-UPLOAD-DEBUG] failed to presign upload response url for key=%q: %v", s3Key, err)
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] failed to presign upload response url for key=%q: %v", s3Key, err)
 			s3URL = ""
 		}
 	} else {
-		log.Printf("[BANK-UPLOAD-DEBUG] S3 upload disabled by BANK_STMT_S3_ENABLED=false; skipping storage for account=%q key=%q", accountNumber, s3Key)
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] S3 upload disabled by BANK_STMT_S3_ENABLED=false; skipping storage for account=%q key=%q", accountNumber, s3Key)
 		s3URL = ""
 	}
 
@@ -714,7 +715,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 				if hasDate && (hasDesc || hasAmountCols) {
 					txnHeaderIdx = i
-					log.Printf("[BANK-UPLOAD-DEBUG] CSV header found at row %d: %q", i, row)
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] CSV header found at row %d: %q", i, row)
 					break
 				}
 			}
@@ -740,8 +741,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 						newRows = append(newRows, rows[i:]...)
 						rows = newRows
 						txnHeaderIdx = i
-						log.Printf("[BANK-UPLOAD-DEBUG] Headless SBI table detected. Inserted synthetic header at row %d", txnHeaderIdx)
-						
+						logger.LogInfo("[BANK-UPLOAD-DEBUG] Headless SBI table detected. Inserted synthetic header at row %d", txnHeaderIdx)
+
 						// Fix shifted columns in the data rows for this headless table
 						for r := txnHeaderIdx + 1; r < len(rows); r++ {
 							if len(rows[r]) >= 14 {
@@ -778,9 +779,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 
 		if txnHeaderIdx == -1 {
-			log.Printf("[BANK-UPLOAD-DEBUG] CSV header detection FAILED. Dumping first 100 rows:")
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] CSV header detection FAILED. Dumping first 100 rows:")
 			for i := 0; i < 100 && i < len(rows); i++ {
-				log.Printf("[BANK-UPLOAD-DEBUG] CSV row[%d]=%q", i, rows[i])
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] CSV row[%d]=%q", i, rows[i])
 			}
 			return nil, errors.New("transaction header row not found in CSV file")
 		}
@@ -821,7 +822,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					colIdx[balanceHeader] = idx
 				}
 			}
-			log.Printf("[BANK-UPLOAD-DEBUG] Custom mapping overrides applied: %v", colIdx)
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] Custom mapping overrides applied: %v", colIdx)
 		}
 		// Verbose header/column dump for Excel branch as well: index, header,
 		// normalized token, numeric-sample and first few sample cells.
@@ -866,7 +867,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					samples = append(samples, "")
 				}
 			}
-			log.Printf("[BANK-UPLOAD-DEBUG] excel-header-col idx=%d header=%q norm=%q numericSample=%v samples=%q", idx, col, norm, numericSample, samples)
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] excel-header-col idx=%d header=%q norm=%q numericSample=%v samples=%q", idx, col, norm, numericSample, samples)
 		}
 
 		// Add flexible column name mappings for CSV as well
@@ -968,10 +969,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 		if idx := findDescriptionCol(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
 			colIdx["Description"] = idx
-			log.Printf("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Description", idx)
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Description", idx)
 		} else if idx := findColContaining("description", "remarks", "narration", "narrative", "particulars"); idx >= 0 {
 			colIdx["Description"] = idx
-			log.Printf("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Description", idx)
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Description", idx)
 		}
 		if _, exists := colIdx["Date"]; !exists {
 			if idx := findColContaining("date"); idx >= 0 && !strings.Contains(strings.ToLower(headerRow[idx]), "value") {
@@ -1078,19 +1079,19 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 
 		wIdx, dIdx := findDebitCreditCols()
-		log.Printf("[BANK-UPLOAD-DEBUG] findDebitCreditCols returned: Withdrawal=%d, Deposit=%d", wIdx, dIdx)
-		log.Printf("[BANK-UPLOAD-DEBUG] Headers: %v", headerRow)
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] findDebitCreditCols returned: Withdrawal=%d, Deposit=%d", wIdx, dIdx)
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] Headers: %v", headerRow)
 		if wIdx >= 0 {
-			log.Printf("[BANK-UPLOAD-DEBUG] Setting Withdrawal to column %d (header: %s)", wIdx, headerRow[wIdx])
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] Setting Withdrawal to column %d (header: %s)", wIdx, headerRow[wIdx])
 			colIdx["Withdrawal"] = wIdx
 			colIdx[withdrawalAmtHeader] = wIdx
 		}
 		if dIdx >= 0 {
-			log.Printf("[BANK-UPLOAD-DEBUG] Setting Deposit to column %d (header: %s)", dIdx, headerRow[dIdx])
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] Setting Deposit to column %d (header: %s)", dIdx, headerRow[dIdx])
 			colIdx["Deposit"] = dIdx
 			colIdx[depositAmtHeader] = dIdx
 		}
-		log.Printf("[BANK-UPLOAD-DEBUG] CSV Column mapping: Date=%d, Description=%d, Withdrawal=%d, Deposit=%d, Balance=%d",
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] CSV Column mapping: Date=%d, Description=%d, Withdrawal=%d, Deposit=%d, Balance=%d",
 			colIdx["Date"], colIdx["Description"], colIdx["Withdrawal"], colIdx["Deposit"], colIdx["Balance"])
 
 		// Flexible required columns: ensure we have Date, a description column, and at least one amount column
@@ -1147,15 +1148,15 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 				if hasDate && (hasDesc || hasAmountCols) {
 					txnHeaderIdx = i
-					log.Printf("[BANK-UPLOAD-DEBUG] Excel header found at row %d: %q", i, row)
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] Excel header found at row %d: %q", i, row)
 					break
 				}
 			}
 		}
 		if txnHeaderIdx == -1 {
-			log.Printf("[BANK-UPLOAD-DEBUG] Excel header detection FAILED. Dumping first 30 rows:")
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] Excel header detection FAILED. Dumping first 30 rows:")
 			for i := 0; i < 30 && i < len(rows); i++ {
-				log.Printf("[BANK-UPLOAD-DEBUG] Excel row[%d]=%q", i, rows[i])
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Excel row[%d]=%q", i, rows[i])
 			}
 			return nil, errors.New(constants.ErrTransactionHeaderRowNotFound)
 		}
@@ -1194,7 +1195,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					colIdx[balanceHeader] = idx
 				}
 			}
-			log.Printf("[BANK-UPLOAD-DEBUG] Custom mapping overrides applied for Excel: %v", colIdx)
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] Custom mapping overrides applied for Excel: %v", colIdx)
 		}
 		// Add flexible column name mappings for common variations
 		// This allows matching "Detail Description" when code looks for "Description"
@@ -1295,10 +1296,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// Prefer Debit/Credit Ref header if present for transaction remarks
 			if idx := findColContaining(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
 				colIdx[transactionRemarksHeader] = idx
-				log.Printf("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Transaction Remarks", idx)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Transaction Remarks", idx)
 			} else if idx := findColContaining(bankStmtDescriptionHeaderAliases...); idx >= 0 {
 				colIdx[transactionRemarksHeader] = idx
-				log.Printf("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Transaction Remarks", idx)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Transaction Remarks", idx)
 			}
 		}
 		if _, exists := colIdx["Date"]; !exists {
@@ -1343,7 +1344,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		if _, exists := colIdx["TimeStamp"]; !exists {
 			if idx := findColContaining("time stamp", "timestamp", "time"); idx >= 0 {
 				colIdx["TimeStamp"] = idx
-				log.Printf("[BANK-UPLOAD-DEBUG] TIME STAMP column detected at index %d", idx)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] TIME STAMP column detected at index %d", idx)
 			}
 		}
 		if _, exists := colIdx[tranIDHeader]; !exists {
@@ -1435,7 +1436,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 			return -1
 		}
-		log.Printf("[BANK-UPLOAD-DEBUG] Column mapping: Date=%d, ValueDate=%d, TranID=%d, Description=%d, Withdrawal=%d, Deposit=%d, Balance=%d, CrDr=%d, Amount=%d",
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] Column mapping: Date=%d, ValueDate=%d, TranID=%d, Description=%d, Withdrawal=%d, Deposit=%d, Balance=%d, CrDr=%d, Amount=%d",
 			getIdx("Date"), getIdx(valueDateHeader), getIdx(tranIDHeader), getIdx(transactionRemarksHeader), getIdx(withdrawalAmtHeader), getIdx(depositAmtHeader), getIdx(balanceHeader), getIdx("CrDr"), amountIdx)
 		// Flexible required columns for Excel as well: need Date and (Description or amount column)
 		hasDate := false
@@ -1634,7 +1635,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					balanceStr := cleanAmount(row[balanceIdx])
 					if balanceStr != "" {
 						fmt.Sscanf(balanceStr, "%f", &openingBalance)
-						log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected: %.2f (cumulative stays at 0, will be added via openingBalance + cumulative)", openingBalance)
+						logger.LogInfo("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected: %.2f (cumulative stays at 0, will be added via openingBalance + cumulative)", openingBalance)
 					}
 				}
 				skippedOpeningBalanceRows++
@@ -1760,7 +1761,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					if amtStr != "" {
 						var amt float64
 						fmt.Sscanf(amtStr, "%f", &amt)
-						
+
 						crIdx := -1
 						for k, v := range colIdx {
 							lk := strings.ToLower(k)
@@ -1772,7 +1773,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 								crIdx = v
 							}
 						}
-						
+
 						if crIdx >= 0 && crIdx < len(row) {
 							crdr := strings.ToLower(strings.TrimSpace(row[crIdx]))
 							if strings.HasPrefix(crdr, "cr") || strings.Contains(crdr, "credit") || strings.HasPrefix(crdr, "c") {
@@ -1828,7 +1829,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				if balance.Valid {
 					openingBalance = balance.Float64
 					cumulative = openingBalance
-					log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE (BBF) detected in CSV: %.2f (initial cumulative set)", openingBalance)
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] OPENING BALANCE (BBF) detected in CSV: %.2f (initial cumulative set)", openingBalance)
 				}
 				skippedOpeningBalanceRows++
 				continue
@@ -1839,7 +1840,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				valueDate = lastValidValueDate
 				transactionDate = lastValidValueDate
 				if debugParse {
-					log.Printf("[BANK-UPLOAD-DEBUG] Row %d: Filled missing dates with last valid date %s", rowNum, lastValidValueDate.Format(constants.DateFormat))
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] Row %d: Filled missing dates with last valid date %s", rowNum, lastValidValueDate.Format(constants.DateFormat))
 				}
 			}
 
@@ -1847,14 +1848,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				// Check if this is a closing balance row before skipping
 				if strings.Contains(strings.ToLower(description), constants.ClosingBalance) {
 					if balance.Valid {
-						log.Printf("[BANK-UPLOAD-DEBUG] CLOSING BALANCE detected: %.2f (skipping from transactions)", balance.Float64)
+						logger.LogInfo("[BANK-UPLOAD-DEBUG] CLOSING BALANCE detected: %.2f (skipping from transactions)", balance.Float64)
 					} else {
-						log.Printf("[BANK-UPLOAD-DEBUG] CLOSING BALANCE row detected (no balance value)")
+						logger.LogInfo("[BANK-UPLOAD-DEBUG] CLOSING BALANCE row detected (no balance value)")
 					}
 					skippedClosingBalanceRows++
 				}
 				if debugParse {
-					log.Printf("[BANK-UPLOAD-DEBUG] Skipping row %d due to missing dates (valueDate=%q transactionDate=%q) raw=%q", rowNum, valueDateStr, transactionDateStr, row)
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] Skipping row %d due to missing dates (valueDate=%q transactionDate=%q) raw=%q", rowNum, valueDateStr, transactionDateStr, row)
 				}
 				skippedMissingDateRows++
 				continue
@@ -1945,7 +1946,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 						if _, vErr := parseDate(valueDateStr); vErr != nil {
 							tranID = sql.NullString{String: valueDateStr, Valid: true}
 							if debugParse {
-								log.Printf("[BANK-UPLOAD-DEBUG] Row %d: TranID looked like date, using ValueDate cell as tran_id instead: %q", rowNum, valueDateStr)
+								logger.LogInfo("[BANK-UPLOAD-DEBUG] Row %d: TranID looked like date, using ValueDate cell as tran_id instead: %q", rowNum, valueDateStr)
 							}
 						}
 					}
@@ -1958,7 +1959,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					valueDate = t
 					transactionDate = t
 					if debugParse {
-						log.Printf("[BANK-UPLOAD-DEBUG] Row %d: Using original TranID cell for dates: %q", rowNum, originalTranIDStr)
+						logger.LogInfo("[BANK-UPLOAD-DEBUG] Row %d: Using original TranID cell for dates: %q", rowNum, originalTranIDStr)
 					}
 				}
 			}
@@ -1973,7 +1974,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 						valueDate = t
 						transactionDate = t
 						if debugParse {
-							log.Printf("[BANK-UPLOAD-DEBUG] Row %d: Fallback picked date from cell value %q", rowNum, c)
+							logger.LogInfo("[BANK-UPLOAD-DEBUG] Row %d: Fallback picked date from cell value %q", rowNum, c)
 						}
 						break
 					}
@@ -2030,7 +2031,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 						postedDate = lastValidValueDate
 					}
 					if debugParse {
-						log.Printf("[BANK-UPLOAD-DEBUG] Row %d: Carried forward last valid date %s for blank date cells", rowNum, lastValidValueDate.Format(constants.DateFormat))
+						logger.LogInfo("[BANK-UPLOAD-DEBUG] Row %d: Carried forward last valid date %s for blank date cells", rowNum, lastValidValueDate.Format(constants.DateFormat))
 					}
 				}
 			}
@@ -2064,7 +2065,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 						}
 					}
 				}
-				log.Printf("[BANK-UPLOAD-DEBUG] BBF row detected (Excel): desc=%q openingBalance=%.2f — skipping from transactions", tempDescLower, openingBalance)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] BBF row detected (Excel): desc=%q openingBalance=%.2f — skipping from transactions", tempDescLower, openingBalance)
 				skippedOpeningBalanceRows++
 				continue
 			}
@@ -2079,13 +2080,13 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 						var closingBal float64
 						if balanceStr != "" {
 							fmt.Sscanf(balanceStr, "%f", &closingBal)
-							log.Printf("[BANK-UPLOAD-DEBUG] CLOSING BALANCE detected: %.2f (skipping from transactions)", closingBal)
+							logger.LogInfo("[BANK-UPLOAD-DEBUG] CLOSING BALANCE detected: %.2f (skipping from transactions)", closingBal)
 						}
 					}
 					skippedClosingBalanceRows++
 				}
 				if debugParse {
-					log.Printf("[BANK-UPLOAD-DEBUG] Skipping row %d due to missing dates (valueDate=%q transactionDate=%q) raw=%q", rowNum, valueDateStr, transactionDateStr, row)
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] Skipping row %d due to missing dates (valueDate=%q transactionDate=%q) raw=%q", rowNum, valueDateStr, transactionDateStr, row)
 				}
 				skippedMissingDateRows++
 				continue
@@ -2108,9 +2109,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			if debugParse && debugCount < 30 {
 				trimmedDesc := strings.TrimSpace(description)
 				if trimmedDesc == "" {
-					log.Printf("[BANK-UPLOAD-DEBUG] Row %d: Description is EMPTY (or whitespace only). Raw: '%s'", debugCount, description)
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] Row %d: Description is EMPTY (or whitespace only). Raw: '%s'", debugCount, description)
 				} else {
-					log.Printf("[BANK-UPLOAD-DEBUG] Row %d: Description='%s'", debugCount, trimmedDesc)
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] Row %d: Description='%s'", debugCount, trimmedDesc)
 				}
 			}
 			// Determine amount using available columns. Some statements use separate
@@ -2262,7 +2263,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			if bIdx >= 0 && bIdx < len(row) {
 				rawB = row[bIdx]
 			}
-			log.Printf("[BANK-UPLOAD-DEBUG] parsed-row num=%d headerRow=%q mapping(Date=%d Description=%d Withdrawal=%d Deposit=%d Balance=%d TranID=%d) rawRow=%q\n  rawWithdrawal=%q rawDeposit=%q rawBalance=%q parsedWithdrawal.Valid=%v parsedWithdrawal=%v parsedDeposit.Valid=%v parsedDeposit=%v description=%q sanitizedDescription=%q",
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] parsed-row num=%d headerRow=%q mapping(Date=%d Description=%d Withdrawal=%d Deposit=%d Balance=%d TranID=%d) rawRow=%q\n  rawWithdrawal=%q rawDeposit=%q rawBalance=%q parsedWithdrawal.Valid=%v parsedWithdrawal=%v parsedDeposit.Valid=%v parsedDeposit=%v description=%q sanitizedDescription=%q",
 				rowNum,
 				headerRow,
 				colIdx["Date"], colIdx["Description"], wIdx, dIdx, bIdx, colIdx[tranIDHeader],
@@ -2287,7 +2288,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				withdrawal = sql.NullFloat64{Valid: true, Float64: cumulative}
 				deposit = sql.NullFloat64{Valid: false}
 				if debugParse {
-					log.Printf("[BANK-UPLOAD-DEBUG] Inferred sweep withdrawal=%.2f from prior balance (desc=%q)", cumulative, description)
+					logger.LogInfo("[BANK-UPLOAD-DEBUG] Inferred sweep withdrawal=%.2f from prior balance (desc=%q)", cumulative, description)
 				}
 			}
 		}
@@ -2307,7 +2308,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					openingBalance = deposit.Float64
 					cumulative = deposit.Float64
 				}
-				log.Printf("[BANK-UPLOAD-DEBUG] BBF detected on firstValidRow: openingBalance=%.2f — skipping from transactions", openingBalance)
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] BBF detected on firstValidRow: openingBalance=%.2f — skipping from transactions", openingBalance)
 				// Keep firstValidRow = true so the NEXT real row correctly initialises period start.
 				// But we need to track last valid date for period end.
 				candidateDate := valueDate
@@ -2482,7 +2483,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			statementPeriodEnd = lastTxnDate
 		}
 	}
-	log.Printf("[BANK-UPLOAD-DEBUG] Parse summary: rows_after_header=%d kept=%d skipped_empty=%d skipped_non_txn=%d skipped_missing_dates=%d skipped_opening_balance=%d skipped_closing_balance=%d",
+	logger.LogInfo("[BANK-UPLOAD-DEBUG] Parse summary: rows_after_header=%d kept=%d skipped_empty=%d skipped_non_txn=%d skipped_missing_dates=%d skipped_opening_balance=%d skipped_closing_balance=%d",
 		totalRows, keptRows, skippedEmptyRows, skippedNonTxnRows, skippedMissingDateRows, skippedOpeningBalanceRows, skippedClosingBalanceRows)
 
 	// If opening balance was detected but first transaction has balance 0, recalculate all balances starting from opening balance
@@ -2497,16 +2498,24 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				cumulative -= transactions[i].WithdrawalAmount.Float64
 			}
 		}
-		log.Printf("[BANK-UPLOAD-DEBUG] Recalculated balances starting from opening balance %.2f", openingBalance)
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] Recalculated balances starting from opening balance %.2f", openingBalance)
 	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin db transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	// Preload existing transactions for this account so we can identify which
 	// rows from the uploaded file are truly new vs already present.
 	existingTxnKeys := make(map[string]bool)
-	rowsExisting, err := db.QueryContext(ctx, `
-			SELECT account_number, transaction_date, description, withdrawal_amount, deposit_amount
-			FROM cimplrcorpsaas.bank_statement_transactions
-			WHERE account_number = $1
+	rowsExisting, err := tx.QueryContext(ctx, `
+			SELECT t.account_number, t.transaction_date, t.description, t.withdrawal_amount, t.deposit_amount
+			FROM cimplrcorpsaas.bank_statement_transactions t
+			JOIN cimplrcorpsaas.bank_statements s ON s.bank_statement_id = t.bank_statement_id
+			WHERE t.account_number = $1
+			  AND COALESCE(s.is_deleted, false) = false
 		`, accountNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing transactions: %w", err)
@@ -2524,22 +2533,16 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		existingTxnKeys[k] = true
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin db transaction: %w", err)
-	}
-	defer tx.Rollback()
-
 	var bankStatementID string
 	if !isFiniteNumber(openingBalance) {
-		log.Printf("[BANK-UPLOAD-DEBUG] openingBalance became non-finite (%v); resetting to 0", openingBalance)
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] openingBalance became non-finite (%v); resetting to 0", openingBalance)
 		openingBalance = 0
 	}
 	if !isFiniteNumber(closingBalance) {
-		log.Printf("[BANK-UPLOAD-DEBUG] closingBalance became non-finite (%v); resetting to 0", closingBalance)
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] closingBalance became non-finite (%v); resetting to 0", closingBalance)
 		closingBalance = 0
 	}
-	log.Printf("[BANK-UPLOAD-DEBUG] Inserting bank_statements: account=%q period=%s→%s openingBalance=%.6f closingBalance=%.6f",
+	logger.LogInfo("[BANK-UPLOAD-DEBUG] Inserting bank_statements: account=%q period=%s→%s openingBalance=%.6f closingBalance=%.6f",
 		accountNumber, statementPeriodStart.Format(constants.DateFormat), statementPeriodEnd.Format(constants.DateFormat), openingBalance, closingBalance)
 	err = tx.QueryRowContext(ctx, `
 		     INSERT INTO cimplrcorpsaas.bank_statements (
@@ -2552,14 +2555,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
     closing_balance,
     upload_s3_key
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-
-ON CONFLICT (file_hash)
-DO UPDATE SET
-    opening_balance = EXCLUDED.opening_balance,
-    closing_balance = EXCLUDED.closing_balance,
-    statement_period_start = EXCLUDED.statement_period_start,
-    statement_period_end = EXCLUDED.statement_period_end,
-    upload_s3_key = EXCLUDED.upload_s3_key
 
 RETURNING bank_statement_id
 		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, uploadS3Key).Scan(&bankStatementID)
@@ -2611,7 +2606,7 @@ RETURNING bank_statement_id
 
 		existingInDBCount := len(reviewTransactions)
 		newInsertCount := len(newTransactions)
-		log.Printf("[BANK-UPLOAD-DEBUG] Dedup summary: parsed=%d existing_in_db=%d new_to_insert=%d", len(transactions), existingInDBCount, newInsertCount)
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] Dedup summary: parsed=%d existing_in_db=%d new_to_insert=%d", len(transactions), existingInDBCount, newInsertCount)
 
 		if len(newTransactions) > 0 {
 			valueStrings := make([]string, 0, len(newTransactions))
@@ -2639,13 +2634,13 @@ RETURNING bank_statement_id
 			       ) VALUES ` +
 				joinStrings(valueStrings, ",") +
 				` ON CONFLICT (account_number, transaction_date, description, withdrawal_amount, deposit_amount) DO NOTHING`
-			log.Printf("[BANK-UPLOAD-DEBUG] Attempting to insert %d new transactions", len(newTransactions))
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] Attempting to insert %d new transactions", len(newTransactions))
 			if _, err := tx.ExecContext(ctx, stmt, valueArgs...); err != nil {
 				tx.Rollback()
-				log.Printf("[BANK-UPLOAD-DEBUG] Bulk insert FAILED. First 5 transactions with amounts:")
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Bulk insert FAILED. First 5 transactions with amounts:")
 				for i := 0; i < 5 && i < len(newTransactions); i++ {
 					t := newTransactions[i]
-					log.Printf("[BANK-UPLOAD-DEBUG]   txn[%d] date=%s desc=%q withdrawal=%.4f deposit=%.4f balance=%.4f",
+					logger.LogInfo("[BANK-UPLOAD-DEBUG]   txn[%d] date=%s desc=%q withdrawal=%.4f deposit=%.4f balance=%.4f",
 						i, t.TransactionDate.Format(constants.DateFormat), t.Description, t.WithdrawalAmount.Float64, t.DepositAmount.Float64, t.Balance.Float64)
 				}
 				return nil, fmt.Errorf("failed to bulk insert transactions: %w", err)
@@ -2685,9 +2680,10 @@ RETURNING bank_statement_id
 	// counterparty defaults, corrections, similarity, account defaults, AI).
 	if opts.PgxPool != nil {
 		pool := opts.PgxPool
+		bsID := bankStatementID // capture for goroutine
 		go func() {
-			if err := cashjobs.ProcessUncategorizedTransactions(pool, 500); err != nil {
-				log.Printf("[SMART-CAT] post-upload trigger failed: %v", err)
+			if err := cashjobs.ProcessUncategorizedTransactions(pool, 500, bsID); err != nil {
+				logger.LogInfo("[SMART-CAT] post-upload trigger failed: %v", err)
 			}
 		}()
 	}
@@ -2797,7 +2793,7 @@ RETURNING bank_statement_id
 func parseFileToRows(fileBytes []byte) ([][]string, error) {
 	// 0. If Apple Numbers file, extract embedded XLSX first
 	if extracted := tryExtractNumbersAsXLSX(fileBytes); extracted != nil {
-		log.Printf("[BANK-PARSE] parseFileToRows: .numbers detected — using embedded XLSX")
+		logger.LogInfo("[BANK-PARSE] parseFileToRows: .numbers detected — using embedded XLSX")
 		fileBytes = extracted
 	}
 
@@ -2877,7 +2873,7 @@ func parseFileToRows(fileBytes []byte) ([][]string, error) {
 //     builds a per-account CSV, computes idempotent `fileHash = sha256(csvBytes + account_number)`,
 //     and calls UploadBankStatementV2WithCategorization for each account.
 //   - Aggregates results per-account and isolates failures to the account level.
-func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
+func UploadMultiAccountBankStatementHandler(db *sql.DB, pgxPool ...*pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if r.Method != http.MethodPost {
@@ -3041,7 +3037,7 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 		// prefer explicit Extra Information column when available
 		extraInfoIdx := findIdx("extra information", "extra", "extra-info", "extra_info")
 		// Debug: log the detected header row and all column cells
-		log.Printf("[MULTI-UPLOAD] headerRowIdx=%d, header cells: %v", headerRowIdx, header)
+		logger.LogInfo("[MULTI-UPLOAD] headerRowIdx=%d, header cells: %v", headerRowIdx, header)
 
 		// Debit / credit: search for explicit column names first to avoid matching
 		// "Closing ledger balance" etc. that happen to contain "credit"/"debit".
@@ -3051,7 +3047,7 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			// Only fall back to "credit" / "deposit" when no explicit column found
 			creditIdx = findIdxExclude([]string{"ledger", "available", "brought", "closing", "opening", "current"}, "credit", "deposit")
 		}
-		log.Printf("[MULTI-UPLOAD] accIdx=%d dateIdx=%d descIdx=%d debitIdx=%d creditIdx=%d balanceIdx(pre)=%d", accIdx, dateIdx, descIdx, debitIdx, creditIdx, -1)
+		logger.LogInfo("[MULTI-UPLOAD] accIdx=%d dateIdx=%d descIdx=%d debitIdx=%d creditIdx=%d balanceIdx(pre)=%d", accIdx, dateIdx, descIdx, debitIdx, creditIdx, -1)
 		openingIdx := findIdx("opening balance", "opening available balance", "opening available", "opening")
 		// Per-row running balance column: prefer an exact "balance" column over "closing balance" etc.
 		// Strategy: first try to find a header whose trimmed lowercase is exactly "balance",
@@ -3203,7 +3199,7 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 				creditStr := cleanAmount(get(creditIdx))
 				if len(stm.Transactions) == 0 {
 					// Log first row details to debug column index resolution
-					log.Printf("[MULTI-UPLOAD] FIRST ROW: debitIdx=%d debitStr=%q creditIdx=%d creditStr=%q balanceIdx=%d row=%v", debitIdx, debitStr, creditIdx, creditStr, balanceIdx, rrow)
+					logger.LogInfo("[MULTI-UPLOAD] FIRST ROW: debitIdx=%d debitStr=%q creditIdx=%d creditStr=%q balanceIdx=%d row=%v", debitIdx, debitStr, creditIdx, creditStr, balanceIdx, rrow)
 				}
 				// Per-row balance: prefer dedicated balanceIdx; fall back to closingIdx
 				rowBalStr := ""
@@ -3346,7 +3342,11 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			fileHash := fmt.Sprintf("%x", h.Sum(nil))
 
 			// Call structured ingestion
-			res, upErr := ProcessBankStatementFromStructuredInput(ctx, db, stm, fileHash, nil)
+			var poolArg *pgxpool.Pool
+			if len(pgxPool) > 0 {
+				poolArg = pgxPool[0]
+			}
+			res, upErr := ProcessBankStatementFromStructuredInput(ctx, db, stm, fileHash, poolArg)
 			if upErr != nil {
 				results[resultKey] = map[string]interface{}{"success": false, "message": userFriendlyUploadError(upErr)}
 				continue

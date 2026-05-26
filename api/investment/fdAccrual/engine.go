@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,6 +12,8 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/fdMaster"
+	"CimplrCorpSaas/api/investment/rounding"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -51,8 +52,8 @@ type AccrualInput struct {
 	CapDateAdjustment      string // PRECEDING_WD / FOLLOWING_WD / NO_ADJUST
 	BrokenPeriodMethod     string // SIMPLE / COMPOUND / HYBRID / NONE
 	// Compounding frequency (from fd_master.frequency_id → frequency_master)
-	FrequencyID           string // e.g. "FREQ-QUARTERLY"
-	CompoundingFrequency  string // e.g. "QUARTERLY", "MONTHLY", "ANNUALLY", "DAILY", "AT_MATURITY"
+	FrequencyID          string // e.g. "FREQ-QUARTERLY"
+	CompoundingFrequency string // e.g. "QUARTERLY", "MONTHLY", "ANNUALLY", "DAILY", "AT_MATURITY"
 }
 
 // AccrualRunParams controls what the engine calculates.
@@ -138,8 +139,8 @@ type AccrualPeriodResult struct {
 	ReqHolidayAccrual    bool // always true
 
 	// Compounding metadata (for BRD IA-05 Section C)
-	FrequencyID            string // from fd_master.frequency_id
-	CompoundingFrequency   string // human-readable e.g. "QUARTERLY"
+	FrequencyID            string  // from fd_master.frequency_id
+	CompoundingFrequency   string  // human-readable e.g. "QUARTERLY"
 	CompoundPrincipalUsed  float64 // the opening_principal including past capitalizations
 	NextCapitalizationDate string  // next cashflow CAPITALIZATION event after period_end
 
@@ -197,12 +198,63 @@ type ScheduleConfigRow struct {
 
 // ─── Day-count helpers ────────────────────────────────────────────────────────
 
+func normalizeAccrualDayCountCode(dayCountCode string) string {
+	norm := strings.ToUpper(strings.NewReplacer("/", "_", "-", "_").Replace(strings.TrimSpace(dayCountCode)))
+	norm = strings.TrimPrefix(norm, "DC_")
+	switch {
+	case strings.Contains(norm, "30") && strings.Contains(norm, "360"):
+		return "30_360"
+	case strings.Contains(norm, "ACT") && strings.Contains(norm, "360") && !strings.Contains(norm, "365"):
+		return "ACT_360"
+	case norm == "ACT_ACT" || (strings.Contains(norm, "ACT") && strings.Contains(norm, "ACTUAL") && !strings.Contains(norm, "360") && !strings.Contains(norm, "365")):
+		return "ACT_ACT"
+	case strings.Contains(norm, "365"):
+		return "ACT_365"
+	default:
+		return "ACT_365"
+	}
+}
+
+func accrualIsLeapYear(year int) bool {
+	return year%400 == 0 || (year%4 == 0 && year%100 != 0)
+}
+
+func accrualDaysInMonth(year int, month time.Month) int {
+	switch month {
+	case time.January, time.March, time.May, time.July, time.August, time.October, time.December:
+		return 31
+	case time.April, time.June, time.September, time.November:
+		return 30
+	case time.February:
+		if accrualIsLeapYear(year) {
+			return 29
+		}
+		return 28
+	default:
+		return 0
+	}
+}
+
+func accrualCountDays30by360(start, end time.Time) int {
+	y1, m1, d1 := start.Year(), start.Month(), start.Day()
+	y2, m2, d2 := end.Year(), end.Month(), end.Day()
+	if m1 == time.February && d1 == accrualDaysInMonth(y1, m1) {
+		d1 = 30
+	}
+	if d1 == 31 {
+		d1 = 30
+	}
+	if d2 == 31 && d1 >= 30 {
+		d2 = 30
+	}
+	return (y2-y1)*360 + (int(m2)-int(m1))*30 + (d2 - d1)
+}
+
 // getDivisorForAccrual returns the annual divisor from a day count code.
-// For ACT_ACT it uses the reference date's year. Use getDivisorForPeriod
-// when you have a full period (start, end) for accurate leap-year handling.
+// For ACT_ACT it uses the reference date's year, matching the cashflow workbook rule.
 // Never returns 0.
 func getDivisorForAccrual(dayCountCode string, refDate time.Time) int {
-	switch strings.ToUpper(dayCountCode) {
+	switch normalizeAccrualDayCountCode(dayCountCode) {
 	case "ACT_365":
 		return 365
 	case "ACT_360":
@@ -210,37 +262,19 @@ func getDivisorForAccrual(dayCountCode string, refDate time.Time) int {
 	case "30_360":
 		return 360
 	case "ACT_ACT":
-		year := refDate.Year()
-		if year%400 == 0 || (year%4 == 0 && year%100 != 0) {
+		if accrualIsLeapYear(refDate.Year()) {
 			return 366
 		}
 		return 365
 	default:
 		return 365
 	}
-}
-
-// periodHasLeapDay returns true if any day in [start, end) falls in a
-// calendar year that is a leap year AND Feb 29 exists in [start, end).
-func periodHasLeapDay(start, end time.Time) bool {
-	for y := start.Year(); y <= end.Year(); y++ {
-		isLeap := y%400 == 0 || (y%4 == 0 && y%100 != 0)
-		if !isLeap {
-			continue
-		}
-		feb29 := time.Date(y, time.February, 29, 0, 0, 0, 0, time.UTC)
-		if !feb29.Before(start) && feb29.Before(end) {
-			return true
-		}
-	}
-	return false
 }
 
 // getDivisorForPeriod is the period-aware version of getDivisorForAccrual.
-// For ACT_ACT it returns 366 if Feb 29 falls within [start, end), else 365.
-// All other conventions behave identically to getDivisorForAccrual.
+// For ACT_ACT it follows the cashflow workbook rule: end-date year decides 365/366.
 func getDivisorForPeriod(dayCountCode string, start, end time.Time) int {
-	switch strings.ToUpper(dayCountCode) {
+	switch normalizeAccrualDayCountCode(dayCountCode) {
 	case "ACT_365":
 		return 365
 	case "ACT_360":
@@ -248,7 +282,7 @@ func getDivisorForPeriod(dayCountCode string, start, end time.Time) int {
 	case "30_360":
 		return 360
 	case "ACT_ACT":
-		if periodHasLeapDay(start, end) {
+		if accrualIsLeapYear(end.Year()) {
 			return 366
 		}
 		return 365
@@ -257,16 +291,16 @@ func getDivisorForPeriod(dayCountCode string, start, end time.Time) int {
 	}
 }
 
-// roundAccrual rounds to the given decimals using the specified rule.
-func roundAccrual(amount float64, decimals int, rule string) float64 {
-	if decimals <= 0 {
-		decimals = 2
+func getDivisorAndDaysForAccrualPeriod(dayCountCode string, start, end time.Time, fd AccrualInput, cal accrualHolidayCalendar, holidayAware bool) (int, int) {
+	normalized := normalizeAccrualDayCountCode(dayCountCode)
+	if normalized == "30_360" {
+		return 360, accrualCountDays30by360(start, end)
 	}
-	pow := math.Pow(10, float64(decimals))
-	if strings.EqualFold(rule, "TRUNCATE") {
-		return math.Floor(amount*pow) / pow
+	divisor := getDivisorForPeriod(normalized, start, end)
+	if holidayAware {
+		return divisor, accrualCountWorkingDays(start, end, fd, cal)
 	}
-	return math.Round(amount*pow) / pow
+	return divisor, int(end.Sub(start).Hours() / 24)
 }
 
 // buildAccrualPeriod returns "APR 2025" uppercase month-year string.
@@ -279,12 +313,10 @@ func buildAccrualPeriod(t time.Time) string {
 // getFDsInScope queries investment.fd_master using exact column names.
 //
 // Scope rules (TC-27/28/29/30/31/32):
-//   - ACTIVE FDs whose [start_date, maturity_date] overlaps the run period.
-//   - MATURED FDs whose maturity falls inside the run period (interest till
-//     maturity only — TC-31/32). Already excluded if the run period starts
-//     after the maturity date.
-//   - PREMATURELY_CLOSED FDs whose effective_closure_date falls inside the run
-//     period (TC-29/30 — interest stops at closure, no accrual after closure).
+//   - ACTIVE means active FDs only.
+//   - ACTIVE_MATURED means active FDs plus all completed FD outcomes
+//     (matured payout, premature closure, rollover) that overlap the run period.
+//   - ALL includes every accrual-capable status except pending/cancelled activation.
 //
 // FDs that were closed/matured before the run period start are filtered out
 // because they have no overlap window.
@@ -294,17 +326,18 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 		fdStatus = "ACTIVE"
 	}
 
-	// Build the fd_status IN (...) filter. We always include closed/matured FDs
-	// so the engine can produce partial-period accruals up to the closure or
-	// maturity date — without ever accruing beyond it.
+	// Build the fd_status IN (...) filter. Keep this aligned with the user's
+	// selected scope; validation should not pull closed FDs into an ACTIVE run.
 	var statusValues []string
 	switch fdStatus {
-	case "ACTIVE", "ACTIVE_MATURED":
-		statusValues = []string{"ACTIVE", "MATURED", "PREMATURELY_CLOSED"}
+	case "ACTIVE":
+		statusValues = []string{"ACTIVE"}
+	case "ACTIVE_MATURED":
+		statusValues = []string{"ACTIVE", "MATURED", "PREMATURELY_CLOSED", "ROLLED_OVER"}
 	case "ALL":
 		statusValues = []string{"ACTIVE", "MATURED", "PREMATURELY_CLOSED", "ROLLED_OVER"}
 	default:
-		statusValues = []string{fdStatus, "MATURED", "PREMATURELY_CLOSED"}
+		statusValues = []string{fdStatus}
 	}
 
 	query := `
@@ -352,7 +385,10 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 		  AND f.is_active = true
 		  AND f.start_date <= $3
 		  AND f.maturity_date >= $4
-		  AND (cr.effective_closure_date IS NULL OR cr.effective_closure_date >= $4)`
+		  AND (
+		  	COALESCE(cr.effective_closure_date, f.closed_at::date) IS NULL
+		  	OR COALESCE(cr.effective_closure_date, f.closed_at::date) >= $4
+		  )`
 
 	args := []interface{}{params.EntityID, statusValues, params.PeriodEnd, params.PeriodStart}
 	argIdx := 5
@@ -797,17 +833,164 @@ func hasBlockers(findings []ValidationFinding) bool {
 	return false
 }
 
-// generateSubPeriods splits [start, end) into consecutive sub-periods
-// of the requested granularity. RUN returns the whole range as one chunk.
+// accrualPeriodGranularities are valid accrual_granularity / run_type values.
+var accrualPeriodGranularities = map[string]bool{
+	"DAILY": true, "MONTHLY": true, "QUARTERLY": true,
+	"HALF_YEARLY": true, "YEARLY": true, "RUN": true,
+}
+
+// scheduleFrequencies are valid schedule_frequency values (when the job fires).
+var scheduleFrequencies = map[string]bool{
+	"DAILY": true, "MONTHLY": true, "QUARTERLY": true,
+	"HALF_YEARLY": true, "YEARLY": true,
+}
+
+// periodCoverages are valid period_coverage values (the date window each run covers).
+// RUN = inherit from schedule_frequency (legacy behaviour).
+var periodCoverages = map[string]bool{
+	"DAILY": true, "MONTHLY": true, "QUARTERLY": true,
+	"HALF_YEARLY": true, "YEARLY": true, "RUN": true,
+}
+
+func isValidPeriodCoverage(p string) bool {
+	return periodCoverages[strings.ToUpper(strings.TrimSpace(p))]
+}
+
+// accrualRunApprovalListStatuses — /run/all shows only submitted approval-queue runs
+// (excludes DRAFT, VALIDATED, COMPUTED, IN_PROGRESS, VALIDATION_FAILED, FAILED, etc.).
+var accrualRunApprovalListStatuses = map[string]bool{
+	"PENDING_APPROVAL": true,
+	"APPROVED":         true,
+	"REJECTED":         true,
+	"POSTED":           true,
+	"POSTED_TO_GL":     true,
+	"LOCKED":           true,
+}
+
+func isAccrualRunApprovalListStatus(status string) bool {
+	return accrualRunApprovalListStatuses[strings.ToUpper(strings.TrimSpace(status))]
+}
+
+func normalizeAccrualGranularity(g string) string {
+	return strings.ToUpper(strings.TrimSpace(g))
+}
+
+func normalizeScheduleFrequency(f string) string {
+	return strings.ToUpper(strings.TrimSpace(f))
+}
+
+func isValidAccrualGranularity(g string) bool {
+	return accrualPeriodGranularities[normalizeAccrualGranularity(g)]
+}
+
+func isValidScheduleFrequency(f string) bool {
+	return scheduleFrequencies[normalizeScheduleFrequency(f)]
+}
+
+// AccrualPeriodBounds returns inclusive calendar start/end for the accrual window
+// that contains `at`, based on accrual_granularity (not schedule_frequency).
+//
+// CURRENT BEHAVIOUR (calendar-month):
+//
+//	 MONTHLY → 2025-05-01 to 2025-05-31  (always 1st → last day of month)
+//
+//	— ALTERNATIVE: FD-date-based periods ("24 to 24")
+//
+// If you want the period to run from one FD-anniversary-day to the next
+// (e.g. Apr 24 → May 23, so the scheduler fires ON May 24 and covers the
+// preceding month), this function needs a second parameter: anchorDay int.
+// Change the signature to:
+//
+//	func AccrualPeriodBounds(at time.Time, granularity string, anchorDay ...int) (time.Time, time.Time)
+//
+// Then in the MONTHLY case replace the two lines with:
+//
+//	 — FD-date period: fire date IS the period end + 1 (anniversary)
+//	day := at.Day()                                          // e.g. 24 (run_day_of_month)
+//	if len(anchorDay) > 0 && anchorDay[0] >= 1 {
+//	    day = anchorDay[0]
+//	}
+//	periodEnd   := time.Date(at.Year(), at.Month(), day, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1) // May 23
+//	periodStart := time.Date(at.Year(), at.Month()-1, day, 0, 0, 0, 0, time.UTC)                 // Apr 24
+//	return periodStart, periodEnd
+//
+// NOTE: at.Month()-1 wraps correctly via Go's time.Date overflow (e.g. January-1 = December).
+//
+// You ALSO need to update the call site in fireScheduledRun (scheduler.go) to pass p.RunDay:
+//
+//	periodStart, periodEnd := AccrualPeriodBounds(scheduledAt, periodGranularity, p.RunDay)
+//
+// The manual-run API (run.go CreateAccrualRun) already accepts explicit accrual_period_start /
+// accrual_period_end from the caller — no change needed there.
+func AccrualPeriodBounds(at time.Time, granularity string) (time.Time, time.Time) {
+	at = at.UTC()
+	switch normalizeAccrualGranularity(granularity) {
+	case "DAILY":
+		d := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC)
+		return d, d
+	case "QUARTERLY":
+		qMonth := time.Month(((int(at.Month())-1)/3)*3 + 1)
+		start := time.Date(at.Year(), qMonth, 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 3, -1)
+	case "HALF_YEARLY":
+		if at.Month() <= 6 {
+			return time.Date(at.Year(), time.January, 1, 0, 0, 0, 0, time.UTC),
+				time.Date(at.Year(), time.June, 30, 0, 0, 0, 0, time.UTC)
+		}
+		return time.Date(at.Year(), time.July, 1, 0, 0, 0, 0, time.UTC),
+			time.Date(at.Year(), time.December, 31, 0, 0, 0, 0, time.UTC)
+	case "YEARLY":
+		return time.Date(at.Year(), 1, 1, 0, 0, 0, 0, time.UTC),
+			time.Date(at.Year(), 12, 31, 0, 0, 0, 0, time.UTC)
+	default: // MONTHLY and unknown
+		//  — CURRENT: calendar-month window (1st → last day).
+		// To switch to FD-date-based see the comment above the function.
+		start := time.Date(at.Year(), at.Month(), 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 1, -1)
+	}
+}
+
+// RunTypeForGranularity maps accrual_granularity to fd_accrual_run.run_type.
+func RunTypeForGranularity(granularity string) string {
+	switch normalizeAccrualGranularity(granularity) {
+	case "DAILY":
+		return "DAILY"
+	case "QUARTERLY":
+		return "QUARTERLY"
+	case "HALF_YEARLY":
+		return "HALF_YEARLY"
+	case "YEARLY":
+		return "YEARLY"
+	default:
+		return "MONTHLY"
+	}
+}
+
+// periodGranularityForScheduler resolves the calendar window when granularity is RUN.
+func periodGranularityForScheduler(accrualGranularity, scheduleFrequency string) string {
+	g := normalizeAccrualGranularity(accrualGranularity)
+	if g == "" || g == "RUN" {
+		if isValidScheduleFrequency(scheduleFrequency) {
+			return normalizeScheduleFrequency(scheduleFrequency)
+		}
+		return "MONTHLY"
+	}
+	return g
+}
+
+// generateSubPeriods splits [start, end] (inclusive calendar dates) into consecutive
+// sub-periods of the requested granularity. RUN returns the whole range as one chunk.
 // Each element is [subStart, subEnd) where subEnd is exclusive.
 func generateSubPeriods(start, end time.Time, granularity string) [][2]time.Time {
 	var periods [][2]time.Time
 	cur := start.Truncate(24 * time.Hour)
-	e := end.Truncate(24 * time.Hour)
+	endDay := end.Truncate(24 * time.Hour)
+	// fd_accrual_run stores inclusive end dates; treat as [start, end+1day) for slicing.
+	e := endDay.AddDate(0, 0, 1)
 	if !cur.Before(e) {
 		return periods
 	}
-	switch strings.ToUpper(granularity) {
+	switch normalizeAccrualGranularity(granularity) {
 	case "DAILY":
 		for cur.Before(e) {
 			next := cur.AddDate(0, 0, 1)
@@ -819,7 +1002,6 @@ func generateSubPeriods(start, end time.Time, granularity string) [][2]time.Time
 		}
 	case "MONTHLY":
 		for cur.Before(e) {
-			// advance to first day of next month
 			next := time.Date(cur.Year(), cur.Month()+1, 1, 0, 0, 0, 0, time.UTC)
 			if next.After(e) {
 				next = e
@@ -830,10 +1012,32 @@ func generateSubPeriods(start, end time.Time, granularity string) [][2]time.Time
 	case "QUARTERLY":
 		for cur.Before(e) {
 			next := cur.AddDate(0, 3, 0)
-			// snap to quarter start (Jan/Apr/Jul/Oct)
 			qMonth := ((int(next.Month())-1)/3)*3 + 1
 			next = time.Date(next.Year(), time.Month(qMonth), 1, 0, 0, 0, 0, time.UTC)
-			if next.After(e) || next.Equal(cur) {
+			if next.After(e) || !next.After(cur) {
+				next = e
+			}
+			periods = append(periods, [2]time.Time{cur, next})
+			cur = next
+		}
+	case "HALF_YEARLY":
+		for cur.Before(e) {
+			var next time.Time
+			if cur.Month() <= 6 {
+				next = time.Date(cur.Year(), time.July, 1, 0, 0, 0, 0, time.UTC)
+			} else {
+				next = time.Date(cur.Year()+1, time.January, 1, 0, 0, 0, 0, time.UTC)
+			}
+			if next.After(e) || !next.After(cur) {
+				next = e
+			}
+			periods = append(periods, [2]time.Time{cur, next})
+			cur = next
+		}
+	case "YEARLY":
+		for cur.Before(e) {
+			next := time.Date(cur.Year()+1, time.January, 1, 0, 0, 0, 0, time.UTC)
+			if next.After(e) {
 				next = e
 			}
 			periods = append(periods, [2]time.Time{cur, next})
@@ -882,39 +1086,65 @@ func getNextCapitalizationDate(ctx context.Context, pool *pgxpool.Pool, fdID str
 	return nextDate.Format(constants.DateFormat)
 }
 
+func sameAccrualDate(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	return a.Format(constants.DateFormat) == b.Format(constants.DateFormat)
+}
+
 // getCashflowDataForPeriod sums interest receipts and TDS deductions in the period.
 func getCashflowDataForPeriod(ctx context.Context, pool *pgxpool.Pool,
-	fdID string, periodStart, periodEnd time.Time) (interestReceived float64, tdsDeducted float64, cashflowIDs []string) {
+	fdID string, periodStart, periodEnd time.Time, includePeriodEnd bool) (interestReceived float64, tdsDeducted float64, cashflowIDs []string) {
 
 	rows, err := pool.Query(ctx, `
-		SELECT cashflow_id, event_type,
+		SELECT cashflow_id, event_type, event_date,
 		       COALESCE(net_cash_flow, 0),
-		       COALESCE(tds_amount, 0)
+		       COALESCE(tds_amount, 0),
+		       COALESCE(interest_accrued, 0)
 		FROM investment.fd_cashflow_schedule
 		WHERE fd_id = $1
 		  AND event_date >= $2
-		  AND event_date <= $3
-		  AND event_type IN ('INTEREST_RECEIPT', 'TDS_DEDUCTION')
+		  AND (event_date < $3 OR ($4 AND event_date = $3))
+		  AND event_type IN ('INTEREST_RECEIPT', 'MATURITY', 'TDS_DEDUCTION', 'CAPITALIZATION')
 		  AND COALESCE(is_deleted, false) = false`,
-		fdID, periodStart, periodEnd,
+		fdID, periodStart, periodEnd, includePeriodEnd,
 	)
 	if err != nil {
 		return 0, 0, nil
 	}
 	defer rows.Close()
 
+	tdsByDeductionDate := map[string]float64{}
+	embeddedTDSByDate := map[string]float64{}
+
 	for rows.Next() {
 		var cashflowID, eventType string
-		var netCash, tdsAmt float64
-		if err := rows.Scan(&cashflowID, &eventType, &netCash, &tdsAmt); err != nil {
+		var eventDate time.Time
+		var netCash, tdsAmt, interestAccrued float64
+		if err := rows.Scan(&cashflowID, &eventType, &eventDate, &netCash, &tdsAmt, &interestAccrued); err != nil {
 			continue
 		}
 		cashflowIDs = append(cashflowIDs, cashflowID)
-		if eventType == "INTEREST_RECEIPT" {
-			interestReceived += netCash
+		if eventType == "INTEREST_RECEIPT" || eventType == "MATURITY" {
+			if interestAccrued > 0 {
+				interestReceived += interestAccrued
+			} else {
+				interestReceived += netCash + tdsAmt
+			}
 		}
 		if eventType == "TDS_DEDUCTION" {
-			tdsDeducted += tdsAmt
+			tdsByDeductionDate[eventDate.Format(constants.DateFormat)] += tdsAmt
+		} else if tdsAmt > 0 {
+			embeddedTDSByDate[eventDate.Format(constants.DateFormat)] += tdsAmt
+		}
+	}
+	for _, amount := range tdsByDeductionDate {
+		tdsDeducted += amount
+	}
+	for date, amount := range embeddedTDSByDate {
+		if tdsByDeductionDate[date] == 0 {
+			tdsDeducted += amount
 		}
 	}
 	return interestReceived, tdsDeducted, cashflowIDs
@@ -1062,19 +1292,19 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 	// ─────────────────────────────────────────────────────────────────────
 
 	// Day count from bank config (fd_master / fd_bank_config_master)
-	configDayCountCode := fd.DayCountCode
+	configDayCountCode := normalizeAccrualDayCountCode(fd.DayCountCode)
 	if configDayCountCode == "" {
 		configDayCountCode = "ACT_365"
 	}
-	// Period-aware divisor: for ACT_ACT, use 366 if Feb 29 falls in the period
-	configDivisor := getDivisorForPeriod(configDayCountCode, effectiveStart, effectiveEnd)
-
-	// Holiday-aware accrual day count
-	configAccrualDays := accrualCountWorkingDays(effectiveStart, effectiveEnd, fd, cal)
+	configDivisor, configAccrualDays := getDivisorAndDaysForAccrualPeriod(
+		configDayCountCode, effectiveStart, effectiveEnd, fd, cal, true)
 
 	// Count excluded days for reporting
 	rawCalDays := int(effectiveEnd.Sub(effectiveStart).Hours() / 24)
 	configHolidaysExcluded := rawCalDays - configAccrualDays
+	if configDayCountCode == "30_360" {
+		configHolidaysExcluded = 0
+	}
 	if configHolidaysExcluded < 0 {
 		configHolidaysExcluded = 0
 	}
@@ -1092,13 +1322,14 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 		}
 	}
 
-	// Bank rounding: bank config decimals take precedence, then run-level
+	// Bank rounding: bank config decimals take precedence, then run-level.
+	// Zero decimals (whole rupees) is valid — do not treat 0 as "unset".
 	configDecimals := fd.BankRoundingDecimals
-	if configDecimals <= 0 {
+	if configDecimals < 0 {
 		configDecimals = params.PrecisionDecimals
 	}
-	if configDecimals <= 0 {
-		configDecimals = 2
+	if configDecimals < 0 {
+		configDecimals = rounding.DefaultDecimals
 	}
 	configRoundingRule := fd.BankRoundingMethod
 	if configRoundingRule == "" {
@@ -1110,41 +1341,71 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 
 	configDailyRate := (fd.InterestRate / 100.0) / float64(configDivisor)
 	configRaw := configOpeningPrincipal * configDailyRate * float64(configAccrualDays)
-	configPeriodInterest := roundAccrual(configRaw, configDecimals, configRoundingRule)
+
+	configRoundingFreq := fd.BankRoundingFrequency
+	if configRoundingFreq == "" {
+		configRoundingFreq = "EACH_PERIOD"
+	}
+
+	// Prefer posted cashflow schedule (same rounded rows as simulator / cashflow engine).
+	configPeriodInterest := rounding.Apply(
+		configRaw, configDecimals, configRoundingRule, configRoundingFreq, true)
+	interestSource := "formula"
+	var schedCFIDs []string
+	includePeriodEndCashflows := sameAccrualDate(effectiveEnd, fd.FdMaturityDate) ||
+		sameAccrualDate(effectiveEnd, fd.EffectiveCloseDate)
+	if schedInterest, ids, hasSched := fdMaster.PeriodInterestFromScheduleWithEnd(
+		ctx, pool, fd.FDID, effectiveStart, effectiveEnd, fd.InterestTypeCode,
+		includePeriodEndCashflows,
+	); hasSched {
+		configPeriodInterest = schedInterest
+		schedCFIDs = ids
+		interestSource = "cashflow_schedule"
+	}
 
 	// Cashflow data (same for both paths — receipts come from bank, not formula)
 	interestReceived, tdsDeducted, cashflowIDs := getCashflowDataForPeriod(
-		ctx, pool, fd.FDID, effectiveStart, effectiveEnd)
+		ctx, pool, fd.FDID, effectiveStart, effectiveEnd, includePeriodEndCashflows)
+	if len(schedCFIDs) > 0 {
+		seen := make(map[string]struct{}, len(cashflowIDs))
+		for _, id := range cashflowIDs {
+			seen[id] = struct{}{}
+		}
+		for _, id := range schedCFIDs {
+			if _, ok := seen[id]; !ok {
+				cashflowIDs = append(cashflowIDs, id)
+			}
+		}
+	}
 
 	configTDSApplicable := configPeriodInterest
 	configClosingBalance := openingBalance + configPeriodInterest - interestReceived
 	configNetInterest := configPeriodInterest - tdsDeducted
 
 	configFormula := fmt.Sprintf(
-		"[CONFIG] P(%.2f) × r(%.4f%%) × d(%d) / D(%d) = %.4f | rnd(%s,%d) = %.2f | holiday_excl=%d",
-		configOpeningPrincipal, fd.InterestRate, configAccrualDays, configDivisor,
-		configRaw, configRoundingRule, configDecimals, configPeriodInterest, configHolidaysExcluded)
+		"[CONFIG] src=%s P(%.2f) × r(%.4f%%) × d(%d) / D(%d) = %.4f | rnd(%s,%d,freq=%s) = %.2f | holiday_excl=%d",
+		interestSource, configOpeningPrincipal, fd.InterestRate, configAccrualDays, configDivisor,
+		configRaw, configRoundingRule, configDecimals, configRoundingFreq,
+		configPeriodInterest, configHolidaysExcluded)
 
 	// ─────────────────────────────────────────────────────────────────────
 	// REQ PATH — run-level baseline calculation
 	// No holiday exclusions. Always fd.PrincipalAmount (no compounding lookup).
 	// ─────────────────────────────────────────────────────────────────────
 
-	reqDayCountCode := params.DayCountConvention
+	reqDayCountCode := normalizeAccrualDayCountCode(params.DayCountConvention)
 	if reqDayCountCode == "" {
 		reqDayCountCode = "ACT_365"
 	}
-	// Req path: period-aware divisor too, but using the run's day count
-	reqDivisor := getDivisorForPeriod(reqDayCountCode, effectiveStart, effectiveEnd)
-
-	// Raw calendar days — NO holiday/weekend exclusion on req path
-	reqAccrualDays := rawCalDays
+	// Req path: run-level day count, no holiday/weekend exclusion except 30/360 formula days.
+	reqDivisor, reqAccrualDays := getDivisorAndDaysForAccrualPeriod(
+		reqDayCountCode, effectiveStart, effectiveEnd, fd, cal, false)
 
 	reqOpeningPrincipal := fd.PrincipalAmount // always original principal
 
 	reqDecimals := params.PrecisionDecimals
-	if reqDecimals <= 0 {
-		reqDecimals = 2
+	if reqDecimals < 0 {
+		reqDecimals = rounding.DefaultDecimals
 	}
 	reqRoundingRule := params.RoundingRule
 	if reqRoundingRule == "" {
@@ -1153,7 +1414,7 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 
 	reqDailyRate := (fd.InterestRate / 100.0) / float64(reqDivisor)
 	reqRaw := reqOpeningPrincipal * reqDailyRate * float64(reqAccrualDays)
-	reqPeriodInterest := roundAccrual(reqRaw, reqDecimals, reqRoundingRule)
+	reqPeriodInterest := rounding.RoundByMethod(reqRaw, reqDecimals, reqRoundingRule)
 
 	reqClosingBalance := openingBalance + reqPeriodInterest - interestReceived
 	reqNetInterest := reqPeriodInterest - tdsDeducted
@@ -1174,8 +1435,8 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 		EntityID: fd.EntityID, EntityName: fd.EntityName,
 		InterestTypeCode: fd.InterestTypeCode,
 		PrincipalAmount:  fd.PrincipalAmount, InterestRate: fd.InterestRate,
-		FdStartDate:      fd.FdStartDate,
-		FdMaturityDate:   fd.FdMaturityDate,
+		FdStartDate:    fd.FdStartDate,
+		FdMaturityDate: fd.FdMaturityDate,
 
 		// Period window
 		AccrualPeriodStart: effectiveStart,
@@ -1222,9 +1483,9 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 		ReqHolidayAccrual:    true,
 
 		// Compounding metadata (BRD IA-05 Section C)
-		FrequencyID:           fd.FrequencyID,
-		CompoundingFrequency:  fd.CompoundingFrequency,
-		CompoundPrincipalUsed: configOpeningPrincipal,
+		FrequencyID:            fd.FrequencyID,
+		CompoundingFrequency:   fd.CompoundingFrequency,
+		CompoundPrincipalUsed:  configOpeningPrincipal,
 		NextCapitalizationDate: getNextCapitalizationDate(ctx, pool, fd.FDID, effectiveEnd),
 
 		// References
@@ -1241,8 +1502,10 @@ func friendlyAccrualError(err error, context string) string {
 	}
 	s := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(s, "fd_accrual_run_granularity_check"):
+		return "Invalid accrual_granularity. Allowed: DAILY, MONTHLY, QUARTERLY, HALF_YEARLY, YEARLY, RUN. Run migration 20260519_fd_accrual_run_granularity_yearly.sql if YEARLY fails."
 	case strings.Contains(s, "fd_accrual_run_type_check"):
-		return "Invalid run_type. Allowed: MONTHLY, QUARTERLY, AD_HOC, MANUAL, SCHEDULED."
+		return "Invalid run_type. Allowed: DAILY, MONTHLY, QUARTERLY, HALF_YEARLY, YEARLY, AD_HOC, MANUAL, SCHEDULED, RUN."
 	case strings.Contains(s, "fd_accrual_run_status_check"):
 		return "Invalid run_status transition. Check allowed statuses."
 	case strings.Contains(s, "fd_accrual_run_mode_check"):

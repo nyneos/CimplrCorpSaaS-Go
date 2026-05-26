@@ -3,6 +3,7 @@ package bankbalances
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -34,16 +36,51 @@ func DeleteAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, bankBalanceAdditionalFilesConfig())
 }
 
+func AuditAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, bankBalanceAdditionalFilesConfig())
+}
+
+func ApproveAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, bankBalanceAdditionalFilesConfig())
+}
+
+func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, bankBalanceAdditionalFilesConfig())
+}
+
 func bankBalanceAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:        "bankbalance",
-		ParentIDField: "balance_id",
-		List:          listBankBalanceAdditionalFiles,
-		Create:        createBankBalanceAdditionalFile,
-		GetOne:        getBankBalanceAdditionalFile,
-		GetMany:       getBankBalanceAdditionalFiles,
-		SoftDelete:    deleteBankBalanceAdditionalFile,
+		Module:                "bankbalance",
+		AuditSource:           "BANK_BALANCE",
+		ParentIDField:         "balance_id",
+		List:                  listBankBalanceAdditionalFiles,
+		CreateReturning:       createBankBalanceAdditionalFile,
+		GetOne:                getBankBalanceAdditionalFile,
+		GetAnyFile:            getAnyBankBalanceAdditionalFile,
+		GetMany:               getBankBalanceAdditionalFiles,
+		SoftDelete:            deleteBankBalanceAdditionalFile,
+		SoftDeleteTx:          deleteBankBalanceAdditionalFileTx,
+		RecordMainUploadAudit: recordBankBalanceMainUploadAudit,
 	}
+}
+
+func recordBankBalanceMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	reason, err := additionalfiles.MainUploadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO public.auditactionbankbalances (
+			balance_id,
+			actiontype,
+			processing_status,
+			reason,
+			requested_by,
+			requested_at
+		) VALUES ($1, 'UPLOAD_FILE', 'APPROVED', $2, $3, $4)
+	`, parentID, reason, payload.UploadedBy, payload.UploadedAt)
+	return err
 }
 
 func listBankBalanceAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
@@ -73,10 +110,10 @@ func listBankBalanceAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, par
 	return additionalfiles.QueryFiles(ctx, pool, query, args...)
 }
 
-func createBankBalanceAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
+func createBankBalanceAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
 	scopeClause, scopeArgs, err := bankBalanceAccessScope(ctx, 9)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	parentScope := `
@@ -94,13 +131,26 @@ func createBankBalanceAdditionalFile(ctx context.Context, tx pgx.Tx, input addit
 	`
 
 	args := append([]interface{}{input.ParentID}, scopeArgs...)
-	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "cimplrcorpsaas.bank_balance_files", "balance_id", input, parentScope, args...)
+	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "cimplrcorpsaas.bank_balance_files", "balance_id", input, parentScope, args...)
 }
 
 func getBankBalanceAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getBankBalanceAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnyBankBalanceAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getBankBalanceAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getBankBalanceAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
 	scopeClause, scopeArgs, err := bankBalanceAccessScope(ctx, 3)
 	if err != nil {
 		return nil, err
+	}
+
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
 	}
 
 	query := `
@@ -116,7 +166,7 @@ func getBankBalanceAdditionalFile(ctx context.Context, pool *pgxpool.Pool, paren
 		LEFT JOIN public.masterentity me ON me.entity_id::text = mba.entity_id
 		WHERE f.balance_id = $1
 		  AND f.file_id = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  ` + deletedClause + `
 		  AND ` + scopeClause + `
 	`
 
@@ -158,6 +208,18 @@ func getBankBalanceAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, pare
 }
 
 func deleteBankBalanceAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteBankBalanceAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteBankBalanceAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteBankBalanceAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+type bankBalanceFileExec interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+}
+
+func deleteBankBalanceAdditionalFileExec(ctx context.Context, exec bankBalanceFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	scopeClause, scopeArgs, err := bankBalanceAccessScope(ctx, 5)
 	if err != nil {
 		return false, err
@@ -185,7 +247,7 @@ func deleteBankBalanceAdditionalFile(ctx context.Context, pool *pgxpool.Pool, pa
 	`
 
 	args := append([]interface{}{parentID, fileID, deletedBy, deletedAt}, scopeArgs...)
-	result, execErr := pool.Exec(ctx, query, args...)
+	result, execErr := exec.Exec(ctx, query, args...)
 	if execErr != nil {
 		return false, execErr
 	}
@@ -230,7 +292,7 @@ func bankBalanceAccessScope(ctx context.Context, startPosition int) (string, []i
 	}
 
 	if len(clauses) == 0 {
-		return "", nil, errors.New("no accessible business units found")
+		return "", nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
 
 	return strings.Join(clauses, " AND "), args, nil

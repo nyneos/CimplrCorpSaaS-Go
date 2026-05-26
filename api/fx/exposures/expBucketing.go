@@ -5,6 +5,7 @@ package exposures
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/fx/auditutil"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -312,6 +313,23 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "No records updated")
 			return
 		}
+		actor := auditutil.Actor(req.UserID)
+		oldBucketing := auditutil.FetchRowSnapshot(r.Context(), db, "public.exposure_bucketing", "exposure_header_id", req.ExposureHeaderID)
+		oldHedging := auditutil.FetchRowSnapshot(r.Context(), db, "public.hedging_proposal", "exposure_header_id", req.ExposureHeaderID)
+		if len(req.BucketingFields) > 0 {
+			newValues := any(req.BucketingFields)
+			if bucketingRows, ok := updated["bucketing"]; ok {
+				newValues = bucketingRows
+			}
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: "PENDING_EDIT_APPROVAL", Reason: "", RequestedBy: actor, OldValues: oldBucketing, NewValues: newValues})
+		}
+		if len(req.HedgingFields) > 0 {
+			newValues := any(req.HedgingFields)
+			if hedgingRows, ok := updated["hedging"]; ok {
+				newValues = hedgingRows
+			}
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableHedgeProposal, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: "PENDING_EDIT_APPROVAL", Reason: "", RequestedBy: actor, OldValues: oldHedging, NewValues: newValues})
+		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -358,6 +376,7 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			FROM exposure_headers
 			WHERE entity = ANY($1)
 			  AND (approval_status = 'approved' OR approval_status = 'Approved')
+			  AND COALESCE(is_deleted, false) = false
 			  AND exposure_header_id NOT IN (
 				SELECT exposure_header_id FROM exposure_bucketing
 			  )`, pq.Array(buNames))
@@ -368,7 +387,8 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
 			LEFT JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id
 			WHERE h.entity = ANY($1)
-			  AND (h.approval_status = 'approved' OR h.approval_status = 'Approved')`, pq.Array(buNames))
+			  AND (h.approval_status = 'approved' OR h.approval_status = 'Approved')
+			  AND COALESCE(h.is_deleted, false) = false`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch joined exposures")
 			return
@@ -447,6 +467,94 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+func DeleteBucketingStatus(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID            string   `json:"user_id"`
+			ExposureHeaderIds []string `json:"exposureHeaderIds"`
+			DeleteComment     string   `json:"delete_comment"`
+			Reason            string   `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.UserID == "" {
+			respondWithError(w, http.StatusBadRequest, "exposureHeaderIds and user_id are required")
+			return
+		}
+
+		var requestedBy string
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				requestedBy = s.Name
+				break
+			}
+		}
+		if requestedBy == "" {
+			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		deleteComment := strings.TrimSpace(req.DeleteComment)
+		if deleteComment == "" {
+			deleteComment = strings.TrimSpace(req.Reason)
+		}
+
+		rows, err := db.Query(
+			`WITH target AS (
+				SELECT b.exposure_header_id,
+				       COALESCE(b.status_bucketing, '') AS old_status_bucketing,
+				       COALESCE(b.comments, '') AS old_comments
+				FROM exposure_bucketing b
+				JOIN exposure_headers h ON h.exposure_header_id = b.exposure_header_id
+				WHERE b.exposure_header_id = ANY($1::uuid[])
+				  AND COALESCE(h.is_deleted, false) = false
+			)
+			UPDATE exposure_bucketing b
+			SET status_bucketing = 'PENDING_DELETE_APPROVAL',
+			    updated_by = $2,
+			    comments = $3,
+			    updated_at = NOW()
+			FROM target t
+			WHERE b.exposure_header_id = t.exposure_header_id
+			RETURNING b.exposure_header_id, t.old_status_bucketing, t.old_comments`,
+			pq.Array(req.ExposureHeaderIds),
+			requestedBy,
+			deleteComment,
+		)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+
+		deleted := []string{}
+		for rows.Next() {
+			var id, oldStatusBucketing, oldComments string
+			if err := rows.Scan(&id, &oldStatusBucketing, &oldComments); err == nil {
+				deleted = append(deleted, id)
+				oldValues := map[string]interface{}{
+					"status_bucketing": oldStatusBucketing,
+					"comments":         oldComments,
+				}
+				newValues := map[string]interface{}{
+					"status_bucketing": "PENDING_DELETE_APPROVAL",
+					"comments":         deleteComment,
+				}
+				auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: "PENDING_DELETE_APPROVAL", Reason: deleteComment, RequestedBy: requestedBy, OldValues: oldValues, NewValues: newValues})
+			}
+		}
+		if len(deleted) == 0 {
+			respondWithError(w, http.StatusNotFound, "No eligible exposure bucketing rows found")
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"deleted":              deleted,
+		})
+	}
+}
+
 func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -473,37 +581,123 @@ func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(
-			`UPDATE exposure_bucketing
-             SET status_bucketing = 'Approved', updated_by = $2, comments = $3, updated_at = NOW()
-             WHERE exposure_header_id = ANY($1)
-             RETURNING *`,
-			pq.Array(req.ExposureHeaderIds), updatedBy, req.Comments,
+		tx, err := db.Begin()
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer tx.Rollback()
+
+		statusRows, err := tx.Query(
+			`SELECT exposure_header_id, COALESCE(status_bucketing, '')
+			 FROM exposure_bucketing
+			 WHERE exposure_header_id = ANY($1::uuid[])`,
+			pq.Array(req.ExposureHeaderIds),
 		)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		defer rows.Close()
-		cols, _ := rows.Columns()
-		approved := []map[string]interface{}{}
-		for rows.Next() {
-			vals := make([]interface{}, len(cols))
-			valPtrs := make([]interface{}, len(cols))
-			for i := range vals {
-				valPtrs[i] = &vals[i]
+		toDelete := []string{}
+		toApprove := []string{}
+		for statusRows.Next() {
+			var id, status string
+			if err := statusRows.Scan(&id, &status); err == nil {
+				if strings.EqualFold(status, "PENDING_DELETE_APPROVAL") {
+					toDelete = append(toDelete, id)
+				} else {
+					toApprove = append(toApprove, id)
+				}
 			}
-			rows.Scan(valPtrs...)
-			rowMap := map[string]interface{}{}
-			for i, col := range cols {
-				rowMap[col] = parseDBValue(col, vals[i])
-			}
-			approved = append(approved, rowMap)
 		}
+		statusRows.Close()
+
+		approved := []map[string]interface{}{}
+		if len(toApprove) > 0 {
+			rows, err := tx.Query(
+				`UPDATE exposure_bucketing
+	             SET status_bucketing = 'Approved', updated_by = $2, comments = $3, updated_at = NOW()
+	             WHERE exposure_header_id = ANY($1::uuid[])
+	             RETURNING *`,
+				pq.Array(toApprove), updatedBy, req.Comments,
+			)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			cols, _ := rows.Columns()
+			for rows.Next() {
+				vals := make([]interface{}, len(cols))
+				valPtrs := make([]interface{}, len(cols))
+				for i := range vals {
+					valPtrs[i] = &vals[i]
+				}
+				rows.Scan(valPtrs...)
+				rowMap := map[string]interface{}{}
+				for i, col := range cols {
+					rowMap[col] = parseDBValue(col, vals[i])
+				}
+				approved = append(approved, rowMap)
+			}
+			rows.Close()
+		}
+
+		deleted := []string{}
+		if len(toDelete) > 0 {
+			delRows, err := tx.Query(
+				`UPDATE exposure_headers
+				 SET is_deleted = TRUE,
+				     deleted_at = NOW(),
+				     deleted_by = $2
+				 WHERE exposure_header_id = ANY($1::uuid[])
+				   AND COALESCE(is_deleted, false) = false
+				 RETURNING exposure_header_id`,
+				pq.Array(toDelete), updatedBy,
+			)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			for delRows.Next() {
+				var id string
+				if err := delRows.Scan(&id); err == nil {
+					deleted = append(deleted, id)
+				}
+			}
+			delRows.Close()
+
+			if len(deleted) > 0 {
+				if _, err := tx.Exec(
+					`UPDATE exposure_bucketing
+					 SET status_bucketing = 'Approved', updated_by = $2, comments = $3, updated_at = NOW()
+					 WHERE exposure_header_id = ANY($1::uuid[])`,
+					pq.Array(deleted), updatedBy, req.Comments,
+				); err != nil {
+					respondWithError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		for _, rowMap := range approved {
+			if id, ok := rowMap["exposure_header_id"]; ok {
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: "APPROVED", CheckerBy: updatedBy, Comment: req.Comments})
+			}
+		}
+		for _, id := range deleted {
+			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, Status: "APPROVED", CheckerBy: updatedBy, Comment: req.Comments})
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
 			"Approved":             approved,
+			"deleted":              deleted,
 		})
 	}
 }
@@ -536,8 +730,12 @@ func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
 
 		rows, err := db.Query(
 			`UPDATE exposure_bucketing
-             SET status_bucketing = 'Rejected', updated_by = $2, comments = $3, updated_at = NOW()
-             WHERE exposure_header_id = ANY($1)
+             SET status_bucketing = CASE
+				WHEN UPPER(COALESCE(status_bucketing, '')) = 'PENDING_DELETE_APPROVAL' THEN 'Approved'
+				ELSE 'Rejected'
+		     END,
+		     updated_by = $2, comments = $3, updated_at = NOW()
+             WHERE exposure_header_id = ANY($1::uuid[])
              RETURNING *`,
 			pq.Array(req.ExposureHeaderIds), updatedBy, req.Comments,
 		)
@@ -560,6 +758,9 @@ func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
 				rowMap[col] = parseDBValue(col, vals[i])
 			}
 			rejected = append(rejected, rowMap)
+			if id, ok := rowMap["exposure_header_id"]; ok {
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: "REJECTED", CheckerBy: updatedBy, Comment: req.Comments})
+			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{

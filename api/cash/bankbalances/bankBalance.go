@@ -245,6 +245,8 @@ func GetBankBalanceDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		insertBankBalanceDownloadAudit(ctx, pgxPool, req.BalanceID, requestedByFromCtx(ctx, req.UserID), key)
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -269,6 +271,7 @@ func GetBankBalanceBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		files := make([]map[string]string, 0, len(req.BalanceIDs))
 		failedIDs := make([]string, 0)
+		requestedBy := requestedByFromCtx(ctx, req.UserID)
 
 		for _, rawID := range req.BalanceIDs {
 			balanceID := strings.TrimSpace(rawID)
@@ -303,6 +306,7 @@ func GetBankBalanceBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"balance_id":   balanceID,
 				"download_url": downloadURL,
 			})
+			insertBankBalanceDownloadAudit(ctx, pgxPool, balanceID, requestedBy, key)
 		}
 
 		if len(files) == 0 {
@@ -449,6 +453,13 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// parse optional as_of_date and time into proper types in SQL; pass as strings
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+pgUserFriendlyMessage(err))
+			return
+		}
+		defer tx.Rollback(ctx)
+
 		ins := `INSERT INTO bank_balances_manual (
             balance_id, bank_name, account_no, iban, currency_code, nickname, country,
             as_of_date, as_of_time, balance_type, balance_amount, statement_type, source_channel,
@@ -456,7 +467,7 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`
 
 		// Use Exec context
-		_, err := pgxPool.Exec(ctx, ins,
+		_, err = tx.Exec(ctx, ins,
 			balanceID,
 			nullifyEmpty(req.BankName),
 			nullifyEmpty(req.AccountNo),
@@ -482,9 +493,14 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// insert audit action
 		auditQ := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
-		_, err = pgxPool.Exec(ctx, auditQ, balanceID, nullifyEmpty(req.Reason), requestedBy)
+		_, err = tx.Exec(ctx, auditQ, balanceID, nullifyEmpty(req.Reason), requestedBy)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to create audit action: "+pgUserFriendlyMessage(err))
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 
@@ -515,8 +531,8 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Fetch latest audit per balance_id
-		sel := `SELECT DISTINCT ON (balance_id) action_id, balance_id, actiontype, processing_status FROM auditactionbankbalances WHERE balance_id = ANY($1) ORDER BY balance_id, requested_at DESC`
+		// Fetch latest actionable audit per balance_id so download rows are not treated as approvable actions.
+		sel := `SELECT DISTINCT ON (balance_id) action_id, balance_id, actiontype, processing_status FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, requested_at DESC, action_id DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.BalanceIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to fetch latest audits: "+pgUserFriendlyMessage(err))
@@ -525,17 +541,22 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		actionIDs := make([]string, 0)
-		deleteIDs := make([]string, 0)
+		deleteActionIDs := make([]string, 0)
 		found := map[string]bool{}
 		for rows.Next() {
 			var actionID, balanceID, actionType, procStatus string
 			if err := rows.Scan(&actionID, &balanceID, &actionType, &procStatus); err != nil {
-				continue
+				api.RespondWithResult(w, false, "failed to read latest audits: "+pgUserFriendlyMessage(err))
+				return
 			}
 			found[balanceID] = true
+			if procStatus != "PENDING_APPROVAL" && procStatus != "PENDING_EDIT_APPROVAL" && procStatus != "PENDING_DELETE_APPROVAL" {
+				api.RespondWithResult(w, false, "cannot approve non-pending balance: "+balanceID)
+				return
+			}
 			actionIDs = append(actionIDs, actionID)
 			if actionType == "DELETE" {
-				deleteIDs = append(deleteIDs, balanceID)
+				deleteActionIDs = append(deleteActionIDs, actionID)
 			}
 		}
 
@@ -552,10 +573,15 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrTxBeginFailed+pgUserFriendlyMessage(err))
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+pgUserFriendlyMessage(err))
 			return
 		}
-		defer tx.Rollback(ctx) //nolint:errcheck
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
 
 		// Update audit actions to APPROVED
 		upd := `UPDATE auditactionbankbalances SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
@@ -565,13 +591,45 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// decisionQ := `
+		// 	INSERT INTO auditactionbankbalances (
+		// 		balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
+		// 	)
+		// 	SELECT balance_id, 'APPROVE', 'APPROVED', $2, now(), $2, now(), $3
+		// 	FROM unnest($1::text[]) AS balance_id
+		// `
+
 		// Delete any balances requested for delete
 		deleted := []string{}
-		if len(deleteIDs) > 0 {
-			delQ := `DELETE FROM bank_balances_manual WHERE balance_id = ANY($1) RETURNING balance_id`
-			drows, derr := tx.Query(ctx, delQ, deleteIDs)
+		if len(deleteActionIDs) > 0 {
+			// delQ := `DELETE FROM bank_balances_manual WHERE balance_id = ANY($1) RETURNING balance_id`
+			delQ := `
+				UPDATE bank_balances_manual b
+				SET is_deleted = TRUE,
+					deleted_at = now(),
+					deleted_by = aa.requested_by
+				FROM auditactionbankbalances aa
+				WHERE aa.action_id = ANY($1)
+				  AND aa.actiontype = 'DELETE'
+				  AND aa.balance_id = b.balance_id
+				RETURNING b.balance_id
+			`
+			drows, derr := tx.Query(ctx, delQ, deleteActionIDs)
 			if derr != nil {
-				api.RespondWithResult(w, false, "failed to delete balances: "+pgUserFriendlyMessage(derr))
+				api.RespondWithResult(w, false, "failed to soft delete balances: "+pgUserFriendlyMessage(derr))
+				return
+			}
+			defer drows.Close()
+			for drows.Next() {
+				var id string
+				if err := drows.Scan(&id); err != nil {
+					api.RespondWithResult(w, false, "failed to read deleted balances: "+pgUserFriendlyMessage(err))
+					return
+				}
+				deleted = append(deleted, id)
+			}
+			if drows.Err() != nil {
+				api.RespondWithResult(w, false, "failed to read deleted balances: "+pgUserFriendlyMessage(drows.Err()))
 				return
 			}
 			for drows.Next() {
@@ -590,6 +648,11 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "failed to commit: "+pgUserFriendlyMessage(err))
 			return
 		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to commit approve: "+pgUserFriendlyMessage(err))
+			return
+		}
+		committed = true
 
 		// return structured JSON
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -620,7 +683,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		sel := `SELECT DISTINCT ON (balance_id) action_id, balance_id FROM auditactionbankbalances WHERE balance_id = ANY($1) ORDER BY balance_id, requested_at DESC`
+		sel := `SELECT DISTINCT ON (balance_id) action_id, balance_id, processing_status FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, requested_at DESC, action_id DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.BalanceIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to fetch latest audits: "+pgUserFriendlyMessage(err))
@@ -633,10 +696,16 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var actionID string
 			var balanceID string
-			if err := rows.Scan(&actionID, &balanceID); err != nil {
-				continue
+			var procStatus string
+			if err := rows.Scan(&actionID, &balanceID, &procStatus); err != nil {
+				api.RespondWithResult(w, false, "failed to read latest audits: "+pgUserFriendlyMessage(err))
+				return
 			}
 			found[balanceID] = true
+			if procStatus != "PENDING_APPROVAL" && procStatus != "PENDING_EDIT_APPROVAL" && procStatus != "PENDING_DELETE_APPROVAL" {
+				api.RespondWithResult(w, false, "cannot reject non-pending balance: "+balanceID)
+				return
+			}
 			actionIDs = append(actionIDs, actionID)
 		}
 		missing := []string{}
@@ -650,12 +719,38 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+pgUserFriendlyMessage(err))
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
 		upd := `UPDATE auditactionbankbalances SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
-		_, err = pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs)
+		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to reject actions: "+pgUserFriendlyMessage(err))
 			return
 		}
+
+		// decisionQ := `
+		// 	INSERT INTO auditactionbankbalances (
+		// 		balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
+		// 	)
+		// 	SELECT balance_id, 'REJECT', 'REJECTED', $2, now(), $2, now(), $3
+		// 	FROM unnest($1::text[]) AS balance_id
+		// `
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to commit reject: "+pgUserFriendlyMessage(err))
+			return
+		}
+		committed = true
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rejected_count": len(actionIDs)})
@@ -687,7 +782,7 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		committed := false
@@ -699,13 +794,26 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ins := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
 		for _, id := range req.BalanceIDs {
+			var latestActionType, latestStatus string
+			latestErr := tx.QueryRow(ctx, `
+				SELECT actiontype, processing_status
+				FROM auditactionbankbalances
+				WHERE balance_id = $1
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, id).Scan(&latestActionType, &latestStatus)
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+				api.RespondWithResult(w, false, fmt.Sprintf("delete request already pending for balance_id: %s", id))
+				return
+			}
 			if _, err := tx.Exec(ctx, ins, id, nullifyEmpty(req.Reason), requestedBy); err != nil {
 				api.RespondWithResult(w, false, "failed to create delete audit: "+pgUserFriendlyMessage(err))
 				return
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 		committed = true
@@ -772,7 +880,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		var rows pgx.Rows
 		var err error
-		whereClauses := []string{}
+		whereClauses := []string{"COALESCE(b.is_deleted, false) = false"}
 		args := []interface{}{}
 		pos := 1
 		if len(entityIDs) > 0 {
@@ -948,7 +1056,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Batch fetch audit details for all balance_ids
 			auditMap := make(map[string]map[string]string)
 			if len(balanceIDs) > 0 {
-				auditDetailsQuery := `SELECT balance_id, actiontype, requested_by, requested_at FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, requested_at DESC`
+				auditDetailsQuery := `SELECT balance_id, actiontype, requested_by, requested_at FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, requested_at DESC, action_id DESC`
 				auditRows, auditErr := pgxPool.Query(ctx, auditDetailsQuery, balanceIDs)
 				if auditErr == nil {
 					defer auditRows.Close()
@@ -958,7 +1066,8 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						var rbyPtr *string
 						var ratPtr *time.Time
 						if err := auditRows.Scan(&bid, &atype, &rbyPtr, &ratPtr); err != nil {
-							continue
+							api.RespondWithResult(w, false, "failed to read audit details: "+pgUserFriendlyMessage(err))
+							return
 						}
 						if auditMap[bid] == nil {
 							auditMap[bid] = make(map[string]string)
@@ -981,7 +1090,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Batch fetch latest audit for all balance_ids
 			auditLatestMap := make(map[string]map[string]*string)
 			if len(balanceIDs) > 0 {
-				auditLatestQuery := `SELECT DISTINCT ON (balance_id) balance_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankbalances WHERE balance_id = ANY($1) ORDER BY balance_id, requested_at DESC`
+				auditLatestQuery := `SELECT DISTINCT ON (balance_id) balance_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankbalances WHERE balance_id = ANY($1) ORDER BY balance_id, requested_at DESC, action_id DESC`
 				auditLatestRows, err := pgxPool.Query(ctx, auditLatestQuery, balanceIDs)
 				if err == nil {
 					defer auditLatestRows.Close()
@@ -990,7 +1099,8 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						var ps, rb, at, aid, cb, cc, r *string
 						var rat, cat *time.Time
 						if err := auditLatestRows.Scan(&bid, &ps, &rb, &rat, &at, &aid, &cb, &cat, &cc, &r); err != nil {
-							continue
+							api.RespondWithResult(w, false, "failed to read latest audit details: "+pgUserFriendlyMessage(err))
+							return
 						}
 						auditLatestMap[bid] = map[string]*string{
 							"processing_status": ps,
@@ -1052,7 +1162,12 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": partialRows})
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: true,
+				"data": map[string]interface{}{
+					"bank_balances": partialRows,
+				},
+			})
 		}
 	}
 }
@@ -1229,7 +1344,7 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		defer func() {
@@ -1369,7 +1484,7 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 		// clear tx rollback defer

@@ -2,7 +2,6 @@ package accountingworkbench
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"fmt"
@@ -76,13 +75,7 @@ func CreateCorporateActionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -189,13 +182,7 @@ func CreateCorporateActionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, "Invalid user session")
 			return
@@ -309,13 +296,7 @@ func UpdateCorporateAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -427,6 +408,7 @@ func GetCorporateActionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactionaccountingactivity a
+				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY a.activity_id, a.requested_at DESC
 			)
 			SELECT

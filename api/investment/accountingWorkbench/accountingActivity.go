@@ -2,18 +2,16 @@ package accountingworkbench
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
-	
-
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 // ---------------------------
@@ -537,7 +535,7 @@ func generateCorporateActionJournalInTx(ctx context.Context, tx DBExecutor, sett
 
 // generateFVOJournalInTx generates journal entries for FVO within existing transaction
 func generateFVOJournalInTx(ctx context.Context, tx DBExecutor, settings *SettingsCache, activityID string) error {
-	log.Printf("[DEBUG FVO] Starting generateFVOJournalInTx for activity: %s", activityID)
+	logger.LogInfo("[DEBUG FVO] Starting generateFVOJournalInTx for activity: %s", activityID)
 	rows, err := tx.Query(ctx, `
 		SELECT f.fvo_id, f.scheme_id, COALESCE(f.market_nav, 0) as market_nav, 
 		       f.override_nav, COALESCE(f.variance, 0) as variance, 
@@ -550,7 +548,7 @@ func generateFVOJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 	if err != nil {
 		return fmt.Errorf("fetch FVO data failed: %w", err)
 	}
-	log.Printf("[DEBUG FVO] Query executed successfully")
+	logger.LogInfo("[DEBUG FVO] Query executed successfully")
 
 	// Read all rows into memory first, then close rows to free the connection
 	// This prevents "conn busy" errors when GenerateJournalEntryForFVO queries other tables
@@ -576,7 +574,7 @@ func generateFVOJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 		})
 	}
 	rows.Close()
-	log.Printf("[DEBUG FVO] Read %d FVO records, rows closed", len(fvoRecords))
+	logger.LogInfo("[DEBUG FVO] Read %d FVO records, rows closed", len(fvoRecords))
 
 	if err := rows.Err(); err != nil {
 		return err
@@ -585,20 +583,20 @@ func generateFVOJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 	// Now process the records - connection is free for other queries
 	for _, data := range fvoRecords {
 		fvoID := data["fvo_id"].(string)
-		log.Printf("[DEBUG FVO] Processing fvo_id: %s", fvoID)
+		logger.LogInfo("[DEBUG FVO] Processing fvo_id: %s", fvoID)
 
 		je, err := GenerateJournalEntryForFVO(ctx, tx, settings, activityID, data)
 		if err != nil {
-			log.Printf("[DEBUG FVO] GenerateJournalEntryForFVO failed: %v", err)
+			logger.LogError("[DEBUG FVO] GenerateJournalEntryForFVO failed: %v", err)
 			return fmt.Errorf("generate FVO journal failed: %w", err)
 		}
-		log.Printf("[DEBUG FVO] Journal entry generated, calling SaveJournalEntry")
+		logger.LogInfo("[DEBUG FVO] Journal entry generated, calling SaveJournalEntry")
 
 		if err := SaveJournalEntry(ctx, tx, je); err != nil {
-			log.Printf("[DEBUG FVO] SaveJournalEntry failed: %v", err)
+			logger.LogError("[DEBUG FVO] SaveJournalEntry failed: %v", err)
 			return fmt.Errorf("save FVO journal failed: %w", err)
 		}
-		log.Printf("[DEBUG FVO] Journal entry saved successfully for fvo_id: %s", fvoID)
+		logger.LogInfo("[DEBUG FVO] Journal entry saved successfully for fvo_id: %s", fvoID)
 	}
 
 	return nil
@@ -647,13 +645,7 @@ func CreateActivitySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -745,13 +737,7 @@ func CreateActivityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, "Invalid user session")
 			return
@@ -843,13 +829,7 @@ func UpdateActivity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Name
-				break
-			}
-		}
+		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -956,13 +936,7 @@ func DeleteActivity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		requestedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
+		requestedBy := api.GetUserNameFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1009,19 +983,13 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -1033,6 +1001,7 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (activity_id) action_id, activity_id, actiontype, processing_status
 			FROM investment.auditactionaccountingactivity
 			WHERE activity_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY activity_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ActivityIDs)
@@ -1180,15 +1149,15 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Generate journal entries WITHIN SAME TRANSACTION (atomic operation)
 			// If journal generation fails, entire approval rolls back
-			log.Printf("[DEBUG APPROVAL] Starting journal generation for %d activities", len(toApproveActivityIDs))
+			logger.LogInfo("[DEBUG APPROVAL] Starting journal generation for %d activities", len(toApproveActivityIDs))
 			for _, actID := range toApproveActivityIDs {
-				log.Printf("[DEBUG APPROVAL] Generating journal for activity: %s (tx type: %T)", actID, tx)
+				logger.LogInfo("[DEBUG APPROVAL] Generating journal for activity: %s (tx type: %T)", actID, tx)
 				if err := GenerateAndSaveJournalEntriesInTx(ctx, tx, actID); err != nil {
-					log.Printf("[DEBUG APPROVAL] Journal generation failed for %s: %v", actID, err)
+					logger.LogError("[DEBUG APPROVAL] Journal generation failed for %s: %v", actID, err)
 					api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("journal generation failed for activity %s: %v", actID, err))
 					return
 				}
-				log.Printf("[DEBUG APPROVAL] Journal generation completed for activity: %s", actID)
+				logger.LogInfo("[DEBUG APPROVAL] Journal generation completed for activity: %s", actID)
 			}
 		}
 
@@ -1238,19 +1207,13 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -1262,6 +1225,7 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (activity_id) action_id, activity_id, processing_status
 			FROM investment.auditactionaccountingactivity
 			WHERE activity_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY activity_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ActivityIDs)
@@ -1344,6 +1308,7 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactionaccountingactivity a
+				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY a.activity_id, a.requested_at DESC
 			),
 			history AS (
@@ -1552,6 +1517,7 @@ func GetApprovedActivities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					activity_id,
 					processing_status
 				FROM investment.auditactionaccountingactivity
+				WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY activity_id, requested_at DESC
 			)
 			SELECT

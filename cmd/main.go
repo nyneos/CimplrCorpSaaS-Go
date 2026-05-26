@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv" // Add this import
@@ -73,12 +74,22 @@ func main() {
 		sslMode = "disable"
 	}
 	pgxConnStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&pool_max_conns=30&pool_min_conns=2&statement_timeout=30000",
+		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&statement_timeout=30000",
 		user, pass, host, port, name, sslMode,
 	)
 
 	ctx := context.Background()
-	pgxPool, err := pgxpool.New(ctx, pgxConnStr)
+	pgxConfig, err := pgxpool.ParseConfig(pgxConnStr)
+	if err != nil {
+		log.Fatal("failed to parse pgx config:", err)
+	}
+	pgxConfig.MaxConns = 20
+	pgxConfig.MinConns = 5
+	pgxConfig.MaxConnIdleTime = 5 * time.Minute
+	pgxConfig.MaxConnLifetime = 30 * time.Minute
+	pgxConfig.HealthCheckPeriod = 1 * time.Minute
+
+	pgxPool, err := pgxpool.NewWithConfig(ctx, pgxConfig)
 	if err != nil {
 		log.Fatal("failed to create pgx pool:", err)
 	}

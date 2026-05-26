@@ -3,6 +3,7 @@ package projection
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"errors"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,16 +35,36 @@ func DeleteAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, projectionAdditionalFilesConfig())
 }
 
+func AuditAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, projectionAdditionalFilesConfig())
+}
+
+func ApproveAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, projectionAdditionalFilesConfig())
+}
+
+func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, projectionAdditionalFilesConfig())
+}
+
 func projectionAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:        "projection",
-		ParentIDField: "proposal_id",
-		List:          listProjectionAdditionalFiles,
-		Create:        createProjectionAdditionalFile,
-		GetOne:        getProjectionAdditionalFile,
-		GetMany:       getProjectionAdditionalFiles,
-		SoftDelete:    deleteProjectionAdditionalFile,
+		Module:                "projection",
+		AuditSource:           "PROJECTION",
+		ParentIDField:         "proposal_id",
+		List:                  listProjectionAdditionalFiles,
+		CreateReturning:       createProjectionAdditionalFile,
+		GetOne:                getProjectionAdditionalFile,
+		GetAnyFile:            getAnyProjectionAdditionalFile,
+		GetMany:               getProjectionAdditionalFiles,
+		SoftDelete:            deleteProjectionAdditionalFile,
+		SoftDeleteTx:          deleteProjectionAdditionalFileTx,
+		RecordMainUploadAudit: recordProjectionMainUploadAudit,
 	}
+}
+
+func recordProjectionMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainUploadAudit(ctx, tx, "cimplrcorpsaas.audit_action_cashflow_proposal", "proposal_id", "action_type", parentID, payload)
 }
 
 func listProjectionAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
@@ -53,34 +75,47 @@ func listProjectionAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, pare
 	return additionalfiles.QueryFiles(ctx, pool, projectionFileQuery(`
 		WHERE f.proposal_id = $1
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
-		  AND `+projectionParentEntityAllowed("p.proposal_id", "$2")+`
+		  AND `+projectionParentEntityAllowed(constants.ProposalID, "$2")+`
 		ORDER BY f.uploaded_at DESC
 	`), parentID, names)
 }
 
-func createProjectionAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
+func createProjectionAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
 	names, err := projectionEntityNames(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "cimplrcorpsaas.cashflow_proposal_files", "proposal_id", input, `
+	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "cimplrcorpsaas.cashflow_proposal_files", "proposal_id", input, `
 		SELECT DISTINCT p.proposal_id AS parent_id
 		FROM cimplrcorpsaas.cashflow_proposal p
 		WHERE p.proposal_id = $8
-		  AND `+projectionParentEntityAllowed("p.proposal_id", "$9")+`
+		  AND `+projectionParentEntityAllowed(constants.ProposalID, "$9")+`
 	`, input.ParentID, names)
 }
 
 func getProjectionAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getProjectionAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnyProjectionAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getProjectionAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getProjectionAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
 	names, err := projectionEntityNames(ctx)
 	if err != nil {
 		return nil, err
 	}
+
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
+	}
 	return additionalfiles.FirstFile(ctx, pool, projectionFileQuery(`
 		WHERE f.proposal_id = $1
 		  AND f.file_id = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
-		  AND `+projectionParentEntityAllowed("p.proposal_id", "$3")+`
+		  `+deletedClause+`
+		  AND `+projectionParentEntityAllowed(constants.ProposalID, "$3")+`
 	`), parentID, fileID, names)
 }
 
@@ -94,7 +129,7 @@ func getProjectionAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, paren
 		WHERE f.proposal_id = $1
 		  AND f.file_id = ANY($2)
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
-		  AND `+projectionParentEntityAllowed("p.proposal_id", "$3")+`
+		  AND `+projectionParentEntityAllowed(constants.ProposalID, "$3")+`
 		ORDER BY f.uploaded_at DESC
 	`), parentID, trimmedIDs, names)
 	if queryErr != nil {
@@ -104,11 +139,23 @@ func getProjectionAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, paren
 }
 
 func deleteProjectionAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteProjectionAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteProjectionAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteProjectionAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+type projectionFileExec interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+}
+
+func deleteProjectionAdditionalFileExec(ctx context.Context, exec projectionFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	names, err := projectionEntityNames(ctx)
 	if err != nil {
 		return false, err
 	}
-	result, execErr := pool.Exec(ctx, `
+	result, execErr := exec.Exec(ctx, `
 		UPDATE cimplrcorpsaas.cashflow_proposal_files f
 		SET is_deleted = TRUE,
 		    deleted_by = $3,
@@ -118,7 +165,7 @@ func deleteProjectionAdditionalFile(ctx context.Context, pool *pgxpool.Pool, par
 		  AND f.file_id = $2
 		  AND p.proposal_id = f.proposal_id
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
-		  AND `+projectionParentEntityAllowed("p.proposal_id", "$5")+`
+		  AND `+projectionParentEntityAllowed(constants.ProposalID, "$5")+`
 	`, parentID, fileID, deletedBy, deletedAt, names)
 	if execErr != nil {
 		return false, execErr
@@ -163,7 +210,7 @@ func projectionEntityNames(ctx context.Context) ([]string, error) {
 		}
 	}
 	if len(lowered) == 0 {
-		return nil, errors.New("no accessible business units found")
+		return nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
 	return lowered, nil
 }

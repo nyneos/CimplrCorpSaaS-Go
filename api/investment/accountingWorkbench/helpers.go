@@ -3,13 +3,13 @@ package accountingworkbench
 import (
 	"context"
 	"fmt"
-	"log"
 	"math"
 	"strings"
 	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/internal/logger")
 
 // Global settings cache
 var (
@@ -153,7 +153,7 @@ func GetHoldingsByScheme(ctx context.Context, pool *pgxpool.Pool, schemeID strin
 			&h.TotalCostBasis,
 		)
 		if err != nil {
-			log.Printf("Error scanning holding: %v", err)
+			logger.LogError("Error scanning holding: %v", err)
 			continue
 		}
 		holdings = append(holdings, h)

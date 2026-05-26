@@ -7,9 +7,89 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
+
+// getLogContext extracts MODULE, SUBMODULE, and FILENAME from the caller's stack
+func getLogContext() (string, string, string) {
+	// Skip 3 levels: LogInfo/LogError -> getLogContext -> runtime.Caller
+	_, file, _, ok := runtime.Caller(3)
+	if !ok {
+		return "UNKNOWN", "UNKNOWN", "UNKNOWN"
+	}
+
+	fileName := filepath.Base(file)
+	dir := filepath.Dir(file)
+	parts := strings.Split(filepath.ToSlash(dir), "/")
+
+	module := "CORE"
+	submodule := "GENERAL"
+
+	foundApi := false
+	foundInternal := false
+
+	for i := len(parts) - 1; i >= 0; i-- {
+		if parts[i] == "api" {
+			foundApi = true
+			if i+1 < len(parts) {
+				module = strings.ToUpper(parts[i+1])
+			}
+			if i+2 < len(parts) {
+				submodule = strings.ToUpper(parts[i+2])
+			}
+			break
+		}
+		if parts[i] == "internal" {
+			foundInternal = true
+			if i+1 < len(parts) {
+				module = "INTERNAL"
+				submodule = strings.ToUpper(parts[i+1])
+			}
+			break
+		}
+	}
+
+	if !foundApi && !foundInternal {
+		if len(parts) > 0 {
+			module = strings.ToUpper(parts[len(parts)-1])
+		}
+	}
+
+	return module, submodule, fileName
+}
+
+// LogInfo logs an informational message in standardized format
+func LogInfo(msg string, args ...interface{}) {
+	mod, sub, file := getLogContext()
+	fullMsg := msg
+	if len(args) > 0 {
+		fullMsg = fmt.Sprintf(msg, args...)
+	}
+	log.Printf("[INFO] [%s] [%s] [%s] %s", mod, sub, file, fullMsg)
+}
+
+// LogError logs an error message in standardized format
+func LogError(msg string, args ...interface{}) {
+	mod, sub, file := getLogContext()
+	fullMsg := msg
+	if len(args) > 0 {
+		fullMsg = fmt.Sprintf(msg, args...)
+	}
+	log.Printf("[ERROR] [%s] [%s] [%s] %s", mod, sub, file, fullMsg)
+}
+
+// LogAudit logs an audit message (system level)
+func LogAudit(msg string, args ...interface{}) {
+	mod, sub, file := getLogContext()
+	fullMsg := msg
+	if len(args) > 0 {
+		fullMsg = fmt.Sprintf(msg, args...)
+	}
+	log.Printf("[AUDIT] [%s] [%s] [%s] %s", mod, sub, file, fullMsg)
+}
 
 type LoggerService struct {
 	Config        map[string]interface{}
@@ -68,8 +148,11 @@ func (l *LoggerService) Start() error {
 	}
 	l.file = file
 	l.currentLog = logFile
-	log.SetOutput(file)
-	log.Println("[LoggerService] Started, writing to", logFile)
+
+	// Set output to both file and terminal
+	multiWriter := io.MultiWriter(file, os.Stdout)
+	log.SetOutput(multiWriter)
+	log.Println("[LoggerService] Started, writing to", logFile, "and Terminal")
 
 	// background goroutine for rotation and retention
 	l.wg.Add(1)
@@ -116,7 +199,10 @@ func (l *LoggerService) rotateIfNeeded() error {
 		}
 		l.file = file
 		l.currentLog = newLog
-		log.SetOutput(file)
+
+		// Update MultiWriter
+		multiWriter := io.MultiWriter(file, os.Stdout)
+		log.SetOutput(multiWriter)
 		log.Println("[LoggerService] Rotated log file to", newLog)
 	}
 	return nil
@@ -185,9 +271,7 @@ func (l *LoggerService) zipAndCleanOldLogs() {
 }
 
 func (l *LoggerService) LogAudit(msg string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	log.Printf("[AUDIT] %s", msg)
+	LogAudit("%s", msg)
 }
 
 var GlobalLogger *LoggerService

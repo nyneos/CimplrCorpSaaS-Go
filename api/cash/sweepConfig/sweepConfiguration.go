@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 // CreateSweepConfiguration inserts a sweep configuration and creates a CREATE audit action (PENDING_APPROVAL)
@@ -89,8 +90,15 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			sweepID = fmt.Sprintf("SWEEP-%d", time.Now().UnixNano()%1000000)
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
 		ins := `INSERT INTO mastersweepconfiguration (sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())`
-		_, err := pgxPool.Exec(ctx, ins,
+		_, err = tx.Exec(ctx, ins,
 			sweepID,
 			nullifyEmpty(req.EntityName),
 			nullifyEmpty(req.BankName),
@@ -109,8 +117,13 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		auditQ := `INSERT INTO auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
-		if _, err := pgxPool.Exec(ctx, auditQ, sweepID, nullifyEmpty(req.Reason), requestedBy); err != nil {
+		if _, err := tx.Exec(ctx, auditQ, sweepID, nullifyEmpty(req.Reason), requestedBy); err != nil {
 			api.RespondWithResult(w, false, "failed to create audit action: "+err.Error())
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 
@@ -156,7 +169,7 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		committed := false
@@ -272,7 +285,7 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 		committed = true
@@ -531,8 +544,15 @@ func BulkApproveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
 		upd := `UPDATE auditactionsweepconfiguration SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
-		if _, err := pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
+		if _, err := tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
 			api.RespondWithResult(w, false, "failed to approve actions: "+err.Error())
 			return
 		}
@@ -541,7 +561,7 @@ func BulkApproveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(deleteIDs) > 0 {
 			// perform soft-delete instead of hard delete
 			updDel := `UPDATE mastersweepconfiguration SET is_deleted = TRUE, updated_at = now() WHERE sweep_id = ANY($1) RETURNING sweep_id`
-			drows, derr := pgxPool.Query(ctx, updDel, deleteIDs)
+			drows, derr := tx.Query(ctx, updDel, deleteIDs)
 			if derr == nil {
 				defer drows.Close()
 				for drows.Next() {
@@ -550,6 +570,11 @@ func BulkApproveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					deleted = append(deleted, id)
 				}
 			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
+			return
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"approved_count": len(actionIDs), "deleted": deleted})
@@ -647,7 +672,7 @@ func BulkRequestDeleteSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFun
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		committed := false
@@ -665,7 +690,7 @@ func BulkRequestDeleteSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFun
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 		committed = true
@@ -828,7 +853,7 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 	}
 
 	// Debug: log what we're checking and how many approved accounts are loaded
-	log.Printf("[CTX-ACC-CHECK] checking account=%s expectedBank=%s expectedEntity=%s approved_count=%d",
+	logger.LogInfo("[CTX-ACC-CHECK] checking account=%s expectedBank=%s expectedEntity=%s approved_count=%d",
 		accountNumber, expectedBankName, expectedEntityName, len(accounts))
 
 	for _, a := range accounts {
@@ -842,7 +867,7 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		// Account must belong to an entity the user is allowed for.
 		if strings.TrimSpace(accEntity) != "" {
 			if !api.IsEntityAllowed(ctx, accEntity) {
-				log.Printf("[CTX-ACC-CHECK] account=%s found but entity='%s' not allowed by context", accountNumber, accEntity)
+				logger.LogInfo("[CTX-ACC-CHECK] account=%s found but entity='%s' not allowed by context", accountNumber, accEntity)
 				return false
 			}
 		}
@@ -850,7 +875,7 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		// If caller provided an expected entity, enforce match.
 		if expectedEntityName != "" && accEntity != "" {
 			if !strings.EqualFold(accEntity, expectedEntityName) {
-				log.Printf("[CTX-ACC-CHECK] account=%s entity mismatch: account_entity='%s' expected='%s'", accountNumber, accEntity, expectedEntityName)
+				logger.LogInfo("[CTX-ACC-CHECK] account=%s entity mismatch: account_entity='%s' expected='%s'", accountNumber, accEntity, expectedEntityName)
 				return false
 			}
 		}
@@ -858,15 +883,15 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		// If caller provided an expected bank, enforce match.
 		if expectedBankName != "" && accBank != "" {
 			if !strings.EqualFold(accBank, expectedBankName) {
-				log.Printf("[CTX-ACC-CHECK] account=%s bank mismatch: account_bank='%s' expected='%s'", accountNumber, accBank, expectedBankName)
+				logger.LogInfo("[CTX-ACC-CHECK] account=%s bank mismatch: account_bank='%s' expected='%s'", accountNumber, accBank, expectedBankName)
 				return false
 			}
 		}
 
-		log.Printf("[CTX-ACC-CHECK] account=%s OK matched bank='%s' entity='%s'", accountNumber, accBank, accEntity)
+		logger.LogInfo("[CTX-ACC-CHECK] account=%s OK matched bank='%s' entity='%s'", accountNumber, accBank, accEntity)
 		return true
 	}
 
-	log.Printf("[CTX-ACC-CHECK] account=%s not found in ApprovedBankAccounts", accountNumber)
+	logger.LogInfo("[CTX-ACC-CHECK] account=%s not found in ApprovedBankAccounts", accountNumber)
 	return false
 }

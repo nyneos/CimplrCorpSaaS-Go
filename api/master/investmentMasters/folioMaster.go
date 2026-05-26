@@ -3,8 +3,8 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -163,7 +163,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -315,13 +315,13 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// S3 upload before opening transaction
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
 				folder := s3storage.GetStoragePrefix("master-folio")
-				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -472,6 +472,20 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, status, msg)
 				return
 			}
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        "master-folio",
+				OriginalFileName: fh.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(copyRows),
+				InsertedCount:    len(copyRows),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userEmail,
+				UploadedAt:       time.Now().UTC(),
+			})
 
 			results = append(results, map[string]interface{}{
 				"batch_id":             uuid.New().String(),
@@ -548,6 +562,7 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactionfolio a
+				WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.folio_id, a.requested_at DESC
 			),
 			history AS (
@@ -750,6 +765,7 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					folio_id,
 					processing_status
 				FROM investment.auditactionfolio
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY folio_id, requested_at DESC
 			)
 			SELECT
@@ -1434,7 +1450,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "tx")
@@ -1446,7 +1462,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (folio_id) action_id, folio_id, actiontype, processing_status
 			FROM investment.auditactionfolio
-			WHERE folio_id = ANY($1)
+			WHERE folio_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY folio_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.FolioIDs)
@@ -1557,7 +1573,7 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "tx")
@@ -1569,7 +1585,7 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (folio_id) action_id, folio_id, processing_status
 			FROM investment.auditactionfolio
-			WHERE folio_id = ANY($1)
+			WHERE folio_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY folio_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.FolioIDs)
@@ -1655,6 +1671,7 @@ func GetSingleFolioWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
                     a.requested_by, a.requested_at, a.checker_by, a.checker_at,
                     a.checker_comment, a.reason
                 FROM investment.auditactionfolio a
+                WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
                 ORDER BY a.folio_id, a.requested_at DESC
             ),
             history AS (

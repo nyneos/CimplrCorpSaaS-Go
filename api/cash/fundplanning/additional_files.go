@@ -4,12 +4,14 @@ import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,17 +35,53 @@ func DeleteAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, fundPlanAdditionalFilesConfig())
 }
 
+func AuditAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, fundPlanAdditionalFilesConfig())
+}
+
+func ApproveAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, fundPlanAdditionalFilesConfig())
+}
+
+func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, fundPlanAdditionalFilesConfig())
+}
+
 func fundPlanAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:        "fund-planning",
-		ParentIDField: "plan_id",
-		FolderName:    additionalfiles.AdditionalFilesFolder(),
-		List:          listFundPlanAdditionalFiles,
-		Create:        createFundPlanAdditionalFile,
-		GetOne:        getFundPlanAdditionalFile,
-		GetMany:       getFundPlanAdditionalFiles,
-		SoftDelete:    deleteFundPlanAdditionalFile,
+		Module:                "fund-planning",
+		AuditSource:           "FUND_PLANNING",
+		ParentIDField:         "plan_id",
+		FolderName:            additionalfiles.AdditionalFilesFolder(),
+		List:                  listFundPlanAdditionalFiles,
+		CreateReturning:       createFundPlanAdditionalFile,
+		GetOne:                getFundPlanAdditionalFile,
+		GetAnyFile:            getAnyFundPlanAdditionalFile,
+		GetMany:               getFundPlanAdditionalFiles,
+		SoftDelete:            deleteFundPlanAdditionalFile,
+		SoftDeleteTx:          deleteFundPlanAdditionalFileTx,
+		RecordMainUploadAudit: recordFundPlanMainUploadAudit,
 	}
+}
+
+func recordFundPlanMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	reason, err := additionalfiles.MainUploadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	entityClause, entityArgs := fundPlanEntityScope(ctx, 5)
+	query := `
+		INSERT INTO public.auditaction_fund_plan_groups (group_id, actiontype, processing_status, reason, requested_by, requested_at)
+		SELECT fpg.group_id, 'UPLOAD_FILE', 'COMPLETED', $2, $3, $4
+		FROM public.fund_plan_groups fpg
+		WHERE fpg.plan_id = $1
+	` + entityClause
+
+	args := []interface{}{parentID, reason, payload.UploadedBy, payload.UploadedAt}
+	args = append(args, entityArgs...)
+	_, err = tx.Exec(ctx, query, args...)
+	return err
 }
 
 func listFundPlanAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
@@ -57,7 +95,7 @@ func listFundPlanAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parent
 	return additionalfiles.QueryFiles(ctx, pool, query, args...)
 }
 
-func createFundPlanAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
+func createFundPlanAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
 	entityClause, entityArgs := fundPlanEntityScope(ctx, 9)
 	query := `
 		INSERT INTO public.fund_plan_files (
@@ -85,9 +123,10 @@ func createFundPlanAdditionalFile(ctx context.Context, tx pgx.Tx, input addition
 			FALSE
 		FROM public.fund_plan_groups fpg
 		WHERE fpg.plan_id = $8
-	` + entityClause + `
+		` + entityClause + `
 		ORDER BY fpg.group_id
 		LIMIT 1
+		RETURNING file_id
 	`
 
 	args := []interface{}{
@@ -102,21 +141,33 @@ func createFundPlanAdditionalFile(ctx context.Context, tx pgx.Tx, input addition
 	}
 	args = append(args, entityArgs...)
 
-	result, err := tx.Exec(ctx, query, args...)
-	if err != nil {
-		return err
+	var fileID string
+	if err := tx.QueryRow(ctx, query, args...).Scan(&fileID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", pgx.ErrNoRows
+		}
+		return "", err
 	}
-	if result.RowsAffected() == 0 {
-		return pgx.ErrNoRows
-	}
-	return nil
+	return strings.TrimSpace(fileID), nil
 }
 
 func getFundPlanAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getFundPlanAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnyFundPlanAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getFundPlanAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getFundPlanAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
+	}
 	query, args := fundPlanFilesQuery(ctx, `
 		WHERE f.plan_id = $1
 		  AND f.file_id = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  `+deletedClause+`
 	`, parentID, fileID)
 	return additionalfiles.FirstFile(ctx, pool, query, args...)
 }
@@ -140,6 +191,18 @@ func getFundPlanAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentI
 }
 
 func deleteFundPlanAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteFundPlanAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteFundPlanAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteFundPlanAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+type fundPlanFileExec interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+}
+
+func deleteFundPlanAdditionalFileExec(ctx context.Context, exec fundPlanFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	entityClause, entityArgs := fundPlanEntityScope(ctx, 5)
 	query := `
 		UPDATE public.fund_plan_files f
@@ -155,7 +218,7 @@ func deleteFundPlanAdditionalFile(ctx context.Context, pool *pgxpool.Pool, paren
 
 	args := []interface{}{parentID, fileID, deletedBy, deletedAt}
 	args = append(args, entityArgs...)
-	result, err := pool.Exec(ctx, query, args...)
+	result, err := exec.Exec(ctx, query, args...)
 	if err != nil {
 		return false, err
 	}

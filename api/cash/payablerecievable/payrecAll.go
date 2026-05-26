@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
@@ -40,6 +39,7 @@ func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		txType := strings.ToUpper(strings.TrimSpace(req.TransactionType))
+		requestedBy := transactionRequestedBy(req.UserID)
 		if txType == "" {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type is required"})
@@ -83,6 +83,8 @@ func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		insertTransactionDownloadAudit(ctx, pgxPool, txType, req.TransactionID, requestedBy, strings.TrimSpace(*uploadS3Key))
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -108,6 +110,7 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		txType := strings.ToUpper(strings.TrimSpace(req.TransactionType))
+		requestedBy := transactionRequestedBy(req.UserID)
 		if txType == "" {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type is required"})
@@ -158,6 +161,7 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"transaction_id": transactionID,
 				"download_url":   downloadURL,
 			})
+			insertTransactionDownloadAudit(ctx, pgxPool, txType, transactionID, requestedBy, strings.TrimSpace(*uploadS3Key))
 		}
 
 		if len(files) == 0 {
@@ -335,7 +339,7 @@ func (n sqlNullTime) ValueOrZero() interface{} {
 	return nil
 }
 func getAuditInfoPayable(ctx context.Context, pgxPool *pgxpool.Pool, payableID string) (createdBy, createdAt, createdStatus, editedBy, editedAt, editedStatus, deletedBy, deletedAt, deletedStatus string) {
-	auditDetailsQuery := `SELECT actiontype, requested_by, requested_at, processing_status FROM auditactionpayable WHERE payable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC`
+	auditDetailsQuery := `SELECT actiontype, requested_by, requested_at, processing_status FROM auditactionpayable WHERE payable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC, action_id DESC`
 	auditRows, auditErr := pgxPool.Query(ctx, auditDetailsQuery, payableID)
 	if auditErr == nil {
 		defer auditRows.Close()
@@ -372,7 +376,7 @@ func getAuditInfoPayable(ctx context.Context, pgxPool *pgxpool.Pool, payableID s
 }
 
 func getAuditInfoReceivable(ctx context.Context, pgxPool *pgxpool.Pool, receivableID string) (createdBy, createdAt, createdStatus, editedBy, editedAt, editedStatus, deletedBy, deletedAt, deletedStatus string) {
-	auditDetailsQuery := `SELECT actiontype, requested_by, requested_at, processing_status FROM auditactionreceivable WHERE receivable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC`
+	auditDetailsQuery := `SELECT actiontype, requested_by, requested_at, processing_status FROM auditactionreceivable WHERE receivable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC, action_id DESC`
 	auditRows, auditErr := pgxPool.Query(ctx, auditDetailsQuery, receivableID)
 	if auditErr == nil {
 		defer auditRows.Close()
@@ -846,8 +850,9 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// 3. Batch fetch audit logs for payables
 		auditPayableMap := make(map[string]map[string]string)
+		latestPayableAuditMap := make(map[string]string)
 		if len(payableIDs) > 0 {
-			query := `SELECT payable_id, actiontype, requested_by, requested_at, processing_status FROM auditactionpayable WHERE payable_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')`
+			query := `SELECT payable_id, actiontype, requested_by, requested_at, processing_status FROM auditactionpayable WHERE payable_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY payable_id, requested_at DESC, action_id DESC`
 			rows, err := pgxPool.Query(ctx, query, payableIDs)
 			if err == nil {
 				defer rows.Close()
@@ -857,6 +862,9 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					_ = rows.Scan(&pid, &atype, &requestedBy, &requestedAt, &status)
 					if _, ok := auditPayableMap[pid]; !ok {
 						auditPayableMap[pid] = make(map[string]string)
+					}
+					if _, ok := latestPayableAuditMap[pid]; !ok {
+						latestPayableAuditMap[pid] = status
 					}
 					if atype == "CREATE" {
 						auditPayableMap[pid]["created_by"] = requestedBy
@@ -889,21 +897,17 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				payables[i].EditedAt = audit["edited_at"]
 				payables[i].DeletedBy = audit["deleted_by"]
 				payables[i].DeletedAt = audit["deleted_at"]
-				// Set status: prefer DELETE, then EDIT, then CREATE
-				if audit["deleted_status"] != "" {
-					payables[i].Status = audit["deleted_status"]
-				} else if audit["edited_status"] != "" {
-					payables[i].Status = audit["edited_status"]
-				} else {
-					payables[i].Status = audit["created_status"]
-				}
+			}
+			if latestStatus, ok := latestPayableAuditMap[payables[i].PayableID]; ok {
+				payables[i].Status = latestStatus
 			}
 		}
 
 		// 4. Batch fetch audit logs for receivables
 		auditReceivableMap := make(map[string]map[string]string)
+		latestReceivableAuditMap := make(map[string]string)
 		if len(receivableIDs) > 0 {
-			query := `SELECT receivable_id, actiontype, requested_by, requested_at, processing_status FROM auditactionreceivable WHERE receivable_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')`
+			query := `SELECT receivable_id, actiontype, requested_by, requested_at, processing_status FROM auditactionreceivable WHERE receivable_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY receivable_id, requested_at DESC, action_id DESC`
 			rows, err := pgxPool.Query(ctx, query, receivableIDs)
 			if err == nil {
 				defer rows.Close()
@@ -913,6 +917,9 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					_ = rows.Scan(&rid, &atype, &requestedBy, &requestedAt, &status)
 					if _, ok := auditReceivableMap[rid]; !ok {
 						auditReceivableMap[rid] = make(map[string]string)
+					}
+					if _, ok := latestReceivableAuditMap[rid]; !ok {
+						latestReceivableAuditMap[rid] = status
 					}
 					if atype == "CREATE" {
 						auditReceivableMap[rid]["created_by"] = requestedBy
@@ -945,18 +952,15 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				receivables[i].EditedAt = audit["edited_at"]
 				receivables[i].DeletedBy = audit["deleted_by"]
 				receivables[i].DeletedAt = audit["deleted_at"]
-				// Set status: prefer DELETE, then EDIT, then CREATE
-				if audit["deleted_status"] != "" {
-					receivables[i].Status = audit["deleted_status"]
-				} else if audit["edited_status"] != "" {
-					receivables[i].Status = audit["edited_status"]
-				} else {
-					receivables[i].Status = audit["created_status"]
-				}
+			}
+			if latestStatus, ok := latestReceivableAuditMap[receivables[i].ReceivableID]; ok {
+				receivables[i].Status = latestStatus
 			}
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		// Merge payables and receivables into a single array if you want a flat list, or return two arrays as separate fields
+		// Here, we return both as separate top-level arrays for clarity
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
 			"data": map[string]interface{}{
@@ -1005,7 +1009,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToBeginTransaction})
 			return
 		}
 		committed := false
@@ -1021,6 +1025,18 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			reasonArg = req.Reason
 		}
 		for _, id := range txIDsPay {
+			var latestActionType, latestStatus string
+			latestErr := tx.QueryRow(ctx, `
+				SELECT actiontype, processing_status
+				FROM auditactionpayable
+				WHERE payable_id = $1
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, id).Scan(&latestActionType, &latestStatus)
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "delete request already pending for transaction: " + id})
+				return
+			}
 			var actionID string
 			if err := tx.QueryRow(ctx, insPay, id, reasonArg, requestedBy).Scan(&actionID); err == nil {
 				// nop: collected if needed
@@ -1029,6 +1045,18 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		insRec := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now()) RETURNING action_id`
 		for _, id := range txIDsRec {
+			var latestActionType, latestStatus string
+			latestErr := tx.QueryRow(ctx, `
+				SELECT actiontype, processing_status
+				FROM auditactionreceivable
+				WHERE receivable_id = $1
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, id).Scan(&latestActionType, &latestStatus)
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "delete request already pending for transaction: " + id})
+				return
+			}
 			var actionID string
 			if err := tx.QueryRow(ctx, insRec, id, reasonArg, requestedBy).Scan(&actionID); err == nil {
 				// nop
@@ -1082,14 +1110,42 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		var actionIDs []string
+		payActionIDs := make([]string, 0, len(payIDs))
+		recActionIDs := make([]string, 0, len(recIDs))
+		payEditActionIDs := make([]string, 0)
+		recEditActionIDs := make([]string, 0)
+
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToBeginTransaction})
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
 
 		// For payables: find latest action_id per payable and add to list
 		if len(payIDs) > 0 {
 			for _, pid := range payIDs {
-				var aid string
-				if err := pgxPool.QueryRow(ctx, `SELECT action_id FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC LIMIT 1`, pid).Scan(&aid); err == nil && aid != "" {
-					actionIDs = append(actionIDs, aid)
+				var aid, atype, status string
+				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`, pid).Scan(&aid, &atype, &status); err != nil {
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + pid})
+					return
+				}
+				if aid == "" {
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + pid})
+					return
+				}
+				if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot reject non-pending transaction: " + pid})
+					return
+				}
+				payActionIDs = append(payActionIDs, aid)
+				if atype == "EDIT" {
+					payEditActionIDs = append(payEditActionIDs, aid)
 				}
 			}
 		}
@@ -1097,14 +1153,27 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// For receivables
 		if len(recIDs) > 0 {
 			for _, rid := range recIDs {
-				var aid string
-				if err := pgxPool.QueryRow(ctx, `SELECT action_id FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC LIMIT 1`, rid).Scan(&aid); err == nil && aid != "" {
-					actionIDs = append(actionIDs, aid)
+				var aid, atype, status string
+				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`, rid).Scan(&aid, &atype, &status); err != nil {
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + rid})
+					return
+				}
+				if aid == "" {
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + rid})
+					return
+				}
+				if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot reject non-pending transaction: " + rid})
+					return
+				}
+				recActionIDs = append(recActionIDs, aid)
+				if atype == "EDIT" {
+					recEditActionIDs = append(recEditActionIDs, aid)
 				}
 			}
 		}
 
-		if len(actionIDs) == 0 {
+		if len(payActionIDs) == 0 && len(recActionIDs) == 0 {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "no valid actions found for provided ids"})
 			return
 		}
@@ -1112,14 +1181,61 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if strings.TrimSpace(req.Comment) != "" {
 			commentArg = req.Comment
 		}
-		if _, err := pgxPool.Exec(ctx, `UPDATE auditactionpayable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, actionIDs); err != nil {
-			// ignore error, try receivable update
+		if len(payEditActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE auditactionpayable aa
+				SET
+					old_entity_name       = p.entity_name,
+					old_counterparty_name = p.counterparty_name,
+					old_invoice_number    = p.invoice_number,
+					old_invoice_date      = p.invoice_date,
+					old_due_date          = p.due_date,
+					old_amount            = p.amount,
+					old_currency_code     = p.currency_code
+				FROM tr_payables p
+				WHERE aa.action_id = ANY($1) AND aa.payable_id = p.payable_id
+			`, payEditActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to capture old payable values on rejection"})
+				return
+			}
 		}
-		if _, err := pgxPool.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, actionIDs); err != nil {
-			// ignore
+		if len(recEditActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE auditactionreceivable aa
+				SET
+					old_entity_name       = r.entity_name,
+					old_counterparty_name = r.counterparty_name,
+					old_invoice_number    = r.invoice_number,
+					old_invoice_date      = r.invoice_date,
+					old_due_date          = r.due_date,
+					old_amount            = r.invoice_amount,
+					old_currency_code     = r.currency_code
+				FROM tr_receivables r
+				WHERE aa.action_id = ANY($1) AND aa.receivable_id = r.receivable_id
+			`, recEditActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to capture old receivable values on rejection"})
+				return
+			}
 		}
+		if len(payActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE auditactionpayable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, payActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to reject payable actions"})
+				return
+			}
+		}
+		if len(recActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, recActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to reject receivable actions"})
+				return
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrTxCommitFailed})
+			return
+		}
+		committed = true
 
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rejected_count": len(actionIDs)})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rejected_count": len(payActionIDs) + len(recActionIDs)})
 	}
 }
 
@@ -1160,82 +1276,206 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		// Get latest action ids for provided transaction ids
-		var actionIDs []string
+		payActionIDs := make([]string, 0, len(payIDs))
+		recActionIDs := make([]string, 0, len(recIDs))
+		payDeleteActionIDs := make([]string, 0)
+		recDeleteActionIDs := make([]string, 0)
+		payEditActionIDs := make([]string, 0)
+		recEditActionIDs := make([]string, 0)
 		for _, pid := range payIDs {
-			var aid string
-			if err := pgxPool.QueryRow(ctx, `SELECT action_id FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC LIMIT 1`, pid).Scan(&aid); err == nil && aid != "" {
-				actionIDs = append(actionIDs, aid)
+			var aid, atype, status string
+			if err := pgxPool.QueryRow(ctx, `
+				SELECT action_id, actiontype, processing_status
+				FROM auditactionpayable
+				WHERE payable_id = $1
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, pid).Scan(&aid, &atype, &status); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + pid})
+				return
+			}
+			if aid == "" {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + pid})
+				return
+			}
+			if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot approve non-pending transaction: " + pid})
+				return
+			}
+			payActionIDs = append(payActionIDs, aid)
+			if atype == "DELETE" && status == "PENDING_DELETE_APPROVAL" {
+				payDeleteActionIDs = append(payDeleteActionIDs, aid)
+			} else if atype == "EDIT" {
+				payEditActionIDs = append(payEditActionIDs, aid)
 			}
 		}
 		for _, rid := range recIDs {
-			var aid string
-			if err := pgxPool.QueryRow(ctx, `SELECT action_id FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC LIMIT 1`, rid).Scan(&aid); err == nil && aid != "" {
-				actionIDs = append(actionIDs, aid)
+			var aid, atype, status string
+			if err := pgxPool.QueryRow(ctx, `
+				SELECT action_id, actiontype, processing_status
+				FROM auditactionreceivable
+				WHERE receivable_id = $1
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			`, rid).Scan(&aid, &atype, &status); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + rid})
+				return
+			}
+			if aid == "" {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + rid})
+				return
+			}
+			if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot approve non-pending transaction: " + rid})
+				return
+			}
+			recActionIDs = append(recActionIDs, aid)
+			if atype == "DELETE" && status == "PENDING_DELETE_APPROVAL" {
+				recDeleteActionIDs = append(recDeleteActionIDs, aid)
+			} else if atype == "EDIT" {
+				recEditActionIDs = append(recEditActionIDs, aid)
 			}
 		}
 
-		if len(actionIDs) == 0 {
+		if len(payActionIDs) == 0 && len(recActionIDs) == 0 {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "no valid actions found for provided ids"})
 			return
 		}
-		// First, remove PENDING_DELETE_APPROVAL audit actions and collect their target transaction ids
-		var payableIDsToDelete []string
-		var receivableIDsToDelete []string
-
-		delPayQuery := `DELETE FROM auditactionpayable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, payable_id`
-		delPayRows, err := pgxPool.Query(ctx, delPayQuery, actionIDs)
+		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			log.Printf("[WARN] failed to delete auditactionpayable rows: %v", err)
-		} else {
-			defer delPayRows.Close()
-			for delPayRows.Next() {
-				var aid, pid string
-				if err := delPayRows.Scan(&aid, &pid); err == nil {
-					payableIDsToDelete = append(payableIDsToDelete, pid)
-				}
-			}
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToBeginTransaction})
+			return
 		}
-
-		delRecQuery := `DELETE FROM auditactionreceivable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, receivable_id`
-		delRecRows, err := pgxPool.Query(ctx, delRecQuery, actionIDs)
-		if err != nil {
-			log.Printf("[WARN] failed to delete auditactionreceivable rows: %v", err)
-		} else {
-			defer delRecRows.Close()
-			for delRecRows.Next() {
-				var aid, rid string
-				if err := delRecRows.Scan(&aid, &rid); err == nil {
-					receivableIDsToDelete = append(receivableIDsToDelete, rid)
-				}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
 			}
-		}
-
-		// Mark canonical rows as deleted (soft-delete) instead of hard delete
-		if len(payableIDsToDelete) > 0 {
-			if _, err := pgxPool.Exec(ctx, `UPDATE tr_payables SET is_deleted = TRUE, updated_at = now() WHERE payable_id = ANY($1)`, payableIDsToDelete); err != nil {
-				// log or ignore; continue
-			}
-		}
-		if len(receivableIDsToDelete) > 0 {
-			if _, err := pgxPool.Exec(ctx, `UPDATE tr_receivables SET is_deleted = TRUE, updated_at = now() WHERE receivable_id = ANY($1)`, receivableIDsToDelete); err != nil {
-				// log or ignore
-			}
-		}
-
-		// Approve the remaining actions
+		}()
+		// delPayQuery := `DELETE FROM auditactionpayable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL'`
+		// delRecQuery := `DELETE FROM auditactionreceivable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL'`
 		commentArg := interface{}(nil)
 		if strings.TrimSpace(req.Comment) != "" {
 			commentArg = req.Comment
 		}
-		if _, err := pgxPool.Exec(ctx, `UPDATE auditactionpayable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL'`, checkerBy, commentArg, actionIDs); err != nil {
-			// ignore
+		if len(payActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE auditactionpayable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, payActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to approve payable audits"})
+				return
+			}
 		}
-		if _, err := pgxPool.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL'`, checkerBy, commentArg, actionIDs); err != nil {
-			// ignore
+		if len(recActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, recActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to approve receivable audits"})
+				return
+			}
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(actionIDs)})
+		if len(payEditActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE auditactionpayable aa
+				SET
+					old_entity_name       = p.entity_name,
+					old_counterparty_name = p.counterparty_name,
+					old_invoice_number    = p.invoice_number,
+					old_invoice_date      = p.invoice_date,
+					old_due_date          = p.due_date,
+					old_amount            = p.amount,
+					old_currency_code     = p.currency_code
+				FROM tr_payables p
+				WHERE aa.action_id = ANY($1) AND aa.payable_id = p.payable_id
+			`, payEditActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to capture old payable values: " + err.Error()})
+				return
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE tr_payables p
+				SET
+					entity_name       = COALESCE(NULLIF(aa.new_entity_name, ''), p.entity_name),
+					counterparty_name = COALESCE(NULLIF(aa.new_counterparty_name, ''), p.counterparty_name),
+					invoice_number    = COALESCE(NULLIF(aa.new_invoice_number, ''), p.invoice_number),
+					invoice_date      = COALESCE(NULLIF(aa.new_invoice_date::text, '')::date, p.invoice_date),
+					due_date          = COALESCE(NULLIF(aa.new_due_date::text, '')::date, p.due_date),
+					amount            = COALESCE(NULLIF(aa.new_amount::text, '')::numeric, p.amount),
+					currency_code     = COALESCE(NULLIF(aa.new_currency_code, ''), p.currency_code)
+				FROM auditactionpayable aa
+				WHERE aa.action_id = ANY($1) AND aa.payable_id = p.payable_id
+			`, payEditActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to apply new payable values: " + err.Error()})
+				return
+			}
+		}
+
+		if len(recEditActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE auditactionreceivable aa
+				SET
+					old_entity_name       = r.entity_name,
+					old_counterparty_name = r.counterparty_name,
+					old_invoice_number    = r.invoice_number,
+					old_invoice_date      = r.invoice_date,
+					old_due_date          = r.due_date,
+					old_amount            = r.invoice_amount,
+					old_currency_code     = r.currency_code
+				FROM tr_receivables r
+				WHERE aa.action_id = ANY($1) AND aa.receivable_id = r.receivable_id
+			`, recEditActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to capture old receivable values: " + err.Error()})
+				return
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE tr_receivables r
+				SET
+					entity_name       = COALESCE(NULLIF(aa.new_entity_name, ''), r.entity_name),
+					counterparty_name = COALESCE(NULLIF(aa.new_counterparty_name, ''), r.counterparty_name),
+					invoice_number    = COALESCE(NULLIF(aa.new_invoice_number, ''), r.invoice_number),
+					invoice_date      = COALESCE(NULLIF(aa.new_invoice_date::text, '')::date, r.invoice_date),
+					due_date          = COALESCE(NULLIF(aa.new_due_date::text, '')::date, r.due_date),
+					invoice_amount    = COALESCE(NULLIF(aa.new_amount::text, '')::numeric, r.invoice_amount),
+					currency_code     = COALESCE(NULLIF(aa.new_currency_code, ''), r.currency_code)
+				FROM auditactionreceivable aa
+				WHERE aa.action_id = ANY($1) AND aa.receivable_id = r.receivable_id
+			`, recEditActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to apply new receivable values: " + err.Error()})
+				return
+			}
+		}
+
+		if len(payDeleteActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE tr_payables p
+				SET is_deleted = TRUE,
+					deleted_at = now(),
+					deleted_by = aa.requested_by
+				FROM auditactionpayable aa
+				WHERE aa.action_id = ANY($1)
+				  AND aa.payable_id = p.payable_id
+			`, payDeleteActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to soft delete payables"})
+				return
+			}
+		}
+		if len(recDeleteActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE tr_receivables r
+				SET is_deleted = TRUE,
+					deleted_at = now(),
+					deleted_by = aa.requested_by
+				FROM auditactionreceivable aa
+				WHERE aa.action_id = ANY($1)
+				  AND aa.receivable_id = r.receivable_id
+			`, recDeleteActionIDs); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to soft delete receivables"})
+				return
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrTxCommitFailed})
+			return
+		}
+		committed = true
+
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(payActionIDs) + len(recActionIDs)})
 	}
 }
 
@@ -1269,7 +1509,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToBeginTransaction})
 			return
 		}
 		committed := false
@@ -1444,217 +1684,180 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var actionID string
 
 		if strings.HasPrefix(id, constants.ErrPrefixPayable) {
-			// Update single payable using old_ pattern
-			sel := `SELECT entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code FROM tr_payables WHERE payable_id=$1 FOR UPDATE`
-			var curEntity, curCounter, curInvoice sqlNullString
-			var curInvoiceDate, curDueDate sqlNullTime
-			var curAmount sqlNullFloat
-			var curCurrency sqlNullString
-			if err := tx.QueryRow(ctx, sel, id).Scan(&curEntity, &curCounter, &curInvoice, &curInvoiceDate, &curDueDate, &curAmount, &curCurrency); err != nil {
-				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch payable: "+err.Error())
-				return
-			}
-
-			sets := []string{}
-			args := []interface{}{}
-			pos := 1
-			addStr := func(col, oldcol string, val interface{}, cur sqlNullString) {
-				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
-				args = append(args, nullifyEmpty(fmt.Sprint(val)))
-				args = append(args, cur.ValueOrZero())
-				pos += 2
-			}
-			addDate := func(col, oldcol string, val interface{}, cur sqlNullTime) {
-				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
-				if val == nil {
-					args = append(args, nil)
-				} else if s, ok := val.(string); ok && strings.TrimSpace(s) != "" {
-					if t, e := time.Parse(constants.DateFormat, normalizeDate(s)); e == nil {
-						args = append(args, t)
-					} else {
-						args = append(args, nil)
-					}
-				} else {
-					args = append(args, nil)
+			extractStr := func(key string) *string {
+				if v, ok := req.Fields[key]; ok {
+					s := fmt.Sprint(v)
+					return &s
 				}
-				args = append(args, cur.ValueOrZero())
-				pos += 2
+				return nil
 			}
-			addFloat := func(col, oldcol string, val interface{}, cur sqlNullFloat) {
-				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
-				if val == nil {
-					args = append(args, nil)
-				} else {
-					switch vv := val.(type) {
+			extractDate := func(key string) *time.Time {
+				if v, ok := req.Fields[key]; ok {
+					if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+						if t, e := time.Parse(constants.DateFormat, normalizeDate(s)); e == nil {
+							return &t
+						}
+					}
+				}
+				return nil
+			}
+			extractFloat := func(key string) *float64 {
+				if v, ok := req.Fields[key]; ok {
+					switch vv := v.(type) {
 					case float64:
-						args = append(args, vv)
+						return &vv
 					case float32:
-						args = append(args, float64(vv))
+						f := float64(vv)
+						return &f
 					case int:
-						args = append(args, float64(vv))
+						f := float64(vv)
+						return &f
 					case int64:
-						args = append(args, float64(vv))
+						f := float64(vv)
+						return &f
 					case string:
 						var out float64
 						fmt.Sscan(vv, &out)
-						args = append(args, out)
-					default:
-						args = append(args, nil)
+						return &out
 					}
 				}
-				args = append(args, cur.ValueOrZero())
-				pos += 2
+				return nil
 			}
 
-			for k, v := range req.Fields {
-				switch k {
-				case "entity_name":
-					addStr("entity_name", "old_entity_name", v, curEntity)
-				case "counterparty_name":
-					addStr("counterparty_name", "old_counterparty_name", v, curCounter)
-				case "invoice_number":
-					addStr("invoice_number", "old_invoice_number", v, curInvoice)
-				case "invoice_date":
-					addDate("invoice_date", "old_invoice_date", v, curInvoiceDate)
-				case "due_date":
-					addDate("due_date", "old_due_date", v, curDueDate)
-				case "amount":
-					addFloat("amount", "old_amount", v, curAmount)
-				case "currency_code":
-					addStr("currency_code", "old_currency_code", v, curCurrency)
-				default:
-					// ignore unknown
-				}
-			}
-			if len(sets) == 0 {
+			newEntity := extractStr("entity_name")
+			newCounter := extractStr("counterparty_name")
+			newInvoice := extractStr("invoice_number")
+			newCurrency := extractStr("currency_code")
+			newInvDate := extractDate("invoice_date")
+			newDueDate := extractDate("due_date")
+			newAmount := extractFloat("amount")
+
+			if newEntity == nil && newCounter == nil && newInvoice == nil && newCurrency == nil &&
+				newInvDate == nil && newDueDate == nil && newAmount == nil {
 				api.RespondWithResult(w, false, "no valid fields to update")
 				tx.Rollback(ctx)
 				return
 			}
-			q := "UPDATE tr_payables SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE payable_id=$%d RETURNING payable_id", pos)
-			args = append(args, id)
-			var updatedID string
-			if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
-				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to update payable: "+err.Error())
-				return
-			}
 
-			auditQ := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now()) RETURNING action_id`
 			reasonArg := interface{}(nil)
 			if strings.TrimSpace(req.Reason) != "" {
 				reasonArg = req.Reason
 			}
-			if err := tx.QueryRow(ctx, auditQ, updatedID, reasonArg, userName).Scan(&actionID); err != nil {
+
+			var (
+				oldEntity, oldCounter, oldInvoice, oldCurrency *string
+				oldInvDate, oldDueDate                         *time.Time
+				oldAmount                                      *float64
+			)
+			_ = tx.QueryRow(ctx, `
+				SELECT entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code
+				FROM tr_payables WHERE payable_id = $1 AND is_deleted != TRUE
+			`, id).Scan(&oldEntity, &oldCounter, &oldInvoice, &oldInvDate, &oldDueDate, &oldAmount, &oldCurrency)
+
+			auditQ := `
+				INSERT INTO auditactionpayable
+				  (payable_id, actiontype, processing_status, reason, requested_by, requested_at,
+				   old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date,
+				   old_due_date, old_amount, old_currency_code,
+				   new_entity_name, new_counterparty_name, new_invoice_number, new_invoice_date,
+				   new_due_date, new_amount, new_currency_code)
+				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),
+					$4,$5,$6,$7,$8,$9,$10,
+					$11,$12,$13,$14,$15,$16,$17)
+				RETURNING action_id`
+			if err := tx.QueryRow(ctx, auditQ, id, reasonArg, userName,
+				oldEntity, oldCounter, oldInvoice, oldInvDate, oldDueDate, oldAmount, oldCurrency,
+				newEntity, newCounter, newInvoice, newInvDate, newDueDate, newAmount, newCurrency).Scan(&actionID); err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to create audit for payable: "+err.Error())
 				return
 			}
 
 		} else if strings.HasPrefix(id, constants.ErrPrefixReceivable) {
-			sel := `SELECT entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code FROM tr_receivables WHERE receivable_id=$1 FOR UPDATE`
-			var curEntity, curCounter, curInvoice sqlNullString
-			var curInvoiceDate, curDueDate sqlNullTime
-			var curAmount sqlNullFloat
-			var curCurrency sqlNullString
-			if err := tx.QueryRow(ctx, sel, id).Scan(&curEntity, &curCounter, &curInvoice, &curInvoiceDate, &curDueDate, &curAmount, &curCurrency); err != nil {
-				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch receivable: "+err.Error())
-				return
-			}
-
-			sets := []string{}
-			args := []interface{}{}
-			pos := 1
-			addStr := func(col, oldcol string, val interface{}, cur sqlNullString) {
-				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
-				args = append(args, nullifyEmpty(fmt.Sprint(val)))
-				args = append(args, cur.ValueOrZero())
-				pos += 2
-			}
-			addDate := func(col, oldcol string, val interface{}, cur sqlNullTime) {
-				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
-				if val == nil {
-					args = append(args, nil)
-				} else if s, ok := val.(string); ok && strings.TrimSpace(s) != "" {
-					if t, e := time.Parse(constants.DateFormat, normalizeDate(s)); e == nil {
-						args = append(args, t)
-					} else {
-						args = append(args, nil)
-					}
-				} else {
-					args = append(args, nil)
+			extractStr := func(key string) *string {
+				if v, ok := req.Fields[key]; ok {
+					s := fmt.Sprint(v)
+					return &s
 				}
-				args = append(args, cur.ValueOrZero())
-				pos += 2
+				return nil
 			}
-			addFloat := func(col, oldcol string, val interface{}, cur sqlNullFloat) {
-				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
-				if val == nil {
-					args = append(args, nil)
-				} else {
-					switch vv := val.(type) {
+			extractDate := func(key string) *time.Time {
+				if v, ok := req.Fields[key]; ok {
+					if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+						if t, e := time.Parse(constants.DateFormat, normalizeDate(s)); e == nil {
+							return &t
+						}
+					}
+				}
+				return nil
+			}
+			extractFloat := func(key string) *float64 {
+				if v, ok := req.Fields[key]; ok {
+					switch vv := v.(type) {
 					case float64:
-						args = append(args, vv)
+						return &vv
 					case float32:
-						args = append(args, float64(vv))
+						f := float64(vv)
+						return &f
 					case int:
-						args = append(args, float64(vv))
+						f := float64(vv)
+						return &f
 					case int64:
-						args = append(args, float64(vv))
+						f := float64(vv)
+						return &f
 					case string:
 						var out float64
 						fmt.Sscan(vv, &out)
-						args = append(args, out)
-					default:
-						args = append(args, nil)
+						return &out
 					}
 				}
-				args = append(args, cur.ValueOrZero())
-				pos += 2
+				return nil
 			}
 
-			for k, v := range req.Fields {
-				switch k {
-				case "entity_name":
-					addStr("entity_name", "old_entity_name", v, curEntity)
-				case "counterparty_name":
-					addStr("counterparty_name", "old_counterparty_name", v, curCounter)
-				case "invoice_number":
-					addStr("invoice_number", "old_invoice_number", v, curInvoice)
-				case "invoice_date":
-					addDate("invoice_date", "old_invoice_date", v, curInvoiceDate)
-				case "due_date":
-					addDate("due_date", "old_due_date", v, curDueDate)
-				case "invoice_amount":
-					addFloat("invoice_amount", "old_invoice_amount", v, curAmount)
-				case "currency_code":
-					addStr("currency_code", "old_currency_code", v, curCurrency)
-				default:
-					// ignore unknown
-				}
-			}
-			if len(sets) == 0 {
+			newEntity := extractStr("entity_name")
+			newCounter := extractStr("counterparty_name")
+			newInvoice := extractStr("invoice_number")
+			newCurrency := extractStr("currency_code")
+			newInvDate := extractDate("invoice_date")
+			newDueDate := extractDate("due_date")
+			newAmount := extractFloat("invoice_amount")
+
+			if newEntity == nil && newCounter == nil && newInvoice == nil && newCurrency == nil &&
+				newInvDate == nil && newDueDate == nil && newAmount == nil {
 				api.RespondWithResult(w, false, "no valid fields to update")
 				tx.Rollback(ctx)
 				return
 			}
-			q := "UPDATE tr_receivables SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE receivable_id=$%d RETURNING receivable_id", pos)
-			args = append(args, id)
-			var updatedID string
-			if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
-				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to update receivable: "+err.Error())
-				return
-			}
 
-			auditQ := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now()) RETURNING action_id`
 			reasonArg := interface{}(nil)
 			if strings.TrimSpace(req.Reason) != "" {
 				reasonArg = req.Reason
 			}
-			if err := tx.QueryRow(ctx, auditQ, updatedID, reasonArg, userName).Scan(&actionID); err != nil {
+
+			var (
+				oldEntity, oldCounter, oldInvoice, oldCurrency *string
+				oldInvDate, oldDueDate                         *time.Time
+				oldAmount                                      *float64
+			)
+			_ = tx.QueryRow(ctx, `
+				SELECT entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code
+				FROM tr_receivables WHERE receivable_id = $1 AND is_deleted != TRUE
+			`, id).Scan(&oldEntity, &oldCounter, &oldInvoice, &oldInvDate, &oldDueDate, &oldAmount, &oldCurrency)
+
+			auditQ := `
+				INSERT INTO auditactionreceivable
+				  (receivable_id, actiontype, processing_status, reason, requested_by, requested_at,
+				   old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date,
+				   old_due_date, old_amount, old_currency_code,
+				   new_entity_name, new_counterparty_name, new_invoice_number, new_invoice_date,
+				   new_due_date, new_amount, new_currency_code)
+				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),
+					$4,$5,$6,$7,$8,$9,$10,
+					$11,$12,$13,$14,$15,$16,$17)
+				RETURNING action_id`
+			if err := tx.QueryRow(ctx, auditQ, id, reasonArg, userName,
+				oldEntity, oldCounter, oldInvoice, oldInvDate, oldDueDate, oldAmount, oldCurrency,
+				newEntity, newCounter, newInvoice, newInvDate, newDueDate, newAmount, newCurrency).Scan(&actionID); err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to create audit for receivable: "+err.Error())
 				return

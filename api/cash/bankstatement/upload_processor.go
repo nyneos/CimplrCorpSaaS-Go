@@ -15,12 +15,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 // ProcessBankStatementFromJSON reads bank.json and processes it like Excel upload.
 // This is a placeholder for future PDF OCR integration.
 func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]interface{}, error) {
-	log.Println("[PDF_PROCESSOR] Reading bank.json file")
+	logger.LogInfo("[PDF_PROCESSOR] Reading bank.json file")
 
 	possiblePaths := []string{
 		"api/cash/bankstatement/bank.json",
@@ -36,7 +38,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 		jsonBytes, err = os.ReadFile(jsonPath)
 		if err == nil {
 			foundPath = jsonPath
-			log.Printf("[PDF_PROCESSOR] Found bank.json at: %s", foundPath)
+			logger.LogInfo("[PDF_PROCESSOR] Found bank.json at: %s", foundPath)
 			break
 		}
 	}
@@ -50,7 +52,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 		return nil, fmt.Errorf("failed to parse bank.json: %w", err)
 	}
 
-	log.Printf("[PDF_PROCESSOR] Parsed JSON: Account=%s, Bank=%s, Period=%s to %s, Transactions=%d",
+	logger.LogInfo("[PDF_PROCESSOR] Parsed JSON: Account=%s, Bank=%s, Period=%s to %s, Transactions=%d",
 		pdfData.AccountNumber, pdfData.BankName, pdfData.PeriodStart, pdfData.PeriodEnd, len(pdfData.Transactions))
 
 	var structured StructuredBankStatement
@@ -128,12 +130,12 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 	for i, txn := range input.Transactions {
 		txnDate, err := time.Parse(constants.DateFormat, txn.TransactionDate)
 		if err != nil {
-			log.Printf("[STRUCTURED_PROCESSOR] Warning: failed to parse transaction_date %s, skipping", txn.TransactionDate)
+			logger.LogError("[STRUCTURED_PROCESSOR] Warning: failed to parse transaction_date %s, skipping", txn.TransactionDate)
 			continue
 		}
 		valDate, err := time.Parse(constants.DateFormat, txn.ValueDate)
 		if err != nil {
-			log.Printf("[STRUCTURED_PROCESSOR] Warning: failed to parse value_date %s, skipping", txn.ValueDate)
+			logger.LogError("[STRUCTURED_PROCESSOR] Warning: failed to parse value_date %s, skipping", txn.ValueDate)
 			continue
 		}
 		if IsStatementOpeningCarryRow(txn.Description) {
@@ -199,11 +201,19 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 		}
 	}
 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	existingTxnKeys := make(map[string]bool)
-	rowsExisting, err := db.QueryContext(ctx, `
-		SELECT account_number, transaction_date, description, withdrawal_amount, deposit_amount
-		FROM cimplrcorpsaas.bank_statement_transactions
-		WHERE account_number = $1
+	rowsExisting, err := tx.QueryContext(ctx, `
+		SELECT t.account_number, t.transaction_date, t.description, t.withdrawal_amount, t.deposit_amount
+		FROM cimplrcorpsaas.bank_statement_transactions t
+		JOIN cimplrcorpsaas.bank_statements s ON s.bank_statement_id = t.bank_statement_id
+		WHERE t.account_number = $1
+		  AND COALESCE(s.is_deleted, false) = false
 	`, input.AccountNumber)
 	if err == nil {
 		defer rowsExisting.Close()
@@ -218,20 +228,12 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 		}
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
 	var bankStatementID string
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO cimplrcorpsaas.bank_statements (
 			entity_id, account_number, statement_period_start, statement_period_end,
 			file_hash, opening_balance, closing_balance, upload_s3_key
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT ON CONSTRAINT uniq_stmt
-		DO UPDATE SET file_hash = EXCLUDED.file_hash, closing_balance = EXCLUDED.closing_balance, upload_s3_key = EXCLUDED.upload_s3_key, upload_link = NULL
 		RETURNING bank_statement_id
 	`, entityID, input.AccountNumber, periodStart, periodEnd, fileHash,
 		input.OpeningBalance, input.ClosingBalance, nil).Scan(&bankStatementID)
@@ -313,7 +315,7 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 	// legacy matchCategoryForTransaction engine.
 	if pgxPool != nil && len(newTxns) > 0 {
 		go func(bsID string) {
-			if err := cashjobs.ProcessUncategorizedTransactions(pgxPool, 500); err != nil {
+			if err := cashjobs.ProcessUncategorizedTransactions(pgxPool, 500, bsID); err != nil {
 				log.Printf("[SMART-CAT] post-upload categorization error (bs_id=%s): %v", bsID, err)
 			}
 		}(bankStatementID)

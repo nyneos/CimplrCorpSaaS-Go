@@ -2,8 +2,9 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
+
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
@@ -88,8 +89,8 @@ type BankRateCardInput struct {
 	IsCallable                 *bool    `json:"is_callable"`
 	PrematureWithdrawalAllowed bool     `json:"premature_withdrawal_allowed"`
 	PenaltyPercentage          *float64 `json:"penalty_percentage"`
-	EffectiveFrom              string   `json:"effective_from"` // YYYY-MM-DD string → DATE
-	EffectiveTo                *string  `json:"effective_to"`   // nullable YYYY-MM-DD string → DATE
+	EffectiveFrom              string   `json:"effective_from"` // YYYY-MM-DD string â†’ DATE
+	EffectiveTo                *string  `json:"effective_to"`   // nullable YYYY-MM-DD string â†’ DATE
 	RateSource                 *string  `json:"rate_source"`    // WEBSITE|RM|EMAIL|nil
 	SpecialOffer               bool     `json:"special_offer"`
 	OfferDetails               *string  `json:"offer_details"`
@@ -239,7 +240,7 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		fileBytes, err := io.ReadAll(file)
 		file.Close()
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -250,13 +251,7 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -447,13 +442,13 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		s3Key := ""
+		s3Key, storedFileName := "", ""
 		if s3storage.IsS3UploadEnabled() {
 			folder := s3storage.GetStoragePrefix("master-bank-rate-card")
-			storedFileName := s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
+			storedFileName = s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 				return
 			}
 		}
@@ -533,6 +528,20 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+		bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+			ModuleKey:        "master-bank-rate-card",
+			OriginalFileName: handler.Filename,
+			StoredFileName:   storedFileName,
+			UploadS3Key:      s3Key,
+			ContentType:      contentType,
+			FileSize:         int64(len(fileBytes)),
+			TotalRows:        len(data) - 1,
+			InsertedCount:    len(insertedRecords),
+			ErrorCount:       (len(data) - 1) - len(insertedRecords),
+			Status:           bulkuploadaudit.StatusFor(len(insertedRecords), (len(data)-1)-len(insertedRecords)),
+			UploadedBy:       userEmail,
+			UploadedAt:       time.Now().UTC(),
+		})
 
 		api.RespondWithPayload(w, len(insertedRecords) > 0, "", insertedRecords)
 		api.LogInfo("RateCard upload: %d inserted from %s", len(insertedRecords), handler.Filename)
@@ -559,13 +568,7 @@ func CreateBankRateCardSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -648,13 +651,7 @@ func CreateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -790,13 +787,7 @@ func UpdateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -805,13 +796,13 @@ func UpdateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyRateCardError(err, "Transaction start failed")
+			msg, status := getUserFriendlyRateCardError(err, constants.ErrTxStartFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
 
-		// Fetch existing for old values — use TO_CHAR for DATE columns
+		// Fetch existing for old values â€” use TO_CHAR for DATE columns
 		var oldBankCode, oldDepositType, oldEffectiveFrom string
 		var oldEffectiveTo, oldRateSource, oldOfferDetails *string
 		var oldMinTenor, oldMaxTenor int
@@ -938,13 +929,7 @@ func UpdateBankRateCardBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -996,7 +981,7 @@ func UpdateBankRateCardBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// Fetch old values — TO_CHAR for DATE fields
+		// Fetch old values â€” TO_CHAR for DATE fields
 		oldRows, err := tx.Query(ctx, `
 			SELECT rate_card_id, bank_code, deposit_type, min_tenor_days, max_tenor_days, interest_rate,
 			       min_amount, max_amount, is_callable, premature_withdrawal_allowed, penalty_percentage,
@@ -1146,13 +1131,7 @@ func DeleteBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1247,13 +1226,7 @@ func BulkApproveBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1289,6 +1262,7 @@ func BulkApproveBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE a.rate_card_id = ANY($1::text[])
 				  AND a.action_type='DELETE'
 				  AND a.processing_status='APPROVED'
+				  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			)
 		`, req.RateCardIDs)
 		if err != nil {
@@ -1329,13 +1303,7 @@ func BulkRejectBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1398,7 +1366,7 @@ func GetBankRateCardsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_bank_rate_card_master m
 			INNER JOIN investment.fd_audit_bank_rate_card a ON a.rate_card_id = m.rate_card_id
 			LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
-			WHERE a.processing_status='APPROVED' AND m.is_active=true AND COALESCE(m.is_deleted,false)=false
+			WHERE a.processing_status='APPROVED' AND a.action_type IN ('CREATE','EDIT','DELETE') AND m.is_active=true AND COALESCE(m.is_deleted,false)=false
 			ORDER BY m.rate_card_id, m.bank_code
 		`)
 		if err != nil {
@@ -1493,6 +1461,7 @@ func GetBankRateCardsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_offer_details,
 					a.old_is_active
 				FROM investment.fd_audit_bank_rate_card a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.rate_card_id,
 				         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
 			),
@@ -1613,191 +1582,6 @@ func GetBankRateCardsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// GetBankRateCardAuditHistory returns audit history for bank rate cards
-func GetBankRateCardAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		rateCardID := r.URL.Query().Get("rate_card_id")
-
-		var q string
-		var args []interface{}
-
-		baseSelect := `
-			SELECT
-				a.audit_id,
-				a.rate_card_id,
-				a.action_type,
-				a.processing_status,
-				COALESCE(a.reason,'') AS reason,
-				COALESCE(a.requested_by,'') AS requested_by,
-				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				COALESCE(a.checker_by,'') AS checker_by,
-				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-				COALESCE(a.checker_comment,'') AS checker_comment,
-
-				-- Current values from master (DATE → string)
-				COALESCE(m.bank_code,'') AS bank_code,
-				COALESCE(mb.bank_name,'') AS bank_name,
-				COALESCE(mb.bank_short_name,'') AS bank_short_name,
-				COALESCE(m.deposit_type,'') AS deposit_type,
-				COALESCE(m.min_tenor_days,0) AS min_tenor_days,
-				COALESCE(m.max_tenor_days,0) AS max_tenor_days,
-				COALESCE(m.interest_rate,0) AS interest_rate,
-				m.min_amount,
-				m.max_amount,
-				m.is_callable,
-				COALESCE(m.premature_withdrawal_allowed,true) AS premature_withdrawal_allowed,
-				m.penalty_percentage,
-				TO_CHAR(m.effective_from,'YYYY-MM-DD') AS effective_from,
-				TO_CHAR(m.effective_to,'YYYY-MM-DD') AS effective_to,
-				COALESCE(m.rate_source,'') AS rate_source,
-				COALESCE(m.special_offer,false) AS special_offer,
-				COALESCE(m.offer_details,'') AS offer_details,
-				COALESCE(m.is_active,false) AS is_active,
-				COALESCE(m.is_deleted,false) AS is_deleted,
-
-				-- Old values from audit (DATE → string)
-				COALESCE(a.old_bank_code,'') AS old_bank_code,
-				COALESCE(a.old_deposit_type,'') AS old_deposit_type,
-				COALESCE(a.old_min_tenor_days,0) AS old_min_tenor_days,
-				COALESCE(a.old_max_tenor_days,0) AS old_max_tenor_days,
-				COALESCE(a.old_interest_rate,0) AS old_interest_rate,
-				a.old_min_amount,
-				a.old_max_amount,
-				a.old_is_callable,
-				COALESCE(a.old_premature_withdrawal_allowed,true) AS old_premature_withdrawal_allowed,
-				a.old_penalty_percentage,
-				TO_CHAR(a.old_effective_from,'YYYY-MM-DD') AS old_effective_from,
-				TO_CHAR(a.old_effective_to,'YYYY-MM-DD') AS old_effective_to,
-				COALESCE(a.old_rate_source,'') AS old_rate_source,
-				COALESCE(a.old_special_offer,false) AS old_special_offer,
-				COALESCE(a.old_offer_details,'') AS old_offer_details,
-				COALESCE(a.old_is_active,false) AS old_is_active
-
-			FROM investment.fd_audit_bank_rate_card a
-			LEFT JOIN investment.fd_bank_rate_card_master m ON m.rate_card_id = a.rate_card_id
-			LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code`
-
-		if rateCardID != "" {
-			q = baseSelect + `
-			WHERE a.rate_card_id = $1
-			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`
-			args = append(args, rateCardID)
-		} else {
-			q = baseSelect + `
-			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
-			LIMIT 1000`
-		}
-
-		rows, err := pgxPool.Query(ctx, q, args...)
-		if err != nil {
-			msg, status := getUserFriendlyRateCardError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
-			return
-		}
-		defer rows.Close()
-
-		out := make([]map[string]interface{}, 0)
-
-		for rows.Next() {
-			var auditID, rcID, actionType, processStatus, reason, reqBy, reqAt, checkerBy, checkerAt, checkerComment string
-
-			// Current values
-			var curBankCode, curBankName, curBankShortName, curDepositType, curEffectiveFrom, curRateSource, curOfferDetails string
-			var curMinTenor, curMaxTenor int
-			var curInterestRate float64
-			var curMinAmt, curMaxAmt, curPenaltyPct *float64
-			var curIsCallable *bool
-			var curPrematureWd, curSpecialOffer, curIsActive, curIsDeleted bool
-			var curEffectiveTo *string
-
-			// Old values
-			var oldBankCode, oldDepositType, oldEffectiveFrom, oldRateSource, oldOfferDetails string
-			var oldMinTenor, oldMaxTenor int
-			var oldInterestRate float64
-			var oldMinAmt, oldMaxAmt, oldPenaltyPct *float64
-			var oldIsCallable *bool
-			var oldPrematureWd, oldSpecialOffer, oldIsActive bool
-			var oldEffectiveTo *string
-
-			if err := rows.Scan(
-				&auditID, &rcID, &actionType, &processStatus, &reason, &reqBy, &reqAt, &checkerBy, &checkerAt, &checkerComment,
-				&curBankCode, &curBankName, &curBankShortName, &curDepositType, &curMinTenor, &curMaxTenor, &curInterestRate,
-				&curMinAmt, &curMaxAmt, &curIsCallable, &curPrematureWd, &curPenaltyPct,
-				&curEffectiveFrom, &curEffectiveTo, &curRateSource, &curSpecialOffer, &curOfferDetails, &curIsActive, &curIsDeleted,
-				&oldBankCode, &oldDepositType, &oldMinTenor, &oldMaxTenor, &oldInterestRate,
-				&oldMinAmt, &oldMaxAmt, &oldIsCallable, &oldPrematureWd, &oldPenaltyPct,
-				&oldEffectiveFrom, &oldEffectiveTo, &oldRateSource, &oldSpecialOffer, &oldOfferDetails, &oldIsActive,
-			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
-				return
-			}
-
-			out = append(out, map[string]interface{}{
-				"audit_id":          auditID,
-				"rate_card_id":      rcID,
-				"action_type":       actionType,
-				"processing_status": processStatus,
-				"reason":            reason,
-				"requested_by":      reqBy,
-				"requested_at":      reqAt,
-				"checker_by":        checkerBy,
-				"checker_at":        checkerAt,
-				"checker_comment":   checkerComment,
-
-				"bank_code":                    curBankCode,
-				"bank_name":                    curBankName,
-				"bank_short_name":              curBankShortName,
-				"deposit_type":                 curDepositType,
-				"min_tenor_days":               curMinTenor,
-				"max_tenor_days":               curMaxTenor,
-				"interest_rate":                curInterestRate,
-				"min_amount":                   curMinAmt,
-				"max_amount":                   curMaxAmt,
-				"is_callable":                  curIsCallable,
-				"premature_withdrawal_allowed": curPrematureWd,
-				"penalty_percentage":           curPenaltyPct,
-				"effective_from":               curEffectiveFrom,
-				"effective_to":                 curEffectiveTo,
-				"rate_source":                  curRateSource,
-				"special_offer":                curSpecialOffer,
-				"offer_details":                curOfferDetails,
-				"is_active":                    curIsActive,
-				"is_deleted":                   curIsDeleted,
-
-				"old_bank_code":                    oldBankCode,
-				"old_deposit_type":                 oldDepositType,
-				"old_min_tenor_days":               oldMinTenor,
-				"old_max_tenor_days":               oldMaxTenor,
-				"old_interest_rate":                oldInterestRate,
-				"old_min_amount":                   oldMinAmt,
-				"old_max_amount":                   oldMaxAmt,
-				"old_is_callable":                  oldIsCallable,
-				"old_premature_withdrawal_allowed": oldPrematureWd,
-				"old_penalty_percentage":           oldPenaltyPct,
-				"old_effective_from":               oldEffectiveFrom,
-				"old_effective_to":                 oldEffectiveTo,
-				"old_rate_source":                  oldRateSource,
-				"old_special_offer":                oldSpecialOffer,
-				"old_offer_details":                oldOfferDetails,
-				"old_is_active":                    oldIsActive,
-			})
-		}
-
-		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+rows.Err().Error())
-			return
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"audit_logs":           out,
-		})
-		api.LogInfo("RateCard AuditHistory: returned %d records", len(out))
-	}
-}
-
 // GetBankRateCard returns a single bank rate card by ID
 func GetBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1814,13 +1598,7 @@ func GetBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return

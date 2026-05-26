@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"encoding/json"
 	"errors"
@@ -170,7 +171,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		fileBytes, err := io.ReadAll(file)
 		file.Close()
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to read file: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -181,13 +182,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -297,13 +292,13 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		s3Key := ""
+		s3Key, storedFileName := "", ""
 		if s3storage.IsS3UploadEnabled() {
 			folder := s3storage.GetStoragePrefix("master-day-count-convention")
-			storedFileName := s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
+			storedFileName = s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 				return
 			}
 		}
@@ -463,6 +458,20 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+		bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+			ModuleKey:        "master-day-count-convention",
+			OriginalFileName: handler.Filename,
+			StoredFileName:   storedFileName,
+			UploadS3Key:      s3Key,
+			ContentType:      contentType,
+			FileSize:         int64(len(fileBytes)),
+			TotalRows:        len(data) - 1,
+			InsertedCount:    len(insertedRecords),
+			ErrorCount:       (len(data) - 1) - len(insertedRecords),
+			Status:           bulkuploadaudit.StatusFor(len(insertedRecords), (len(data)-1)-len(insertedRecords)),
+			UploadedBy:       userEmail,
+			UploadedAt:       time.Now().UTC(),
+		})
 
 		if len(insertedRecords) > 0 {
 			msg := fmt.Sprintf("%d day count conventions created successfully", len(insertedRecords))
@@ -809,7 +818,7 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyDayCountError(err, "Transaction start failed")
+			msg, status := getUserFriendlyDayCountError(err, constants.ErrTxStartFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1267,6 +1276,7 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE a.day_count_code = ANY($1::text[])
 				  AND a.action_type='DELETE'
 				  AND a.processing_status='APPROVED'
+				  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			)
 		`, req.DayCountCodes)
 		if err != nil {
@@ -1365,7 +1375,7 @@ func GetDayCountConventionsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFun
 				   m.is_active
 			FROM investment.fd_day_count_convention_master m
 			INNER JOIN investment.fd_audit_day_count_convention a ON a.day_count_code = m.day_count_code
-			WHERE a.processing_status='APPROVED' AND m.is_active=true AND COALESCE(m.is_deleted,false)=false
+			WHERE a.processing_status='APPROVED' AND a.action_type IN ('CREATE','EDIT','DELETE') AND m.is_active=true AND COALESCE(m.is_deleted,false)=false
 			ORDER BY m.day_count_name
 		`)
 		if err != nil {
@@ -1423,6 +1433,7 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_formula_example,
 					a.old_is_active
 				FROM investment.fd_audit_day_count_convention a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.day_count_code,
 				         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
 			),
@@ -1528,122 +1539,6 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"rows":                 out,
 		})
 		api.LogInfo("DayCount WithAudit: returned %d records", len(out))
-	}
-}
-
-// GetDayCountConventionAuditHistory returns audit history for day count conventions
-func GetDayCountConventionAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		dayCountCode := r.URL.Query().Get("day_count_code")
-
-		var q string
-		var args []interface{}
-
-		baseSelect := `
-			SELECT
-				a.audit_id,
-				a.day_count_code,
-				a.action_type,
-				a.processing_status,
-				COALESCE(a.reason,'') AS reason,
-				COALESCE(a.requested_by,'') AS requested_by,
-				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				COALESCE(a.checker_by,'') AS checker_by,
-				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-				COALESCE(a.checker_comment,'') AS checker_comment,
-
-				COALESCE(m.day_count_name,'') AS day_count_name,
-				COALESCE(m.convention_type,'') AS convention_type,
-				COALESCE(m.description,'') AS description,
-				COALESCE(m.formula_example,'') AS formula_example,
-				COALESCE(m.is_active,false) AS is_active,
-				COALESCE(m.is_deleted,false) AS is_deleted,
-
-				COALESCE(a.old_day_count_name,'') AS old_day_count_name,
-				COALESCE(a.old_convention_type,'') AS old_convention_type,
-				COALESCE(a.old_description,'') AS old_description,
-				COALESCE(a.old_formula_example,'') AS old_formula_example,
-				COALESCE(a.old_is_active,false) AS old_is_active
-
-			FROM investment.fd_audit_day_count_convention a
-			LEFT JOIN investment.fd_day_count_convention_master m ON m.day_count_code = a.day_count_code`
-
-		if dayCountCode != "" {
-			q = baseSelect + `
-			WHERE a.day_count_code = $1
-			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`
-			args = append(args, dayCountCode)
-		} else {
-			q = baseSelect + `
-			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
-			LIMIT 1000`
-		}
-
-		rows, err := pgxPool.Query(ctx, q, args...)
-		if err != nil {
-			msg, status := getUserFriendlyDayCountError(err, constants.ErrQueryFailed)
-			api.RespondWithError(w, status, msg)
-			return
-		}
-		defer rows.Close()
-
-		out := make([]map[string]interface{}, 0)
-
-		for rows.Next() {
-			var auditID, code, actionType, processStatus, reason, reqBy, reqAt, checkerBy, checkerAt, checkerComment string
-			var curName, curType, curDesc, curFormula string
-			var curIsActive, curIsDeleted bool
-			var oldName, oldType, oldDesc, oldFormula string
-			var oldIsActive bool
-
-			if err := rows.Scan(
-				&auditID, &code, &actionType, &processStatus, &reason, &reqBy, &reqAt, &checkerBy, &checkerAt, &checkerComment,
-				&curName, &curType, &curDesc, &curFormula, &curIsActive, &curIsDeleted,
-				&oldName, &oldType, &oldDesc, &oldFormula, &oldIsActive,
-			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
-				return
-			}
-
-			out = append(out, map[string]interface{}{
-				"audit_id":          auditID,
-				"day_count_code":    code,
-				"action_type":       actionType,
-				"processing_status": processStatus,
-				"reason":            reason,
-				"requested_by":      reqBy,
-				"requested_at":      reqAt,
-				"checker_by":        checkerBy,
-				"checker_at":        checkerAt,
-				"checker_comment":   checkerComment,
-
-				"day_count_name":  curName,
-				"convention_type": curType,
-				"description":     curDesc,
-				"formula_example": curFormula,
-				"is_active":       curIsActive,
-				"is_deleted":      curIsDeleted,
-
-				"old_day_count_name":  oldName,
-				"old_convention_type": oldType,
-				"old_description":     oldDesc,
-				"old_formula_example": oldFormula,
-				"old_is_active":       oldIsActive,
-			})
-		}
-
-		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+rows.Err().Error())
-			return
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"audit_logs":           out,
-		})
-		api.LogInfo("DayCount AuditHistory: returned %d records", len(out))
 	}
 }
 

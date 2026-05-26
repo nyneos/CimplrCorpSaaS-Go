@@ -31,6 +31,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,6 +74,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
+		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
 		today := now.Format(constants.DateFormat)
 		threeDaysOut := now.AddDate(0, 0, 3).Format(constants.DateFormat)
 		ctx := r.Context()
@@ -110,14 +112,20 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(m.fd_status,'') AS fd_status,
 				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'') AS maturity_date,
 				  COALESCE(cf.interest_accrued,0) AS expected_interest,
-				  COALESCE(cr.closure_type,'') AS closure_instruction,
-				  COALESCE(cr.closure_status,'') AS closure_status
+				  COALESCE(NULLIF(cimplr_ci.closure_type, ''), NULLIF(cr.closure_type, ''), m.maturity_instructions, '') AS closure_instruction,
+				  COALESCE(NULLIF(cimplr_cc.closure_status, ''), NULLIF(cimplr_ci.closure_status, ''), NULLIF(cr.closure_status, ''), '') AS closure_status
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_cashflow_schedule cf
 				  ON cf.fd_id = m.fd_id AND cf.event_type = 'MATURITY' AND cf.is_deleted=false
-				LEFT JOIN investment.fd_closure_request cr
-				  ON cr.fd_id = m.fd_id AND cr.is_deleted=false
-				  AND cr.closure_type IN ('MATURITY','ROLLOVER','AUTO_RENEWAL')
+				`+sqlLatestCimplrInitiate+`
+				`+sqlLatestCimplrConfirm+`
+				LEFT JOIN LATERAL (
+				  SELECT cr.closure_type, cr.closure_status
+				  FROM investment.fd_closure_request cr
+				  WHERE cr.fd_id = m.fd_id AND COALESCE(cr.is_deleted, false) = false
+				  ORDER BY cr.created_at DESC
+				  LIMIT 1
+				) cr ON true
 				WHERE m.is_deleted=false
 				  AND m.maturity_date = $1::date
 				  AND ($2::text='' OR m.entity_id=$2)
@@ -227,16 +235,25 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		// ── BOD: 3. Confirmations pending (SLA aging) ─────────────────────────
+		// Enriched payload: also returns FD master context (fd_id, rate, maturity,
+		// status) so the front-end drill drawer can render the same `FDRecord`
+		// shape used by other FD dashboards.
 		run("confirmations_due", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
 				SELECT
 				  b.booking_id,
-				  COALESCE(b.entity_name,'') AS entity,
+				  COALESCE(b.entity_name,'')                                  AS entity,
+				  COALESCE(b.entity_id,'')                                    AS entity_id,
 				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
-				  COALESCE(b.principal_amount,0) AS principal,
+				  COALESCE(b.principal_amount,0)                              AS principal,
 				  b.booking_status,
-				  COALESCE(EXTRACT(DAY FROM NOW()-b.created_at)::int, 0) AS aging_days,
-				  COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD'),'') AS booking_date
+				  COALESCE(EXTRACT(DAY FROM NOW()-b.created_at)::int, 0)      AS aging_days,
+				  COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD'),'')             AS booking_date,
+				  COALESCE(m.fd_id,'')                                        AS fd_id,
+				  COALESCE(m.interest_rate, 0)                                AS interest_rate,
+				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'')          AS maturity_date,
+				  COALESCE(TO_CHAR(m.start_date,'YYYY-MM-DD'),'')             AS start_date,
+				  COALESCE(m.fd_status,'')                                    AS fd_status
 				FROM investment.fd_booking_request b
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE b.is_deleted=false
@@ -251,25 +268,38 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			defer rows.Close()
 
 			type confRow struct {
-				BookingID   string  `json:"booking_id"`
-				Entity      string  `json:"entity"`
-				Bank        string  `json:"bank"`
-				Principal   float64 `json:"principal"`
-				Status      string  `json:"status"`
-				AgingDays   int     `json:"aging_days"`
-				BookingDate string  `json:"booking_date"`
-				SLAStatus   string  `json:"sla_status"`
+				BookingID    string  `json:"booking_id"`
+				Entity       string  `json:"entity"`
+				EntityID     string  `json:"entity_id"`
+				Bank         string  `json:"bank"`
+				Principal    float64 `json:"principal"`
+				Status       string  `json:"status"`
+				AgingDays    int     `json:"aging_days"`
+				BookingDate  string  `json:"booking_date"`
+				SLAStatus    string  `json:"sla_status"`
+				FDID         string  `json:"fd_id"`
+				InterestRate float64 `json:"interest_rate"`
+				MaturityDate string  `json:"maturity_date"`
+				StartDate    string  `json:"start_date"`
+				FDStatus     string  `json:"fd_status"`
+				Currency     string  `json:"currency"`
 			}
 			out := []confRow{}
 			overdue := 0
 			for rows.Next() {
 				var cr confRow
-				if err2 := rows.Scan(&cr.BookingID, &cr.Entity, &cr.Bank, &cr.Principal,
-					&cr.Status, &cr.AgingDays, &cr.BookingDate); err2 != nil {
+				if err2 := rows.Scan(
+					&cr.BookingID, &cr.Entity, &cr.EntityID, &cr.Bank, &cr.Principal,
+					&cr.Status, &cr.AgingDays, &cr.BookingDate,
+					&cr.FDID, &cr.InterestRate, &cr.MaturityDate, &cr.StartDate,
+					&cr.FDStatus,
+				); err2 != nil {
 					api.LogError("[BodEodDash] confirmations_due scan error: %v", err2)
 					continue
 				}
 				cr.Principal = fdRound(cr.Principal, 2)
+				cr.InterestRate = fdRound(cr.InterestRate, 4)
+				cr.Currency = req.Currency
 				switch {
 				case cr.AgingDays >= 3:
 					cr.SLAStatus = "Breached"
@@ -414,6 +444,52 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
+		// ── BOD: 5b. Active FD interest pipeline ─────────────────────────────
+		// Sum of all *upcoming* INTEREST_RECEIPT + MATURITY interest cashflow
+		// rows for FDs that are currently ACTIVE in fd_master. This is what the
+		// "Expected Interest" tile shows when nothing matures today: it falls
+		// back to the entire pipeline of receivable interest for live FDs.
+		run("active_interest_pipeline", func(ctx context.Context) (interface{}, error) {
+			var total float64
+			var fdCount, cfCount int64
+			err := pool.QueryRow(ctx, `
+				WITH active_fds AS (
+				  SELECT fd_id, entity_id
+				  FROM investment.fd_master
+				  WHERE is_deleted = false
+				    AND fd_status   = 'ACTIVE'
+				    AND ($1::text='' OR entity_id = $1)
+				)
+				SELECT
+				  COALESCE(SUM(
+				    CASE
+				      WHEN cf.event_type = 'INTEREST_RECEIPT' THEN COALESCE(cf.net_cash_flow, cf.interest_accrued, 0)
+				      WHEN cf.event_type = 'MATURITY'         THEN COALESCE(cf.interest_accrued, 0)
+				      ELSE 0
+				    END
+				  ),0)                                       AS total_interest,
+				  COUNT(DISTINCT cf.fd_id)                   AS fd_count,
+				  COUNT(*)                                   AS cashflow_count
+				FROM investment.fd_cashflow_schedule cf
+				JOIN active_fds a ON a.fd_id = cf.fd_id
+				WHERE cf.is_deleted = false
+				  AND cf.event_date >= CURRENT_DATE
+				  AND cf.event_type IN ('INTEREST_RECEIPT','MATURITY')
+				  AND COALESCE(cf.receipt_cleared, false) = false
+				  AND COALESCE(cf.posting_status,'') <> 'POSTED'`, entityFilter).Scan(&total, &fdCount, &cfCount)
+			if err != nil {
+				api.LogError("[BodEodDash] active_interest_pipeline query error: %v", err)
+				return map[string]interface{}{
+					"total_interest": 0, "fd_count": 0, "cashflow_count": 0,
+				}, nil
+			}
+			return map[string]interface{}{
+				"total_interest":  fdRound(total, 2),
+				"fd_count":        fdCount,
+				"cashflow_count":  cfCount,
+			}, nil
+		})
+
 		// ── BOD: 6. Today's action list (booking + closure tasks) ─────────────
 		run("action_list", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
@@ -431,6 +507,31 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND b.booking_status IN ('DRAFT','APPROVAL_PENDING','SENT_TO_BANK')
 				  AND ($1::text='' OR b.entity_id=$1)
+				UNION ALL
+				SELECT
+				  ci.closure_initiate_id AS ref_id,
+				  'CLOSURE' AS task_type,
+				  COALESCE(ci.entity_name, m.entity_name, '') AS entity,
+				  COALESCE(ci.bank_name, m.bank_name, '') AS bank,
+				  COALESCE(ci.principal_amount, m.principal_amount, 0)::float8 AS amount,
+				  COALESCE(la.processing_status, ci.closure_status, '') AS status,
+				  -- cimplr.fd_closure_initiate has no created_at column; age the
+				  -- task off the latest audit requested_at instead.
+				  COALESCE(EXTRACT(DAY FROM NOW() - la.requested_at)::int, 0) AS aging_days,
+				  COALESCE(la.requested_by, '') AS owner
+				FROM cimplr.fd_closure_initiate ci
+				JOIN investment.fd_master m ON m.fd_id = ci.fd_id AND m.is_deleted = false
+				LEFT JOIN LATERAL (
+				  SELECT processing_status, requested_by, requested_at
+				  FROM cimplr.fd_closure_initiate_audit a
+				  WHERE a.closure_initiate_id = ci.closure_initiate_id
+				  ORDER BY a.requested_at DESC
+				  LIMIT 1
+				) la ON true
+				WHERE COALESCE(ci.is_deleted, false) = false
+				  AND COALESCE(la.processing_status, ci.closure_status, '') NOT IN ('POSTED', 'REJECTED', 'DELETED')
+				  AND NOT (`+sqlCimplrClosureProcessed+`)
+				  AND ($1::text = '' OR COALESCE(ci.entity_id, m.entity_id) = $1)
 				UNION ALL
 				SELECT
 				  cr.closure_request_id AS ref_id,
@@ -778,14 +879,26 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		// ── EOD: 14. EOD Checklist — driven by real data states ───────────────
+		//
+		// Each checklist item is owned by a specific operational role:
+		//   - TREASURY      → accrual runs, maturity verification
+		//   - FINANCE       → variance cases, GL postings
+		//   - BACK_OFFICE   → statement ingestion, exception monitoring
+		//
+		// The checklist is filtered by the caller's role when req.Mode is "EOD".
+		// Roles equal to "ADMIN", "MANAGER", "CFO", or "" (empty) see all items.
 		run("eod_checklist", func(ctx context.Context) (interface{}, error) {
-			// Run 5 small count queries concurrently inside this goroutine
 			type checkItem struct {
-				ID          string `json:"id"`
-				Label       string `json:"label"`
-				Done        bool   `json:"done"`
-				Critical    bool   `json:"critical"`
-				DetailValue string `json:"detail_value,omitempty"`
+				ID                string `json:"id"`
+				Label             string `json:"label"`
+				Done              bool   `json:"done"`
+				Critical          bool   `json:"critical"`
+				DetailValue       string `json:"detail_value,omitempty"`
+				OwnerRole         string `json:"owner_role"`
+				PersistedDone     bool   `json:"persisted_done"`
+				PersistedComment  string `json:"persisted_comment,omitempty"`
+				LastUpdatedBy     string `json:"last_updated_by,omitempty"`
+				LastUpdatedAt     string `json:"last_updated_at,omitempty"`
 			}
 
 			// C1: statement ingestion done (no unmatched today)
@@ -830,35 +943,87 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			var pendingMaturities int64
 			pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_master m
 				WHERE m.is_deleted=false AND m.maturity_date=$1::date
-				AND NOT EXISTS (
-				    SELECT 1 FROM investment.fd_closure_request cr
-				    WHERE cr.fd_id=m.fd_id AND cr.is_deleted=false
-				    AND cr.closure_status IN ('COMPLETED','POSTED')
-				)
+				AND m.fd_status IN ('ACTIVE','MATURED')
+				AND NOT (`+sqlAnyClosureProcessed+`)
 				AND ($2::text='' OR m.entity_id=$2)`, today, entityFilter).Scan(&pendingMaturities)
 
 			accrualDone := latestRunStatus == "COMPLETED" || latestRunStatus == "POSTED"
 
 			items := []checkItem{
-				{ID: "C1", Label: "Bank statement ingestion completed — unmatched receipts below threshold", Done: unmatchedCount == 0, Critical: true, DetailValue: formatInt64(unmatchedCount) + " unmatched"},
-				{ID: "C2", Label: "High variance cases reviewed and addressed", Done: openVariance == 0, Critical: true, DetailValue: formatInt64(openVariance) + " pending"},
-				{ID: "C3", Label: "All GL postings successful — no failed postings", Done: failedPostings == 0, Critical: true, DetailValue: formatInt64(failedPostings) + " failed"},
-				{ID: "C4", Label: "No critical exceptions open", Done: criticalExceptions == 0, Critical: false, DetailValue: formatInt64(criticalExceptions) + " open"},
-				{ID: "C5", Label: "Accrual batch run completed successfully", Done: accrualDone, Critical: false, DetailValue: "Status: " + latestRunStatus},
-				{ID: "C6", Label: "Maturity proceeds verified — closure requests processed", Done: pendingMaturities == 0, Critical: true, DetailValue: formatInt64(pendingMaturities) + " pending"},
+				{ID: "C1", Label: "Bank statement ingestion completed — unmatched receipts below threshold", Done: unmatchedCount == 0, Critical: true, OwnerRole: "BACK_OFFICE", DetailValue: formatInt64(unmatchedCount) + " unmatched"},
+				{ID: "C2", Label: "High variance cases reviewed and addressed", Done: openVariance == 0, Critical: true, OwnerRole: "FINANCE", DetailValue: formatInt64(openVariance) + " pending"},
+				{ID: "C3", Label: "All GL postings successful — no failed postings", Done: failedPostings == 0, Critical: true, OwnerRole: "FINANCE", DetailValue: formatInt64(failedPostings) + " failed"},
+				{ID: "C4", Label: "No critical exceptions open", Done: criticalExceptions == 0, Critical: false, OwnerRole: "BACK_OFFICE", DetailValue: formatInt64(criticalExceptions) + " open"},
+				{ID: "C5", Label: "Accrual batch run completed successfully", Done: accrualDone, Critical: false, OwnerRole: "TREASURY", DetailValue: "Status: " + latestRunStatus},
+				{ID: "C6", Label: "Maturity proceeds verified — closure requests processed", Done: pendingMaturities == 0, Critical: true, OwnerRole: "TREASURY", DetailValue: formatInt64(pendingMaturities) + " pending"},
+			}
+
+			// Merge persisted manual sign-off state (if table exists). Failure is non-fatal.
+			persistedMap := loadEodChecklistPersistedState(ctx, pool, today, entityFilter)
+			for i := range items {
+				if p, ok := persistedMap[items[i].ID]; ok {
+					items[i].PersistedDone = p.Done
+					items[i].PersistedComment = p.Comment
+					items[i].LastUpdatedBy = p.UpdatedBy
+					items[i].LastUpdatedAt = p.UpdatedAt
+					// If user has explicitly marked it done, surface that as the visible state.
+					if p.Done {
+						items[i].Done = true
+					}
+				}
+			}
+
+			// Filter by caller's role when not an aggregated viewer
+			callerRole := normaliseRole(getCallerRole(ctx, req.UserID))
+			if !isAggregatedRole(callerRole) {
+				filtered := items[:0]
+				for _, it := range items {
+					if it.OwnerRole == callerRole {
+						filtered = append(filtered, it)
+					}
+				}
+				// If filtering wiped everything (unknown role), fall back to full list
+				if len(filtered) > 0 {
+					items = filtered
+				}
 			}
 
 			completedCount := 0
+			criticalPending := 0
+			criticalDone := 0
+			normalPending := 0
+			normalDone := 0
 			for _, it := range items {
 				if it.Done {
 					completedCount++
+					if it.Critical {
+						criticalDone++
+					} else {
+						normalDone++
+					}
+				} else {
+					if it.Critical {
+						criticalPending++
+					} else {
+						normalPending++
+					}
 				}
 			}
+			total := len(items)
+			pct := 0.0
+			if total > 0 {
+				pct = fdRound(float64(completedCount)/float64(total)*100, 1)
+			}
 			return map[string]interface{}{
-				"items":          items,
-				"completed":      completedCount,
-				"total":          len(items),
-				"completion_pct": fdRound(float64(completedCount)/float64(len(items))*100, 1),
+				"items":            items,
+				"completed":        completedCount,
+				"total":            total,
+				"completion_pct":   pct,
+				"critical_done":    criticalDone,
+				"critical_pending": criticalPending,
+				"normal_done":      normalDone,
+				"normal_pending":   normalPending,
+				"caller_role":      callerRole,
 			}, nil
 		})
 
@@ -983,6 +1148,21 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		// Pipeline of all upcoming interest receivable across ACTIVE FDs.
+		// This is shown when nothing is maturing today, so the tile is not 0.
+		activeInterestPipeline := 0.0
+		activeInterestFDCount := int64(0)
+		if v := get("active_interest_pipeline"); v != nil {
+			if m, ok := v.(map[string]interface{}); ok {
+				if t, ok2 := m["total_interest"].(float64); ok2 {
+					activeInterestPipeline = t
+				}
+				if c, ok2 := m["fd_count"].(int64); ok2 {
+					activeInterestFDCount = c
+				}
+			}
+		}
+
 		// EOD KPIs
 		bookingsTodayCount := 0
 		bookingsTodayAmount := 0.0
@@ -1009,21 +1189,26 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"generated_at": now.Format(time.RFC3339),
 			"as_of_date":   today,
 			"filters": map[string]interface{}{
-				"entity_id": entityFilter,
-				"currency":  req.Currency,
-				"mode":      req.Mode,
+				"entity_id":  entityFilter,
+				"currency":   req.Currency,
+				"mode":       req.Mode,
+				"period":     periodBounds.Period,
+				"start_date": periodBounds.StartStr,
+				"end_date":   periodBounds.EndStr,
 			},
 			// ── BOD KPIs ──────────────────────────────────────────────────────
 			"bod_kpis": map[string]interface{}{
-				"maturities_today_count":   todayMaturityCount,
-				"maturities_today_total":   todayMaturityTotal,
-				"maturities_next_3d_count": next3Count,
-				"confirmations_due":        confDueCount,
-				"confirmations_overdue":    confOverdue,
-				"expected_interest_today":  expectedInterestTotal,
-				"accrual_runs_today":       countSlice(get("accrual_scheduled")),
-				"sla_breaches_yesterday":   countSlice(get("sla_breach_yesterday")),
-				"action_items_total":       countSlice(get("action_list")),
+				"maturities_today_count":            todayMaturityCount,
+				"maturities_today_total":            todayMaturityTotal,
+				"maturities_next_3d_count":          next3Count,
+				"confirmations_due":                 confDueCount,
+				"confirmations_overdue":             confOverdue,
+				"expected_interest_today":           expectedInterestTotal,
+				"active_fd_interest_pipeline":       activeInterestPipeline,
+				"active_fd_interest_pipeline_count": activeInterestFDCount,
+				"accrual_runs_today":                countSlice(get("accrual_scheduled")),
+				"sla_breaches_yesterday":            countSlice(get("sla_breach_yesterday")),
+				"action_items_total":                countSlice(get("action_list")),
 			},
 			// ── EOD KPIs ──────────────────────────────────────────────────────
 			"eod_kpis": map[string]interface{}{
@@ -1052,9 +1237,10 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"receipts_today":       get("receipts_today"),
 			"exceptions_today":     get("exceptions_today"),
 			"posting_today":        get("posting_today"),
-			"accrual_run_latest":   get("accrual_run_latest"),
-			"eod_checklist":        get("eod_checklist"),
-			"bank_concentration":   get("bank_concentration"),
+			"accrual_run_latest":        get("accrual_run_latest"),
+			"eod_checklist":             get("eod_checklist"),
+			"bank_concentration":        get("bank_concentration"),
+			"active_interest_pipeline":  get("active_interest_pipeline"),
 		}
 
 		api.RespondWithPayload(w, true, "", payload)
@@ -1097,6 +1283,95 @@ func getNestedInt64(v interface{}, key string) int64 {
 		}
 	}
 	return 0
+}
+
+// ─── Role-based filtering helpers ─────────────────────────────────────────────
+
+// normaliseRole maps free-form role strings from the session table to one of the
+// canonical operational role buckets used by the EOD checklist.
+func normaliseRole(role string) string {
+	r := strings.ToUpper(strings.TrimSpace(role))
+	switch r {
+	case "":
+		return ""
+	case "TREASURY", "TREASURY_MANAGER", "TREASURY_USER", "TREASURY MANAGER":
+		return "TREASURY"
+	case "FINANCE", "FINANCE_USER", "ACCOUNTANT", "ACCOUNTING", "FINANCE_MANAGER":
+		return "FINANCE"
+	case "BACK_OFFICE", "BACK OFFICE", "BO", "OPERATIONS", "OPS", "OPERATIONS_USER":
+		return "BACK_OFFICE"
+	}
+	// Default: return upper-cased role so isAggregatedRole can detect ADMIN/CFO etc.
+	return r
+}
+
+// isAggregatedRole returns true when the caller should see every checklist item
+// regardless of which operational team owns it.
+func isAggregatedRole(role string) bool {
+	switch role {
+	case "", "ADMIN", "ADMINISTRATOR", "SUPER_ADMIN", "SUPERADMIN",
+		"MANAGER", "CFO", "HEAD_TREASURY", "AUDITOR", "ALL":
+		return true
+	}
+	return false
+}
+
+// getCallerRole tries the request body first, then session context, then a DB
+// lookup against public.users.role (best-effort — silent fallback to "").
+func getCallerRole(ctx context.Context, userID string) string {
+	if s := api.GetSessionFromCtx(ctx); s != nil {
+		if s.Role != "" {
+			return s.Role
+		}
+		if s.RoleCode != "" {
+			return s.RoleCode
+		}
+	}
+	return ""
+}
+
+// persistedChecklistRow captures a stored user override for a checklist item.
+type persistedChecklistRow struct {
+	Done      bool
+	Comment   string
+	UpdatedBy string
+	UpdatedAt string
+}
+
+// loadEodChecklistPersistedState looks up the latest user-toggled state of each
+// checklist item for the given as_of_date + entity scope. Returns empty map if
+// the table does not yet exist or any query error occurs (best-effort).
+func loadEodChecklistPersistedState(ctx context.Context, pool *pgxpool.Pool, today, entityID string) map[string]persistedChecklistRow {
+	out := map[string]persistedChecklistRow{}
+	rows, err := pool.Query(ctx, `
+		SELECT
+		  item_id,
+		  COALESCE(is_done,false)       AS is_done,
+		  COALESCE(comment,'')          AS comment,
+		  COALESCE(updated_by,'')       AS updated_by,
+		  COALESCE(TO_CHAR(updated_at,'YYYY-MM-DD"T"HH24:MI:SS'),'') AS updated_at
+		FROM investment.fd_eod_checklist_item_status
+		WHERE as_of_date = $1::date
+		  AND ($2::text='' OR entity_id = $2)
+		  AND COALESCE(is_deleted,false) = false
+		ORDER BY updated_at DESC`, today, entityID)
+	if err != nil {
+		// Likely table missing — return empty silently.
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, comment, updatedBy, updatedAt string
+		var done bool
+		if scanErr := rows.Scan(&id, &done, &comment, &updatedBy, &updatedAt); scanErr != nil {
+			continue
+		}
+		if _, exists := out[id]; exists {
+			continue // keep most-recent only
+		}
+		out[id] = persistedChecklistRow{Done: done, Comment: comment, UpdatedBy: updatedBy, UpdatedAt: updatedAt}
+	}
+	return out
 }
 
 func formatInt64(n int64) string {

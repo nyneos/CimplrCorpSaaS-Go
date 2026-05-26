@@ -4,13 +4,12 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"regexp"
 	"slices"
@@ -21,6 +20,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 type CreateCalendarReq struct {
@@ -242,7 +243,7 @@ func CreateCalendarSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.IngestionSource = "Manual"
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, 500, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -436,7 +437,6 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Create calendar audit once
-		// Create calendar audit once
 		_, err = tx.Exec(ctx, `
 	INSERT INTO investment.auditactioncalendar
 	(calendar_id, actiontype, processing_status, reason, requested_by, requested_at)
@@ -536,13 +536,13 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
 				folder := s3storage.GetStoragePrefix("master-calendar")
-				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, 500, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, 500, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -678,6 +678,20 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 500, "commit: "+err.Error())
 				return
 			}
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        "master-calendar",
+				OriginalFileName: fh.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(rowsToInsert),
+				InsertedCount:    len(rowsToInsert),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userEmail,
+				UploadedAt:       time.Now().UTC(),
+			})
 
 			batchIDs = append(batchIDs, uuid.New().String())
 		}
@@ -762,13 +776,13 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
 				folder := s3storage.GetStoragePrefix("master-holiday")
-				storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, 500, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, 500, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -810,7 +824,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE calendar_code = ANY($1) AND is_deleted=false
 			`, codes)
 			if err != nil {
-				log.Printf("[WARN] failed to fetch calendar mapping: %v", err)
+				logger.LogError("[WARN] failed to fetch calendar mapping: %v", err)
 			} else {
 				for rows.Next() {
 					var code, id string
@@ -906,6 +920,20 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 500, "commit: "+err.Error())
 				return
 			}
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        "master-holiday",
+				OriginalFileName: fh.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(tmpRows),
+				InsertedCount:    len(tmpRows),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userEmail,
+				UploadedAt:       time.Now().UTC(),
+			})
 
 			batchIDs = append(batchIDs, uuid.New().String())
 		}
@@ -935,6 +963,7 @@ WITH latest_audit AS (
         a.checker_comment,
         a.reason
     FROM investment.auditactioncalendar a
+    WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
     ORDER BY a.calendar_id, a.requested_at DESC
 ),
 history AS (
@@ -1060,6 +1089,7 @@ WITH latest_audit AS (
         requested_at,
         checker_at
     FROM investment.auditactioncalendar
+    WHERE actiontype IN ('CREATE','EDIT','DELETE')
     ORDER BY calendar_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 )
 SELECT
@@ -1132,7 +1162,7 @@ WITH latest_audit AS (
         requested_by, requested_at, checker_by, checker_at,
         checker_comment, reason
     FROM investment.auditactioncalendar
-    WHERE calendar_id = $1
+    WHERE calendar_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE')
     ORDER BY calendar_id, requested_at DESC
 ),
 history AS (
@@ -1508,7 +1538,7 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, 500, "tx begin failed")
@@ -1631,7 +1661,7 @@ func BulkRejectCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, 500, "tx begin failed")

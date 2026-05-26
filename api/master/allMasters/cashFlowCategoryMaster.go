@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 
 	// "bufio"
@@ -25,6 +26,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
+
+	"CimplrCorpSaas/internal/logger"
 )
 
 // getUserFriendlyCashFlowCategoryError converts database errors to user-friendly messages
@@ -321,6 +324,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						processing_status
 					FROM auditactioncashflowcategory
 					WHERE processing_status = 'APPROVED'
+					  AND actiontype IN ('CREATE','EDIT','DELETE')
 					ORDER BY category_id, requested_at DESC
 				)
 				SELECT 
@@ -583,6 +587,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				       checker_by, checker_at, checker_comment, reason
 				FROM auditactioncashflowcategory a
 				WHERE a.category_id = m.category_id
+				  AND a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
@@ -971,7 +976,7 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT m.category_id, m.category_name, m.category_type, m.is_deleted, a.processing_status
 			FROM mastercashflowcategory m
 			LEFT JOIN LATERAL (
-		SELECT processing_status FROM auditactioncashflowcategory a WHERE a.category_id = m.category_id ORDER BY requested_at DESC LIMIT 1
+		SELECT processing_status FROM auditactioncashflowcategory a WHERE a.category_id = m.category_id AND a.actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC LIMIT 1
 		) a ON TRUE
 	`)
 		if err != nil {
@@ -1809,7 +1814,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(file)
 			file.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fileHeader.Filename)
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fileHeader.Filename)
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -1844,13 +1849,13 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			columns := append([]string{"upload_batch_id"}, headerRow...)
 
-			s3Key := ""
+			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-cashflow-category")
-				storedFileName := s3storage.BuildUploadedFilename(fileHeader.Filename, userName, time.Now().UTC())
+				folder := s3storage.GetStoragePrefix(constants.FormatMasterCashflowCategory)
+				storedFileName = s3storage.BuildUploadedFilename(fileHeader.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -2105,6 +2110,20 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			committed = true
+			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+				ModuleKey:        constants.FormatMasterCashflowCategory,
+				OriginalFileName: fileHeader.Filename,
+				StoredFileName:   storedFileName,
+				UploadS3Key:      s3Key,
+				ContentType:      contentType,
+				FileSize:         int64(len(fileBytes)),
+				TotalRows:        len(dataRows),
+				InsertedCount:    len(copyRows),
+				ErrorCount:       0,
+				Status:           bulkuploadaudit.StatusCompleted,
+				UploadedBy:       userName,
+				UploadedAt:       time.Now().UTC(),
+			})
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"batch_ids": batchIDs,
@@ -2150,7 +2169,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		fileBytes, err := io.ReadAll(file)
 		file.Close()
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -2213,15 +2232,15 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		readDur := time.Since(fileStart)
 		timings = append(timings, map[string]interface{}{"phase": "read_csv", "rows": rowCount, "ms": readDur.Milliseconds()})
-		log.Printf("[UploadCashFlowCategorySimple] read rows=%d elapsed=%v file=%s", rowCount, readDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] read rows=%d elapsed=%v file=%s", rowCount, readDur, fh.Filename)
 
-		s3Key := ""
+		s3Key, storedFileName := "", ""
 		if s3storage.IsS3UploadEnabled() {
-			folder := s3storage.GetStoragePrefix("master-cashflow-category")
-			storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+			folder := s3storage.GetStoragePrefix(constants.FormatMasterCashflowCategory)
+			storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 				return
 			}
 		}
@@ -2260,7 +2279,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		timings = append(timings, map[string]interface{}{"phase": "copy_to_tmp", "rows": rowCount, "ms": copyDur.Milliseconds()})
-		log.Printf("[UploadCashFlowCategorySimple] COPY rows=%d elapsed=%v file=%s", rowCount, copyDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] COPY rows=%d elapsed=%v file=%s", rowCount, copyDur, fh.Filename)
 
 		_, _ = tx.Exec(ctx, `CREATE INDEX ON tmp_mcc (category_name)`)
 
@@ -2331,7 +2350,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		validationDur := time.Since(validationStart)
 		timings = append(timings, map[string]interface{}{"phase": "validation", "ms": validationDur.Milliseconds()})
-		log.Printf("[UploadCashFlowCategorySimple] validation elapsed=%v file=%s", validationDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] validation elapsed=%v file=%s", validationDur, fh.Filename)
 
 		insertSQL := `
 INSERT INTO mastercashflowcategory (
@@ -2350,7 +2369,7 @@ SELECT
 	t.tally_group, t.tally_voucher, t.tally_notes,
 	t.sage_section, t.sage_line, t.sage_notes
 FROM tmp_mcc t
-LEFT JOIN mastercashflowcategory m ON m.category_name = t.category_name
+LEFT JOIN mastercashflowcategory m ON m.category_name = t.category_name AND COALESCE(m.is_deleted, false) = false
 WHERE m.category_name IS NULL;
 `
 		insertStart := time.Now()
@@ -2370,7 +2389,7 @@ WHERE m.category_name IS NULL;
 		}
 		insertDur := time.Since(insertStart)
 		timings = append(timings, map[string]interface{}{"phase": "insert", "ms": insertDur.Milliseconds()})
-		log.Printf("[UploadCashFlowCategorySimple] insert elapsed=%v file=%s", insertDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] insert elapsed=%v file=%s", insertDur, fh.Filename)
 
 		updateSQL := `
 UPDATE mastercashflowcategory m
@@ -2397,7 +2416,7 @@ AND (
 		}
 		updateDur := time.Since(updateStart)
 		timings = append(timings, map[string]interface{}{"phase": "update", "ms": updateDur.Milliseconds()})
-		log.Printf("[UploadCashFlowCategorySimple] update elapsed=%v file=%s", updateDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] update elapsed=%v file=%s", updateDur, fh.Filename)
 
 		hierarchySQL := `
 WITH RECURSIVE affected AS (
@@ -2424,7 +2443,7 @@ WHERE m.category_id = a.category_id;
 		}
 		hierarchyDur := time.Since(hierarchyStart)
 		timings = append(timings, map[string]interface{}{"phase": "hierarchy", "ms": hierarchyDur.Milliseconds()})
-		log.Printf("[UploadCashFlowCategorySimple] hierarchy elapsed=%v file=%s", hierarchyDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] hierarchy elapsed=%v file=%s", hierarchyDur, fh.Filename)
 
 		relationshipSQL := `
 INSERT INTO cashflowcategoryrelationships (parent_category_name, child_category_name, status)
@@ -2442,7 +2461,7 @@ ON CONFLICT (parent_category_name, child_category_name) DO NOTHING;
 		}
 		relDur := time.Since(relStart)
 		timings = append(timings, map[string]interface{}{"phase": "relationships", "ms": relDur.Milliseconds()})
-		log.Printf("[UploadCashFlowCategorySimple] relationships elapsed=%v file=%s", relDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] relationships elapsed=%v file=%s", relDur, fh.Filename)
 
 		auditSQL := `
 INSERT INTO auditactioncashflowcategory(category_id, actiontype, processing_status, requested_by, requested_at)
@@ -2458,7 +2477,7 @@ ON CONFLICT DO NOTHING;
 		}
 		auditDur := time.Since(auditStart)
 		timings = append(timings, map[string]interface{}{"phase": "audit", "ms": auditDur.Milliseconds()})
-		log.Printf("[UploadCashFlowCategorySimple] audit elapsed=%v file=%s", auditDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] audit elapsed=%v file=%s", auditDur, fh.Filename)
 
 		commitStart := time.Now()
 		if err := tx.Commit(ctx); err != nil {
@@ -2467,8 +2486,22 @@ ON CONFLICT DO NOTHING;
 		}
 		commitDur := time.Since(commitStart)
 		timings = append(timings, map[string]interface{}{"phase": "commit", "ms": commitDur.Milliseconds()})
-		log.Printf("[UploadCashFlowCategorySimple] commit elapsed=%v file=%s", commitDur, fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] commit elapsed=%v file=%s", commitDur, fh.Filename)
 		tx = nil
+		bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
+			ModuleKey:        constants.FormatMasterCashflowCategory,
+			OriginalFileName: fh.Filename,
+			StoredFileName:   storedFileName,
+			UploadS3Key:      s3Key,
+			ContentType:      contentType,
+			FileSize:         int64(len(fileBytes)),
+			TotalRows:        rowCount,
+			InsertedCount:    rowCount,
+			ErrorCount:       0,
+			Status:           bulkuploadaudit.StatusCompleted,
+			UploadedBy:       userName,
+			UploadedAt:       time.Now().UTC(),
+		})
 
 		dur := time.Since(startOverall)
 		timings = append(timings, map[string]interface{}{"phase": "total", "ms": dur.Milliseconds()})
@@ -2480,7 +2513,7 @@ ON CONFLICT DO NOTHING;
 			"batch_id":             uuid.New().String(),
 			"timings":              timings,
 		}
-		log.Printf("[UploadCashFlowCategorySimple] finished rows=%d total_ms=%d file=%s", rowCount, dur.Milliseconds(), fh.Filename)
+		logger.LogInfo("[UploadCashFlowCategorySimple] finished rows=%d total_ms=%d file=%s", rowCount, dur.Milliseconds(), fh.Filename)
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}

@@ -93,6 +93,142 @@ func decodeSQLValue(v interface{}) interface{} {
 	}
 }
 
+const userEntityAccessExistsSQL = `
+	EXISTS (
+		SELECT 1 FROM user_entity_mappings uem
+		WHERE uem.user_id = u.id
+		  AND COALESCE(uem.is_deleted, false) = false
+		  AND uem.entity_id = ANY($%d::text[])
+	)`
+
+const usersTableEntityAccessExistsSQL = `
+	EXISTS (
+		SELECT 1 FROM user_entity_mappings uem
+		WHERE uem.user_id = users.id
+		  AND COALESCE(uem.is_deleted, false) = false
+		  AND uem.entity_id = ANY($%d::text[])
+	)`
+
+const activeUserRoleLateralSQL = `
+LEFT JOIN LATERAL (
+	SELECT r.name AS role_name,
+	       COALESCE(r.status, '') AS role_status,
+	       COALESCE(r.roles_permission_status, '') AS role_permission_status,
+	       COALESCE(r.role_code, r.rolecode) AS role_code
+	FROM user_roles ur
+	JOIN roles r ON ur.role_id = r.id
+	WHERE ur.user_id = u.id
+	  AND COALESCE(ur.is_deleted, false) = false
+	ORDER BY ur.approved_at DESC NULLS LAST, ur.role_id DESC
+	LIMIT 1
+) rr ON true`
+
+func normalizeUserIdentifier(value string) string {
+	return strings.TrimSpace(value)
+}
+
+func entityIDSet(entityIDs []string) map[string]bool {
+	set := make(map[string]bool, len(entityIDs))
+	for _, id := range entityIDs {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			set[id] = true
+		}
+	}
+	return set
+}
+
+func prevalidationEntityScope(ctx context.Context) ([]string, bool) {
+	entityIDs := api.GetEntityIDsFromCtx(ctx)
+	isAdminOverride, _ := ctx.Value("is_admin_override").(bool)
+	return entityIDs, isAdminOverride
+}
+
+func requirePrevalidationEntityScope(ctx context.Context) ([]string, bool, int, string) {
+	entityIDs, isAdminOverride := prevalidationEntityScope(ctx)
+	if len(entityIDs) == 0 && !isAdminOverride {
+		return nil, false, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit
+	}
+	return entityIDs, isAdminOverride, 0, ""
+}
+
+func validateEntityMappingsInScope(
+	entityIDs []string,
+	mappings []struct{ EntityID, EntityName string },
+) (int, string) {
+	accessible := entityIDSet(entityIDs)
+	if len(accessible) == 0 {
+		return 0, ""
+	}
+	valid := 0
+	for _, em := range mappings {
+		entityID := strings.TrimSpace(em.EntityID)
+		if entityID == "" {
+			continue
+		}
+		if !accessible[entityID] {
+			label := strings.TrimSpace(em.EntityName)
+			if label == "" {
+				label = entityID
+			}
+			return http.StatusBadRequest, fmt.Sprintf("Entity '%s' is outside your accessible scope", label)
+		}
+		valid++
+	}
+	if valid == 0 {
+		return http.StatusBadRequest, "At least one accessible entity mapping is required"
+	}
+	return 0, ""
+}
+
+func upsertActiveUserRole(exec sqlExecutor, userID, roleName string) error {
+	roleName = strings.TrimSpace(roleName)
+	if roleName == "" {
+		return nil
+	}
+
+	var roleID string
+	err := exec.QueryRow(
+		`SELECT id FROM roles WHERE name = $1 OR rolecode = $1 OR role_code = $1 LIMIT 1`,
+		roleName,
+	).Scan(&roleID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("role '%s' not found in roles table", roleName)
+		}
+		return err
+	}
+
+	if _, err := exec.Exec(
+		`UPDATE user_roles SET is_deleted = true WHERE user_id = $1 AND COALESCE(is_deleted, false) = false`,
+		userID,
+	); err != nil {
+		return err
+	}
+
+	reactivated, err := exec.Exec(
+		`UPDATE user_roles SET is_deleted = false WHERE user_id = $1 AND role_id = $2`,
+		userID, roleID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, _ := reactivated.RowsAffected(); rows == 0 {
+		if _, err := exec.Exec(
+			`INSERT INTO user_roles (user_id, role_id, is_deleted) VALUES ($1, $2, false)`,
+			userID, roleID,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type sqlExecutor interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
 // Handler: Create user
 func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -119,17 +255,48 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		// Get createdBy from session
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				createdBy = s.Email
-				break
-			}
+		createdBy := api.GetUserEmailFromCtx(r.Context())
+		if createdBy == "" {
+			createdBy = api.RequestedByFromCtx(r.Context(), api.GetUserIDFromCtx(r.Context()))
 		}
 		if createdBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			return
+		}
+
+		entityIDs, isAdminOverride, statusCode, errMsg := requirePrevalidationEntityScope(r.Context())
+		if statusCode != 0 {
+			respondWithError(w, statusCode, errMsg)
+			return
+		}
+
+		req.UsernameOrEmployeeID = normalizeUserIdentifier(req.UsernameOrEmployeeID)
+		req.Email = normalizeUserIdentifier(strings.ToLower(req.Email))
+		req.EmployeeName = normalizeUserIdentifier(req.EmployeeName)
+		req.Role = normalizeUserIdentifier(req.Role)
+		if req.UsernameOrEmployeeID == "" || req.Email == "" {
+			respondWithError(w, http.StatusBadRequest, "Username and email are required")
+			return
+		}
+
+		validEntityMappings := make([]struct{ EntityID, EntityName string }, 0, len(req.EntityMappings))
+		for _, em := range req.EntityMappings {
+			entityID := strings.TrimSpace(em.EntityID)
+			if entityID == "" {
+				continue
+			}
+			validEntityMappings = append(validEntityMappings, struct {
+				EntityID   string
+				EntityName string
+			}{entityID, strings.TrimSpace(em.EntityName)})
+		}
+		if !isAdminOverride {
+			if statusCode, errMsg := validateEntityMappingsInScope(entityIDs, validEntityMappings); statusCode != 0 {
+				respondWithError(w, statusCode, errMsg)
+				return
+			}
+		} else if len(validEntityMappings) == 0 {
+			respondWithError(w, http.StatusBadRequest, "At least one entity mapping is required")
 			return
 		}
 
@@ -154,19 +321,28 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
 			return
 		}
-		// -------------------------------------------------------------------------
-
-		tx, err := db.Begin()
+		ctx := r.Context()
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			respondWithInternalError(w, err)
 			return
 		}
 		defer tx.Rollback()
 
-		// Uniqueness checks: ensure username_or_employee_id and email are unique
+		// Uniqueness checks: ensure username_or_employee_id and email are unique (exclude soft-deleted users)
 		var existingID string
 		var existingUsername, existingEmail string
-		err = tx.QueryRow("SELECT id, username_or_employee_id, email FROM users WHERE username_or_employee_id = $1 OR email = $2 LIMIT 1", req.UsernameOrEmployeeID, req.Email).Scan(&existingID, &existingUsername, &existingEmail)
+		err = tx.QueryRow(`
+			SELECT id, username_or_employee_id, email
+			FROM users
+			WHERE COALESCE(is_deleted, false) = false
+			  AND (
+			    TRIM(username_or_employee_id) = $1
+			    OR LOWER(TRIM(email)) = $2
+			  )
+			LIMIT 1`,
+			req.UsernameOrEmployeeID, req.Email,
+		).Scan(&existingID, &existingUsername, &existingEmail)
 		if err == nil {
 			// conflict
 			msg := ""
@@ -213,25 +389,32 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		var roleId string
-		err = tx.QueryRow(`SELECT id FROM roles WHERE name = $1 OR rolecode = $1`, req.Role).Scan(&roleId)
+		err = tx.QueryRow(`SELECT id FROM roles WHERE name = $1 OR rolecode = $1 OR role_code = $1 LIMIT 1`, req.Role).Scan(&roleId)
 		if err != nil {
 			respondWithError(w, http.StatusBadRequest, "Role '"+req.Role+"' not found in roles table")
 			return
 		}
-		_, err = tx.Exec(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`, userId, roleId)
+		if _, err = tx.Exec(
+			`UPDATE user_roles SET is_deleted = true WHERE user_id = $1 AND COALESCE(is_deleted, false) = false`,
+			userId,
+		); err != nil {
+			respondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		_, err = tx.Exec(
+			`INSERT INTO user_roles (user_id, role_id, is_deleted) VALUES ($1, $2, false)`,
+			userId, roleId,
+		)
 		if err != nil {
 			respondWithInternalError(w, err)
 			return
 		}
 		// Insert entity mappings
-		for _, em := range req.EntityMappings {
-			if em.EntityID == "" {
-				continue
-			}
+		for _, em := range validEntityMappings {
 			_, err = tx.Exec(`
-				INSERT INTO user_entity_mappings (user_id, entity_id, entity_name)
-				VALUES ($1, $2, $3)
-				ON CONFLICT (user_id, entity_id) DO UPDATE SET entity_name = EXCLUDED.entity_name`,
+				INSERT INTO user_entity_mappings (user_id, entity_id, entity_name, is_deleted)
+				VALUES ($1, $2, $3, false)
+				ON CONFLICT (user_id, entity_id) DO UPDATE SET entity_name = EXCLUDED.entity_name, is_deleted = false`,
 				userId, em.EntityID, em.EntityName,
 			)
 			if err != nil {
@@ -276,17 +459,17 @@ func GetUsers(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
+			if api.GetUserIDFromCtx(r.Context()) == "" {
+				respondWithError(w, http.StatusBadRequest, "Please login to continue.")
+				return
+			}
+		}
+		entityIDs, isAdminOverride, statusCode, errMsg := requirePrevalidationEntityScope(r.Context())
+		if statusCode != 0 {
+			respondWithError(w, statusCode, errMsg)
 			return
 		}
-		// Get entity IDs from context (set by middleware via user_entity_mappings).
-		// Admin override sessions are allowed even if entity list is unexpectedly empty.
-		entityIDs, _ := r.Context().Value(api.EntityIDsKey).([]string)
-		isAdminOverride, _ := r.Context().Value("is_admin_override").(bool)
-		if len(entityIDs) == 0 && !isAdminOverride {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-			return
-		}
+		_ = isAdminOverride
 		// Pagination
 		pagination, err := utils.ExtractPagination(r)
 		if err != nil {
@@ -298,7 +481,7 @@ func GetUsers(db *sql.DB) http.HandlerFunc {
 		countArgs := []interface{}{pq.Array(entityIDs)}
 		paramIdx := 2
 		countQuery := `SELECT COUNT(*) FROM users u WHERE
-			EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = u.id AND uem.entity_id = ANY($1::text[]))`
+			COALESCE(u.is_deleted, false) = false AND` + fmt.Sprintf(userEntityAccessExistsSQL, 1)
 		if status != "" {
 			countQuery += fmt.Sprintf(" AND u.status = $%d", paramIdx)
 			countArgs = append(countArgs, status)
@@ -316,25 +499,15 @@ func GetUsers(db *sql.DB) http.HandlerFunc {
 	COALESCE(rr.role_permission_status, '') AS role_permission_status,
 	COALESCE(rr.role_code, '') AS role_code,
 	COALESCE(em.entity_mappings, '[]'::json) AS entity_mappings
-FROM users u
-LEFT JOIN LATERAL (
-	SELECT r.name AS role_name,
-				 COALESCE(r.status, '') AS role_status,
-				 COALESCE(r.roles_permission_status, '') AS role_permission_status,
-				 COALESCE(r.role_code, r.rolecode) AS role_code
-	FROM user_roles ur
-	JOIN roles r ON ur.role_id = r.id
-	WHERE ur.user_id = u.id
-	LIMIT 1
-) rr ON true
+FROM users u` + activeUserRoleLateralSQL + `
 LEFT JOIN LATERAL (
 	SELECT COALESCE(
 			json_agg(json_build_object('entity_id', entity_id, 'entity_name', entity_name)),
 			'[]'::json
 		) AS entity_mappings
-	FROM user_entity_mappings WHERE user_id = u.id
+	FROM user_entity_mappings WHERE user_id = u.id AND COALESCE(is_deleted, false) = false
 ) em ON true
-WHERE EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = u.id AND uem.entity_id = ANY($1::text[]))`
+WHERE COALESCE(u.is_deleted, false) = false AND` + fmt.Sprintf(userEntityAccessExistsSQL, 1)
 		if status != "" {
 			query += fmt.Sprintf(" AND u.status = $%d", pIdx)
 			args = append(args, status)
@@ -379,14 +552,20 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, "Missing or invalid user_id in request body")
 			return
 		}
-		// Get entity IDs from context (set by middleware via user_entity_mappings)
-		entityIDs, _ := r.Context().Value(api.EntityIDsKey).([]string)
-		if len(entityIDs) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+		if strings.TrimSpace(req.UserID) == "" {
+			req.UserID = api.GetUserIDFromCtx(r.Context())
+		}
+		if strings.TrimSpace(req.UserID) == "" {
+			respondWithError(w, http.StatusBadRequest, "Missing or invalid user_id in request body")
+			return
+		}
+		entityIDs, _, statusCode, errMsg := requirePrevalidationEntityScope(r.Context())
+		if statusCode != 0 {
+			respondWithError(w, statusCode, errMsg)
 			return
 		}
 		// Query for user by ID — also return their entity mappings as JSON array.
@@ -399,10 +578,16 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 					json_agg(json_build_object('entity_id', entity_id, 'entity_name', entity_name)),
 					'[]'::json
 				) AS entity_mappings
-				FROM user_entity_mappings WHERE user_id = u.id
+				FROM user_entity_mappings
+				WHERE user_id = u.id AND COALESCE(is_deleted, false) = false
 			) em ON true
-			WHERE u.id = $1
-			  AND EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = u.id AND uem.entity_id = ANY($2::text[]))`,
+			WHERE u.id = $1 AND COALESCE(u.is_deleted, false) = false
+			  AND EXISTS (
+				SELECT 1 FROM user_entity_mappings uem
+				WHERE uem.user_id = u.id
+				  AND COALESCE(uem.is_deleted, false) = false
+				  AND uem.entity_id = ANY($2::text[])
+			  )`,
 			req.UserID, pq.Array(entityIDs),
 		)
 		if err != nil {
@@ -448,41 +633,49 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "Missing user_id in request body")
+			if api.GetUserIDFromCtx(r.Context()) == "" {
+				respondWithError(w, http.StatusBadRequest, "Missing user_id in request body")
+				return
+			}
+		}
+
+		entityIDs, _, statusCode, errMsg := requirePrevalidationEntityScope(r.Context())
+		if statusCode != 0 {
+			respondWithError(w, statusCode, errMsg)
 			return
 		}
 
-		// Get entity IDs from middleware (via user_entity_mappings)
-		entityIDs, _ := r.Context().Value(api.EntityIDsKey).([]string)
-		if len(entityIDs) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-			return
-		}
-
-		// Build query — if entity_name supplied, narrow to users mapped to that entity.
+		entityAccessExists := `
+				EXISTS (
+					SELECT 1 FROM user_entity_mappings uem
+					WHERE uem.user_id = u.id
+					  AND COALESCE(uem.is_deleted, false) = false
+					  AND uem.entity_id = ANY($1::text[])
+				)`
 		var rows *sql.Rows
 		var err error
 		if req.EntityName != "" {
 			rows, err = db.Query(`
 				SELECT * FROM users u
-				WHERE EXISTS (
+				WHERE `+entityAccessExists+`
+				  AND EXISTS (
 					SELECT 1 FROM user_entity_mappings uem
 					JOIN masterentitycash ec ON ec.entity_id::text = uem.entity_id
 					WHERE uem.user_id = u.id
+					  AND COALESCE(uem.is_deleted, false) = false
 					  AND uem.entity_id = ANY($1::text[])
 					  AND UPPER(TRIM(ec.entity_name)) = UPPER(TRIM($2))
-				)
+				  )
 				  AND LOWER(TRIM(u.status)) = 'approved'
+				  AND COALESCE(u.is_deleted, false) = false
 				ORDER BY u.id DESC
 			`, pq.Array(entityIDs), req.EntityName)
 		} else {
 			rows, err = db.Query(`
 				SELECT * FROM users u
-				WHERE EXISTS (
-					SELECT 1 FROM user_entity_mappings uem
-					WHERE uem.user_id = u.id AND uem.entity_id = ANY($1::text[])
-				)
+				WHERE `+entityAccessExists+`
 				  AND LOWER(TRIM(u.status)) = 'approved'
+				  AND COALESCE(u.is_deleted, false) = false
 				ORDER BY u.id DESC
 			`, pq.Array(entityIDs))
 		}
@@ -530,18 +723,19 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		id, idOk := req["id"].(string)
-		userID, userIDOk := req["user_id"].(string)
-		if !idOk || !userIDOk || id == "" || userID == "" {
-			respondWithError(w, http.StatusBadRequest, "Missing id or user_id")
+		id, _ := req["id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			respondWithError(w, http.StatusBadRequest, "Missing id")
 			return
 		}
-		entityIDs, _ := r.Context().Value(api.EntityIDsKey).([]string)
-		if len(entityIDs) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+
+		entityIDs, isAdminOverride, statusCode, errMsg := requirePrevalidationEntityScope(r.Context())
+		if statusCode != 0 {
+			respondWithError(w, statusCode, errMsg)
 			return
 		}
-		// Extract entity_mappings before building the SQL SET clause (it is not a column).
+
 		var newEntityMappings []struct {
 			EntityID   string
 			EntityName string
@@ -552,28 +746,48 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 					if mMap, ok := m.(map[string]interface{}); ok {
 						eid, _ := mMap["entity_id"].(string)
 						ename, _ := mMap["entity_name"].(string)
-						if eid != "" {
-							newEntityMappings = append(newEntityMappings, struct{ EntityID, EntityName string }{eid, ename})
+						if strings.TrimSpace(eid) != "" {
+							newEntityMappings = append(newEntityMappings, struct{ EntityID, EntityName string }{
+								strings.TrimSpace(eid), strings.TrimSpace(ename),
+							})
 						}
 					}
 				}
 			}
 			delete(req, "entity_mappings")
 		}
-		// Get updated_by from session
-		updatedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				updatedBy = s.Email
-				break
+
+		var newRole string
+		if roleVal, ok := req["role"].(string); ok && strings.TrimSpace(roleVal) != "" {
+			newRole = strings.TrimSpace(roleVal)
+		} else if roleNameVal, ok := req["role_name"].(string); ok && strings.TrimSpace(roleNameVal) != "" {
+			newRole = strings.TrimSpace(roleNameVal)
+		}
+		for _, metaKey := range []string{
+			"role", "role_name", "role_code", "role_status", "role_permission_status",
+			"status_change_request", "reason", "sr_no", "created_at", "updated_at",
+			"approved_at", "approved_by", "rejected_at", "rejected_by", "approval_comment",
+			"user_id",
+		} {
+			delete(req, metaKey)
+		}
+
+		if len(newEntityMappings) > 0 && !isAdminOverride {
+			if statusCode, errMsg := validateEntityMappingsInScope(entityIDs, newEntityMappings); statusCode != 0 {
+				respondWithError(w, statusCode, errMsg)
+				return
 			}
+		}
+
+		updatedBy := api.GetUserEmailFromCtx(r.Context())
+		if updatedBy == "" {
+			updatedBy = api.RequestedByFromCtx(r.Context(), api.GetUserIDFromCtx(r.Context()))
 		}
 		if updatedBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		// Allowed fields to update
+
 		allowed := map[string]bool{
 			"authentication_type":     true,
 			"employee_name":           true,
@@ -592,7 +806,6 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 		fields := map[string]interface{}{}
 		for k, v := range req {
 			if allowed[k] {
-				// Hash password before storing
 				if k == "password" {
 					if pw, ok := v.(string); ok && pw != "" {
 						hashed, err := auth.HashPassword(pw)
@@ -607,72 +820,105 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		fields["updated_by"] = updatedBy
-		// record update timestamp for auditing
 		fields["updated_at"] = time.Now()
-		// When an update occurs, default the status to 'pending' so the
-		// update goes through the approval workflow unless the caller
-		// explicitly provided a status field.
 		if _, hasStatus := fields["status"]; !hasStatus {
 			fields["status"] = "pending"
 		}
-		if len(fields) == 0 {
+		if len(fields) == 0 && newRole == "" && len(newEntityMappings) == 0 {
 			respondWithError(w, http.StatusBadRequest, "No valid fields to update")
 			return
 		}
-		// Build query
-		keys := make([]string, 0, len(fields))
-		values := make([]interface{}, 0, len(fields))
-		setClause := ""
-		for k := range fields {
-			keys = append(keys, k)
-		}
-		for idx, k := range keys {
-			if idx > 0 {
-				setClause += ", "
+
+		var userMap map[string]interface{}
+		if len(fields) > 0 {
+			keys := make([]string, 0, len(fields))
+			values := make([]interface{}, 0, len(fields))
+			setClause := ""
+			for k := range fields {
+				keys = append(keys, k)
 			}
-			setClause += k + " = $" + fmt.Sprint(idx+1)
-			values = append(values, fields[k])
-		}
-		query := fmt.Sprintf(
-			`UPDATE users SET %s WHERE id = $%d AND
-				EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = users.id AND uem.entity_id = ANY($%d::text[]))
-			RETURNING *`,
-			setClause, len(keys)+1, len(keys)+2,
-		)
-		values = append(values, id, pq.Array(entityIDs))
-		rows, err := db.Query(query, values...)
-		if err != nil {
-			respondWithInternalError(w, err)
-			return
-		}
-		defer rows.Close()
-		cols, _ := rows.Columns()
-		if !rows.Next() {
-			respondWithError(w, http.StatusNotFound, "User not found or not accessible")
-			return
-		}
-		vals := make([]interface{}, len(cols))
-		valPtrs := make([]interface{}, len(cols))
-		for i := range vals {
-			valPtrs[i] = &vals[i]
-		}
-		rows.Scan(valPtrs...)
-			userMap := map[string]interface{}{}
+			for idx, k := range keys {
+				if idx > 0 {
+					setClause += ", "
+				}
+				setClause += k + " = $" + fmt.Sprint(idx+1)
+				values = append(values, fields[k])
+			}
+			query := fmt.Sprintf(
+				`UPDATE users SET %s WHERE id = $%d AND`+fmt.Sprintf(usersTableEntityAccessExistsSQL, len(keys)+2)+`
+				RETURNING *`,
+				setClause, len(keys)+1,
+			)
+			values = append(values, id, pq.Array(entityIDs))
+			rows, err := db.Query(query, values...)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			defer rows.Close()
+			cols, _ := rows.Columns()
+			if !rows.Next() {
+				respondWithError(w, http.StatusNotFound, "User not found or not accessible")
+				return
+			}
+			vals := make([]interface{}, len(cols))
+			valPtrs := make([]interface{}, len(cols))
+			for i := range vals {
+				valPtrs[i] = &vals[i]
+			}
+			rows.Scan(valPtrs...)
+			userMap = map[string]interface{}{}
 			for i, col := range cols {
 				userMap[col] = decodeSQLValue(vals[i])
 			}
-		// Replace entity mappings if the caller provided a new list.
-		if len(newEntityMappings) > 0 {
-			db.Exec("DELETE FROM user_entity_mappings WHERE user_id = $1", id)
-			for _, em := range newEntityMappings {
-				db.Exec(`
-					INSERT INTO user_entity_mappings (user_id, entity_id, entity_name)
-					VALUES ($1, $2, $3)
-					ON CONFLICT (user_id, entity_id) DO UPDATE SET entity_name = EXCLUDED.entity_name`,
-					id, em.EntityID, em.EntityName,
-				)
+		} else {
+			var count int
+			checkQuery := `SELECT COUNT(*) FROM users u WHERE u.id = $1 AND COALESCE(u.is_deleted, false) = false AND` +
+				fmt.Sprintf(userEntityAccessExistsSQL, 2)
+			if err := db.QueryRow(checkQuery, id, pq.Array(entityIDs)).Scan(&count); err != nil || count == 0 {
+				respondWithError(w, http.StatusNotFound, "User not found or not accessible")
+				return
 			}
 		}
+
+		if len(newEntityMappings) > 0 {
+			tx, err := db.BeginTx(r.Context(), nil)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+				return
+			}
+			defer tx.Rollback()
+
+			if _, err := tx.Exec("UPDATE user_entity_mappings SET is_deleted = true WHERE user_id = $1", id); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to soft-delete old mappings: "+err.Error())
+				return
+			}
+
+			for _, em := range newEntityMappings {
+				if _, err := tx.Exec(`
+					INSERT INTO user_entity_mappings (user_id, entity_id, entity_name, is_deleted)
+					VALUES ($1, $2, $3, false)
+					ON CONFLICT (user_id, entity_id) DO UPDATE SET entity_name = EXCLUDED.entity_name, is_deleted = false`,
+					id, em.EntityID, em.EntityName,
+				); err != nil {
+					respondWithError(w, http.StatusInternalServerError, "Failed to insert entity mapping: "+err.Error())
+					return
+				}
+			}
+
+			if err := tx.Commit(); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to commit entity mappings: "+err.Error())
+				return
+			}
+		}
+
+		if newRole != "" {
+			if err := upsertActiveUserRole(db, id, newRole); err != nil {
+				respondWithError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "user": sanitizeUserMap(userMap)})
 	}
@@ -703,20 +949,12 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "Missing user_id or id/ids in request body")
 			return
 		}
-		entityIDs, _ := r.Context().Value(api.EntityIDsKey).([]string)
-		if len(entityIDs) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+		entityIDs, _, statusCode, errMsg := requirePrevalidationEntityScope(r.Context())
+		if statusCode != 0 {
+			respondWithError(w, statusCode, errMsg)
 			return
 		}
-		// Determine who requested the delete for auditing
-		deleter := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				deleter = s.Email
-				break
-			}
-		}
+		deleter := api.GetUserEmailFromCtx(r.Context())
 		if deleter == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -730,7 +968,12 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 		rows, err := db.Query(`
 			UPDATE users SET status = 'Delete-Approval', updated_by = $1, updated_at = NOW()
 			WHERE id = ANY($2)
-			  AND EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = users.id AND uem.entity_id = ANY($3::text[]))
+			  AND EXISTS (
+				SELECT 1 FROM user_entity_mappings uem
+				WHERE uem.user_id = users.id
+				  AND COALESCE(uem.is_deleted, false) = false
+				  AND uem.entity_id = ANY($3::text[])
+			  )
 			RETURNING *`,
 			deleter, pq.Array(targetIds), pq.Array(entityIDs),
 		)
@@ -775,15 +1018,20 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "ids and approval_comment are required")
 			return
 		}
-		entityIDs, _ := r.Context().Value(api.EntityIDsKey).([]string)
-		if len(entityIDs) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+		entityIDs, _, statusCode, errMsg := requirePrevalidationEntityScope(r.Context())
+		if statusCode != 0 {
+			respondWithError(w, statusCode, errMsg)
 			return
 		}
 		// Get existing users and their status
 		rows, err := db.Query(`
 			SELECT id, status FROM users u WHERE id = ANY($1)
-			  AND EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = u.id AND uem.entity_id = ANY($2::text[]))`,
+			  AND EXISTS (
+				SELECT 1 FROM user_entity_mappings uem
+				WHERE uem.user_id = u.id
+				  AND COALESCE(uem.is_deleted, false) = false
+				  AND uem.entity_id = ANY($2::text[])
+			  )`,
 			pq.Array(req.Ids), pq.Array(entityIDs),
 		)
 		if err != nil {
@@ -810,7 +1058,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 		if len(toDelete) > 0 {
 			// Delete user_roles first for referential integrity
 			_, err := db.Exec(
-				"DELETE FROM user_roles WHERE user_id = ANY($1)",
+				"UPDATE user_roles SET is_deleted = true WHERE user_id = ANY($1)",
 				pq.Array(toDelete),
 			)
 			if err != nil {
@@ -818,9 +1066,16 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 				respondWithError(w, http.StatusInternalServerError, "Internal server error")
 				return
 			}
+			// Soft delete users (set is_deleted = true)
 			delRows, err := db.Query(`
-				DELETE FROM users WHERE id = ANY($1)
-				  AND EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = users.id AND uem.entity_id = ANY($2::text[]))
+				UPDATE users SET is_deleted = true, status = 'Deleted', updated_at = NOW()
+				WHERE id = ANY($1)
+				  AND EXISTS (
+					SELECT 1 FROM user_entity_mappings uem
+					WHERE uem.user_id = users.id
+					  AND COALESCE(uem.is_deleted, false) = false
+					  AND uem.entity_id = ANY($2::text[])
+				  )
 				RETURNING *`,
 				pq.Array(toDelete), pq.Array(entityIDs),
 			)
@@ -842,15 +1097,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 				}
 			}
 		}
-		// Get approved_by from session
-		approvedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				approvedBy = s.Email
-				break
-			}
-		}
+		approvedBy := api.GetUserEmailFromCtx(r.Context())
 		if approvedBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -860,7 +1107,12 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 			appRows, err := db.Query(`
 				UPDATE users SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2
 				WHERE id = ANY($3)
-				  AND EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = users.id AND uem.entity_id = ANY($4::text[]))
+				  AND EXISTS (
+					SELECT 1 FROM user_entity_mappings uem
+					WHERE uem.user_id = users.id
+					  AND COALESCE(uem.is_deleted, false) = false
+					  AND uem.entity_id = ANY($4::text[])
+				  )
 				RETURNING *`,
 				approvedBy, req.ApprovalComment, pq.Array(toApprove), pq.Array(entityIDs),
 			)
@@ -900,20 +1152,12 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "ids and rejected_by are required")
 			return
 		}
-		entityIDs, _ := r.Context().Value(api.EntityIDsKey).([]string)
-		if len(entityIDs) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+		entityIDs, _, statusCode, errMsg := requirePrevalidationEntityScope(r.Context())
+		if statusCode != 0 {
+			respondWithError(w, statusCode, errMsg)
 			return
 		}
-		// Get rejected_by from session
-		rejectedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				rejectedBy = s.Email
-				break
-			}
-		}
+		rejectedBy := api.GetUserEmailFromCtx(r.Context())
 		if rejectedBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
@@ -921,7 +1165,12 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 		rows, err := db.Query(`
 			UPDATE users SET status = 'Rejected', rejected_by = $1, rejected_at = NOW(), approval_comment = $2
 			WHERE id = ANY($3)
-			  AND EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = users.id AND uem.entity_id = ANY($4::text[]))
+			  AND EXISTS (
+				SELECT 1 FROM user_entity_mappings uem
+				WHERE uem.user_id = users.id
+				  AND COALESCE(uem.is_deleted, false) = false
+				  AND uem.entity_id = ANY($4::text[])
+			  )
 			RETURNING *`,
 			rejectedBy, req.RejectionComment, pq.Array(req.Ids), pq.Array(entityIDs),
 		)

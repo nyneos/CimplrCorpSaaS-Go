@@ -2,7 +2,6 @@ package approvalMatrix
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
@@ -130,17 +129,11 @@ func validateEyeFields(eyeCount, position int, slaHours *int) error {
 	return nil
 }
 
-// normaliseEyeCount rounds an actual member count (1..5) up to the smallest
-// value the uam_appr_eye_count_chk check constraint accepts (2, 4, or 6).
-func normaliseEyeCount(memberCount int) int {
-	switch {
-	case memberCount <= 2:
-		return 2
-	case memberCount <= 4:
-		return 4
-	default:
-		return 6
-	}
+// normaliseEyeCount calculates the eye count for a given round based on its position.
+// Position 1 -> 2, Position 2 -> 4, Position 3 -> 6.
+// This aligns with standard Maker-Checker terminology and satisfies uam_appr_eye_count_chk.
+func normaliseEyeCount(position int) int {
+	return position * 2
 }
 
 func validateMemberFields(memberType, assignmentType string, roleID, userID *string, slotOrder int) error {
@@ -287,11 +280,9 @@ type MemberDetail struct {
 	OldIsActive       *bool   `json:"old_is_active"`
 }
 
-func resolveUserEmail(userID string) string {
-	for _, s := range auth.GetActiveSessions() {
-		if s.UserID == userID {
-			return s.Email
-		}
+func resolveUserEmail(ctx context.Context) string {
+	if s := api.GetSessionFromCtx(ctx); s != nil {
+		return s.Email
 	}
 	return ""
 }
@@ -386,7 +377,7 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -439,8 +430,8 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						i, eye.Position))
 				return
 			}
-			// Normalise eye_count so it satisfies uam_appr_eye_count_chk (2/4/6).
-			req.Eyes[i].EyeCount = normaliseEyeCount(len(eye.Members))
+			// Normalise eye_count so it satisfies uam_appr_eye_count_chk (2/4/6) based on position.
+			req.Eyes[i].EyeCount = normaliseEyeCount(eye.Position)
 		}
 
 		ctx := r.Context()
@@ -621,7 +612,7 @@ func UpdateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"Provide at least one of: matrix_fields, eyes[], members[]")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -906,7 +897,7 @@ func DeleteApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMatrixIDsCannotBeEmpty)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1017,7 +1008,7 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMatrixIDsCannotBeEmpty)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1145,7 +1136,7 @@ func BulkRejectMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMatrixIDsCannotBeEmpty)
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2078,8 +2069,8 @@ func AddEyeToMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"an ESCALATION eye must contain at least one APPROVER member (role/user) in addition to its ESCALATION member(s)")
 			return
 		}
-		req.EyeCount = normaliseEyeCount(len(req.Members))
-		userEmail := resolveUserEmail(req.UserID)
+		req.EyeCount = normaliseEyeCount(req.Position)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2187,7 +2178,7 @@ func UpdateEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "No fields provided for update")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2275,7 +2266,7 @@ func DeleteEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "eye_ids cannot be empty")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2385,7 +2376,7 @@ func AddMemberToEye(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2466,7 +2457,7 @@ func UpdateMember(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "No fields provided for update")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -2561,7 +2552,7 @@ func DeleteMember(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "member_ids cannot be empty")
 			return
 		}
-		userEmail := resolveUserEmail(req.UserID)
+		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return

@@ -252,7 +252,7 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 				parentEntityID = id
 			} else {
 				// try to find existing parent by name
-				if err := db.QueryRow(`SELECT entity_id FROM masterentity WHERE entity_name = $1 LIMIT 1`, entity.ParentName).Scan(&parentEntityID); err != nil {
+				if err := db.QueryRow(`SELECT entity_id FROM masterentity WHERE entity_name = $1 AND (is_deleted = false OR is_deleted IS NULL) LIMIT 1`, entity.ParentName).Scan(&parentEntityID); err != nil {
 					// parent not found, skip relationship
 					continue
 				}
@@ -489,6 +489,16 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 				for i, col := range cols {
 					entity[col] = vals[i]
 				}
+
+				// Audit stage 2 (delete path): stamp APPROVED with checker identity.
+				checkerBy := api.GetUserEmailFromCtx(r.Context())
+				_, _ = db.Exec(
+					`UPDATE public.auditactionentity
+					 SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2
+					 WHERE entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL'`,
+					checkerBy, req.Comments, pq.Array(allToApprove),
+				)
+
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "entity": entity})
 				return
 			}
@@ -591,6 +601,16 @@ func RejectEntitiesBulk(db *sql.DB) http.HandlerFunc {
 			}
 			updated = append(updated, entity)
 		}
+
+		// Audit stage 2 (reject path): stamp REJECTED with checker identity.
+		checkerBy := api.GetUserEmailFromCtx(r.Context())
+		_, _ = db.Exec(
+			`UPDATE public.auditactionentity
+			 SET processing_status = 'REJECTED', checker_by = $1, checker_at = now(), checker_comment = $2
+			 WHERE entity_id = ANY($3) AND processing_status LIKE '%PENDING%'`,
+			checkerBy, req.Comments, pq.Array(allToReject),
+		)
+
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
 }
@@ -751,6 +771,16 @@ func DeleteEntity(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrEntityNotFound})
 			return
 		}
+
+		// Audit stage 1: log the delete request for every affected entity.
+		requestedBy := api.GetUserEmailFromCtx(r.Context())
+		_, _ = db.Exec(
+			`INSERT INTO public.auditactionentity
+				(entity_id, actiontype, processing_status, reason, requested_by, requested_at)
+			 SELECT unnest($1::text[]), 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now()`,
+			pq.Array(allToDelete), req.Comments, requestedBy,
+		)
+
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
 }
