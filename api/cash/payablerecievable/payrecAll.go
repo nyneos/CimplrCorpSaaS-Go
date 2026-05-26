@@ -1009,7 +1009,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToBeginTransaction})
 			return
 		}
 		committed := false
@@ -1117,7 +1117,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToBeginTransaction})
 			return
 		}
 		committed := false
@@ -1132,11 +1132,11 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, pid := range payIDs {
 				var aid, atype, status string
 				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`, pid).Scan(&aid, &atype, &status); err != nil {
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + pid})
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + pid})
 					return
 				}
 				if aid == "" {
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + pid})
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + pid})
 					return
 				}
 				if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
@@ -1155,11 +1155,11 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, rid := range recIDs {
 				var aid, atype, status string
 				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`, rid).Scan(&aid, &atype, &status); err != nil {
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + rid})
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + rid})
 					return
 				}
 				if aid == "" {
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + rid})
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + rid})
 					return
 				}
 				if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
@@ -1291,11 +1291,11 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, pid).Scan(&aid, &atype, &status); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + pid})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + pid})
 				return
 			}
 			if aid == "" {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + pid})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + pid})
 				return
 			}
 			if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
@@ -1318,11 +1318,11 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, rid).Scan(&aid, &atype, &status); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + rid})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + rid})
 				return
 			}
 			if aid == "" {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "missing latest audit for transaction: " + rid})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + rid})
 				return
 			}
 			if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
@@ -1343,7 +1343,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToBeginTransaction})
 			return
 		}
 		committed := false
@@ -1509,7 +1509,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToBeginTransaction})
 			return
 		}
 		committed := false
@@ -1739,7 +1739,7 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-reasonArg := interface{}(nil)
+			reasonArg := interface{}(nil)
 			if strings.TrimSpace(req.Reason) != "" {
 				reasonArg = req.Reason
 			}
@@ -1747,7 +1747,7 @@ reasonArg := interface{}(nil)
 			var (
 				oldEntity, oldCounter, oldInvoice, oldCurrency *string
 				oldInvDate, oldDueDate                         *time.Time
-				oldAmount                                       *float64
+				oldAmount                                      *float64
 			)
 			_ = tx.QueryRow(ctx, `
 				SELECT entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code
@@ -1829,7 +1829,7 @@ reasonArg := interface{}(nil)
 				return
 			}
 
-reasonArg := interface{}(nil)
+			reasonArg := interface{}(nil)
 			if strings.TrimSpace(req.Reason) != "" {
 				reasonArg = req.Reason
 			}
@@ -1837,7 +1837,7 @@ reasonArg := interface{}(nil)
 			var (
 				oldEntity, oldCounter, oldInvoice, oldCurrency *string
 				oldInvDate, oldDueDate                         *time.Time
-				oldAmount                                       *float64
+				oldAmount                                      *float64
 			)
 			_ = tx.QueryRow(ctx, `
 				SELECT entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code

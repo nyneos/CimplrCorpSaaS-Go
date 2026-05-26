@@ -111,3 +111,27 @@ const sqlCimplrRolloverInFlight = `EXISTS (
 // Effective closure instruction for dashboard rows (cimplr preferred, then master, then legacy).
 const sqlEffectiveClosureType = `COALESCE(NULLIF(cimplr_ci.closure_type, ''), NULLIF(cimplr_cc.closure_type, ''), NULLIF(cr.closure_type, ''), '')`
 const sqlEffectiveClosureStatus = `COALESCE(NULLIF(cimplr_cc.closure_status, ''), NULLIF(cimplr_ci.closure_status, ''), NULLIF(cr.closure_status, ''), '')`
+
+// sqlFdMasterTerminalStatuses — lifecycle-complete fd_master rows excluded from pipeline KPIs.
+const sqlFdMasterTerminalStatuses = `('MATURED','PREMATURELY_CLOSED','ROLLED_OVER','CANCELLED')`
+
+// sqlExcludeTerminalFdOnBooking — booking has no terminal fd_master child (alias b required).
+const sqlExcludeTerminalFdOnBooking = `
+  NOT EXISTS (
+    SELECT 1 FROM investment.fd_master m_term
+    WHERE m_term.booking_id = b.booking_id
+      AND COALESCE(m_term.is_deleted, false) = false
+      AND UPPER(COALESCE(m_term.fd_status, '')) IN ` + sqlFdMasterTerminalStatuses + `
+  )`
+
+// sqlExcludeTerminalFdOnMaster — fd_master row is still operational (alias m required).
+const sqlExcludeTerminalFdOnMaster = `
+  UPPER(COALESCE(m.fd_status, '')) NOT IN ` + sqlFdMasterTerminalStatuses
+
+// sqlBookingAwaitingApproval — booking_status values that genuinely need maker-checker.
+const sqlBookingAwaitingApproval = `UPPER(COALESCE(b.booking_status, '')) IN ('DRAFT','APPROVAL_PENDING')`
+
+// sqlConfirmationAwaitingApproval — interim fd_confirmation statuses (excludes bank-finalised).
+const sqlConfirmationAwaitingApproval = `UPPER(COALESCE(c.confirmation_status, '')) IN (
+  'DRAFT','CAPTURED','PENDING_APPROVAL','APPROVAL_PENDING','VARIANCE_PENDING','PENDING','SUBMITTED'
+)`

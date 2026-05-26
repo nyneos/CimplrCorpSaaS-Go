@@ -156,9 +156,9 @@ type InstanceDetail struct {
 
 // ─── Rich / enriched response types ──────────────────────────────────────────
 
-// ApproverInfo describes one designated approver on an eye (from matrix config).
 type ApproverInfo struct {
 	SlotOrder      int    `json:"slot_order"`
+	MemberType     string `json:"member_type"`
 	AssignmentType string `json:"assignment_type"` // USER_ONLY | ROLE_ONLY | ROLE_USER
 	UserID         string `json:"user_id,omitempty"`
 	UserEmail      string `json:"user_email,omitempty"`

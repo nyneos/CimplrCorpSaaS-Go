@@ -589,7 +589,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			&principalAmount, &maturityDate, &currentStatus)
 		if err != nil {
 			if err == pgx.ErrNoRows {
-				api.RespondWithError(w, http.StatusNotFound, "FD not found")
+				api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			} else {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to load FD")
 			}
@@ -839,7 +839,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		instID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
 			ModuleCode: "FIXED_DEPOSIT", EntityCode: firstNonEmpty(entityID, "DEFAULT"),
 			TransactionType: "FD_CLOSURE_" + req.ClosureType,
-			RecordID:        closureRequestID, RecordTable: "investment.fd_closure_request",
+			RecordID:        closureRequestID, RecordTable: constants.QuerryClosureRequest,
 			AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id",
 			ActionType: "CREATE", Amount: principalAmount,
 			SubmittedBy: req.UserID, SubmittedByEmail: userEmail,
@@ -1837,7 +1837,7 @@ func GetFDClosureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_closure_request
 			WHERE closure_request_id = $1 AND COALESCE(is_deleted,false) = false
 		`, closureRequestID).Scan(&uploadS3Key); err != nil {
-			api.RespondWithResult(w, false, "file not found")
+			api.RespondWithResult(w, false, constants.ErrFileNotFound)
 			return
 		}
 		key := strings.TrimSpace(uploadS3Key.String)
@@ -1994,7 +1994,7 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", crID, req.UserID, userEmail, "", approvalengine.ActionApproved, firstNonEmpty(req.Comment, "Bulk approved FD closure"))
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: firstNonEmpty(req.Comment, "Bulk approved FD closure")})
 			if actionErr != nil {
 				errors = append(errors, crID+": "+actionErr.Error())
 				continue
@@ -2022,7 +2022,7 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 						EntityCode:       firstNonEmpty(entityID, "DEFAULT"),
 						TransactionType:  "FD_CLOSURE_DELETE",
 						RecordID:         crID,
-						RecordTable:      "investment.fd_closure_request",
+						RecordTable:      constants.QuerryClosureRequest,
 						AuditTable:       constants.QuerryAuditClosureRequest,
 						AuditIDColumn:    "closure_request_id",
 						ActionType:       "DELETE",
@@ -2042,7 +2042,7 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 						errors = append(errors, crID+": delete approval instance created but linking failed: "+updErr.Error())
 						continue
 					}
-					retryRes, retryErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", crID, req.UserID, userEmail, "", approvalengine.ActionApproved, firstNonEmpty(req.Comment, "Bulk approved FD closure delete"))
+					retryRes, retryErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: firstNonEmpty(req.Comment, "Bulk approved FD closure delete")})
 					if retryErr != nil {
 						errors = append(errors, crID+": "+retryErr.Error())
 						continue
@@ -2141,7 +2141,7 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", crID, req.UserID, userEmail, "", approvalengine.ActionRejected, firstNonEmpty(req.Comment, "Bulk rejected FD closure"))
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: firstNonEmpty(req.Comment, "Bulk rejected FD closure")})
 			if actionErr != nil {
 				errors = append(errors, crID+": "+actionErr.Error())
 				continue
@@ -2292,7 +2292,7 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			EntityCode:       firstNonEmpty(entityID, "DEFAULT"),
 			TransactionType:  "FD_CLOSURE_DELETE",
 			RecordID:         req.ClosureRequestID,
-			RecordTable:      "investment.fd_closure_request",
+			RecordTable:      constants.QuerryClosureRequest,
 			AuditTable:       constants.QuerryAuditClosureRequest,
 			AuditIDColumn:    "closure_request_id",
 			ActionType:       "DELETE",
@@ -2715,7 +2715,7 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		roundToFour(netPayout), 0, "Cash received on FD closure — " + closureType})
 	lineNum++
 	if tdsAmt > 0 {
-		lines = append(lines, jLine{lineNum, "TDS-RECEIVABLE", "TDS Receivable", "ASSET",
+		lines = append(lines, jLine{lineNum, constants.TDSReceivable, constants.TDSReceivableLabel, "ASSET",
 			roundToFour(tdsAmt), 0, "TDS withheld at source — recoverable"})
 		lineNum++
 	}
@@ -2724,11 +2724,11 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 			roundToFour(penaltyAmt), 0, "Penalty for premature withdrawal"})
 		lineNum++
 	}
-	lines = append(lines, jLine{lineNum, "FD-INVEST-" + fdID, "FD Investment — " + fdID, "ASSET",
+	lines = append(lines, jLine{lineNum, constants.FDInvestmentPrefix + fdID, "FD Investment — " + fdID, "ASSET",
 		0, roundToFour(principalAmt), "Close FD investment asset — " + closureType})
 	lineNum++
 	if interestCredit > 0 {
-		lines = append(lines, jLine{lineNum, "FD-INT-INC-" + fdID, "Interest Income — FD", "INCOME",
+		lines = append(lines, jLine{lineNum, constants.FDInterestIncome + fdID, "Interest Income — FD", "INCOME",
 			0, interestCredit, "Gross interest income recognised on closure"})
 		lineNum++ //nolint:ineffassign
 	}
@@ -3114,7 +3114,7 @@ func ValidateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			&dbMaturityDate, &dbStartDate, &dbTenureDays, &dbFDStatus, &dbInterestTypeCode,
 			&dbEntityID, &dbEntityName)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "FD not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
 
@@ -3253,7 +3253,7 @@ func ValidateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			_ = varianceengine.PersistVariances(ctx, pool, items)
 			// Stamp flags on the closure request record
 			_ = varianceengine.UpdateRecordFlags(ctx, pool,
-				"investment.fd_closure_request", "closure_request_id",
+				constants.QuerryClosureRequest, "closure_request_id",
 				req.ClosureRequestID, runID, items)
 		}
 

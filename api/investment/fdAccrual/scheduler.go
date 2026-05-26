@@ -16,7 +16,7 @@ import (
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 
 	"github.com/jackc/pgx/v5"
-
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -29,6 +29,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			EntityID              string `json:"entity_id"`
 			EntityName            string `json:"entity_name"`
 			ScheduleFrequency     string `json:"schedule_frequency"` // when the job fires: DAILY|MONTHLY|QUARTERLY|HALF_YEARLY|YEARLY
+			PeriodCoverage        string `json:"period_coverage"`    // the date window each run covers: MONTHLY|QUARTERLY|HALF_YEARLY|YEARLY|RUN
 			RunDayOfMonth         int    `json:"run_day_of_month"`
 			RunTime               string `json:"run_time"` // HH:MM or HH:MM:SS (Asia/Kolkata)
 			DefaultBankIDFilter   string `json:"default_bank_id_filter"`
@@ -58,6 +59,9 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.AcrualGranularity == "" {
 			req.AcrualGranularity = "MONTHLY"
 		}
+		if req.PeriodCoverage == "" {
+			req.PeriodCoverage = "RUN"
+		}
 		if !isValidScheduleFrequency(req.ScheduleFrequency) {
 			api.RespondWithError(w, http.StatusBadRequest,
 				"schedule_frequency must be DAILY, MONTHLY, QUARTERLY, HALF_YEARLY, or YEARLY")
@@ -68,6 +72,11 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"accrual_granularity must be DAILY, MONTHLY, QUARTERLY, HALF_YEARLY, YEARLY, or RUN")
 			return
 		}
+		if !isValidPeriodCoverage(req.PeriodCoverage) {
+			api.RespondWithError(w, http.StatusBadRequest,
+				"period_coverage must be DAILY, MONTHLY, QUARTERLY, HALF_YEARLY, YEARLY, or RUN")
+			return
+		}
 
 		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
@@ -76,6 +85,25 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		// Block if entity already has a config with the same (frequency, granularity) combination.
+		// Same entity may have e.g. MONTHLY+MONTHLY and YEARLY+MONTHLY as separate configs,
+		// but not two MONTHLY+MONTHLY configs.
+		var existingConfigID string
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(config_id,'')
+			FROM investment.fd_accrual_schedule_config
+			WHERE entity_id           = $1
+			  AND schedule_frequency  = $2
+			  AND accrual_granularity = $3
+			  AND COALESCE(is_deleted, false) = false
+			LIMIT 1`, req.EntityID, req.ScheduleFrequency, req.AcrualGranularity).Scan(&existingConfigID)
+		if existingConfigID != "" {
+			api.RespondWithError(w, http.StatusConflict, fmt.Sprintf(
+				"entity already has a %s/%s schedule config (%s); update or delete it first",
+				req.ScheduleFrequency, req.AcrualGranularity, existingConfigID))
+			return
+		}
 
 		runTimeDB, runTimeErr := parseRunTimeForDB(req.RunTime)
 		if runTimeErr != nil {
@@ -93,15 +121,15 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				default_bank_id_filter, default_fd_status_filter,
 				default_run_mode, auto_submit_for_approval,
 				is_active, next_run_at,
-				accrual_granularity,
+				accrual_granularity, period_coverage,
 				created_by, created_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,false,$10,$11,$12,now())
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,false,$10,$11,$12,$13,now())
 			RETURNING config_id`,
 			req.EntityID, nullIfEmpty(req.EntityName),
 			req.ScheduleFrequency, req.RunDayOfMonth, runTimeDB,
 			nullIfEmpty(req.DefaultBankIDFilter), req.DefaultFDStatusFilter,
 			req.DefaultRunMode, req.AutoSubmitForApproval,
-			nextRun, req.AcrualGranularity, userEmail,
+			nextRun, req.AcrualGranularity, req.PeriodCoverage, userEmail,
 		).Scan(&configID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Create schedule config failed: "+err.Error())
@@ -122,6 +150,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"config_id":          configID,
 			"entity_id":          req.EntityID,
 			"schedule_frequency": req.ScheduleFrequency,
+			"period_coverage":    req.PeriodCoverage,
 			"run_time":           req.RunTime,
 			"next_run_at":        nextRun,
 			"is_active":          false,
@@ -138,8 +167,8 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntityCode:       entID,
 				TransactionType:  "FD_ACCRUAL_SCHEDULE_APPROVE",
 				RecordID:         cfgID,
-				RecordTable:      "investment.fd_accrual_schedule_config",
-				AuditTable:       "investment.fd_accrual_schedule_config_audit",
+				RecordTable:      constants.QuerryAccrualScheduleConfig,
+				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
 				AuditIDColumn:    "config_id",
 				ActionType:       "CREATE",
 				SubmittedBy:      uID,
@@ -183,6 +212,7 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Allowlist of updatable columns
 		allowed := map[string]bool{
 			"schedule_frequency":       true,
+			"period_coverage":          true,
 			"run_day_of_month":         true,
 			"run_time":                 true,
 			"default_bank_id_filter":   true,
@@ -220,7 +250,7 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Snapshot old values before update
-		var oldFreq, oldRunMode, oldBankFilter, oldFDFilter string
+		var oldFreq, oldRunMode, oldBankFilter, oldFDFilter, oldPeriodCoverage string
 		var oldRunDay int
 		var oldAutoSubmit bool
 		var oldNotifRecipients []byte
@@ -234,10 +264,11 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(default_bank_id_filter,''),
 				COALESCE(default_fd_status_filter,''),
 				auto_submit_for_approval,
-				COALESCE(notification_recipients,'[]'::jsonb)::text
+				COALESCE(notification_recipients,'[]'::jsonb)::text,
+				COALESCE(period_coverage,'RUN')
 			FROM investment.fd_accrual_schedule_config
 			WHERE config_id=$1`, req.ConfigID,
-		).Scan(&oldFreq, &oldRunDay, &oldRunTime, &oldRunMode, &oldBankFilter, &oldFDFilter, &oldAutoSubmit, &oldNotifRecipients)
+		).Scan(&oldFreq, &oldRunDay, &oldRunTime, &oldRunMode, &oldBankFilter, &oldFDFilter, &oldAutoSubmit, &oldNotifRecipients, &oldPeriodCoverage)
 
 		args = append(args, req.ConfigID)
 		query := fmt.Sprintf(
@@ -270,11 +301,12 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				config_id, action_type, processing_status, requested_by, requested_at,
 				old_schedule_frequency, old_run_day_of_month, old_run_time,
 				old_default_run_mode, old_default_bank_id_filter, old_default_fd_status_filter,
-				old_auto_submit_for_approval, old_notification_recipients, old_is_active
-			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10::jsonb,true)`,
+				old_auto_submit_for_approval, old_notification_recipients, old_is_active,
+				old_period_coverage
+			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10::jsonb,true,$11)`,
 			req.ConfigID, userEmail,
 			oldFreq, oldRunDay, oldRunTime, oldRunMode, oldBankFilter, oldFDFilter,
-			oldAutoSubmit, string(oldNotifRecipients))
+			oldAutoSubmit, string(oldNotifRecipients), oldPeriodCoverage)
 
 		var entityID string
 		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_accrual_schedule_config WHERE config_id=$1`, req.ConfigID).Scan(&entityID)
@@ -295,8 +327,8 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntityCode:       entID,
 				TransactionType:  "FD_ACCRUAL_SCHEDULE_APPROVE",
 				RecordID:         cfgID,
-				RecordTable:      "investment.fd_accrual_schedule_config",
-				AuditTable:       "investment.fd_accrual_schedule_config_audit",
+				RecordTable:      constants.QuerryAccrualScheduleConfig,
+				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
 				AuditIDColumn:    "config_id",
 				ActionType:       "EDIT",
 				SubmittedBy:      uID,
@@ -330,7 +362,8 @@ func GetScheduleConfigs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auto_submit_for_approval,
 				COALESCE(last_run_status,''),
 				last_run_at, next_run_at,
-				is_active, created_at
+				is_active, created_at,
+				COALESCE(period_coverage,'RUN') AS period_coverage
 			FROM investment.fd_accrual_schedule_config
 			WHERE is_active = true`
 		args := []interface{}{}
@@ -512,7 +545,7 @@ func ApproveScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if strings.TrimSpace(comment) == "" {
 				comment = "Approved FD accrual schedule"
 			}
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", configID, req.UserID, userEmail, "", approvalengine.ActionApproved, comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: configID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: comment})
 			if actionErr != nil {
 				errors = append(errors, configID+": "+actionErr.Error())
 				continue
@@ -618,7 +651,7 @@ func RejectScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if strings.TrimSpace(comment) == "" {
 				comment = "Rejected FD accrual schedule"
 			}
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", configID, req.UserID, userEmail, "", approvalengine.ActionRejected, comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: configID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: comment})
 			if actionErr != nil {
 				errors = append(errors, configID+": "+actionErr.Error())
 				continue
@@ -758,10 +791,24 @@ func finalizeScheduleConfigAudits(
 					WHERE config_id=$2`, checkerEmail, p.configID)
 				deleted = append(deleted, p.configID)
 			default:
+				// Read timing params inside the tx to compute a guaranteed-future next_run_at
+				// before setting is_active=true — avoids the race where the worker fires
+				// immediately with a stale (past) next_run_at from creation time.
+				var freq string
+				var runDay int
+				var runTimeVal interface{}
+				_ = tx.QueryRow(ctx, `
+					SELECT COALESCE(schedule_frequency,'MONTHLY'),
+					       COALESCE(run_day_of_month,1),
+					       run_time
+					FROM investment.fd_accrual_schedule_config
+					WHERE config_id=$1`, p.configID,
+				).Scan(&freq, &runDay, &runTimeVal)
+				nextRun := computeNextRunAt(freq, runDay, runTimeVal, time.Now())
 				_, _ = tx.Exec(ctx, `
 					UPDATE investment.fd_accrual_schedule_config
-					SET is_active=true, updated_by=$1, updated_at=now()
-					WHERE config_id=$2`, checkerEmail, p.configID)
+					SET is_active=true, next_run_at=$1, updated_by=$2, updated_at=now()
+					WHERE config_id=$3`, nextRun, checkerEmail, p.configID)
 				approved = append(approved, p.configID)
 			}
 		} else {
@@ -791,10 +838,13 @@ func applyApprovedScheduleConfig(ctx context.Context, pool *pgxpool.Pool, config
 			WHERE config_id=$2`, checkerEmail, configID)
 		return true, err
 	}
+	// Compute next_run_at before activating to prevent the race where the background
+	// worker sees is_active=true with a stale (past) next_run_at and fires immediately.
+	nextRun := loadAndComputeNextRunAt(ctx, pool, configID)
 	_, err := pool.Exec(ctx, `
 		UPDATE investment.fd_accrual_schedule_config
-		SET is_active=true, updated_by=$1, updated_at=now()
-		WHERE config_id=$2`, checkerEmail, configID)
+		SET is_active=true, next_run_at=$1, updated_by=$2, updated_at=now()
+		WHERE config_id=$3`, nextRun, checkerEmail, configID)
 	return false, err
 }
 
@@ -824,7 +874,7 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Snapshot old values before delete
-		var dOldFreq, dOldRunMode, dOldBankFilter, dOldFDFilter string
+		var dOldFreq, dOldRunMode, dOldBankFilter, dOldFDFilter, dOldPeriodCoverage string
 		var dOldRunDay int
 		var dOldAutoSubmit bool
 		var dOldNotif []byte
@@ -838,10 +888,11 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(default_bank_id_filter,''),
 				COALESCE(default_fd_status_filter,''),
 				auto_submit_for_approval,
-				COALESCE(notification_recipients,'[]'::jsonb)::text
+				COALESCE(notification_recipients,'[]'::jsonb)::text,
+				COALESCE(period_coverage,'RUN')
 			FROM investment.fd_accrual_schedule_config
 			WHERE config_id=$1`, req.ConfigID,
-		).Scan(&dOldFreq, &dOldRunDay, &dOldRunTime, &dOldRunMode, &dOldBankFilter, &dOldFDFilter, &dOldAutoSubmit, &dOldNotif)
+		).Scan(&dOldFreq, &dOldRunDay, &dOldRunTime, &dOldRunMode, &dOldBankFilter, &dOldFDFilter, &dOldAutoSubmit, &dOldNotif, &dOldPeriodCoverage)
 
 		var exists bool
 		_ = pgxPool.QueryRow(ctx, `SELECT true FROM investment.fd_accrual_schedule_config WHERE config_id=$1`, req.ConfigID).Scan(&exists)
@@ -856,11 +907,12 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				config_id, action_type, processing_status, requested_by, requested_at,
 				old_schedule_frequency, old_run_day_of_month, old_run_time,
 				old_default_run_mode, old_default_bank_id_filter, old_default_fd_status_filter,
-				old_auto_submit_for_approval, old_notification_recipients, old_is_active
-			) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10::jsonb,true)`,
+				old_auto_submit_for_approval, old_notification_recipients, old_is_active,
+				old_period_coverage
+			) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10::jsonb,true,$11)`,
 			req.ConfigID, userEmail,
 			dOldFreq, dOldRunDay, dOldRunTime, dOldRunMode, dOldBankFilter, dOldFDFilter,
-			dOldAutoSubmit, string(dOldNotif)); err != nil {
+			dOldAutoSubmit, string(dOldNotif), dOldPeriodCoverage); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Delete audit insert failed: "+err.Error())
 			return
 		}
@@ -883,8 +935,8 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntityCode:       entID,
 				TransactionType:  "FD_ACCRUAL_SCHEDULE_APPROVE",
 				RecordID:         cfgID,
-				RecordTable:      "investment.fd_accrual_schedule_config",
-				AuditTable:       "investment.fd_accrual_schedule_config_audit",
+				RecordTable:      constants.QuerryAccrualScheduleConfig,
+				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
 				AuditIDColumn:    "config_id",
 				ActionType:       "DELETE",
 				SubmittedBy:      uID,
@@ -928,6 +980,7 @@ func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
 		       default_run_mode,
 		       auto_submit_for_approval,
 		       COALESCE(accrual_granularity,'MONTHLY') AS accrual_granularity,
+		       COALESCE(period_coverage,'RUN') AS period_coverage,
 		       COALESCE(next_run_at, now()) AS next_run_at
 		FROM investment.fd_accrual_schedule_config c
 		WHERE c.is_active = true
@@ -951,6 +1004,7 @@ func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
 		ConfigID, EntityID, EntityName          string
 		ScheduleFrequency, BankFilter, FDStatus string
 		DefaultRunMode                          string
+		PeriodCoverage                          string
 		RunDayOfMonth                           int
 		AutoSubmit                              bool
 		Granularity                             string
@@ -966,7 +1020,7 @@ func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
 			&runTime,
 			&c.BankFilter, &c.FDStatus,
 			&c.DefaultRunMode, &c.AutoSubmit,
-			&c.Granularity, &c.NextRunAt,
+			&c.Granularity, &c.PeriodCoverage, &c.NextRunAt,
 		); err != nil {
 			api.LogError("[FDAccrual] checkAndFireDueSchedules scan: %v", err)
 			continue
@@ -978,34 +1032,36 @@ func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
 	api.LogInfo("[FDAccrual] Scheduler tick: %d due config(s)", len(due))
 	for _, c := range due {
 		fireScheduledRun(ctx, pool, FireScheduledParams{
-			ConfigID:     c.ConfigID,
-			EntityID:     c.EntityID,
-			EntityName:   c.EntityName,
-			ScheduleFreq: c.ScheduleFrequency,
-			BankFilter:   c.BankFilter,
-			FDStatus:     c.FDStatus,
-			RunMode:      c.DefaultRunMode,
-			RunDay:       c.RunDayOfMonth,
-			AutoSubmit:   c.AutoSubmit,
-			Granularity:  c.Granularity,
-			ScheduledAt:  c.NextRunAt,
+			ConfigID:       c.ConfigID,
+			EntityID:       c.EntityID,
+			EntityName:     c.EntityName,
+			ScheduleFreq:   c.ScheduleFrequency,
+			PeriodCoverage: c.PeriodCoverage,
+			BankFilter:     c.BankFilter,
+			FDStatus:       c.FDStatus,
+			RunMode:        c.DefaultRunMode,
+			RunDay:         c.RunDayOfMonth,
+			AutoSubmit:     c.AutoSubmit,
+			Granularity:    c.Granularity,
+			ScheduledAt:    c.NextRunAt,
 		})
 	}
 }
 
 // fireScheduledRun creates a run, validates, executes, and optionally submits.
 type FireScheduledParams struct {
-	ConfigID     string
-	EntityID     string
-	EntityName   string
-	ScheduleFreq string
-	BankFilter   string
-	FDStatus     string
-	RunMode      string
-	RunDay       int
-	AutoSubmit   bool
-	Granularity  string
-	ScheduledAt  time.Time
+	ConfigID       string
+	EntityID       string
+	EntityName     string
+	ScheduleFreq   string
+	PeriodCoverage string // the date window each run covers (MONTHLY/QUARTERLY/HALF_YEARLY/YEARLY/RUN)
+	BankFilter     string
+	FDStatus       string
+	RunMode        string
+	RunDay         int
+	AutoSubmit     bool
+	Granularity    string
+	ScheduledAt    time.Time
 }
 
 func fireScheduledRun(
@@ -1027,22 +1083,38 @@ func fireScheduledRun(
 	if granularity == "" {
 		granularity = "MONTHLY"
 	}
-	// Accrual period window follows accrual_granularity (not schedule_frequency).
-	// schedule_frequency only controls when next_run_at fires via computeNextRunAt.
-	periodGranularity := periodGranularityForScheduler(granularity, scheduleFreq)
-	periodStart, periodEnd := AccrualPeriodBounds(scheduledAt, periodGranularity)
-	financialPeriod := buildAccrualPeriod(periodStart)
-	runType := RunTypeForGranularity(periodGranularity)
 
-	api.LogInfo("[FDAccrual] Scheduler firing config=%s entity=%s schedule_freq=%s accrual_granularity=%s period_granularity=%s period=%s→%s bank_filter=%q",
-		configID, entityID, scheduleFreq, granularity, periodGranularity,
+	// period_coverage controls the date window each run covers.
+	// accrual_granularity controls only the interest calculation steps inside the run.
+	// When period_coverage=RUN (or empty), fall back to schedule_frequency for period bounds.
+	periodWindow := strings.ToUpper(strings.TrimSpace(p.PeriodCoverage))
+	if periodWindow == "" || periodWindow == "RUN" {
+		periodWindow = periodGranularityForScheduler("RUN", scheduleFreq)
+	}
+
+	//  — CURRENT: calendar-month bounds (May 1 → May 31 when fire date is May 24).
+	// To switch to FD-date-based "24 to 24" periods, replace the line below with:
+	//
+	//   anchorDay := p.RunDay  // e.g. 24 (the run_day_of_month from the schedule config)
+	//   periodEnd   := time.Date(scheduledAt.Year(), scheduledAt.Month(), anchorDay, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
+	//   periodStart := time.Date(scheduledAt.Year(), scheduledAt.Month()-1, anchorDay, 0, 0, 0, 0, time.UTC)
+	//   // Example: fire on May 24 → periodStart = Apr 24, periodEnd = May 23
+	//   // Go's time.Date handles month underflow: Month(1)-1 = December of prior year automatically.
+	//
+	// After making this change also update AccrualPeriodBounds signature as described
+	// in engine.go above the function definition.
+	periodStart, periodEnd := AccrualPeriodBounds(scheduledAt, periodWindow)
+	financialPeriod := buildAccrualPeriod(periodStart)
+	runType := RunTypeForGranularity(granularity) // run_type reflects accrual_granularity, not period window
+
+	api.LogInfo("[FDAccrual] Scheduler firing config=%s entity=%s schedule_freq=%s accrual_granularity=%s period_window=%s period=%s→%s bank_filter=%q",
+		configID, entityID, scheduleFreq, granularity, periodWindow,
 		periodStart.Format(constants.DateFormat), periodEnd.Format(constants.DateFormat),
 		bankFilter)
 
 	// ── Duplicate guard ─────────────────────────────────────────────────────
-	// Skip if ANY scheduler-created run already exists for this entity+period+mode
-	// that is not in a terminal failure state.  This prevents server restarts or
-	// tick races from creating multiple runs for the same period.
+	// Skip if a scheduler-created run already exists for this entity+period+mode
+	// that is not in a terminal failure state.
 	var existingRun string
 	_ = pool.QueryRow(ctx, `
 		SELECT COALESCE(run_id,'') FROM investment.fd_accrual_run
@@ -1058,6 +1130,53 @@ func fireScheduledRun(
 	if existingRun != "" {
 		api.LogInfo("[FDAccrual] Scheduler skip entity=%s period=%s→%s mode=%s — run %s already exists",
 			entityID, periodStart.Format(constants.DateFormat), periodEnd.Format(constants.DateFormat), runMode, existingRun)
+		logAccrualEvent(ctx, pool, LogAccrualParams{
+			RunID:     existingRun,
+			Level:     "INFO",
+			EventType: "SCHEDULER_SKIPPED_DUPLICATE",
+			Message: fmt.Sprintf("Scheduler skipped: run %s already covers entity=%s period=%s→%s mode=%s config=%s",
+				existingRun, entityID,
+				periodStart.Format(constants.DateFormat), periodEnd.Format(constants.DateFormat),
+				runMode, configID),
+			Detail: map[string]interface{}{
+				"schedule_config_id":   configID,
+				"duplicate_run_id":     existingRun,
+				"accrual_period_start": periodStart.Format(constants.DateFormat),
+				"accrual_period_end":   periodEnd.Format(constants.DateFormat),
+				"run_mode":             runMode,
+			},
+		})
+		// When the skipped run was FINAL, auto-fire a companion SIMULATION run so
+		// the user gets a fresh simulation for this period (unless one already exists).
+		if strings.ToUpper(runMode) == "FINAL" {
+			var existingSim string
+			_ = pool.QueryRow(ctx, `
+				SELECT COALESCE(run_id,'') FROM investment.fd_accrual_run
+				WHERE entity_id=$1
+				  AND accrual_period_start=$2
+				  AND accrual_period_end=$3
+				  AND run_mode='SIMULATION'
+				  AND created_by='SCHEDULER'
+				  AND run_status NOT IN ('FAILED','VALIDATION_FAILED')
+				LIMIT 1`,
+				entityID, periodStart, periodEnd,
+			).Scan(&existingSim)
+			if existingSim == "" {
+				fireScheduledRun(ctx, pool, FireScheduledParams{
+					ConfigID:     p.ConfigID,
+					EntityID:     p.EntityID,
+					EntityName:   p.EntityName,
+					ScheduleFreq: p.ScheduleFreq,
+					BankFilter:   p.BankFilter,
+					FDStatus:     p.FDStatus,
+					RunMode:      "SIMULATION",
+					RunDay:       p.RunDay,
+					AutoSubmit:   false, // simulations never auto-submit
+					Granularity:  p.Granularity,
+					ScheduledAt:  p.ScheduledAt,
+				})
+			}
+		}
 		updateLastRunStatus(ctx, pool, configID, existingRun, "SKIPPED_DUPLICATE")
 		return
 	}
@@ -1300,6 +1419,16 @@ func parseRunTimeComponents(runTime interface{}) (hour, min, sec int, ok bool) {
 	switch t := runTime.(type) {
 	case time.Time:
 		return t.Hour(), t.Minute(), t.Second(), true
+	case pgtype.Time:
+		// pgx v5 returns PostgreSQL TIME columns as pgtype.Time{Microseconds, Valid}
+		if !t.Valid {
+			return 0, 0, 0, false
+		}
+		total := t.Microseconds / 1_000_000 // convert to seconds
+		h := int(total / 3600)
+		m := int((total % 3600) / 60)
+		s := int(total % 60)
+		return h, m, s, true
 	case string:
 		if t == "" {
 			return 0, 0, 0, false
@@ -1494,6 +1623,7 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			c.default_run_mode,
 			c.auto_submit_for_approval,
 			COALESCE(c.accrual_granularity,'MONTHLY')   AS accrual_granularity,
+			COALESCE(c.period_coverage,'RUN')           AS period_coverage,
 			COALESCE(c.last_run_id,'')                  AS last_run_id,
 			COALESCE(c.last_run_status,'')              AS last_run_status,
 			COALESCE(TO_CHAR(c.last_run_at,'YYYY-MM-DD HH24:MI:SS'),'') AS last_run_at,
@@ -1638,6 +1768,7 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				c.default_run_mode,
 				c.auto_submit_for_approval,
 				COALESCE(c.accrual_granularity,''),
+				COALESCE(c.period_coverage,'RUN'),
 				COALESCE(c.last_run_id,''),
 				COALESCE(c.last_run_status,''),
 				c.last_run_at,
@@ -1665,7 +1796,7 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN history h ON h.config_id = c.config_id
 			WHERE c.config_id = $1`, req.ConfigID)
 
-		var configID, entityID, entityName, scheduleFreq, bankFilter, fdFilter, runMode, granularity string
+		var configID, entityID, entityName, scheduleFreq, bankFilter, fdFilter, runMode, granularity, periodCoverage string
 		var lastRunID, lastRunStatus, createdBy, updatedBy string
 		var auditAction, auditStatus, auditReqBy, auditChkBy, auditComment string
 		var histCreatedBy, histCreatedAt, histEditedBy, histEditedAt, histDeletedBy, histDeletedAt string
@@ -1675,7 +1806,7 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := configRow.Scan(
 			&configID, &entityID, &entityName, &scheduleFreq, &runDay,
-			&bankFilter, &fdFilter, &runMode, &autoSubmit, &granularity,
+			&bankFilter, &fdFilter, &runMode, &autoSubmit, &granularity, &periodCoverage,
 			&lastRunID, &lastRunStatus, &lastRunAt, &nextRunAt,
 			&isActive, &createdAt, &createdBy, &updatedAt, &updatedBy,
 			&auditAction, &auditStatus, &auditReqBy, &auditReqAt,
@@ -1691,6 +1822,7 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"entity_id":                entityID,
 			"entity_name":              entityName,
 			"schedule_frequency":       scheduleFreq,
+			"period_coverage":          periodCoverage,
 			"run_day_of_month":         runDay,
 			"default_bank_id_filter":   bankFilter,
 			"default_fd_status_filter": fdFilter,
@@ -1999,6 +2131,7 @@ func GetScheduleExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.entity_id,'') AS entity_id,
 				COALESCE(c.entity_name,'') AS entity_name,
 				c.schedule_frequency,
+				COALESCE(c.period_coverage,'RUN') AS period_coverage,
 				COALESCE(c.run_day_of_month,1) AS run_day_of_month,
 				c.run_time,
 				COALESCE(c.default_bank_id_filter,'') AS default_bank_id_filter,

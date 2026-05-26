@@ -12,7 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 type transactionAuditRequest struct {
 	UserID          string `json:"user_id"`
@@ -108,7 +109,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY requested_at ASC, download_audit_id ASC
 		`, txType, req.TransactionID)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction download audit history"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToReadTransactionDownloadAuditHistory})
 			return
 		}
 		defer downloadRows.Close()
@@ -118,26 +119,27 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var requestedAt sql.NullTime
 			var fileName, uploadKey sql.NullString
 			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &fileName, &uploadKey); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction download audit history"})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToReadTransactionDownloadAuditHistory})
 				return
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"entity_id":       entityID,
-				"action_type":     "DOWNLOAD",
-				"requested_by":    strings.TrimSpace(requestedBy),
-				"requested_at":    timePointerValue(&requestedAt.Time),
-				"checker_by":      "",
-				"checker_at":      nil,
-				"checker_comment": "",
-				"reason":          "",
-				"file_name":       fileName.String,
-				"upload_s3_key":   uploadKey.String,
-				"source":          txType,
+				"entity_id":         entityID,
+				"action_type":       "DOWNLOAD",
+				"processing_status": "COMPLETED",
+				"requested_by":      strings.TrimSpace(requestedBy),
+				"requested_at":      timePointerValue(&requestedAt.Time),
+				"checker_by":        "",
+				"checker_at":        nil,
+				"checker_comment":   "",
+				"reason":            "",
+				"file_name":         fileName.String,
+				"upload_s3_key":     uploadKey.String,
+				"source":            txType,
 			})
 		}
 		if err := downloadRows.Err(); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction download audit history"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToReadTransactionDownloadAuditHistory})
 			return
 		}
 

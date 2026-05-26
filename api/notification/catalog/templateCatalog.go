@@ -786,6 +786,7 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
 				COALESCE(l.checker_by,'')                                     AS checker_by,
 				COALESCE(l.checker_comment,'')                                AS checker_comment,
+				COALESCE(l.change_note,'')                                    AS change_note,
 				COALESCE(l.is_deleted, false)                                 AS version_is_deleted,
 
 				COALESCE(h.created_by,'')        AS created_by,
@@ -837,6 +838,26 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					row[string(f.Name)] = vals[i]
 				}
 			}
+
+			// Parse recipient_strategy from change_note if present
+			if cn, ok := row["change_note"].(string); ok && cn != "" {
+				const strategyPrefix = constants.ErrStrategyRequired
+				if strings.HasPrefix(cn, strategyPrefix) {
+					raw := strings.TrimPrefix(cn, strategyPrefix)
+					strategyRaw := raw
+					if idx := strings.Index(raw, "\n"); idx >= 0 {
+						strategyRaw = raw[:idx]
+						row["change_note"] = raw[idx+1:]
+					} else {
+						row["change_note"] = ""
+					}
+					var strat map[string]interface{}
+					if err := json.Unmarshal([]byte(strategyRaw), &strat); err == nil {
+						row["recipient_strategy"] = strat
+					}
+				}
+			}
+
 			out = append(out, row)
 		}
 		if rows.Err() != nil {
@@ -924,6 +945,7 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
 				COALESCE(a.checker_by,'')                                     AS checker_by,
 				COALESCE(a.checker_comment,'')                                AS checker_comment,
+				COALESCE(a.change_note,'')                                    AS change_note,
 
 				COALESCE(h.created_by,'')        AS created_by,
 				COALESCE(h.created_at,'')        AS created_at,
@@ -985,6 +1007,26 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					row[string(f.Name)] = vals[i]
 				}
 			}
+
+			// Parse recipient_strategy from change_note if present
+			if cn, ok := row["change_note"].(string); ok && cn != "" {
+				const strategyPrefix = constants.ErrStrategyRequired
+				if strings.HasPrefix(cn, strategyPrefix) {
+					raw := strings.TrimPrefix(cn, strategyPrefix)
+					strategyRaw := raw
+					if idx := strings.Index(raw, "\n"); idx >= 0 {
+						strategyRaw = raw[:idx]
+						row["change_note"] = raw[idx+1:]
+					} else {
+						row["change_note"] = ""
+					}
+					var strat map[string]interface{}
+					if err := json.Unmarshal([]byte(strategyRaw), &strat); err == nil {
+						row["recipient_strategy"] = strat
+					}
+				}
+			}
+
 			out = append(out, row)
 		}
 		if rows.Err() != nil {
@@ -1097,7 +1139,22 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			oldRecipientsJSON = []byte("[]")
 		}
 
-		// ── Step 4: marshal recipient_strategy for storage ───────────────────────
+		// ── Step 4: marshal recipient_strategy and template-level fields for storage ───────
+		if req.TemplateName != "" || req.Description != "" || req.RoleScope != "" {
+			if req.Strategy == nil {
+				req.Strategy = make(map[string]interface{})
+			}
+			if req.TemplateName != "" {
+				req.Strategy["__template_name"] = req.TemplateName
+			}
+			if req.Description != "" {
+				req.Strategy["__description"] = req.Description
+			}
+			if req.RoleScope != "" {
+				req.Strategy["__role_scope"] = req.RoleScope
+			}
+		}
+
 		// Always embed the strategy using a sentinel prefix so the approval handler
 		// can reliably extract and apply it even when a human change_note is present.
 		var strategyJSON []byte
@@ -1106,7 +1163,7 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				strategyJSON = sj
 			}
 		}
-		const strategyPrefix = "__STRATEGY__:"
+		const strategyPrefix = constants.ErrStrategyRequired
 		changeNote := req.ChangeNote
 		if len(strategyJSON) > 0 {
 			// Sentinel prefix + strategy JSON, then optional human note separated by newline
@@ -1123,15 +1180,15 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				(template_id, action_type, processing_status,
 				 subject, body_text, body_html, is_html_enabled, formula_steps,
 				 version_label, requested_by, requested_at, change_note,
-				 old_subject, old_body_text, old_body_html, old_formula_steps,
+				 old_subject, old_body_text, old_body_html, old_is_html_enabled, old_formula_steps,
 				 old_recipients)
 			VALUES
 				($1, 'EDIT', 'PENDING_EDIT_APPROVAL',
 				 $2, $3, $4, $5, $6,
-				 (SELECT 'v' || (COUNT(*)+1) FROM notification_svc.audit_template WHERE template_id = $14::varchar),
+				 (SELECT 'v' || (COUNT(*)+1) FROM notification_svc.audit_template WHERE template_id = $15::varchar),
 				 $7, now(), $8,
-				 $9, $10, $11, $12,
-				 $13)
+				 $9, $10, $11, $12, $13,
+				 $14)
 			RETURNING audit_id::text, version_label
 		`
 		var newAuditID, newVersion string
@@ -1139,22 +1196,55 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.TemplateID,                                                   // $1
 			req.Subject, req.BodyText, req.BodyHTML, *req.IsHTML, formulaVal, // $2–$6
 			editor, changeNote, // $7, $8
-			oldSubject.String, oldBodyText.String, oldBodyHTML.String, oldFormula, // $9–$12
-			oldRecipientsJSON, // $13
-			req.TemplateID,    // $14 — subquery ref (avoids 42P08)
+			oldSubject.String, oldBodyText.String, oldBodyHTML.String, oldIsHTML.Bool, oldFormula, // $9–$13
+			oldRecipientsJSON, // $14
+			req.TemplateID,    // $15 — subquery ref (avoids 42P08)
 		).Scan(&newAuditID, &newVersion); err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
 		}
 
+		// ── Step 6: immediately apply recipient strategy to live template_recipient ──
+		// Recipients don't need checker approval — apply now so the UI reflects the
+		// change immediately. The old snapshot is already saved in old_recipients above.
+		recipientsApplied := 0
+		if req.Strategy != nil {
+			stratCopy := make(map[string]interface{}, len(req.Strategy))
+			for k, v := range req.Strategy {
+				stratCopy[k] = v
+			}
+			// Strip metadata-only keys before passing to recipient resolver
+			delete(stratCopy, "__template_name")
+			delete(stratCopy, "__description")
+			delete(stratCopy, "__role_scope")
+
+			if mode, ok := stratCopy["mode"].(string); ok && mode != "" {
+				// Deactivate all current live recipients
+				if _, derr := pgxPool.Exec(ctx,
+					`UPDATE notification_svc.template_recipient SET is_active = false WHERE template_id = $1`,
+					req.TemplateID,
+				); derr != nil {
+					api.LogError("[EditTemplateSingle] recipient deactivation failed for %s: %v", req.TemplateID, derr)
+				} else {
+					// Insert new recipients per the strategy
+					if cnt, rerr := populateRecipientsForTemplate(ctx, pgxPool, req.TemplateID, stratCopy, editor); rerr != nil {
+						api.LogError("[EditTemplateSingle] populateRecipientsForTemplate failed for %s: %v", req.TemplateID, rerr)
+					} else {
+						recipientsApplied = cnt
+					}
+				}
+			}
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"template_id":    req.TemplateID,
-			"audit_id":       newAuditID,
-			"version_label":  newVersion,
-			"action_type":    "EDIT",
-			"status":         "PENDING_EDIT_APPROVAL",
-			"requested_by":   editor,
-			"old_recipients": string(oldRecipientsJSON),
+			"template_id":        req.TemplateID,
+			"audit_id":           newAuditID,
+			"version_label":      newVersion,
+			"action_type":        "EDIT",
+			"status":             "PENDING_EDIT_APPROVAL",
+			"requested_by":       editor,
+			"old_recipients":     string(oldRecipientsJSON),
+			"recipients_applied": recipientsApplied,
 		})
 	}
 }
@@ -1451,7 +1541,7 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		const approvalStrategyPrefix = "__STRATEGY__:"
+		const approvalStrategyPrefix = constants.ErrStrategyRequired
 
 		for _, t := range targets {
 
@@ -1516,18 +1606,46 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				var strategy map[string]interface{}
 				if jerr := json.Unmarshal([]byte(strategyRaw), &strategy); jerr == nil && len(strategy) > 0 {
-					// Deactivate all current live recipients for this template
-					if _, derr := tx.Exec(ctx,
-						`UPDATE notification_svc.template_recipient SET is_active = false WHERE template_id = $1`,
-						t.TemplateID,
-					); derr != nil {
-						api.RespondWithPayload(w, false, "recipient deactivation failed: "+derr.Error(), nil)
-						return
+					// Apply template metadata if present
+					if tn, ok := strategy["__template_name"].(string); ok {
+						if _, err := tx.Exec(ctx, `UPDATE notification_svc.template SET template_name = $1 WHERE template_id = $2`, tn, t.TemplateID); err != nil {
+							api.RespondWithPayload(w, false, "template_name update failed: "+err.Error(), nil)
+							return
+						}
 					}
-					// Insert new recipients per the stored strategy
-					if _, rerr := populateRecipientsOnTx(ctx, tx, pgxPool, t.TemplateID, strategy, userEmail); rerr != nil {
-						api.RespondWithPayload(w, false, "recipient apply failed: "+rerr.Error(), nil)
-						return
+					if desc, ok := strategy["__description"].(string); ok {
+						if _, err := tx.Exec(ctx, `UPDATE notification_svc.template SET description = $1 WHERE template_id = $2`, desc, t.TemplateID); err != nil {
+							api.RespondWithPayload(w, false, "description update failed: "+err.Error(), nil)
+							return
+						}
+					}
+					if rs, ok := strategy["__role_scope"].(string); ok {
+						if _, err := tx.Exec(ctx, `UPDATE notification_svc.template SET role_scope = $1 WHERE template_id = $2`, rs, t.TemplateID); err != nil {
+							api.RespondWithPayload(w, false, "role_scope update failed: "+err.Error(), nil)
+							return
+						}
+					}
+
+					// Remove metadata keys so they don't interfere with recipient mode (if any)
+					delete(strategy, "__template_name")
+					delete(strategy, "__description")
+					delete(strategy, "__role_scope")
+
+					// Apply recipient strategy only if mode is present
+					if mode, ok := strategy["mode"].(string); ok && mode != "" {
+						// Deactivate all current live recipients for this template
+						if _, derr := tx.Exec(ctx,
+							`UPDATE notification_svc.template_recipient SET is_active = false WHERE template_id = $1`,
+							t.TemplateID,
+						); derr != nil {
+							api.RespondWithPayload(w, false, "recipient deactivation failed: "+derr.Error(), nil)
+							return
+						}
+						// Insert new recipients per the stored strategy
+						if _, rerr := populateRecipientsOnTx(ctx, tx, pgxPool, t.TemplateID, strategy, userEmail); rerr != nil {
+							api.RespondWithPayload(w, false, "recipient apply failed: "+rerr.Error(), nil)
+							return
+						}
 					}
 				}
 			}
@@ -2451,29 +2569,8 @@ func populateRecipientsOnTx(ctx context.Context, tx pgx.Tx, pgxPool *pgxpool.Poo
 		if v, ok := strategy["recipient_priority"].(float64); ok && v > 0 {
 			rollePriority = int(v)
 		}
-		// Read-only lookup on pool (role→users) — this is fine, no write conflict
-		rowsU, err := pgxPool.Query(ctx,
-			`SELECT u.id FROM users u
-			  JOIN user_roles ur ON ur.user_id = u.id
-			  JOIN roles ro ON ro.id = ur.role_id
-			 WHERE ro.name = $1 OR ro.rolecode = $1`, roleName)
-		if err != nil {
-			return 0, err
-		}
-		defer rowsU.Close()
-		var userRows [][]interface{}
-		for rowsU.Next() {
-			var uid string
-			if err := rowsU.Scan(&uid); err == nil {
-				userRows = append(userRows, []interface{}{templateID, "USER", uid, nil, true, createdBy, rollePriority})
-			}
-		}
-		rowsU.Close()
-		if len(userRows) > 0 {
-			return len(userRows), batchInsertRecipientsOnTx(ctx, tx, userRows)
-		}
-		// fallback: insert a ROLE sentinel row
-		err = batchInsertRecipientsOnTx(ctx, tx, [][]interface{}{{templateID, "ROLE", nil, roleName, true, createdBy, rollePriority}})
+		// Insert a ROLE recipient so that it dynamically evaluates at runtime
+		err := batchInsertRecipientsOnTx(ctx, tx, [][]interface{}{{templateID, "ROLE", nil, roleName, true, createdBy, rollePriority}})
 		if err != nil {
 			return 0, err
 		}

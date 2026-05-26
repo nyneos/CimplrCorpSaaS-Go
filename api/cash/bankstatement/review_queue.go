@@ -131,7 +131,7 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 				"entity_id":          entityID,
 			}
 			if valueDate != nil {
-				row["value_date"] = valueDate.Format("2006-01-02")
+				row["value_date"] = valueDate.Format(constants.DateFormat)
 			}
 			out = append(out, row)
 		}

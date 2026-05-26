@@ -3,6 +3,7 @@ package forwards
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"errors"
 	"net/http"
@@ -191,7 +192,7 @@ func forwardEntityNames(ctx context.Context) ([]string, error) {
 		}
 	}
 	if len(lowered) == 0 {
-		return nil, errors.New("no accessible business units found")
+		return nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
 	return lowered, nil
 }

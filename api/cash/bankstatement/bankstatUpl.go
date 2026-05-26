@@ -1716,7 +1716,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, "failed to begin tx: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrFailedToBeginTransaction+err.Error(), nil)
 			return
 		}
 		committed := false
@@ -1882,7 +1882,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, "failed to commit: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrTxCommitFailed+err.Error(), nil)
 			return
 		}
 		committed = true

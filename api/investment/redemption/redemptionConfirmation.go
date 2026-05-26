@@ -135,7 +135,7 @@ func GetRedemptionConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFun
 			FROM investment.redemption_confirmation
 			WHERE redemption_confirm_id = $1
 		`, req.RedemptionConfirmID).Scan(&uploadS3Key); err != nil {
-			api.RespondWithResult(w, false, "file not found")
+			api.RespondWithResult(w, false, constants.ErrFileNotFound)
 			return
 		}
 

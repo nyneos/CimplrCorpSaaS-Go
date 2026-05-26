@@ -271,7 +271,7 @@ func (l *LoggerService) zipAndCleanOldLogs() {
 }
 
 func (l *LoggerService) LogAudit(msg string) {
-	LogAudit(msg)
+	LogAudit("%s", msg)
 }
 
 var GlobalLogger *LoggerService

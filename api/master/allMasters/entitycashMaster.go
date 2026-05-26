@@ -108,6 +108,71 @@ func getUserFriendlyEntityCashError(err error, context string) (string, int) {
 	return fmt.Sprintf("%s: %s", context, errMsg), http.StatusInternalServerError
 }
 
+type cashEntityQuery interface {
+	Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}
+
+func cashEntityNameDescendants(parentMap map[string][]string, startName string) []string {
+	visited := make(map[string]bool)
+	queue := []string{startName}
+	visited[startName] = true
+
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+		for _, child := range parentMap[curr] {
+			if !visited[child] {
+				visited[child] = true
+				queue = append(queue, child)
+			}
+		}
+	}
+
+	result := make([]string, 0, len(visited))
+	for name := range visited {
+		result = append(result, name)
+	}
+	return result
+}
+
+func cashEntityIDsWithDescendants(ctx context.Context, q cashEntityQuery, parentMap map[string][]string, rootEntityIDs []string) ([]string, error) {
+	nameSet := make(map[string]bool)
+	for _, eid := range rootEntityIDs {
+		var name string
+		if err := q.QueryRow(ctx, `SELECT entity_name FROM masterentitycash WHERE entity_id = $1`, eid).Scan(&name); err != nil {
+			if err == pgx.ErrNoRows {
+				continue
+			}
+			return nil, err
+		}
+		for _, n := range cashEntityNameDescendants(parentMap, name) {
+			nameSet[n] = true
+		}
+	}
+	if len(nameSet) == 0 {
+		return rootEntityIDs, nil
+	}
+	names := make([]string, 0, len(nameSet))
+	for n := range nameSet {
+		names = append(names, n)
+	}
+	rows, err := q.Query(ctx, `SELECT entity_id FROM masterentitycash WHERE entity_name = ANY($1)`, names)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, len(names))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 type CashEntityMasterRequest struct {
 	EntityName       string `json:"entity_name"`
 	ParentEntityName string `json:"parent_entity_name"`
@@ -1766,30 +1831,17 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				parentMap[parent] = append(parentMap[parent], child)
 			}
 		}
-		// Traverse descendants
-		getAllDescendants := func(ids []string) []string {
-			all := map[string]bool{}
-			queue := append([]string{}, ids...)
-			for _, id := range ids {
-				all[id] = true
+		allToReject, err := cashEntityIDsWithDescendants(ctx, pgxPool, parentMap, req.EntityIDs)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to resolve entity hierarchy for bulk reject")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
 			}
-			for len(queue) > 0 {
-				current := queue[0]
-				queue = queue[1:]
-				for _, child := range parentMap[current] {
-					if !all[child] {
-						all[child] = true
-						queue = append(queue, child)
-					}
-				}
-			}
-			result := []string{}
-			for id := range all {
-				result = append(result, id)
-			}
-			return result
+			return
 		}
-		allToReject := getAllDescendants(req.EntityIDs)
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
@@ -1888,29 +1940,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				parentMap[parent] = append(parentMap[parent], child)
 			}
 		}
-		// Traverse descendants
-		getAllDescendants := func(ids []string) []string {
-			all := map[string]bool{}
-			queue := append([]string{}, ids...)
-			for _, id := range ids {
-				all[id] = true
-			}
-			for len(queue) > 0 {
-				current := queue[0]
-				queue = queue[1:]
-				for _, child := range parentMap[current] {
-					if !all[child] {
-						all[child] = true
-						queue = append(queue, child)
-					}
-				}
-			}
-			result := []string{}
-			for id := range all {
-				result = append(result, id)
-			}
-			return result
-		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
@@ -1937,7 +1966,11 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if status == "PENDING_DELETE_APPROVAL" {
 				// Mark all descendants as deleted (do not approve them)
-				descendants := getAllDescendants([]string{eid})
+				descendants, derr := cashEntityIDsWithDescendants(ctx, tx, parentMap, []string{eid})
+				if derr != nil {
+					anyError = derr
+					break
+				}
 				rows, err := tx.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, descendants)
 				if err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to mark entities as deleted")
@@ -1949,7 +1982,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					return
 				}
-				defer rows.Close()
 				for rows.Next() {
 					var entityID string
 					if err := rows.Scan(&entityID); err == nil {
@@ -1959,6 +1991,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						})
 					}
 				}
+				rows.Close()
 
 				// Also update the audit rows for these descendants: mark their delete actions as APPROVED
 				auditRows, aerr := tx.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, descendants)
@@ -1972,7 +2005,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					return
 				}
-				defer auditRows.Close()
 				for auditRows.Next() {
 					var actionID, entityID string
 					if err := auditRows.Scan(&actionID, &entityID); err == nil {
@@ -1983,6 +2015,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						})
 					}
 				}
+				auditRows.Close()
 			} else {
 				// Approve only this entity: update auditactionentity processing_status
 				rows, err := tx.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = $3 AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, eid)
@@ -1996,7 +2029,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					return
 				}
-				defer rows.Close()
 				for rows.Next() {
 					var actionID, entityID string
 					if err := rows.Scan(&actionID, &entityID); err == nil {
@@ -2007,6 +2039,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						})
 					}
 				}
+				rows.Close()
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -2384,7 +2417,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -2433,11 +2466,11 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-entity-cash")
+				folder := s3storage.GetStoragePrefix(constants.ErrMasterEntityCash)
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -2614,7 +2647,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			committed = true
 			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
-				ModuleKey:        "master-entity-cash",
+				ModuleKey:        constants.ErrMasterEntityCash,
 				OriginalFileName: fh.Filename,
 				StoredFileName:   storedFileName,
 				UploadS3Key:      s3Key,
@@ -2769,7 +2802,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = body.UserID
 		}
 		if userID == "" {
-			uploadEntityError(w, http.StatusBadRequest, "user_id is required")
+			uploadEntityError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		userName := api.GetUserNameFromCtx(r.Context())
@@ -2791,7 +2824,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		fileBytes, err := io.ReadAll(f)
 		f.Close()
 		if err != nil {
-			uploadEntityError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+			uploadEntityError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -3117,11 +3150,11 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── 9. Begin transaction & write ─────────────────────────────────
 		s3Key, storedFileName := "", ""
 		if s3storage.IsS3UploadEnabled() {
-			folder := s3storage.GetStoragePrefix("master-entity-cash")
+			folder := s3storage.GetStoragePrefix(constants.ErrMasterEntityCash)
 			storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				uploadEntityError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				uploadEntityError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 				return
 			}
 		}
@@ -3474,7 +3507,7 @@ ON CONFLICT (parent_entity_name, child_entity_name) DO UPDATE
 		}
 		tx = nil
 		bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
-			ModuleKey:        "master-entity-cash",
+			ModuleKey:        constants.ErrMasterEntityCash,
 			OriginalFileName: fh.Filename,
 			StoredFileName:   storedFileName,
 			UploadS3Key:      s3Key,

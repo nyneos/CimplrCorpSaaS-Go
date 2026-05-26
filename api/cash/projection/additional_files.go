@@ -3,6 +3,7 @@ package projection
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"errors"
 	"net/http"
@@ -74,7 +75,7 @@ func listProjectionAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, pare
 	return additionalfiles.QueryFiles(ctx, pool, projectionFileQuery(`
 		WHERE f.proposal_id = $1
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
-		  AND `+projectionParentEntityAllowed("p.proposal_id", "$2")+`
+		  AND `+projectionParentEntityAllowed(constants.ProposalID, "$2")+`
 		ORDER BY f.uploaded_at DESC
 	`), parentID, names)
 }
@@ -88,7 +89,7 @@ func createProjectionAdditionalFile(ctx context.Context, tx pgx.Tx, input additi
 		SELECT DISTINCT p.proposal_id AS parent_id
 		FROM cimplrcorpsaas.cashflow_proposal p
 		WHERE p.proposal_id = $8
-		  AND `+projectionParentEntityAllowed("p.proposal_id", "$9")+`
+		  AND `+projectionParentEntityAllowed(constants.ProposalID, "$9")+`
 	`, input.ParentID, names)
 }
 
@@ -114,7 +115,7 @@ func getProjectionAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.P
 		WHERE f.proposal_id = $1
 		  AND f.file_id = $2
 		  `+deletedClause+`
-		  AND `+projectionParentEntityAllowed("p.proposal_id", "$3")+`
+		  AND `+projectionParentEntityAllowed(constants.ProposalID, "$3")+`
 	`), parentID, fileID, names)
 }
 
@@ -128,7 +129,7 @@ func getProjectionAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, paren
 		WHERE f.proposal_id = $1
 		  AND f.file_id = ANY($2)
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
-		  AND `+projectionParentEntityAllowed("p.proposal_id", "$3")+`
+		  AND `+projectionParentEntityAllowed(constants.ProposalID, "$3")+`
 		ORDER BY f.uploaded_at DESC
 	`), parentID, trimmedIDs, names)
 	if queryErr != nil {
@@ -164,7 +165,7 @@ func deleteProjectionAdditionalFileExec(ctx context.Context, exec projectionFile
 		  AND f.file_id = $2
 		  AND p.proposal_id = f.proposal_id
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
-		  AND `+projectionParentEntityAllowed("p.proposal_id", "$5")+`
+		  AND `+projectionParentEntityAllowed(constants.ProposalID, "$5")+`
 	`, parentID, fileID, deletedBy, deletedAt, names)
 	if execErr != nil {
 		return false, execErr
@@ -209,7 +210,7 @@ func projectionEntityNames(ctx context.Context) ([]string, error) {
 		}
 	}
 	if len(lowered) == 0 {
-		return nil, errors.New("no accessible business units found")
+		return nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
 	return lowered, nil
 }

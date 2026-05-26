@@ -1063,7 +1063,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		committed := false
@@ -1109,7 +1109,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		for _, id := range req.InitiationIDs {
 			if !found[id] {
-				api.RespondWithResult(w, false, "missing latest audit for initiation: "+id)
+				api.RespondWithResult(w, false, constants.ErrMissingLatestAuditForInitiation+id)
 				return
 			}
 		}
@@ -1197,7 +1197,7 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		committed := false
@@ -1239,7 +1239,7 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		for _, id := range req.InitiationIDs {
 			if !found[id] {
-				api.RespondWithResult(w, false, "missing latest audit for initiation: "+id)
+				api.RespondWithResult(w, false, constants.ErrMissingLatestAuditForInitiation+id)
 				return
 			}
 		}
@@ -1315,7 +1315,7 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		committed := false
@@ -1335,7 +1335,7 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
 			if latestErr != nil {
-				api.RespondWithResult(w, false, "missing latest audit for initiation: "+id)
+				api.RespondWithResult(w, false, constants.ErrMissingLatestAuditForInitiation+id)
 				return
 			}
 			if latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {

@@ -42,11 +42,11 @@ type activateFDRequest struct {
 	UserID         string `json:"user_id"`
 	ConfirmationID string `json:"confirmation_id"`
 	// Deprecated: legacy clients sent bank ref here; use confirmation bank_fd_ref_no instead.
-	FDNumber string `json:"fd_number"`
+	FDNumber    string `json:"fd_number"`
 	ReceiptDate string `json:"receipt_date"`
 	// Ops activation comment (preferred over fd_number in UI).
 	Reason string `json:"reason"`
-	Notes       string `json:"notes"`
+	Notes  string `json:"notes"`
 }
 
 type bulkFDActionRequest struct {
@@ -384,6 +384,29 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 	}
 
 	interestTypeCode := firstNonEmpty(rec.InterestTypeCode, "SIMPLE")
+	effectiveReceiptDate := receiptDate
+	if effectiveReceiptDate.IsZero() {
+		effectiveReceiptDate = rec.ReceiptDate
+	}
+	termsSnapshot := map[string]interface{}{
+		"confirmation_id":             rec.ConfirmationID,
+		"booking_id":                  rec.BookingID,
+		"interest_type_code":          interestTypeCode,
+		"frequency_id":                rec.FrequencyID,
+		"interest_payout_frequency":   rec.InterestPayoutFrequency,
+		"payout_frequency_id":         rec.InterestPayoutFrequency,
+		"accrual_frequency_code":      rec.AccrualFrequencyCode,
+		"reset_type":                  rec.ResetType,
+		"day_count_code":              rec.DayCountConvention,
+		"tds_plan_id":                 rec.TDSPlanID,
+		"bank_config_id":              rec.BankConfigID,
+		"first_payout_date":           nilIfZero(rec.FirstPayoutDate),
+		"first_capitalization_date":   nilIfZero(rec.FirstCapitalizationDate),
+		"bank_fd_ref_no":              fdRef,
+		"bank_reference_number":       rec.BankReferenceNumber,
+		"premature_closure_terms_set": rec.PrematureClosureTerms != "",
+	}
+	termsSnapshotJSON, _ := json.Marshal(termsSnapshot)
 
 	valueMap := map[string]interface{}{
 		// identity
@@ -416,10 +439,21 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 		"tenure_years":  rec.TenureYears,
 		"tenor_years":   rec.TenureYears, // fallback old name
 		// optional
-		"frequency_id":   rec.FrequencyID,
-		"bank_config_id": rec.BankConfigID,
-		"tds_plan_id":    rec.TDSPlanID,
-		"day_count_code": rec.DayCountConvention,
+		"frequency_id":              rec.FrequencyID,
+		"interest_payout_frequency": rec.InterestPayoutFrequency,
+		"payout_frequency_id":       rec.InterestPayoutFrequency,
+		"accrual_frequency_code":    strings.ToUpper(strings.TrimSpace(rec.AccrualFrequencyCode)),
+		"reset_type":                firstNonEmpty(strings.ToUpper(strings.TrimSpace(rec.ResetType)), "AT_MATURITY"),
+		"first_payout_date":         nilIfZero(rec.FirstPayoutDate),
+		"first_capitalization_date": nilIfZero(rec.FirstCapitalizationDate),
+		"bank_config_id":            rec.BankConfigID,
+		"tds_plan_id":               rec.TDSPlanID,
+		"day_count_code":            rec.DayCountConvention,
+		"receipt_date":              nilIfZero(effectiveReceiptDate),
+		"bank_reference_number":     nilIfEmpty(rec.BankReferenceNumber),
+		"premature_closure_terms":   nilIfEmpty(rec.PrematureClosureTerms),
+		"cashflow_engine_version":   "2.0",
+		"cashflow_terms_snapshot":   string(termsSnapshotJSON),
 		// fd reference — NOT NULL in schema
 		"bank_fd_ref_no":     fdRef,
 		"bank_fd_reference":  fdRef,
@@ -430,9 +464,9 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 		"status":    statusValue,
 		"fd_status": statusValue,
 		// audit
-		"created_by": createdBy,
-		"notes":      notes,
-		"is_deleted": false,
+		"created_by":   createdBy,
+		"notes":        notes,
+		"is_deleted":   false,
 		"auto_renewal": rec.AutoRenewal,
 	}
 	preferred := []string{
@@ -447,7 +481,10 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 		"tenure_months", "tenor_months",
 		"tenure_type", "tenor_type",
 		"tenure_years", "tenor_years",
-		"frequency_id", "bank_config_id", "tds_plan_id", "day_count_code",
+		"frequency_id", "interest_payout_frequency", "payout_frequency_id",
+		"accrual_frequency_code", "reset_type", "first_payout_date", "first_capitalization_date",
+		"bank_config_id", "tds_plan_id", "day_count_code", "receipt_date",
+		"bank_reference_number", "premature_closure_terms", "cashflow_engine_version", "cashflow_terms_snapshot",
 		"bank_fd_ref_no", "fd_number", "fd_no", "certificate_number", "bank_fd_reference",
 		"status", "fd_status",
 		"created_by", "notes", "is_deleted", "auto_renewal",
@@ -955,7 +992,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", fdID, req.UserID, userEmail, "", approvalengine.ActionApproved, firstNonEmpty(req.Comment, "Bulk approved FD activation"))
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: fdID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: firstNonEmpty(req.Comment, "Bulk approved FD activation")})
 			if actionErr != nil {
 				api.LogError("[FDMaster] RecordAction approve failed for fd %s: %v", fdID, actionErr)
 				errors = append(errors, fdID+": "+actionErr.Error())
@@ -1118,7 +1155,7 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", fdID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: fdID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDMaster] RecordAction reject failed for fd %s: %v", fdID, actionErr)
 				errors = append(errors, fdID+": "+actionErr.Error())
@@ -2037,7 +2074,7 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				skipped++
 				continue
 			}
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", auditID, req.UserID, userEmail, "", approvalengine.ActionApproved, firstNonEmpty(req.Comment, "Bulk cashflow edit approved"))
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: auditID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: firstNonEmpty(req.Comment, "Bulk cashflow edit approved")})
 			if actionErr != nil {
 				errs = append(errs, cashflowID+": "+actionErr.Error())
 				continue
@@ -2172,7 +2209,7 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", auditID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: auditID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				errs = append(errs, cashflowID+": "+actionErr.Error())
 				continue
@@ -2998,7 +3035,7 @@ func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", req.AuditID, req.UserID, userEmail, "", approvalengine.ActionApproved, firstNonEmpty(req.Comment, "Cashflow edit approved"))
+		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: req.AuditID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: firstNonEmpty(req.Comment, "Cashflow edit approved")})
 		if actionErr != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "approval engine error: "+actionErr.Error())
 			return
@@ -3081,7 +3118,7 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", req.AuditID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: req.AuditID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 		if actionErr != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "approval engine error: "+actionErr.Error())
 			return

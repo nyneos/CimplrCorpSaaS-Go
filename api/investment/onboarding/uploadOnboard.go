@@ -1151,7 +1151,7 @@ func GetOnboardDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(req.BatchID) == "" {
-			api.RespondWithResult(w, false, "batch_id required")
+			api.RespondWithResult(w, false, constants.BatchIDsRequired)
 			return
 		}
 
@@ -1161,7 +1161,7 @@ func GetOnboardDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.onboard_batch
 			WHERE batch_id = $1
 		`, req.BatchID).Scan(&uploadS3Key); err != nil {
-			api.RespondWithResult(w, false, "file not found")
+			api.RespondWithResult(w, false, constants.ErrFileNotFound)
 			return
 		}
 
@@ -1199,7 +1199,7 @@ func GetOnboardDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // 			return
 // 		}
 // 		if strings.TrimSpace(req.BatchID) == "" {
-// 			api.RespondWithResult(w, false, "batch_id required")
+// 			api.RespondWithResult(w, false, constants.BatchIDsRequired)
 // 			return
 // 		}
 
@@ -1209,7 +1209,7 @@ func GetOnboardDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // 			FROM investment.onboard_batch
 // 			WHERE batch_id = $1
 // 		`, req.BatchID).Scan(&uploadS3Key); err != nil {
-// 			api.RespondWithResult(w, false, "file not found")
+// 			api.RespondWithResult(w, false, constants.ErrFileNotFound )
 // 			return
 // 		}
 
@@ -1486,7 +1486,7 @@ func RefreshPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.BatchID == "" {
-			api.RespondWithError(w, 400, "batch_id required")
+			api.RespondWithError(w, 400, constants.BatchIDsRequired)
 			return
 		}
 
@@ -1665,7 +1665,7 @@ func PostPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.BatchID == "" {
-			api.RespondWithError(w, 400, "batch_id required")
+			api.RespondWithError(w, 400, constants.BatchIDsRequired)
 			return
 		}
 

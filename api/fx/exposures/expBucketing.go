@@ -249,14 +249,14 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			if bucketingRows, ok := updated["bucketing"]; ok {
 				newValues = bucketingRows
 			}
-			auditutil.RecordAction(r.Context(), db, auditutil.TableExposureBucketing, "exposure_header_id", req.ExposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", actor, oldBucketing, newValues)
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: "PENDING_EDIT_APPROVAL", Reason: "", RequestedBy: actor, OldValues: oldBucketing, NewValues: newValues})
 		}
 		if len(req.HedgingFields) > 0 {
 			newValues := any(req.HedgingFields)
 			if hedgingRows, ok := updated["hedging"]; ok {
 				newValues = hedgingRows
 			}
-			auditutil.RecordAction(r.Context(), db, auditutil.TableHedgeProposal, "exposure_header_id", req.ExposureHeaderID, "EDIT", "PENDING_EDIT_APPROVAL", "", actor, oldHedging, newValues)
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableHedgeProposal, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: "PENDING_EDIT_APPROVAL", Reason: "", RequestedBy: actor, OldValues: oldHedging, NewValues: newValues})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -467,7 +467,7 @@ func DeleteBucketingStatus(db *sql.DB) http.HandlerFunc {
 					"status_bucketing": "PENDING_DELETE_APPROVAL",
 					"comments":         deleteComment,
 				}
-				auditutil.RecordAction(r.Context(), db, auditutil.TableExposureBucketing, "exposure_header_id", id, "DELETE", "PENDING_DELETE_APPROVAL", deleteComment, requestedBy, oldValues, newValues)
+				auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: "PENDING_DELETE_APPROVAL", Reason: deleteComment, RequestedBy: requestedBy, OldValues: oldValues, NewValues: newValues})
 			}
 		}
 		if len(deleted) == 0 {
@@ -614,11 +614,11 @@ func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
 
 		for _, rowMap := range approved {
 			if id, ok := rowMap["exposure_header_id"]; ok {
-				auditutil.RecordDecision(r.Context(), db, auditutil.TableExposureBucketing, "exposure_header_id", fmt.Sprint(id), "APPROVED", updatedBy, req.Comments)
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: "APPROVED", CheckerBy: updatedBy, Comment: req.Comments})
 			}
 		}
 		for _, id := range deleted {
-			auditutil.RecordDecision(r.Context(), db, auditutil.TableExposureBucketing, "exposure_header_id", id, "APPROVED", updatedBy, req.Comments)
+			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, Status: "APPROVED", CheckerBy: updatedBy, Comment: req.Comments})
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -687,7 +687,7 @@ func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
 			}
 			rejected = append(rejected, rowMap)
 			if id, ok := rowMap["exposure_header_id"]; ok {
-				auditutil.RecordDecision(r.Context(), db, auditutil.TableExposureBucketing, "exposure_header_id", fmt.Sprint(id), "REJECTED", updatedBy, req.Comments)
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: "REJECTED", CheckerBy: updatedBy, Comment: req.Comments})
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -90,13 +89,13 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// ── 1. surplus & deployment KPI ──────────────────────────────────────────────────────────────────────────────────────
-		// Surplus "available" = capital currently committed but not yet matured + capital in pending FD bookings.
+		// Surplus "available" = fd_master rows in ACTIVE or PENDING_ACTIVATION.
 		// Includes:
 		//   • ACTIVE FDs that have NOT been fully closed via the cimplr workflow.
-		//   • Pending bookings (DRAFT / APPROVAL_PENDING / APPROVED / SENT_TO_BANK) that have not yet produced an FD.
+		//   • PENDING_ACTIVATION FDs awaiting activation approval.
 		// Excludes:
-		//   • MATURED / CLOSED FDs.
-		//   • FDs already POSTED via cimplr.fd_closure_confirm (accounting_posted=true).
+		//   • MATURED / CLOSED / other fd_status values.
+		//   • ACTIVE FDs already POSTED via cimplr.fd_closure_confirm (accounting_posted=true).
 		run("surplus_deployment", func(ctx context.Context) (interface{}, error) {
 			var activeAmt, pendingAmt float64
 			var activeCnt, pendingCnt int64
@@ -123,19 +122,13 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
 				entityFilter).Scan(&activeAmt, &activeCnt)
 
-			// Pending approval bookings — money the user has committed but not yet deployed as an active FD.
 			_ = pool.QueryRow(ctx, `
-				SELECT COALESCE(SUM(b.principal_amount),0), COUNT(*)
-				FROM investment.fd_booking_request b
-				WHERE COALESCE(b.is_deleted,false) = false
-				  AND b.booking_status IN ('DRAFT','APPROVAL_PENDING','APPROVED','SENT_TO_BANK')
-				  AND NOT EXISTS (
-				    SELECT 1 FROM investment.fd_master m2
-				    WHERE m2.booking_id = b.booking_id
-				      AND COALESCE(m2.is_deleted,false) = false
-				      AND m2.fd_status IN ('ACTIVE','MATURED','CLOSED')
-				  )
-				  AND ($1::text='' OR b.entity_id=$1)`,
+				SELECT COALESCE(SUM(m.principal_amount),0), COUNT(*)
+				FROM investment.fd_master m
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				WHERE m.is_deleted = false
+				  AND m.fd_status = 'PENDING_ACTIVATION'
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
 				entityFilter).Scan(&pendingAmt, &pendingCnt)
 
 			total := activeAmt + pendingAmt
@@ -256,14 +249,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 4. FDs near maturity (next 30 days) — aligned with closure.go GetFDsNearMaturity ─
-		// Rules:
-		//   SHOW  — ACTIVE FD with no closure entry at all OR all closure entries deleted
-		//   HIDE  — ACTIVE FD with any non-deleted entry in cimplr.fd_closure_initiate / confirm
-		//   HIDE  — ACTIVE FD with any non-deleted entry in legacy investment.fd_closure_request
-		// rollover_pending counts FDs whose maturity action is still undecided:
-		//   • no closure initiate exists, OR
-		//   • initiate exists with action_at_maturity ∈ ('ROLLOVER') still in INITIATE / CONFIRM stage
+		// ── 4. FDs near maturity (≤30 days ahead + overdue pending redemption) ─────
+		// Eligibility aligned with closure.go GetFDsNearMaturity / closureV2:
+		//   SHOW  — ACTIVE/MATURED with no non-deleted closure request / initiate / confirm
+		//   SHOW  — calendar-matured ACTIVE rows still awaiting payout (maturity_date < today)
+		//   WINDOW — maturity_date <= CURRENT_DATE + 30 days (no lower bound)
 		run("near_maturity", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
 				SELECT
@@ -273,9 +263,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  m.principal_amount,
 				  m.interest_rate,
 				  TO_CHAR(m.maturity_date,'YYYY-MM-DD') AS maturity_date,
+				  TO_CHAR(m.start_date,'YYYY-MM-DD') AS start_date,
 				  COALESCE(m.maturity_instructions,'') AS maturity_instructions,
 				  m.fd_status,
 				  (m.maturity_date - CURRENT_DATE) AS days_to_maturity,
+				  COALESCE(al.total_interest_accrued, 0) AS interest_accrued,
 				  COALESCE(ci.closure_initiate_id, '') AS closure_initiate_id,
 				  COALESCE(ci.closure_type, '') AS workflow_closure_type,
 				  COALESCE(ci.closure_status, '') AS workflow_closure_status,
@@ -283,25 +275,30 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				LEFT JOIN LATERAL (
+				  SELECT SUM(COALESCE(period_interest_accrued,0)) AS total_interest_accrued
+				  FROM investment.fd_accrual_ledger
+				  WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
+				) al ON true
+				LEFT JOIN LATERAL (
 				  SELECT closure_initiate_id, closure_type, closure_status, action_at_maturity
 				  FROM cimplr.fd_closure_initiate ci2
 				  WHERE ci2.fd_id = m.fd_id AND COALESCE(ci2.is_deleted,false)=false
 				  ORDER BY ci2.created_at DESC LIMIT 1
 				) ci ON true
 				WHERE m.is_deleted = false
-				  AND m.fd_status = 'ACTIVE'
-				  AND m.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
+				  AND m.fd_status IN ('ACTIVE','MATURED')
+				  AND m.maturity_date <= CURRENT_DATE + INTERVAL '30 days'
 				  AND NOT EXISTS (
-				    SELECT 1 FROM cimplr.fd_closure_confirm cc
-				    WHERE cc.fd_id = m.fd_id
-				      AND COALESCE(cc.is_deleted,false) = false
-				      AND cc.closure_status IN ('POSTED','CONFIRM')
+				    SELECT 1 FROM investment.fd_closure_request xcr
+				    WHERE xcr.fd_id = m.fd_id AND COALESCE(xcr.is_deleted,false) = false
 				  )
 				  AND NOT EXISTS (
-				    SELECT 1 FROM investment.fd_closure_request cr
-				    WHERE cr.fd_id = m.fd_id
-				      AND COALESCE(cr.is_deleted,false) = false
-				      AND cr.closure_status IN ('PENDING_APPROVAL','APPROVED','POSTED','COMPLETED','CLOSED')
+				    SELECT 1 FROM cimplr.fd_closure_initiate ncr
+				    WHERE ncr.fd_id = m.fd_id AND COALESCE(ncr.is_deleted,false) = false
+				  )
+				  AND NOT EXISTS (
+				    SELECT 1 FROM cimplr.fd_closure_confirm ncc
+				    WHERE ncc.fd_id = m.fd_id AND COALESCE(ncc.is_deleted,false) = false
 				  )
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				ORDER BY m.maturity_date ASC`, entityFilter)
@@ -320,9 +317,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				Principal             float64 `json:"principal"`
 				Rate                  float64 `json:"rate"`
 				MaturityDate          string  `json:"maturity_date"`
+				StartDate             string  `json:"start_date"`
 				MaturityInstructions  string  `json:"maturity_instructions"`
 				Status                string  `json:"status"`
 				DaysToMaturity        int     `json:"days_to_maturity"`
+				InterestAccrued       float64 `json:"interest_accrued"`
 				ClosureInitiateID     string  `json:"closure_initiate_id,omitempty"`
 				WorkflowClosureType   string  `json:"workflow_closure_type,omitempty"`
 				WorkflowClosureStatus string  `json:"workflow_closure_status,omitempty"`
@@ -336,27 +335,22 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			for rows.Next() {
 				var mr matRow
 				if err2 := rows.Scan(&mr.FDID, &mr.Entity, &mr.Bank, &mr.Principal,
-					&mr.Rate, &mr.MaturityDate, &mr.MaturityInstructions,
-					&mr.Status, &mr.DaysToMaturity,
+					&mr.Rate, &mr.MaturityDate, &mr.StartDate, &mr.MaturityInstructions,
+					&mr.Status, &mr.DaysToMaturity, &mr.InterestAccrued,
 					&mr.ClosureInitiateID, &mr.WorkflowClosureType,
 					&mr.WorkflowClosureStatus, &mr.WorkflowActionAtMat); err2 != nil {
 					continue
 				}
 				mr.Principal = fdRound(mr.Principal, 2)
 				mr.Rate = fdRound(mr.Rate, 4)
+				mr.InterestAccrued = fdRound(mr.InterestAccrued, 2)
 
-				// Decision is "still pending" if no initiate exists, or the initiate is still
-				// in INITIATE / CONFIRM stage (not REJECTED/DELETED/POSTED).
-				wfStatus := strings.ToUpper(strings.TrimSpace(mr.WorkflowClosureStatus))
+				// No closure workflow started yet → rollover decision still required.
 				if mr.ClosureInitiateID == "" {
 					mr.NeedsRolloverDecision = true
-				} else if wfStatus == "INITIATE" || wfStatus == "CONFIRM" || wfStatus == "" {
-					mr.NeedsRolloverDecision = true
-				}
-				if mr.NeedsRolloverDecision {
 					rolloverPending++
 				}
-				if mr.DaysToMaturity <= 0 {
+				if mr.DaysToMaturity == 0 {
 					maturingToday++
 				}
 				totalAmt += mr.Principal
@@ -606,7 +600,8 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  LIMIT 1
 				) ai ON true
 				WHERE b.is_deleted=false
-				  AND b.booking_status IN ('APPROVAL_PENDING','SENT_TO_BANK','APPROVED','DRAFT')
+				  AND `+sqlExcludeTerminalFdOnBooking+`
+				  AND b.booking_status IN ('APPROVAL_PENDING','SENT_TO_BANK','APPROVED','DRAFT','CONFIRMED','ACTIVE')
 				  AND ($1::text='' OR b.entity_id=$1)
 				ORDER BY b.created_at ASC
 				LIMIT 100`, entityFilter)
@@ -759,7 +754,8 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id AND b.is_deleted=false
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE COALESCE(c.is_deleted,false)=false
-				  AND c.confirmation_status NOT IN ('CONFIRMED','APPROVED','VARIANCE_ACCEPTED','REJECTED')
+				  AND `+sqlConfirmationAwaitingApproval+`
+				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND ($1::text='' OR b.entity_id=$1)
 				ORDER BY c.created_at ASC
 				LIMIT 100`, entityFilter)
@@ -832,6 +828,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE COALESCE(c.is_deleted,false)=false
 				  AND c.confirmation_status IN ('CONFIRMED','APPROVED','VARIANCE_ACCEPTED')
+				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND ($1::text='' OR b.entity_id=$1)
 				ORDER BY c.created_at DESC
 				LIMIT 100`, entityFilter)
@@ -944,8 +941,8 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_master m
 				  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				  WHERE m.is_deleted = false
-				    AND m.fd_status = 'ACTIVE'
-				    AND m.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
+				    AND m.fd_status IN ('ACTIVE','MATURED')
+				    AND m.maturity_date <= CURRENT_DATE + INTERVAL '30 days'
 				    AND NOT EXISTS (
 				      SELECT 1 FROM cimplr.fd_closure_initiate ci2
 				      WHERE ci2.fd_id = m.fd_id AND COALESCE(ci2.is_deleted,false) = false
@@ -1019,8 +1016,8 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		// ── 10a. full FD list with all info ─────────────────────────────────────
-		// Treasury portfolio view: ACTIVE FDs that have NOT yet been closed via
-		// the cimplr maturity / rollover / premature workflow (or legacy fd_closure_request).
+		// Treasury portfolio view: ACTIVE + PENDING_ACTIVATION rows from fd_master.
+		// ACTIVE rows exclude FDs already closed via cimplr / legacy closure workflow.
 		// MATURED rows are intentionally excluded — surplus & ladder calcs must
 		// not double-count capital that is already released.
 		run("fd_list", func(ctx context.Context) (interface{}, error) {
@@ -1033,6 +1030,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(m.principal_amount,0) AS principal_amount,
 				  COALESCE(m.interest_rate,0) AS interest_rate,
 				  COALESCE(m.interest_type_code,'') AS interest_type,
+				  COALESCE(TO_CHAR(m.start_date,'YYYY-MM-DD'),'') AS start_date,
 				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'') AS maturity_date,
 				  COALESCE(m.fd_status,'') AS fd_status,
 				  COALESCE(m.maturity_instructions,'') AS maturity_instructions,
@@ -1040,23 +1038,38 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(b.booking_status,'') AS booking_status,
 				  COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD'),'') AS booking_date,
 				  COALESCE(b.created_by, m.created_by,'') AS created_by,
-				  COALESCE((m.maturity_date - CURRENT_DATE)::int, 0) AS days_to_maturity
+				  COALESCE((m.maturity_date - CURRENT_DATE)::int, 0) AS days_to_maturity,
+				  COALESCE(al.total_interest_accrued, 0) AS interest_accrued,
+				  EXISTS (
+				    SELECT 1 FROM investment.fd_accrual_ledger al2
+				    WHERE al2.fd_id = m.fd_id AND COALESCE(al2.is_deleted, false) = false
+				  ) AS has_accrual
 				FROM investment.fd_master m
+				LEFT JOIN LATERAL (
+				  SELECT SUM(COALESCE(period_interest_accrued,0)) AS total_interest_accrued
+				  FROM investment.fd_accrual_ledger
+				  WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
+				) al ON true
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted = false
-				  AND m.fd_status = 'ACTIVE'
-				  AND NOT EXISTS (
-				    SELECT 1 FROM cimplr.fd_closure_confirm cc
-				    WHERE cc.fd_id = m.fd_id
-				      AND COALESCE(cc.is_deleted,false) = false
-				      AND cc.closure_status = 'POSTED'
-				      AND COALESCE(cc.accounting_posted,false) = true
-				  )
-				  AND NOT EXISTS (
-				    SELECT 1 FROM investment.fd_closure_request cr
-				    WHERE cr.fd_id = m.fd_id
-				      AND COALESCE(cr.is_deleted,false) = false
-				      AND cr.closure_status IN ('COMPLETED','POSTED','CLOSED')
+				  AND (
+				    m.fd_status = 'PENDING_ACTIVATION'
+				    OR (
+				      m.fd_status = 'ACTIVE'
+				      AND NOT EXISTS (
+				        SELECT 1 FROM cimplr.fd_closure_confirm cc
+				        WHERE cc.fd_id = m.fd_id
+				          AND COALESCE(cc.is_deleted,false) = false
+				          AND cc.closure_status = 'POSTED'
+				          AND COALESCE(cc.accounting_posted,false) = true
+				      )
+				      AND NOT EXISTS (
+				        SELECT 1 FROM investment.fd_closure_request cr
+				        WHERE cr.fd_id = m.fd_id
+				          AND COALESCE(cr.is_deleted,false) = false
+				          AND cr.closure_status IN ('COMPLETED','POSTED','CLOSED')
+				      )
+				    )
 				  )
 				  AND ($1::text='' OR COALESCE(m.entity_id, b.entity_id)=$1)
 				ORDER BY m.maturity_date ASC NULLS LAST
@@ -1075,6 +1088,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				PrincipalAmount      float64 `json:"principal_amount"`
 				InterestRate         float64 `json:"interest_rate"`
 				InterestType         string  `json:"interest_type"`
+				StartDate            string  `json:"start_date"`
 				MaturityDate         string  `json:"maturity_date"`
 				FDStatus             string  `json:"fd_status"`
 				MaturityInstructions string  `json:"maturity_instructions"`
@@ -1083,6 +1097,8 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				BookingDate          string  `json:"booking_date"`
 				CreatedBy            string  `json:"created_by"`
 				DaysToMaturity       int     `json:"days_to_maturity"`
+				InterestAccrued      float64 `json:"interest_accrued"`
+				HasAccrual           bool    `json:"has_accrual"`
 			}
 			out := []fdRow{}
 			for fdRows.Next() {
@@ -1090,15 +1106,16 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				if err2 := fdRows.Scan(
 					&fr.FDID, &fr.Bank, &fr.Entity, &fr.EntityID,
 					&fr.PrincipalAmount, &fr.InterestRate, &fr.InterestType,
-					&fr.MaturityDate, &fr.FDStatus, &fr.MaturityInstructions,
+					&fr.StartDate, &fr.MaturityDate, &fr.FDStatus, &fr.MaturityInstructions,
 					&fr.BookingID, &fr.BookingStatus, &fr.BookingDate,
-					&fr.CreatedBy, &fr.DaysToMaturity,
+					&fr.CreatedBy, &fr.DaysToMaturity, &fr.InterestAccrued, &fr.HasAccrual,
 				); err2 != nil {
 					api.LogError("[TreasuryDash] fd_list scan error: %v", err2)
 					continue
 				}
 				fr.PrincipalAmount = fdRound(fr.PrincipalAmount, 2)
 				fr.InterestRate = fdRound(fr.InterestRate, 4)
+				fr.InterestAccrued = fdRound(fr.InterestAccrued, 2)
 				out = append(out, fr)
 			}
 			return out, nil
@@ -1354,12 +1371,13 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			var bkAmt float64
 			_ = pool.QueryRow(ctx, `
 				SELECT COUNT(*),
-				       COUNT(*) FILTER (WHERE booking_status IN ('DRAFT','APPROVAL_PENDING')),
+				       COUNT(*) FILTER (WHERE `+sqlBookingAwaitingApproval+`),
 				       COALESCE(SUM(principal_amount),0)
-				FROM investment.fd_booking_request
-				WHERE is_deleted=false
-				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR entity_id=$1)`,
+				FROM investment.fd_booking_request b
+				WHERE b.is_deleted=false
+				  AND `+sqlExcludeTerminalFdOnBooking+`
+				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR b.entity_id=$1)`,
 				entityFilter, startDateStr, endDateStr).Scan(&bkTotal, &bkApprovalPending, &bkAmt)
 
 			var apTotal int64
@@ -1389,13 +1407,15 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			var confTotal int64
 			var confAmt float64
 			_ = pool.QueryRow(ctx, `
-				SELECT COUNT(*), COALESCE(SUM(m.principal_amount),0)
-				FROM investment.fd_master m
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE m.is_deleted=false
-				  AND COALESCE(b.created_at, m.created_at) >= $2::date
-				  AND COALESCE(b.created_at, m.created_at) <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
+				SELECT COUNT(*), COALESCE(SUM(c.actual_principal),0)
+				FROM investment.fd_confirmation c
+				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id AND b.is_deleted=false
+				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
+				WHERE COALESCE(c.is_deleted,false)=false
+				  AND `+sqlExcludeTerminalFdOnBooking+`
+				  AND COALESCE(b.created_at, c.created_at) >= $2::date
+				  AND COALESCE(b.created_at, c.created_at) <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR COALESCE(b.entity_id,m.entity_id)=$1)`,
 				entityFilter, startDateStr, endDateStr).Scan(&confTotal, &confAmt)
 
 			var activeTotal int64

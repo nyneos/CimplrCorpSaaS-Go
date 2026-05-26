@@ -127,6 +127,46 @@ func pickFirstExistingFDColumn(columns map[string]bool, candidates ...string) st
 	return ""
 }
 
+func fdTextExpr(columns map[string]bool, tableAlias string, fallback string, candidates ...string) string {
+	columnName := pickFirstExistingFDColumn(columns, candidates...)
+	if columnName == "" {
+		return fallback
+	}
+	return fmt.Sprintf(constants.FormatCOALESCE, tableAlias, columnName)
+}
+
+func fdNumericExpr(columns map[string]bool, tableAlias string, fallback string, candidates ...string) string {
+	columnName := pickFirstExistingFDColumn(columns, candidates...)
+	if columnName == "" {
+		return fallback
+	}
+	return fmt.Sprintf("COALESCE(%s.%s,0)", tableAlias, columnName)
+}
+
+func fdBoolExpr(columns map[string]bool, tableAlias string, fallback string, candidates ...string) string {
+	columnName := pickFirstExistingFDColumn(columns, candidates...)
+	if columnName == "" {
+		return fallback
+	}
+	return fmt.Sprintf("COALESCE(%s.%s,false)", tableAlias, columnName)
+}
+
+func fdDateTextExpr(columns map[string]bool, tableAlias string, fallback string, candidates ...string) string {
+	columnName := pickFirstExistingFDColumn(columns, candidates...)
+	if columnName == "" {
+		return fallback
+	}
+	return fmt.Sprintf("COALESCE(TO_CHAR(%s.%s,'YYYY-MM-DD'),'')", tableAlias, columnName)
+}
+
+func fdTimestampTextExpr(columns map[string]bool, tableAlias string, fallback string, candidates ...string) string {
+	columnName := pickFirstExistingFDColumn(columns, candidates...)
+	if columnName == "" {
+		return fallback
+	}
+	return fmt.Sprintf("COALESCE(TO_CHAR(%s.%s,'YYYY-MM-DD HH24:MI:SS'),'')", tableAlias, columnName)
+}
+
 func buildFDPlaceholders(count int) string {
 	placeholders := make([]string, count)
 	for index := 0; index < count; index++ {
@@ -181,6 +221,18 @@ func resolveFDBookingAccountColumn(ctx context.Context, exec fdSchemaQueryExecut
 	return pickFirstExistingFDColumn(columns, "source_account_id", "bank_account_id", "account_id", "bank_account"), nil
 }
 
+func resolveFDBookingAccountNumberExpression(ctx context.Context, exec fdSchemaQueryExecutor, tableAlias string) (string, error) {
+	columns, err := loadFDTableColumns(ctx, exec, "investment", "fd_booking_request")
+	if err != nil {
+		return "", err
+	}
+	columnName := pickFirstExistingFDColumn(columns, "source_account_number", "bank_account_number", "account_number")
+	if columnName == "" {
+		return constants.ErrEmptyString, nil
+	}
+	return fmt.Sprintf(constants.FormatCOALESCE, tableAlias, columnName), nil
+}
+
 // fdConfirmationHasUploadS3Key returns true when investment.fd_confirmation
 // currently has the upload_s3_key column. The deployment target sometimes ships
 // without that column (the file-upload feature is optional / behind a later
@@ -212,7 +264,7 @@ func resolveFDBookingAccountExpression(ctx context.Context, exec fdSchemaQueryEx
 	if columnName == "" {
 		return constants.ErrEmptyString, nil
 	}
-	return fmt.Sprintf("COALESCE(%s.%s,'')", tableAlias, columnName), nil
+	return fmt.Sprintf(constants.FormatCOALESCE, tableAlias, columnName), nil
 }
 
 // getEntityName attempts to resolve an entity's display name using master tables.
@@ -228,6 +280,164 @@ func getEntityName(ctx context.Context, exec fdSchemaQueryExecutor, entityID str
 		return name
 	}
 	return ""
+}
+
+// ─── FD confirmation reference uniqueness ────────────────────────────────────
+
+type fdConfirmationReferenceCheck struct {
+	EntityID              string
+	BankFDRefNo           string
+	BankReferenceNumber   string
+	ExcludeConfirmationID string
+}
+
+func fdReferenceValueInUseOnConfirmation(
+	ctx context.Context,
+	exec fdSchemaQueryExecutor,
+	entityID, refValue, excludeConfirmationID string,
+	hasBankReferenceNumberCol bool,
+) (bool, error) {
+	refValue = strings.TrimSpace(refValue)
+	if refValue == "" {
+		return false, nil
+	}
+	excludeConfirmationID = strings.TrimSpace(excludeConfirmationID)
+
+	matchSQL := `BTRIM(COALESCE(c.bank_fd_ref_no, '')) = $3`
+	if hasBankReferenceNumberCol {
+		matchSQL = `(
+			BTRIM(COALESCE(c.bank_fd_ref_no, '')) = $3
+			OR BTRIM(COALESCE(c.bank_reference_number::text, '')) = $3
+		)`
+	}
+
+	var exists bool
+	err := exec.QueryRow(ctx, fmt.Sprintf(`
+		SELECT EXISTS (
+			SELECT 1
+			FROM investment.fd_confirmation c
+			INNER JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE COALESCE(c.is_deleted, false) = false
+			  AND COALESCE(b.is_deleted, false) = false
+			  AND b.entity_id = $1
+			  AND ($2 = '' OR c.confirmation_id <> $2)
+			  AND %s
+		)`, matchSQL), entityID, excludeConfirmationID, refValue).Scan(&exists)
+	return exists, err
+}
+
+func fdReferenceValueInUseOnMaster(
+	ctx context.Context,
+	exec fdSchemaQueryExecutor,
+	entityID, refValue string,
+	masterCols map[string]bool,
+) (bool, error) {
+	refValue = strings.TrimSpace(refValue)
+	if refValue == "" || strings.TrimSpace(entityID) == "" {
+		return false, nil
+	}
+
+	matchSQL := `BTRIM(COALESCE(m.bank_fd_ref_no, '')) = $2`
+	if masterCols["bank_reference_number"] {
+		matchSQL = `(
+			BTRIM(COALESCE(m.bank_fd_ref_no, '')) = $2
+			OR BTRIM(COALESCE(m.bank_reference_number::text, '')) = $2
+		)`
+	}
+
+	var exists bool
+	err := exec.QueryRow(ctx, fmt.Sprintf(`
+		SELECT EXISTS (
+			SELECT 1
+			FROM investment.fd_master m
+			WHERE COALESCE(m.is_deleted, false) = false
+			  AND m.entity_id = $1
+			  AND %s
+		)`, matchSQL), entityID, refValue).Scan(&exists)
+	return exists, err
+}
+
+// validateFDConfirmationReferenceUniqueness ensures bank FD ref and bank reference
+// number are unique per entity across fd_confirmation and fd_master.
+func validateFDConfirmationReferenceUniqueness(
+	ctx context.Context,
+	exec fdSchemaQueryExecutor,
+	check fdConfirmationReferenceCheck,
+) (string, int) {
+	entityID := strings.TrimSpace(check.EntityID)
+	if entityID == "" {
+		return "", http.StatusOK
+	}
+
+	confCols, err := loadFDTableColumns(ctx, exec, "investment", "fd_confirmation")
+	if err != nil {
+		return "Failed to load confirmation schema: " + err.Error(), http.StatusInternalServerError
+	}
+	masterCols, err := loadFDTableColumns(ctx, exec, "investment", "fd_master")
+	if err != nil {
+		return "Failed to load FD master schema: " + err.Error(), http.StatusInternalServerError
+	}
+	hasBankReferenceNumberCol := confCols["bank_reference_number"]
+
+	refs := []struct {
+		value   string
+		fdLabel string
+	}{
+		{strings.TrimSpace(check.BankFDRefNo), "Bank FD reference number"},
+		{strings.TrimSpace(check.BankReferenceNumber), "Bank reference number"},
+	}
+	seen := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		if ref.value == "" || seen[ref.value] {
+			continue
+		}
+		seen[ref.value] = true
+
+		inUse, err := fdReferenceValueInUseOnConfirmation(
+			ctx, exec, entityID, ref.value, check.ExcludeConfirmationID, hasBankReferenceNumberCol,
+		)
+		if err != nil {
+			return "Failed to validate confirmation reference uniqueness: " + err.Error(), http.StatusInternalServerError
+		}
+		if inUse {
+			return fmt.Sprintf(
+				`%s "%s" already exists for this entity. Please use a unique reference.`,
+				ref.fdLabel, ref.value,
+			), http.StatusConflict
+		}
+
+		inUse, err = fdReferenceValueInUseOnMaster(ctx, exec, entityID, ref.value, masterCols)
+		if err != nil {
+			return "Failed to validate FD master reference uniqueness: " + err.Error(), http.StatusInternalServerError
+		}
+		if inUse {
+			return fmt.Sprintf(
+				`%s "%s" already exists for this entity. Please use a unique reference.`,
+				ref.fdLabel, ref.value,
+			), http.StatusConflict
+		}
+	}
+
+	return "", http.StatusOK
+}
+
+func resolveEditConfirmationReferenceFields(
+	fields map[string]interface{},
+	oldBankFDRefNo, oldBankReferenceNumber string,
+) (bankFDRefNo, bankReferenceNumber string) {
+	bankFDRefNo = strings.TrimSpace(oldBankFDRefNo)
+	bankReferenceNumber = strings.TrimSpace(oldBankReferenceNumber)
+
+	if v, ok := fields["bank_fd_ref_no"]; ok {
+		bankFDRefNo = strings.TrimSpace(fmt.Sprint(v))
+	} else if v, ok := fields["bank_fd_reference"]; ok {
+		bankFDRefNo = strings.TrimSpace(fmt.Sprint(v))
+	}
+	if v, ok := fields["bank_reference_number"]; ok {
+		bankReferenceNumber = strings.TrimSpace(fmt.Sprint(v))
+	}
+
+	return bankFDRefNo, bankReferenceNumber
 }
 
 // ─── getUserFriendlyFDError ───────────────────────────────────────────────────
@@ -273,6 +483,12 @@ func getUserFriendlyFDError(err error, context string) (string, int) {
 			case strings.Contains(constraint, "interest_payout"):
 				return "Invalid interest payout frequency.", http.StatusOK
 			}
+		case "23505":
+			constraint := strings.ToLower(pgErr.ConstraintName)
+			if strings.Contains(constraint, "bank_ref") {
+				return "Bank reference number already exists for this entity. Please use a unique reference.", http.StatusConflict
+			}
+			return "Duplicate entry detected. Please check for existing records.", http.StatusConflict
 		}
 	}
 	errStr := strings.ToLower(err.Error())
@@ -530,21 +746,130 @@ func formatNumber(v float64) string {
 
 // fdConfirmationVarianceInput holds booked vs actual values for varianceengine.Compare.
 type fdConfirmationVarianceInput struct {
-	BookingID, EntityID, RunID string
+	BookingID, EntityID, RunID  string
 	ResolvedBy, ResolvedByEmail string
 
-	BookedPrincipal, ActualPrincipal float64
-	BookedRate, ActualRate           float64
-	BookedTenorDays, ActualTenorDays int
-	BookedTenorMonths, ActualTenorMonths int
-	BookedTenorYears, ActualTenorYears   int
-	BookedValueDate, ActualValueDate         string
-	BookedMaturityDate, ActualMaturityDate string
-	BookedInterestType, ActualInterestType   string
-	BookedFrequencyID, ActualFrequencyID     string
-	BookedTenorType, ActualTenorType         string
-	BookedFirstCapDate, ActualFirstCapDate   string
-	BookedFirstPayoutDate, ActualFirstPayoutDate string
+	BookedPrincipal, ActualPrincipal                       float64
+	BookedRate, ActualRate                                 float64
+	BookedTenorDays, ActualTenorDays                       int
+	BookedTenorMonths, ActualTenorMonths                   int
+	BookedTenorYears, ActualTenorYears                     int
+	BookedValueDate, ActualValueDate                       string
+	BookedMaturityDate, ActualMaturityDate                 string
+	BookedInterestType, ActualInterestType                 string
+	BookedFrequencyID, ActualFrequencyID                   string
+	BookedPayoutFrequencyID, ActualPayoutFrequencyID       string
+	BookedResetType, ActualResetType                       string
+	BookedAccrualFrequencyCode, ActualAccrualFrequencyCode string
+	BookedTenorType, ActualTenorType                       string
+	BookedFirstCapDate, ActualFirstCapDate                 string
+	BookedFirstPayoutDate, ActualFirstPayoutDate           string
+}
+
+func normalizeResetType(v string) string {
+	v = strings.ToUpper(strings.TrimSpace(v))
+	if v == "" {
+		return "AT_MATURITY"
+	}
+	return v
+}
+
+// normalizeAccrualFrequencyCode treats blank accrual as "same as payout", then compounding.
+func normalizeAccrualFrequencyCode(code, payoutFreqID, compoundingFreqID string) string {
+	c := strings.TrimSpace(strings.ToUpper(code))
+	if c != "" {
+		return c
+	}
+	if p := strings.TrimSpace(payoutFreqID); p != "" {
+		return p
+	}
+	return strings.TrimSpace(compoundingFreqID)
+}
+
+// canonicalFrequencyIdentity maps frequency id/code/name to a stable master id so
+// IDENTITY variance does not fire when the user picks the same frequency via id vs code.
+func canonicalFrequencyIdentity(ctx context.Context, pool *pgxpool.Pool, raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if pool != nil {
+		var fid string
+		err := pool.QueryRow(ctx, `
+			SELECT COALESCE(frequency_id::text,'')
+			FROM investment.fd_compounding_frequency_master
+			WHERE (frequency_id::text = $1 OR frequency_code = $1 OR frequency_name = $1)
+			  AND COALESCE(is_deleted,false) = false
+			LIMIT 1`, raw).Scan(&fid)
+		if err == nil && fid != "" {
+			return fid
+		}
+	}
+	return strings.ToUpper(raw)
+}
+
+func normalizedPayoutFrequency(ctx context.Context, pool *pgxpool.Pool, bookedPayout, bookedCompound, actualPayout, actualCompound string) (booked, actual string) {
+	b := strings.TrimSpace(bookedPayout)
+	if b == "" {
+		b = strings.TrimSpace(bookedCompound)
+	}
+	a := strings.TrimSpace(actualPayout)
+	if a == "" {
+		a = strings.TrimSpace(actualCompound)
+	}
+	return canonicalFrequencyIdentity(ctx, pool, b), canonicalFrequencyIdentity(ctx, pool, a)
+}
+
+type accrualFrequencyInput struct {
+	BookedCode     string
+	ActualCode     string
+	BookedPayout   string
+	ActualPayout   string
+	BookedCompound string
+	ActualCompound string
+}
+
+func normalizedAccrualFrequency(ctx context.Context, pool *pgxpool.Pool, in accrualFrequencyInput) (booked, actual string) {
+	bookedNorm := normalizeAccrualFrequencyCode(in.BookedCode, in.BookedPayout, in.BookedCompound)
+	actualNorm := normalizeAccrualFrequencyCode(in.ActualCode, in.ActualPayout, in.ActualCompound)
+	return canonicalFrequencyIdentity(ctx, pool, bookedNorm), canonicalFrequencyIdentity(ctx, pool, actualNorm)
+}
+
+func normalizeTenorTypeForVariance(booked, actual string) (string, string) {
+	b := strings.ToUpper(strings.TrimSpace(booked))
+	a := strings.ToUpper(strings.TrimSpace(actual))
+	if b == "" {
+		if a != "" {
+			b = a
+		} else {
+			b = "DAYS"
+		}
+	}
+	if a == "" {
+		a = b
+	}
+	return b, a
+}
+
+// prepareFDConfirmationVarianceInput canonicalizes frequency identity fields before compare.
+func prepareFDConfirmationVarianceInput(ctx context.Context, pool *pgxpool.Pool, in fdConfirmationVarianceInput) fdConfirmationVarianceInput {
+	in.BookedTenorType, in.ActualTenorType = normalizeTenorTypeForVariance(in.BookedTenorType, in.ActualTenorType)
+	in.BookedFrequencyID = canonicalFrequencyIdentity(ctx, pool, in.BookedFrequencyID)
+	in.ActualFrequencyID = canonicalFrequencyIdentity(ctx, pool, in.ActualFrequencyID)
+	in.BookedPayoutFrequencyID = canonicalFrequencyIdentity(ctx, pool, in.BookedPayoutFrequencyID)
+	in.ActualPayoutFrequencyID = canonicalFrequencyIdentity(ctx, pool, in.ActualPayoutFrequencyID)
+	in.BookedAccrualFrequencyCode = canonicalFrequencyIdentity(ctx, pool, in.BookedAccrualFrequencyCode)
+	in.ActualAccrualFrequencyCode = canonicalFrequencyIdentity(ctx, pool, in.ActualAccrualFrequencyCode)
+	return in
+}
+
+func resetTypeDisplayLabel(v string) string {
+	switch normalizeResetType(v) {
+	case "AT_EACH_PAYOUT":
+		return "At Each Payout"
+	default:
+		return "At Maturity (default)"
+	}
 }
 
 // lookupFrequencyLabel resolves a compounding-frequency id to a human readable
@@ -581,14 +906,19 @@ func lookupFrequencyLabel(ctx context.Context, pool *pgxpool.Pool, id string) st
 	}
 }
 
-// frequencyLabelFor enriches a variance field with its display label. Only
-// returns a non-empty value for the frequency_id field (other identity fields
-// are already self-describing).
-func frequencyLabelFor(ctx context.Context, pool *pgxpool.Pool, fieldName, value string) string {
-	if fieldName != "frequency_id" {
+// identityLabelFor enriches identity variance fields with human-readable labels.
+func identityLabelFor(ctx context.Context, pool *pgxpool.Pool, fieldName, value string) string {
+	switch fieldName {
+	case "frequency_id", "payout_frequency_id", "accrual_frequency_code":
+		if lbl := lookupFrequencyLabel(ctx, pool, value); lbl != "" {
+			return lbl
+		}
+		return strings.TrimSpace(value)
+	case "reset_type":
+		return resetTypeDisplayLabel(value)
+	default:
 		return ""
 	}
-	return lookupFrequencyLabel(ctx, pool, value)
 }
 
 // serializeVarianceItem turns a varianceengine.VarianceItem into the JSON map
@@ -609,10 +939,10 @@ func serializeVarianceItem(ctx context.Context, pool *pgxpool.Pool, v varianceen
 		"has_variance":   v.HasVariance,
 		"system_comment": v.SystemComment,
 	}
-	if expLabel := frequencyLabelFor(ctx, pool, v.FieldName, v.ExpectedValue); expLabel != "" {
+	if expLabel := identityLabelFor(ctx, pool, v.FieldName, v.ExpectedValue); expLabel != "" {
 		out["expected_value_label"] = expLabel
 	}
-	if actLabel := frequencyLabelFor(ctx, pool, v.FieldName, v.ActualValue); actLabel != "" {
+	if actLabel := identityLabelFor(ctx, pool, v.FieldName, v.ActualValue); actLabel != "" {
 		out["actual_value_label"] = actLabel
 	}
 	return out
@@ -629,6 +959,9 @@ func buildFDConfirmationVarianceRules(in fdConfirmationVarianceInput) []variance
 		{FieldName: "maturity_date", VarianceType: varianceengine.TypeDate, ExpectedValue: in.BookedMaturityDate, ActualValue: in.ActualMaturityDate, Priority: varianceengine.PriorityHigh},
 		{FieldName: "interest_type_code", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedInterestType, ActualValue: in.ActualInterestType, Priority: varianceengine.PriorityHigh},
 		{FieldName: "frequency_id", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedFrequencyID, ActualValue: in.ActualFrequencyID, Priority: varianceengine.PriorityMedium},
+		{FieldName: "payout_frequency_id", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedPayoutFrequencyID, ActualValue: in.ActualPayoutFrequencyID, Priority: varianceengine.PriorityMedium},
+		{FieldName: "reset_type", VarianceType: varianceengine.TypeIdentity, ExpectedValue: normalizeResetType(in.BookedResetType), ActualValue: normalizeResetType(in.ActualResetType), Priority: varianceengine.PriorityMedium},
+		{FieldName: "accrual_frequency_code", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedAccrualFrequencyCode, ActualValue: in.ActualAccrualFrequencyCode, Priority: varianceengine.PriorityMedium},
 		{FieldName: "tenor_type", VarianceType: varianceengine.TypeIdentity, ExpectedValue: in.BookedTenorType, ActualValue: in.ActualTenorType, Priority: varianceengine.PriorityLow},
 		{FieldName: "first_capitalization_date", VarianceType: varianceengine.TypeDate, ExpectedValue: in.BookedFirstCapDate, ActualValue: in.ActualFirstCapDate, Priority: varianceengine.PriorityMedium},
 		{FieldName: "first_payout_date", VarianceType: varianceengine.TypeDate, ExpectedValue: in.BookedFirstPayoutDate, ActualValue: in.ActualFirstPayoutDate, Priority: varianceengine.PriorityMedium},
@@ -643,6 +976,7 @@ func runFDConfirmationVarianceCompare(ctx context.Context, pool *pgxpool.Pool, i
 	if in.RunID == "" {
 		in.RunID = varianceengine.NewRunID()
 	}
+	in = prepareFDConfirmationVarianceInput(ctx, pool, in)
 	items := varianceengine.Compare("FD_CONFIRMATION", in.BookingID, in.EntityID, in.RunID, buildFDConfirmationVarianceRules(in))
 	hasVariance := false
 	for _, v := range items {
@@ -694,7 +1028,7 @@ func varianceTypeForField(field string) string {
 		return varianceengine.TypeDays
 	case "value_date", "maturity_date", "first_capitalization_date", "first_payout_date":
 		return varianceengine.TypeDate
-	case "interest_type_code", "frequency_id", "tenor_type":
+	case "interest_type_code", "frequency_id", "payout_frequency_id", "accrual_frequency_code", "reset_type", "tenor_type":
 		return varianceengine.TypeIdentity
 	default:
 		return varianceengine.TypeOther
@@ -762,42 +1096,42 @@ func backfillOpenVarianceLogFromDetails(ctx context.Context, pool *pgxpool.Pool,
 func buildEditConfirmationFieldMap(confCols map[string]bool) map[string]string {
 	// clientKey → dbColumn
 	candidates := map[string]string{
-		"actual_principal":              "actual_principal",
-		"confirmed_principal_amount":    "actual_principal",
-		"confirmed_rate":                "confirmed_rate",
-		"confirmed_interest_rate":       "confirmed_rate",
-		"actual_start_date":             "actual_start_date",
-		"confirmed_value_date":          "actual_start_date",
-		"actual_maturity_date":          "actual_maturity_date",
-		"confirmed_maturity_date":       "actual_maturity_date",
-		"bank_fd_ref_no":                "bank_fd_ref_no",
-		"bank_fd_reference":             "bank_fd_ref_no",
-		"confirmation_received_date":    "confirmation_received_date",
-		"receipt_date":                  "confirmation_received_date",
-		"confirmed_interest_type_code":  "confirmed_interest_type_code",
-		"confirmed_interest_type":       "confirmed_interest_type_code",
-		"confirmed_frequency_id":        "confirmed_frequency_id",
-		"tenor_type":                    "tenor_type",
-		"confirmed_tenor_type":          "tenor_type",
-		"tenor_days":                    "tenor_days",
-		"confirmed_tenor_days":        "tenor_days",
-		"tenor_months":                  "tenor_months",
-		"confirmed_tenor_months":        "tenor_months",
-		"tenor_years":                   "tenor_years",
-		"confirmed_tenor_years":         "tenor_years",
-		"payout_dates":                  "payout_dates",
-		"compounding_dates":             "compounding_dates",
-		"penalty_id":                    "penalty_id",
-		"first_payout_date":             "first_payout_date",
-		"first_capitalization_date":     "first_capitalization_date",
-		"accrual_frequency_code":        "accrual_frequency_code",
-		"reset_type":                    "reset_type",
-		"payout_frequency_id":           "payout_frequency_id",
-		"bank_reference_number":         "bank_reference_number",
-		"premature_closure_terms":       "premature_closure_terms",
-		"confirmation_notes":            "confirmation_notes",
-		"notes":                         "confirmation_notes",
-		"confirmation_mode":             "confirmation_mode",
+		"actual_principal":             "actual_principal",
+		"confirmed_principal_amount":   "actual_principal",
+		"confirmed_rate":               "confirmed_rate",
+		"confirmed_interest_rate":      "confirmed_rate",
+		"actual_start_date":            "actual_start_date",
+		"confirmed_value_date":         "actual_start_date",
+		"actual_maturity_date":         "actual_maturity_date",
+		"confirmed_maturity_date":      "actual_maturity_date",
+		"bank_fd_ref_no":               "bank_fd_ref_no",
+		"bank_fd_reference":            "bank_fd_ref_no",
+		"confirmation_received_date":   "confirmation_received_date",
+		"receipt_date":                 "confirmation_received_date",
+		"confirmed_interest_type_code": "confirmed_interest_type_code",
+		"confirmed_interest_type":      "confirmed_interest_type_code",
+		"confirmed_frequency_id":       "confirmed_frequency_id",
+		"tenor_type":                   "tenor_type",
+		"confirmed_tenor_type":         "tenor_type",
+		"tenor_days":                   "tenor_days",
+		"confirmed_tenor_days":         "tenor_days",
+		"tenor_months":                 "tenor_months",
+		"confirmed_tenor_months":       "tenor_months",
+		"tenor_years":                  "tenor_years",
+		"confirmed_tenor_years":        "tenor_years",
+		"payout_dates":                 "payout_dates",
+		"compounding_dates":            "compounding_dates",
+		"penalty_id":                   "penalty_id",
+		"first_payout_date":            "first_payout_date",
+		"first_capitalization_date":    "first_capitalization_date",
+		"accrual_frequency_code":       "accrual_frequency_code",
+		"reset_type":                   "reset_type",
+		"payout_frequency_id":          "payout_frequency_id",
+		"bank_reference_number":        "bank_reference_number",
+		"premature_closure_terms":      "premature_closure_terms",
+		"confirmation_notes":           "confirmation_notes",
+		"notes":                        "confirmation_notes",
+		"confirmation_mode":            "confirmation_mode",
 	}
 	out := make(map[string]string, len(candidates))
 	for clientKey, dbCol := range candidates {

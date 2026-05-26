@@ -101,7 +101,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_booking_request b
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE b.is_deleted=false
-				  AND b.booking_status IN ('DRAFT','APPROVAL_PENDING')
+				  AND b.booking_status = 'SENT_TO_BANK'
 				  AND ($1::text='' OR b.entity_id=$1)
 				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')
 				ORDER BY b.created_at ASC
@@ -217,7 +217,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 3. unmatched interest receipts ─────────────────────────────────────
 		run("unmatched_receipts", func(ctx context.Context) (interface{}, error) {
-			// fd_interest_receipt where fd_id is NULL or matching fd_master row is missing
+			// fd_interest_receipt rows that also feed top_mismatch_causes (interest_receipt).
 			rows, err := pool.Query(ctx, `
 				SELECT
 				  ir.receipt_id,
@@ -226,10 +226,14 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(ir.currency,'INR') AS currency,
 				  COALESCE(TO_CHAR(ir.receipt_date,'YYYY-MM-DD'),'') AS transaction_date,
 				  COALESCE(ir.narration,'') AS description,
-				  COALESCE(ir.fd_id,'') AS suspected_fd_ref
+				  COALESCE(ir.fd_id,'') AS suspected_fd_ref,
+				  COALESCE(ir.reconcile_status,'') AS reconcile_status,
+				  COALESCE(b.entity_name, m.entity_name, ir.entity_id,'') AS entity
 				FROM investment.fd_interest_receipt ir
+				LEFT JOIN investment.fd_master m ON m.fd_id = ir.fd_id
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE ir.is_deleted=false
-				  AND (ir.fd_id IS NULL OR ir.reconcile_status IN ('UNMATCHED','PENDING',''))
+				  AND (ir.fd_id IS NULL OR ir.fd_id='' OR ir.reconcile_status IN ('UNMATCHED','PENDING',''))
 				  AND ($1::text='' OR ir.entity_id=$1)
 				ORDER BY ir.receipt_date DESC
 				LIMIT 100`, entityFilter)
@@ -246,6 +250,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				TransactionDate string  `json:"transaction_date"`
 				Description     string  `json:"description"`
 				SuspectedFDRef  string  `json:"suspected_fd_ref"`
+				ReconcileStatus string  `json:"reconcile_status"`
+				Entity          string  `json:"entity"`
 			}
 			out := []stmtRow{}
 			totalAmt := 0.0
@@ -253,7 +259,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				var sr stmtRow
 				if err2 := rows.Scan(&sr.ReceiptID, &sr.Bank, &sr.CreditAmount,
 					&sr.Currency, &sr.TransactionDate, &sr.Description,
-					&sr.SuspectedFDRef); err2 == nil {
+					&sr.SuspectedFDRef, &sr.ReconcileStatus, &sr.Entity); err2 == nil {
 					sr.CreditAmount = fdRound(sr.CreditAmount, 2)
 					totalAmt += sr.CreditAmount
 					out = append(out, sr)
@@ -332,8 +338,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			accRows, err := pool.Query(ctx, `
 				SELECT
 				  COALESCE(ae.exception_id,'')                    AS exception_id,
-				  COALESCE(ae.fd_id,'')                           AS fd_ref,
-				  COALESCE(m.bank_name, m.bank_id,'')             AS bank,
+				  COALESCE(NULLIF(m.bank_fd_ref_no,''), m.fd_id, b.booking_id, ae.fd_id,'') AS fd_ref,
+				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
 				  COALESCE(b.entity_name, m.entity_name,'')       AS entity,
 				  COALESCE(ae.variance_amount,0)                  AS variance_amount,
 				  COALESCE(ae.variance_pct,0)                     AS variance_pct,
@@ -376,8 +382,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			varRows, vErr := pool.Query(ctx, `
 				SELECT
 				  COALESCE(vl.variance_id,'')                                  AS variance_id,
-				  COALESCE(vl.record_id,'')                                    AS fd_ref,
-				  COALESCE(m.bank_name, m.bank_id,'')                          AS bank,
+				  COALESCE(NULLIF(m.bank_fd_ref_no,''), m.fd_id, b.booking_id, vl.record_id,'') AS fd_ref,
+				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
 				  COALESCE(b.entity_name, m.entity_name, vl.entity_id,'')      AS entity,
 				  COALESCE(ABS(vl.variance_delta),0)                           AS variance_amount,
 				  COALESCE(vl.variance_delta,0)                                AS variance_delta,
@@ -1004,12 +1010,13 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			var bookingAmt float64
 			_ = pool.QueryRow(ctx, `
 				SELECT COUNT(*),
-				       COUNT(*) FILTER (WHERE booking_status IN ('DRAFT','APPROVAL_PENDING')),
+				       COUNT(*) FILTER (WHERE `+sqlBookingAwaitingApproval+`),
 				       COALESCE(SUM(principal_amount),0)
-				FROM investment.fd_booking_request
-				WHERE is_deleted=false
-				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR entity_id=$1)`,
+				FROM investment.fd_booking_request b
+				WHERE b.is_deleted=false
+				  AND `+sqlExcludeTerminalFdOnBooking+`
+				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR b.entity_id=$1)`,
 				entityFilter, startDateStr, endDateStr).Scan(&bookingTotal, &bookingStuck, &bookingAmt)
 
 			bookingItems := []stageItem{}
@@ -1023,6 +1030,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_booking_request b
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE b.is_deleted=false
+				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')
 				  AND ($1::text='' OR b.entity_id=$1)
 				ORDER BY b.created_at DESC LIMIT 50`, entityFilter, startDateStr, endDateStr); err == nil {
@@ -1036,34 +1044,38 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// Stage 2 — Confirmation captured (fd_master row exists for booking)
+			// Stage 2 — Confirmation captured (fd_confirmation row exists for booking)
 			var confTotal int64
 			var confAmt float64
 			_ = pool.QueryRow(ctx, `
-				SELECT COUNT(*), COALESCE(SUM(m.principal_amount),0)
-				FROM investment.fd_master m
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE m.is_deleted=false
-				  AND COALESCE(b.created_at, m.created_at) >= $2::date
-				  AND COALESCE(b.created_at, m.created_at) <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
+				SELECT COUNT(*), COALESCE(SUM(c.actual_principal),0)
+				FROM investment.fd_confirmation c
+				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id AND b.is_deleted=false
+				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
+				WHERE COALESCE(c.is_deleted,false)=false
+				  AND `+sqlExcludeTerminalFdOnBooking+`
+				  AND COALESCE(b.created_at, c.created_at) >= $2::date
+				  AND COALESCE(b.created_at, c.created_at) <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR COALESCE(b.entity_id,m.entity_id)=$1)`,
 				entityFilter, startDateStr, endDateStr).Scan(&confTotal, &confAmt)
 
 			confItems := []stageItem{}
 			if rows, err := pool.Query(ctx, `
-				SELECT m.fd_id,
-				       COALESCE(m.bank_name, m.bank_id,'') AS bank,
+				SELECT COALESCE(c.confirmation_id, c.booking_id),
+				       COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
 				       COALESCE(b.entity_name, m.entity_name,'') AS entity,
-				       COALESCE(m.principal_amount,0) AS principal,
-				       COALESCE(m.fd_status,'') AS status,
-				       COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD'),'') AS d
-				FROM investment.fd_master m
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE m.is_deleted=false
-				  AND COALESCE(b.created_at, m.created_at) >= $2::date
-				  AND COALESCE(b.created_at, m.created_at) <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				ORDER BY COALESCE(b.created_at, m.created_at) DESC LIMIT 50`,
+				       COALESCE(c.actual_principal,0) AS principal,
+				       COALESCE(c.confirmation_status,'') AS status,
+				       COALESCE(TO_CHAR(c.confirmation_received_date,'YYYY-MM-DD'), TO_CHAR(c.created_at,'YYYY-MM-DD'),'') AS d
+				FROM investment.fd_confirmation c
+				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id AND b.is_deleted=false
+				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
+				WHERE COALESCE(c.is_deleted,false)=false
+				  AND `+sqlExcludeTerminalFdOnBooking+`
+				  AND COALESCE(b.created_at, c.created_at) >= $2::date
+				  AND COALESCE(b.created_at, c.created_at) <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR COALESCE(b.entity_id,m.entity_id)=$1)
+				ORDER BY COALESCE(b.created_at, c.created_at) DESC LIMIT 50`,
 				entityFilter, startDateStr, endDateStr); err == nil {
 				defer rows.Close()
 				for rows.Next() {
@@ -1082,11 +1094,12 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				SELECT COUNT(*),
 				       COUNT(*) FILTER (WHERE COALESCE(cashflow_generated,false)=false),
 				       COALESCE(SUM(principal_amount),0)
-				FROM investment.fd_master
-				WHERE is_deleted=false
-				  AND fd_status='ACTIVE'
-				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR entity_id=$1)`,
+				FROM investment.fd_master m
+				WHERE m.is_deleted=false
+				  AND m.fd_status='ACTIVE'
+				  AND `+sqlExcludeTerminalFdOnMaster+`
+				  AND m.created_at >= $2::date AND m.created_at <= ($3::date + INTERVAL '1 day')
+				  AND ($1::text='' OR m.entity_id=$1)`,
 				entityFilter, startDateStr, endDateStr).Scan(&activeTotal, &activeStuck, &activeAmt)
 
 			activeItems := []stageItem{}
@@ -1096,11 +1109,12 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				       COALESCE(m.entity_name, b.entity_name,'') AS entity,
 				       COALESCE(m.principal_amount,0) AS principal,
 				       COALESCE(m.fd_status,'') AS status,
-				       COALESCE(TO_CHAR(m.activation_date, 'YYYY-MM-DD'), TO_CHAR(m.created_at,'YYYY-MM-DD'),'') AS d
+				       COALESCE(TO_CHAR(m.activated_at, 'YYYY-MM-DD'), TO_CHAR(m.created_at,'YYYY-MM-DD'),'') AS d
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false
 				  AND m.fd_status='ACTIVE'
+				  AND `+sqlExcludeTerminalFdOnMaster+`
 				  AND m.created_at >= $2::date AND m.created_at <= ($3::date + INTERVAL '1 day')
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				ORDER BY m.created_at DESC LIMIT 50`,
@@ -1122,8 +1136,9 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				SELECT COUNT(DISTINCT al.fd_id),
 				       COALESCE(SUM(DISTINCT m.principal_amount),0)
 				FROM investment.fd_accrual_ledger al
-				LEFT JOIN investment.fd_master m ON m.fd_id = al.fd_id
+				INNER JOIN investment.fd_master m ON m.fd_id = al.fd_id AND m.is_deleted=false
 				WHERE COALESCE(al.is_deleted,false)=false
+				  AND `+sqlExcludeTerminalFdOnMaster+`
 				  AND al.accrual_period_end >= $2::date
 				  AND ($1::text='' OR m.entity_id=$1)`,
 				entityFilter, startDateStr).Scan(&accrualTotal, &accrualAmt)
@@ -1199,19 +1214,22 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			_ = pool.QueryRow(ctx, `
 				SELECT COUNT(*) FROM investment.fd_booking_request b
 				WHERE b.is_deleted=false
-				  AND b.booking_status IN ('DRAFT','APPROVAL_PENDING')
+				  AND `+sqlBookingAwaitingApproval+`
+				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND ($1::text='' OR b.entity_id=$1)
 				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')`,
 				entityFilter, startDateStr, endDateStr).Scan(&bk)
 
 			_ = pool.QueryRow(ctx, `
 				SELECT COUNT(*),
-				       COUNT(*) FILTER (WHERE EXTRACT(DAY FROM NOW()-b.created_at) >= 3)
-				FROM investment.fd_booking_request b
-				WHERE b.is_deleted=false
-				  AND b.booking_status IN ('SENT_TO_BANK','APPROVED')
+				       COUNT(*) FILTER (WHERE EXTRACT(DAY FROM NOW()-c.created_at) >= 3)
+				FROM investment.fd_confirmation c
+				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id AND b.is_deleted=false
+				WHERE COALESCE(c.is_deleted,false)=false
+				  AND `+sqlConfirmationAwaitingApproval+`
+				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND ($1::text='' OR b.entity_id=$1)
-				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')`,
+				  AND c.created_at >= $2::date AND c.created_at <= ($3::date + INTERVAL '1 day')`,
 				entityFilter, startDateStr, endDateStr).Scan(&conf, &confOverdue)
 
 			_ = pool.QueryRow(ctx, `

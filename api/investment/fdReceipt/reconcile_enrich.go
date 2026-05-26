@@ -6,18 +6,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type reconcileEnrichOutputs struct {
+	ReceiptStatus     *string
+	ReconcileStatus   *string
+	JournalEntryID    *string
+	TDSStatus         *string
+	TDSJournalEntryID *string
+	Cashflows         *[]CashflowLine
+}
+
 // applyReconcilePostingEnrichment copies live receipt/TDS posting fields onto a result row.
-func applyReconcilePostingEnrichment(ctx context.Context, pool *pgxpool.Pool,
-	receiptID, tdsID, resultType string,
-	receiptStatus, reconcileStatus, journalEntryID, tdsStatus, tdsJournalEntryID *string,
-	cashflows *[]CashflowLine,
-) {
+func applyReconcilePostingEnrichment(ctx context.Context, pool *pgxpool.Pool, receiptID, tdsID, resultType string, out reconcileEnrichOutputs) {
 	snap := loadReconcilePostingSnapshot(ctx, pool, receiptID, tdsID)
-	if receiptStatus != nil {
-		*receiptStatus = snap.ReceiptStatus
+	if out.ReceiptStatus != nil {
+		*out.ReceiptStatus = snap.ReceiptStatus
 	}
-	if reconcileStatus != nil {
-		*reconcileStatus = snap.ReconcileStatus
+	if out.ReconcileStatus != nil {
+		*out.ReconcileStatus = snap.ReconcileStatus
 		if resultType == "TDS" && tdsID != "" {
 			var tdsRecon string
 			_ = pool.QueryRow(ctx, `
@@ -27,21 +32,21 @@ func applyReconcilePostingEnrichment(ctx context.Context, pool *pgxpool.Pool,
 				tdsID,
 			).Scan(&tdsRecon)
 			if tdsRecon != "" {
-				*reconcileStatus = tdsRecon
+				*out.ReconcileStatus = tdsRecon
 			}
 		}
 	}
-	if journalEntryID != nil {
-		*journalEntryID = snap.JournalEntryID
+	if out.JournalEntryID != nil {
+		*out.JournalEntryID = snap.JournalEntryID
 	}
-	if tdsStatus != nil {
-		*tdsStatus = snap.TDSStatus
+	if out.TDSStatus != nil {
+		*out.TDSStatus = snap.TDSStatus
 	}
-	if tdsJournalEntryID != nil {
-		*tdsJournalEntryID = snap.TDSJournalEntryID
+	if out.TDSJournalEntryID != nil {
+		*out.TDSJournalEntryID = snap.TDSJournalEntryID
 	}
-	if cashflows != nil && snap.ReceiptStatus == "POSTED" {
-		refreshCashflowPostingStatus(*cashflows)
+	if out.Cashflows != nil && snap.ReceiptStatus == "POSTED" {
+		refreshCashflowPostingStatus(*out.Cashflows)
 	}
 }
 

@@ -11,7 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 type bankBalanceAuditRequest struct {
 	UserID    string `json:"user_id"`
@@ -99,7 +100,7 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY requested_at ASC, download_audit_id ASC
 		`, req.BalanceID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to read bank balance download audit history")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadBankBalanceAuditHistory)
 			return
 		}
 		defer downloadRows.Close()
@@ -109,7 +110,7 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var requestedAt sql.NullTime
 			var fileName, uploadKey sql.NullString
 			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &fileName, &uploadKey); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to read bank balance download audit history")
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadBankBalanceAuditHistory)
 				return
 			}
 
@@ -128,7 +129,7 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if err := downloadRows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to read bank balance download audit history")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadBankBalanceAuditHistory)
 			return
 		}
 
