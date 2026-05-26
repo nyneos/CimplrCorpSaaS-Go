@@ -24,6 +24,7 @@ import (
 	statementstatus "CimplrCorpSaas/api/dash/statementstatus"
 	ticker "CimplrCorpSaas/api/dash/ticker"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/internal/dbutil"
 	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
@@ -31,6 +32,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -43,14 +45,16 @@ func StartDashService(db *sql.DB, port string) {
 	host := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	sslMode := os.Getenv("DB_SSLMODE")
-	if sslMode == "" {
-		sslMode = "disable"
-	}
+	sslMode := dbutil.EffectiveSSLMode(host)
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
+	}
+	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := pgxPool.Ping(pingCtx); err != nil {
+		log.Fatalf("Dash: failed to verify pgxpool DB connectivity at startup: %v", err)
 	}
 	// Statement Status Dashboard
 	mux.Handle("/dash/statement-status", middlewares.PreValidationMiddleware(pgxPool)(statementstatus.GetStatementStatusHandler(pgxPool)))

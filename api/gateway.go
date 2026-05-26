@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/internal/dashboard"
 	dinojobs "CimplrCorpSaas/internal/jobs/dino"
 	"CimplrCorpSaas/internal/logger"
+	"CimplrCorpSaas/internal/observability"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -800,8 +801,9 @@ func StartGateway(port string, pathPrefix string) {
 		log.Printf("Prioitizing env Port %s over yaml port %s (if deployment didn't have that port open)", os.Getenv("PORT"), port)
 		port = os.Getenv("PORT")
 	}
+	mux.Handle("/gateway/metrics", observability.MetricsHandler("gateway"))
 	log.Printf("API Gateway listening on :%s (path prefix: %s)", port, pathPrefix)
-	handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux, pathPrefix))))
+	handler := observability.WrapHTTP("gateway", encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux, pathPrefix)))))
 	// handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux))))
 	cert := os.Getenv("TLS_CERT")
 	key := os.Getenv("TLS_KEY")

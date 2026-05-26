@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/fx/forwards"
 	v91 "CimplrCorpSaas/api/fx/v91"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/internal/dbutil"
 	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
@@ -13,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -32,16 +34,18 @@ func StartFXService(db *sql.DB, port string) {
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
 	if user != "" && pass != "" && host != "" && dbPort != "" && name != "" {
-		sslMode := os.Getenv("DB_SSLMODE")
-		if sslMode == "" {
-			sslMode = "disable"
-		}
+		sslMode := dbutil.EffectiveSSLMode(host)
 		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 
 		// create a shared pgx pool once for the v91 and prevalidation middleware
 		pgxPool, err := pgxpool.New(context.Background(), dsn)
 		if err != nil {
 			log.Fatalf("failed to connect to pgxpool DB: %v", err)
+		}
+		pingCtx, pingCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer pingCancel()
+		if err := pgxPool.Ping(pingCtx); err != nil {
+			log.Fatalf("FX: failed to verify pgxpool DB connectivity at startup: %v", err)
 		}
 
 		// wrapper calls the v91 handler using the shared pool

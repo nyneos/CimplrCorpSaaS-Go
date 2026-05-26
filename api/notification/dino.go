@@ -7,10 +7,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	middlewares "CimplrCorpSaas/api/middlewares"
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	push "CimplrCorpSaas/api/notification/push"
+	"CimplrCorpSaas/internal/dbutil"
 	"CimplrCorpSaas/internal/observability"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,15 +29,17 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 		port := os.Getenv("DB_PORT")
 		name := os.Getenv("DB_NAME")
 		if user != "" && pass != "" && host != "" && port != "" && name != "" {
-			sslMode := os.Getenv("DB_SSLMODE")
-			if sslMode == "" {
-				sslMode = "disable"
-			}
+			sslMode := dbutil.EffectiveSSLMode(host)
 			dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
 			var err error
 			pool, err = pgxpool.New(context.Background(), dsn)
 			if err != nil {
 				log.Fatalf("failed to connect to pgxpool DB: %v", err)
+			}
+			pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := pool.Ping(pingCtx); err != nil {
+				log.Fatalf("Notification: failed to verify pgxpool DB connectivity at startup: %v", err)
 			}
 		}
 	}

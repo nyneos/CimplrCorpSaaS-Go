@@ -117,6 +117,14 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	}
 	log.Printf("[AUTH DEBUG] users row loaded user_id=%s email=%q status_valid=%v status=%q pass_present=%v", dbUserID, dbEmail, dbStatus.Valid, dbStatus.String, dbPassword.Valid && dbPassword.String != "")
 
+	// Reject disabled/non-approved accounts before any password check
+	if dbStatus.Valid && !strings.EqualFold(dbStatus.String, "Approved") &&
+		!strings.EqualFold(dbStatus.String, "pending") {
+		log.Printf("[AUTH DEBUG] login blocked: account status=%q user_id=%s", dbStatus.String, dbUserID)
+		LogSecurityEvent(a.db, dbUserID, "login_failed", "account not active: "+dbStatus.String, clientIP)
+		return nil, false, errors.New("Account is not active")
+	}
+
 	// Account lock check
 	if a.MaxLoginAttempts > 0 {
 		if fa, ok := a.failedAttempts[dbUserID]; ok {

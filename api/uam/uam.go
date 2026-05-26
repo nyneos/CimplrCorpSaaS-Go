@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 	"log"
 	"net/http"
 	"os"
@@ -31,15 +32,16 @@ func StartUAMService(db *sql.DB, port string) {
 		host := os.Getenv("DB_HOST")
 		port := os.Getenv("DB_PORT")
 		name := os.Getenv("DB_NAME")
-		sslMode := os.Getenv("DB_SSLMODE")
-		if sslMode == "" {
-			sslMode = "disable"
-		}
 		sslMode := dbutil.EffectiveSSLMode(host)
 		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
 		pool, err := pgxpool.New(context.Background(), dsn)
 		if err != nil {
 			log.Fatalf("UAM: failed to connect to pgxpool DB: %v", err)
+		}
+		pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := pool.Ping(pingCtx); err != nil {
+			log.Fatalf("UAM: failed to verify pgxpool DB connectivity at startup: %v", err)
 		}
 		return pool
 	}()
