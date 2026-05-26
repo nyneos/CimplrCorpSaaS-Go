@@ -113,19 +113,19 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 	out := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var (
-			exceptionID, reconcileRunID, resultID, fdID, fdRefNo, resultType string
-			receiptID, tdsID, exceptionType, severity                          string
-			caseType, exceptionStatus                                          string
-			proposedResolution, reasonCode, resolutionRemarks, attachment      string
-			raisedBy, raisedAt, auditID, actionType, auditProcessingStatus     string
-			reason, requestedBy, requestedAt, checkerBy, checkerAt             string
+			exceptionID, reconcileRunID, resultID, fdID, fdRefNo, resultType     string
+			receiptID, tdsID, exceptionType, severity                            string
+			caseType, exceptionStatus                                            string
+			proposedResolution, reasonCode, resolutionRemarks, attachment        string
+			raisedBy, raisedAt, auditID, actionType, auditProcessingStatus       string
+			reason, requestedBy, requestedAt, checkerBy, checkerAt               string
 			checkerComment                                                       string
 			oldExceptionStatus, oldProposedResolution, oldReasonCode             string
-			oldResolutionRemarks, oldAttachment, oldCaseType, oldVarianceOutcome   string
+			oldResolutionRemarks, oldAttachment, oldCaseType, oldVarianceOutcome string
 			createdAt, createdBy, editedAt, editedBy                             string
-			varianceOutcome                                                        *string
+			varianceOutcome                                                      *string
 			expectedAmount, receivedAmount, varianceAmount                       float64
-			isActive, isDeleted                                                    bool
+			isActive, isDeleted                                                  bool
 		)
 		if err := rows.Scan(
 			&exceptionID, &reconcileRunID, &resultID, &fdID, &fdRefNo, &resultType,
@@ -157,55 +157,55 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 		isLocked := exceptionStatus == "CLOSE"
 
 		row := map[string]interface{}{
-			"exception_id":          exceptionID,
-			"reconcile_run_id":      reconcileRunID,
-			"result_id":             resultID,
-			"fd_id":                 fdID,
-			"fd_ref_no":             fdRefNo,
-			"result_type":           resultType,
-			"receipt_id":            receiptID,
-			"tds_id":                tdsID,
-			"exception_type":        exceptionType,
-			"severity":              severity,
-			"expected_amount":       expectedAmount,
-			"received_amount":       receivedAmount,
-			"variance_amount":       varianceAmount,
-			"case_type":             caseType,
-			"exception_status":      exceptionStatus,
-			"workflow_status":       exceptionStatus,
-			"variance_outcome":      varianceOutcomeStr,
-			"proposed_resolution":   proposedResolution,
-			"reason_code":           reasonCode,
-			"resolution_remarks":    resolutionRemarks,
-			"attachment":            attachment,
-			"raised_by":             raisedBy,
-			"raised_at":             raisedAt,
-			"is_active":             isActive,
-			"is_deleted":            isDeleted,
-			"processing_status":     processingStatus,
-			"checker_approved":      checkerApproved,
-			"awaiting_close":        awaitingClose,
-			"is_locked":             isLocked,
-			"allowed_actions":       varianceAllowedActions(exceptionStatus, checkerApproved),
-			"created_at":            createdAt,
-			"created_by":            createdBy,
-			"edited_at":             editedAt,
-			"edited_by":             editedBy,
-			"audit_id":              auditID,
-			"action_type":           actionType,
-			"requested_at":          requestedAt,
-			"requested_by":          requestedBy,
-			"checker_by":            checkerBy,
-			"checker_at":            checkerAt,
-			"checker_comment":       checkerComment,
-			"reason":                reason,
+			"exception_id":            exceptionID,
+			"reconcile_run_id":        reconcileRunID,
+			"result_id":               resultID,
+			"fd_id":                   fdID,
+			"fd_ref_no":               fdRefNo,
+			"result_type":             resultType,
+			"receipt_id":              receiptID,
+			"tds_id":                  tdsID,
+			"exception_type":          exceptionType,
+			"severity":                severity,
+			"expected_amount":         expectedAmount,
+			"received_amount":         receivedAmount,
+			"variance_amount":         varianceAmount,
+			"case_type":               caseType,
+			"exception_status":        exceptionStatus,
+			"workflow_status":         exceptionStatus,
+			"variance_outcome":        varianceOutcomeStr,
+			"proposed_resolution":     proposedResolution,
+			"reason_code":             reasonCode,
+			"resolution_remarks":      resolutionRemarks,
+			"attachment":              attachment,
+			"raised_by":               raisedBy,
+			"raised_at":               raisedAt,
+			"is_active":               isActive,
+			"is_deleted":              isDeleted,
+			"processing_status":       processingStatus,
+			"checker_approved":        checkerApproved,
+			"awaiting_close":          awaitingClose,
+			"is_locked":               isLocked,
+			"allowed_actions":         varianceAllowedActions(exceptionStatus, checkerApproved),
+			"created_at":              createdAt,
+			"created_by":              createdBy,
+			"edited_at":               editedAt,
+			"edited_by":               editedBy,
+			"audit_id":                auditID,
+			"action_type":             actionType,
+			"requested_at":            requestedAt,
+			"requested_by":            requestedBy,
+			"checker_by":              checkerBy,
+			"checker_at":              checkerAt,
+			"checker_comment":         checkerComment,
+			"reason":                  reason,
 			"old_exception_status":    oldExceptionStatus,
 			"old_proposed_resolution": oldProposedResolution,
-			"old_reason_code":           oldReasonCode,
-			"old_resolution_remarks":    oldResolutionRemarks,
-			"old_attachment":            oldAttachment,
-			"old_case_type":             oldCaseType,
-			"old_variance_outcome":      oldVarianceOutcome,
+			"old_reason_code":         oldReasonCode,
+			"old_resolution_remarks":  oldResolutionRemarks,
+			"old_attachment":          oldAttachment,
+			"old_case_type":           oldCaseType,
+			"old_variance_outcome":    oldVarianceOutcome,
 		}
 		out = append(out, row)
 	}

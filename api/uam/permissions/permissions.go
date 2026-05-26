@@ -13,7 +13,8 @@ import (
 
 	"github.com/lib/pq"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // ---------------------------------------------------------------------------
 // Helper: send JSON error response

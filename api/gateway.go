@@ -816,12 +816,12 @@ func StartGateway(port string, pathPrefix string) {
 		stat := gatewayPool.Stat()
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":           "healthy",
-			"db":               "connected",
-			"latency":          latency.String(),
-			"total_conns":      stat.TotalConns(),
-			"idle_conns":       stat.IdleConns(),
-			"acquired_conns":   stat.AcquiredConns(),
+			"status":         "healthy",
+			"db":             "connected",
+			"latency":        latency.String(),
+			"total_conns":    stat.TotalConns(),
+			"idle_conns":     stat.IdleConns(),
+			"acquired_conns": stat.AcquiredConns(),
 		})
 	}))
 
@@ -836,7 +836,7 @@ func StartGateway(port string, pathPrefix string) {
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte("404 - Route not found"))
 	}))
-	
+
 	u := os.Getenv("PORT")
 	if port != (u) && u != "" {
 		logger.LogInfo("Prioitizing env Port %s over yaml port %s (if deployment didn't have that port open)", os.Getenv("PORT"), port)

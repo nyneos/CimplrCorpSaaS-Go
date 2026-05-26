@@ -14,7 +14,8 @@ import (
 
 	"github.com/lib/pq"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	logger.LogError("%s", errMsg)

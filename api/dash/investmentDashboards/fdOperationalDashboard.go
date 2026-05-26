@@ -497,24 +497,24 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				// No table or no rows — return placeholder shape the FE expects.
 				return map[string]interface{}{
-					"run_id":                "",
-					"run_type":              "",
-					"run_mode":              "",
-					"status":                "No Run",
-					"entity_id":             "",
-					"entity_name":           "",
-					"financial_period":      "",
-					"run_time":              "",
-					"period_start":          "",
-					"period_end":            "",
-					"fds_in_scope":          0,
-					"fds_calculated":        0,
-					"fds_failed":            0,
-					"records_processed":     0,
-					"errors_detected":       0,
+					"run_id":                 "",
+					"run_type":               "",
+					"run_mode":               "",
+					"status":                 "No Run",
+					"entity_id":              "",
+					"entity_name":            "",
+					"financial_period":       "",
+					"run_time":               "",
+					"period_start":           "",
+					"period_end":             "",
+					"fds_in_scope":           0,
+					"fds_calculated":         0,
+					"fds_failed":             0,
+					"records_processed":      0,
+					"errors_detected":        0,
 					"total_interest_accrued": 0,
-					"total_tds_deducted":    0,
-					"ledger_count":          0,
+					"total_tds_deducted":     0,
+					"ledger_count":           0,
 				}, nil
 			}
 			// Friendly status mapping (UI uses "Completed"/"Pending Approval"/"Failed").
@@ -528,25 +528,25 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				friendlyStatus = "Failed"
 			}
 			return map[string]interface{}{
-				"run_id":                runID,
-				"run_type":              runType,
-				"run_mode":              runMode,
-				"status":                friendlyStatus,
-				"raw_status":            runStatus,
-				"entity_id":             entityID,
-				"entity_name":           entityName,
-				"financial_period":      financialPeriod,
-				"run_time":              runTime,
-				"period_start":          periodStart,
-				"period_end":            periodEnd,
-				"fds_in_scope":          fdsInScope,
-				"fds_calculated":        fdsCalculated,
-				"fds_failed":            fdsFailed,
-				"records_processed":     ledgerCount,
-				"errors_detected":       fdsFailed,
+				"run_id":                 runID,
+				"run_type":               runType,
+				"run_mode":               runMode,
+				"status":                 friendlyStatus,
+				"raw_status":             runStatus,
+				"entity_id":              entityID,
+				"entity_name":            entityName,
+				"financial_period":       financialPeriod,
+				"run_time":               runTime,
+				"period_start":           periodStart,
+				"period_end":             periodEnd,
+				"fds_in_scope":           fdsInScope,
+				"fds_calculated":         fdsCalculated,
+				"fds_failed":             fdsFailed,
+				"records_processed":      ledgerCount,
+				"errors_detected":        fdsFailed,
 				"total_interest_accrued": fdRound(totalInterestAccrued, 2),
-				"total_tds_deducted":    fdRound(totalTDSDeducted, 2),
-				"ledger_count":          ledgerCount,
+				"total_tds_deducted":     fdRound(totalTDSDeducted, 2),
+				"ledger_count":           ledgerCount,
 			}, nil
 		})
 
@@ -878,10 +878,10 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		//   • fd_interest_receipt.reconcile_status (UNMATCHED/PENDING)
 		run("top_mismatch_causes", func(ctx context.Context) (interface{}, error) {
 			type causeRow struct {
-				Cause   string  `json:"cause"`
-				Count   int64   `json:"count"`
-				Impact  float64 `json:"impact"`
-				Source  string  `json:"source"`
+				Cause  string  `json:"cause"`
+				Count  int64   `json:"count"`
+				Impact float64 `json:"impact"`
+				Source string  `json:"source"`
 			}
 			out := []causeRow{}
 

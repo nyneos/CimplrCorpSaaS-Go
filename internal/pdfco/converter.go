@@ -12,7 +12,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 const (
 	baseURL    = "https://api.pdf.co"

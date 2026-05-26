@@ -47,7 +47,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public entry point

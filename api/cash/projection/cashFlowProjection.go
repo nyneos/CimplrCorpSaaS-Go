@@ -15,7 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 func ifaceToBool(v interface{}) bool {
 	switch val := v.(type) {

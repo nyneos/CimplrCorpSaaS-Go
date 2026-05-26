@@ -7,7 +7,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	logger.LogError("%s", errMsg)

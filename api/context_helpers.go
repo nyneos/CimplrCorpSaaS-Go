@@ -6,7 +6,8 @@ import (
 
 	"CimplrCorpSaas/api/auth"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 func RequestedByFromCtx(ctx context.Context, userID string) string {
 	if v := ctx.Value("session"); v != nil {

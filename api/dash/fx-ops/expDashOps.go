@@ -17,7 +17,8 @@ import (
 
 	"github.com/lib/pq"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 var rates = map[string]float64{
 	"USD": 1.0,

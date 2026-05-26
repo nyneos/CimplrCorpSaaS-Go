@@ -43,7 +43,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // StartRolloverReconcileWorker fires once immediately, then every day at 18:00.
 func StartRolloverReconcileWorker(db *pgxpool.Pool) {
@@ -338,5 +339,3 @@ func generateAndSaveCashflows(ctx context.Context, tx pgx.Tx, fdID string, r rol
 	}
 	return nil
 }
-
-

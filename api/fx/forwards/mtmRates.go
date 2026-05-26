@@ -957,7 +957,7 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 			if mtmID == "" || mtmID == "<nil>" {
 				continue
 			}
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: mtmID, ActionType: "DELETE", Status: "PENDING_DELETE_APPROVAL", Reason: req.Reason, RequestedBy: requestedBy, OldValues: oldSnapshots[mtmID], NewValues: rowMap,})
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: mtmID, ActionType: "DELETE", Status: "PENDING_DELETE_APPROVAL", Reason: req.Reason, RequestedBy: requestedBy, OldValues: oldSnapshots[mtmID], NewValues: rowMap})
 		}
 		resultRows.Close()
 

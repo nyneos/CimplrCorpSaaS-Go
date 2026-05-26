@@ -9,7 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // Global settings cache
 var (
@@ -25,7 +26,7 @@ type SettingsCache struct {
 	RoundingMode      string
 }
 
-// LoadSettings fetches settings from the single-row accounting_setting table  
+// LoadSettings fetches settings from the single-row accounting_setting table
 func LoadSettings(ctx context.Context, pool *pgxpool.Pool) (*SettingsCache, error) {
 	query := `
 		SELECT units_precision, nav_precision, currency_precision, rounding_mode
@@ -56,7 +57,7 @@ func LoadSettings(ctx context.Context, pool *pgxpool.Pool) (*SettingsCache, erro
 func GetCachedSettings() *SettingsCache {
 	settingsMux.RLock()
 	defer settingsMux.RUnlock()
-	
+
 	if globalSettings == nil {
 		// Return default values if not loaded
 		return &SettingsCache{

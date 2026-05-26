@@ -16,7 +16,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // V2 API handlers for new schema with base_currency_code, maturity_date, bank info
 // PERFORMANCE OPTIMIZED for bulk operations (10K-100K records)

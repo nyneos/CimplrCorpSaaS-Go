@@ -107,9 +107,9 @@ type SysInboxItem struct {
 	SenderName    string     `json:"sender_name"`
 	SenderEmail   string     `json:"sender_email"`
 	// ── System-only extras ────────────────────────────────────────────────
-	Level    SysNotifLevel `json:"level"`    // "error" | "warn" | "info"
-	Source   string        `json:"source"`   // "notification_pipeline"
-	Route    string        `json:"route"`    // originating HTTP route
+	Level    SysNotifLevel `json:"level"`     // "error" | "warn" | "info"
+	Source   string        `json:"source"`    // "notification_pipeline"
+	Route    string        `json:"route"`     // originating HTTP route
 	IsSystem bool          `json:"is_system"` // always true
 }
 
@@ -203,9 +203,9 @@ func (us *userNotifStore) push(item *SysInboxItem) {
 //  1. Stores it in the in-memory ring buffer for every active session user
 //     (so they see it when they next load the inbox or on reconnect).
 //  2. Immediately broadcasts two SSE messages to every active session:
-//       • "in_app_item"        — the full item payload (live inbox append)
-//       • "notification_count" — badge refresh (uses the same SSE type as
-//                                DB-driven pushCountSSE; no frontend change needed)
+//     • "in_app_item"        — the full item payload (live inbox append)
+//     • "notification_count" — badge refresh (uses the same SSE type as
+//     DB-driven pushCountSSE; no frontend change needed)
 //
 // The actor (who caused the pipeline action) is set as sender so recipients
 // can see who triggered it.

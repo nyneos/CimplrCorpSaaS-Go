@@ -66,8 +66,8 @@ type autoMaturityOutcome string
 
 const (
 	autoMaturityOutcomeSuccess autoMaturityOutcome = "SUCCESS"
-	autoMaturityOutcomeSkipped  autoMaturityOutcome = "SKIPPED"
-	autoMaturityOutcomeFailed   autoMaturityOutcome = "FAILED"
+	autoMaturityOutcomeSkipped autoMaturityOutcome = "SKIPPED"
+	autoMaturityOutcomeFailed  autoMaturityOutcome = "FAILED"
 )
 
 // RunCimplrAutoMaturityDue creates and finalizes payout/rollover confirms for approved

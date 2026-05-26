@@ -11,7 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // DBExecutor is an interface that both pgx.Tx and pgxpool.Pool implement
 type DBExecutor interface {

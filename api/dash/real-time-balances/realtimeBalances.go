@@ -1,9 +1,9 @@
 package realtimebalances
 
 import (
-	"bytes"
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"

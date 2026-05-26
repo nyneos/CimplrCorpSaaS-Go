@@ -13,7 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux := http.NewServeMux()

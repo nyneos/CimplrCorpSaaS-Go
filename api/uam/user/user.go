@@ -951,10 +951,10 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 				valPtrs[i] = &vals[i]
 			}
 			rows.Scan(valPtrs...)
-					userMap := map[string]interface{}{}
-					for i, col := range cols {
-						userMap[col] = decodeSQLValue(vals[i])
-					}
+			userMap := map[string]interface{}{}
+			for i, col := range cols {
+				userMap[col] = decodeSQLValue(vals[i])
+			}
 			updated = append(updated, userMap)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
