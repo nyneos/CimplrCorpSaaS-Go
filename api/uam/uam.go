@@ -33,9 +33,13 @@ func StartUAMService(db *sql.DB, port string) {
 		pool, err := pgxpool.New(context.Background(), dsn)
 		if err != nil {
 			logger.LogError("UAM: failed to connect to pgxpool DB: %v", err)
+			return nil
 		}
 		return pool
 	}()
+	if pgxPool == nil {
+		return
+	}
 	defer pgxPool.Close()
 	mux.HandleFunc("/uam/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("UAM Service is active"))

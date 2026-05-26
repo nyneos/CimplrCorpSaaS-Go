@@ -40,7 +40,9 @@ func StartFXService(db *sql.DB, port string) {
 		pgxPool, err := pgxpool.New(context.Background(), dsn)
 		if err != nil {
 			logger.LogError("failed to connect to pgxpool DB: %v", err)
+			return
 		}
+		defer pgxPool.Close()
 
 		// wrapper calls the v91 handler using the shared pool
 		v91Wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

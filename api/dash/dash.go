@@ -50,7 +50,9 @@ func StartDashService(db *sql.DB, port string) {
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		logger.LogError("failed to connect to pgxpool DB: %v", err)
+		return
 	}
+	defer pgxPool.Close()
 	investmentDashHandler := func(h http.HandlerFunc) http.Handler {
 		return middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.CacheDashboardHandler(h))
 	}

@@ -31,6 +31,7 @@ func StartMasterService(db *sql.DB, port string) {
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		logger.LogError("failed to connect to pgxpool DB: %v", err)
+		return
 	}
 	// ensure pool is closed when service exits
 	defer pgxPool.Close()
