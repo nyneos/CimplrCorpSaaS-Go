@@ -2,7 +2,6 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api/cash/additionalfiles"
-	"CimplrCorpSaas/api/constants"
 	"bytes"
 	"context"
 	"fmt"
@@ -102,7 +101,7 @@ func buildMasterFilesConfig(moduleKey, parentField, parentTable, parentCol, file
 			return deleteMasterAdditionalFile(ctx, pool, masterDeleteFileParams{ParentID: parentID, FileID: fileID, DeletedBy: deletedBy, DeletedAt: deletedAt, ParentCol: parentCol, FilesTable: filesTable})
 		},
 		SoftDeleteTx: func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
-			return deleteMasterAdditionalFile(ctx, tx, parentID, fileID, deletedBy, deletedAt, parentCol, filesTable)
+			return deleteMasterAdditionalFile(ctx, tx, masterDeleteFileParams{ParentID: parentID, FileID: fileID, DeletedBy: deletedBy, DeletedAt: deletedAt, ParentCol: parentCol, FilesTable: filesTable})
 		},
 		RecordMainUploadAudit: func(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 			return additionalfiles.InsertMainUploadAudit(ctx, tx, auditTable, parentCol, actionCol, parentID, payload)
