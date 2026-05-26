@@ -377,7 +377,7 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		committed := false
@@ -606,7 +606,7 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 		committed = true
@@ -1012,7 +1012,7 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		committed := false
@@ -1137,7 +1137,7 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		committed := false
@@ -1203,7 +1203,7 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		committed := false
@@ -1233,7 +1233,7 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 		committed = true

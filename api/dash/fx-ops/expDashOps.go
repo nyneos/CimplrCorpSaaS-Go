@@ -35,7 +35,7 @@ var rates = map[string]float64{
 }
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	logger.LogError("", errMsg)
+	logger.LogError("%s", errMsg)
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{

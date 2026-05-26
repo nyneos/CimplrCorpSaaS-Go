@@ -214,7 +214,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			&fdStart, &fdMaturity)
 		if err != nil {
 			if err == pgx.ErrNoRows {
-				api.RespondWithError(w, http.StatusNotFound, "FD not found")
+				api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 				return
 			}
 			api.RespondWithError(w, http.StatusInternalServerError, "FD lookup failed: "+err.Error())
@@ -447,7 +447,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT receipt_status FROM investment.fd_interest_receipt
 			WHERE receipt_id=$1 AND is_deleted=false`, req.ReceiptID).Scan(&currentStatus)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Receipt not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ReceiptNotFound)
 			return
 		}
 		if currentStatus != "CAPTURED" && currentStatus != "REJECTED" {
@@ -464,7 +464,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE receipt_id=$1 AND is_deleted=false`,
 			req.ReceiptID).Scan(&entityID, &fdIDForReceipt, &currentReceiptDate, &currentPeriodStart, &currentPeriodEnd)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Receipt not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ReceiptNotFound)
 			return
 		}
 
@@ -807,7 +807,7 @@ func SubmitReceiptForApproval(pool *pgxpool.Pool) http.HandlerFunc {
 			`SELECT receipt_status FROM investment.fd_interest_receipt WHERE receipt_id=$1 AND is_deleted=false`,
 			req.ReceiptID).Scan(&receiptStatus)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Receipt not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ReceiptNotFound)
 			return
 		}
 
@@ -846,7 +846,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		engineActed := 0
 		var approvalErrors []string
 		for _, receiptID := range req.ReceiptIDs {
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", receiptID, req.UserID, userEmail, "", approvalengine.ActionApproved, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: receiptID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				approvalErrors = append(approvalErrors, receiptID+": "+actionErr.Error())
 				continue
@@ -1059,7 +1059,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		engineActed := 0
 		var approvalErrors []string
 		for _, receiptID := range req.ReceiptIDs {
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, "FIXED_DEPOSIT", receiptID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: receiptID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				approvalErrors = append(approvalErrors, receiptID+": "+actionErr.Error())
 				continue
@@ -2568,8 +2568,7 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			applyReconcilePostingEnrichment(ctx, pool, rl.ReceiptID, rl.TDSID, rl.ResultType,
-				&rl.ReceiptStatus, &rl.ReconcileStatus, &rl.JournalEntryID, &rl.TDSStatus, &rl.TDSJournalEntryID,
-				&rl.Cashflows)
+				reconcileEnrichOutputs{ReceiptStatus: &rl.ReceiptStatus, ReconcileStatus: &rl.ReconcileStatus, JournalEntryID: &rl.JournalEntryID, TDSStatus: &rl.TDSStatus, TDSJournalEntryID: &rl.TDSJournalEntryID, Cashflows: &rl.Cashflows})
 		}
 
 		if results == nil {
@@ -2914,8 +2913,7 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			applyReconcilePostingEnrichment(ctx, pool, row.ReceiptID, row.TDSID, row.ReceiptType,
-				&row.ReceiptStatus, &row.ReconcileStatus, &row.JournalEntryID, &row.TDSStatus, &row.TDSJournalEntryID,
-				&row.Cashflows)
+				reconcileEnrichOutputs{ReceiptStatus: &row.ReceiptStatus, ReconcileStatus: &row.ReconcileStatus, JournalEntryID: &row.JournalEntryID, TDSStatus: &row.TDSStatus, TDSJournalEntryID: &row.TDSJournalEntryID, Cashflows: &row.Cashflows})
 		}
 
 		if results == nil {
@@ -3665,7 +3663,7 @@ func GetTDSDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.TdsID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "tds_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
 			return
 		}
 		userEmail := resolveUserEmail(r.Context())

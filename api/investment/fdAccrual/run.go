@@ -1067,7 +1067,7 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, runID := range req.RunIDs {
 			res := map[string]interface{}{"run_id": runID}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", runID, req.UserID, userEmail, req.RoleID, approvalengine.ActionApproved, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: runID, UserID: req.UserID, UserEmail: userEmail, RoleID: req.RoleID, Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				res[constants.ValueSuccess] = false
 				res[constants.ValueError] = "Approval engine error: " + actionErr.Error()
@@ -1259,7 +1259,7 @@ func BulkRejectAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, runID := range req.RunIDs {
 			res := map[string]interface{}{"run_id": runID}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", runID, req.UserID, userEmail, req.RoleID, approvalengine.ActionRejected, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: runID, UserID: req.UserID, UserEmail: userEmail, RoleID: req.RoleID, Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				res[constants.ValueSuccess] = false
 				res[constants.ValueError] = "Rejection engine error: " + actionErr.Error()

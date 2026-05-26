@@ -99,7 +99,7 @@ func GetInterestTypeAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req interestTypeAuditReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {
@@ -182,7 +182,7 @@ func GetBankConfigAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req bankConfigAuditReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {
@@ -307,7 +307,7 @@ func GetCompoundingFrequencyAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 		var req compoundingFreqAuditReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {
@@ -388,7 +388,7 @@ func GetDayCountConventionAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req dayCountAuditReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {
@@ -466,7 +466,7 @@ func GetBankRateCardAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req bankRateCardAuditReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {
@@ -569,7 +569,7 @@ func GetTdsPlanAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req tdsPlanAuditReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {
@@ -654,7 +654,7 @@ func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req penaltyStructureAuditReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {

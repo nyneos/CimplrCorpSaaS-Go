@@ -142,7 +142,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_master
 			WHERE fd_id = $1 AND is_deleted = false
 			LIMIT 1`, req.FDID).Scan(&fdRefNo, &bankID, &entityName, &bankName, &fdStart, &fdMaturity); err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "FD not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
 
@@ -437,7 +437,7 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction start failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -535,7 +535,7 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(req.TDSID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "tds_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
 			return
 		}
 
@@ -564,7 +564,7 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "transaction start failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -630,7 +630,7 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(req.TDSID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "tds_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
 			return
 		}
 
@@ -747,7 +747,7 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.TDSIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "tds_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
 			return
 		}
 
@@ -820,7 +820,7 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.TDSIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "tds_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
 			return
 		}
 
@@ -879,7 +879,7 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(req.TDSID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "tds_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
 			return
 		}
 
@@ -893,7 +893,7 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "transaction start failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -1047,7 +1047,7 @@ func BulkDeleteTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.TDSIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "tds_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
 			return
 		}
 

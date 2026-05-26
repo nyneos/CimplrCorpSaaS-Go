@@ -788,7 +788,7 @@ func getAvailableBankAccounts(ctx context.Context, pgxPool *pgxpool.Pool) []Bank
 
 	rows, err := pgxPool.Query(ctx, query)
 	if err != nil {
-		api.LogError("getAvailableBankAccounts query failed", map[string]interface{}{constants.ValueError: err.Error()})
+		api.LogError("getAvailableBankAccounts query failed: %v", map[string]interface{}{constants.ValueError: err.Error()})
 		return []BankAccountInfo{}
 	}
 	defer rows.Close()
@@ -797,7 +797,7 @@ func getAvailableBankAccounts(ctx context.Context, pgxPool *pgxpool.Pool) []Bank
 	for rows.Next() {
 		var id, name, currency, usage, bankName string
 		if err := rows.Scan(&id, &name, &currency, &usage, &bankName); err != nil {
-			api.LogError("getAvailableBankAccounts scan failed", map[string]interface{}{constants.ValueError: err.Error()})
+			api.LogError("getAvailableBankAccounts scan failed: %v", map[string]interface{}{constants.ValueError: err.Error()})
 			continue
 		}
 		accounts = append(accounts, BankAccountInfo{
@@ -809,7 +809,7 @@ func getAvailableBankAccounts(ctx context.Context, pgxPool *pgxpool.Pool) []Bank
 		})
 	}
 
-	api.LogInfo("getAvailableBankAccounts", map[string]interface{}{"count": len(accounts)})
+	api.LogInfo("getAvailableBankAccounts: %v", map[string]interface{}{"count": len(accounts)})
 	return accounts
 }
 
@@ -999,7 +999,7 @@ func GetApprovedBankAccountsForFundPlanning(pgxPool *pgxpool.Pool) http.HandlerF
 			var usage, accountName, bankName, connCutoff, connTz, currency sql.NullString
 
 			if err := rows.Scan(&usage, &accountNo, &accountName, &bankName, &connCutoff, &connTz, &currency); err != nil {
-				api.LogError(constants.ErrScanFailed, map[string]interface{}{constants.ValueError: err.Error()})
+				api.LogError("%s: %v", constants.ErrScanFailed, map[string]interface{}{constants.ValueError: err.Error()})
 				continue
 			}
 
@@ -1076,7 +1076,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Log the parsed request for debugging
-		api.LogInfo("CreateFundPlan request parsed", map[string]interface{}{
+		api.LogInfo("CreateFundPlan request parsed: %v", map[string]interface{}{
 			"plan_id":           req.PlanID,
 			constants.KeyUserID: req.UserID,
 			"entity_name":       req.EntityName,
@@ -1085,7 +1085,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		for i, group := range req.Groups {
-			api.LogInfo("Group details", map[string]interface{}{
+			api.LogInfo("Group details: %v", map[string]interface{}{
 				"index":                  i,
 				"group_id":               group.GroupID,
 				"total_amount":           group.TotalAmount,

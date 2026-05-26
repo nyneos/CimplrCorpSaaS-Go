@@ -260,7 +260,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bookedPayoutFreqID, bookedFrequencyID, req.PayoutFrequencyID, req.ConfirmedFrequencyID,
 		)
 		bookedAccrual, actualAccrual := normalizedAccrualFrequency(ctx, pgxPool,
-			bookedAccrualFreqCode, req.AccrualFrequencyCode, bookedPayout, actualPayout, bookedFrequencyID, req.ConfirmedFrequencyID,
+			accrualFrequencyInput{BookedCode: bookedAccrualFreqCode, ActualCode: req.AccrualFrequencyCode, BookedPayout: bookedPayout, ActualPayout: actualPayout, BookedCompound: bookedFrequencyID, ActualCompound: req.ConfirmedFrequencyID},
 		)
 		varIn := prepareFDConfirmationVarianceInput(ctx, pgxPool, fdConfirmationVarianceInput{
 			BookedPrincipal: bookedPrincipal, ActualPrincipal: req.ConfirmedPrincipalAmount,
@@ -571,7 +571,7 @@ func GetFDConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_confirmation
 			WHERE confirmation_id = $1 AND COALESCE(is_deleted,false) = false
 		`, confirmationID).Scan(&uploadS3Key); err != nil {
-			api.RespondWithResult(w, false, "file not found")
+			api.RespondWithResult(w, false, constants.ErrFileNotFound)
 			return
 		}
 		key := strings.TrimSpace(uploadS3Key.String)
@@ -606,7 +606,7 @@ func GetFDConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfirmationIDs) == 0 {
-			api.RespondWithResult(w, false, "confirmation_ids required")
+			api.RespondWithResult(w, false, constants.ConfirmationIDsRequired)
 			return
 		}
 		files := make([]map[string]string, 0, len(req.ConfirmationIDs))
@@ -812,7 +812,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bookedPayoutFreqID, bookedFrequencyID, req.PayoutFrequencyID, req.ConfirmedFrequencyID,
 		)
 		bookedAccrual, actualAccrual := normalizedAccrualFrequency(ctx, pgxPool,
-			bookedAccrualFreqCode, req.AccrualFrequencyCode, bookedPayout, actualPayout, bookedFrequencyID, req.ConfirmedFrequencyID,
+			accrualFrequencyInput{BookedCode: bookedAccrualFreqCode, ActualCode: req.AccrualFrequencyCode, BookedPayout: bookedPayout, ActualPayout: actualPayout, BookedCompound: bookedFrequencyID, ActualCompound: req.ConfirmedFrequencyID},
 		)
 		varItems, hasVariance := runFDConfirmationVarianceCompare(ctx, pgxPool, fdConfirmationVarianceInput{
 			BookingID: bookingID, EntityID: entityID, RunID: runID,
@@ -1121,7 +1121,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		confCols, colErr := loadFDTableColumns(ctx, pgxPool, "investment", "fd_confirmation")
 		if colErr != nil {
-			msg, status := getUserFriendlyFDError(colErr, "Load confirmation schema failed")
+			msg, status := getUserFriendlyFDError(colErr, constants.ErrLoadConfirmationSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1385,7 +1385,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				bookedPayoutFreqID, bookedFrequencyID, effPayoutFreqID, effFrequencyID,
 			)
 			bookedAccrual, actualAccrual := normalizedAccrualFrequency(ctx, pgxPool,
-				bookedAccrualFreqCode, effAccrualFreqCode, bookedPayout, actualPayout, bookedFrequencyID, effFrequencyID,
+				accrualFrequencyInput{BookedCode: bookedAccrualFreqCode, ActualCode: effAccrualFreqCode, BookedPayout: bookedPayout, ActualPayout: actualPayout, BookedCompound: bookedFrequencyID, ActualCompound: effFrequencyID},
 			)
 			varItems, hasVariance = runFDConfirmationVarianceCompare(ctx, pgxPool, fdConfirmationVarianceInput{
 				BookingID: bookingID, EntityID: entityID, RunID: runID,
@@ -1602,7 +1602,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// returns SQLSTATE 42703 (column does not exist).
 		confCols, err := loadFDTableColumns(ctx, pgxPool, "investment", "fd_confirmation")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load confirmation schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadConfirmationSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1839,7 +1839,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", cID, req.UserID, userEmail, "", approvalengine.ActionApproved, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: cID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDConfirmation] RecordAction approve failed for %s: %v", cID, actionErr)
 				errors = append(errors, cID+": "+actionErr.Error())
@@ -2044,7 +2044,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", cID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: cID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDConfirmation] RecordAction reject failed for %s: %v", cID, actionErr)
 				errors = append(errors, cID+": "+actionErr.Error())
@@ -2475,7 +2475,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		confCols, err := loadFDTableColumns(ctx, pgxPool, "investment", "fd_confirmation")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load confirmation schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadConfirmationSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -2609,7 +2609,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		confCols, err := loadFDTableColumns(ctx, pgxPool, "investment", "fd_confirmation")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load confirmation schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadConfirmationSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}

@@ -195,8 +195,7 @@ func loadReconcileResultDetail(ctx context.Context, pool *pgxpool.Pool, resultID
 	}
 
 	applyReconcilePostingEnrichment(ctx, pool, rd.ReceiptID, rd.TDSID, rd.ResultType,
-		&rd.ReceiptStatus, &rd.ReconcileStatus, &rd.JournalEntryID, &rd.TDSStatus, &rd.TDSJournalEntryID,
-		&rd.Cashflows)
+		reconcileEnrichOutputs{ReceiptStatus: &rd.ReceiptStatus, ReconcileStatus: &rd.ReconcileStatus, JournalEntryID: &rd.JournalEntryID, TDSStatus: &rd.TDSStatus, TDSJournalEntryID: &rd.TDSJournalEntryID, Cashflows: &rd.Cashflows})
 
 	return &rd, nil
 }

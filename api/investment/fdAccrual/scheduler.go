@@ -28,8 +28,8 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID                string `json:"user_id"`
 			EntityID              string `json:"entity_id"`
 			EntityName            string `json:"entity_name"`
-			ScheduleFrequency     string `json:"schedule_frequency"`  // when the job fires: DAILY|MONTHLY|QUARTERLY|HALF_YEARLY|YEARLY
-			PeriodCoverage        string `json:"period_coverage"`      // the date window each run covers: MONTHLY|QUARTERLY|HALF_YEARLY|YEARLY|RUN
+			ScheduleFrequency     string `json:"schedule_frequency"` // when the job fires: DAILY|MONTHLY|QUARTERLY|HALF_YEARLY|YEARLY
+			PeriodCoverage        string `json:"period_coverage"`    // the date window each run covers: MONTHLY|QUARTERLY|HALF_YEARLY|YEARLY|RUN
 			RunDayOfMonth         int    `json:"run_day_of_month"`
 			RunTime               string `json:"run_time"` // HH:MM or HH:MM:SS (Asia/Kolkata)
 			DefaultBankIDFilter   string `json:"default_bank_id_filter"`
@@ -167,8 +167,8 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntityCode:       entID,
 				TransactionType:  "FD_ACCRUAL_SCHEDULE_APPROVE",
 				RecordID:         cfgID,
-				RecordTable:      "investment.fd_accrual_schedule_config",
-				AuditTable:       "investment.fd_accrual_schedule_config_audit",
+				RecordTable:      constants.QuerryAccrualScheduleConfig,
+				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
 				AuditIDColumn:    "config_id",
 				ActionType:       "CREATE",
 				SubmittedBy:      uID,
@@ -327,8 +327,8 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntityCode:       entID,
 				TransactionType:  "FD_ACCRUAL_SCHEDULE_APPROVE",
 				RecordID:         cfgID,
-				RecordTable:      "investment.fd_accrual_schedule_config",
-				AuditTable:       "investment.fd_accrual_schedule_config_audit",
+				RecordTable:      constants.QuerryAccrualScheduleConfig,
+				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
 				AuditIDColumn:    "config_id",
 				ActionType:       "EDIT",
 				SubmittedBy:      uID,
@@ -545,7 +545,7 @@ func ApproveScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if strings.TrimSpace(comment) == "" {
 				comment = "Approved FD accrual schedule"
 			}
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", configID, req.UserID, userEmail, "", approvalengine.ActionApproved, comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: configID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: comment})
 			if actionErr != nil {
 				errors = append(errors, configID+": "+actionErr.Error())
 				continue
@@ -651,7 +651,7 @@ func RejectScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if strings.TrimSpace(comment) == "" {
 				comment = "Rejected FD accrual schedule"
 			}
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", configID, req.UserID, userEmail, "", approvalengine.ActionRejected, comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: configID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: comment})
 			if actionErr != nil {
 				errors = append(errors, configID+": "+actionErr.Error())
 				continue
@@ -935,8 +935,8 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntityCode:       entID,
 				TransactionType:  "FD_ACCRUAL_SCHEDULE_APPROVE",
 				RecordID:         cfgID,
-				RecordTable:      "investment.fd_accrual_schedule_config",
-				AuditTable:       "investment.fd_accrual_schedule_config_audit",
+				RecordTable:      constants.QuerryAccrualScheduleConfig,
+				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
 				AuditIDColumn:    "config_id",
 				ActionType:       "DELETE",
 				SubmittedBy:      uID,

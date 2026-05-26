@@ -43,14 +43,27 @@ func respondAuditData(w http.ResponseWriter, payload interface{}) {
 	})
 }
 
+type auditHistoryConfig struct {
+	AuditTable  string
+	MasterTable string
+	IDCol       string
+	NameCol     string
+	EntityID    string
+}
+
 // runAuditHistory executes the standard audit-history query pattern used by all cash masters.
 // auditTable and masterTable are hardcoded constants — no user input.
 func runAuditHistory(
 	w http.ResponseWriter,
 	r *http.Request,
 	pgxPool *pgxpool.Pool,
-	auditTable, masterTable, idCol, nameCol, entityID string,
+	cfg auditHistoryConfig,
 ) {
+	auditTable := cfg.AuditTable
+	masterTable := cfg.MasterTable
+	idCol := cfg.IDCol
+	nameCol := cfg.NameCol
+	entityID := cfg.EntityID
 	if api.GetSessionFromCtx(r.Context()) == nil {
 		api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 		return
@@ -103,7 +116,7 @@ func GetBankMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			BankID string `json:"bank_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, "auditactionbank", "masterbank", "bank_id", "bank_name", req.BankID)
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactionbank", MasterTable: "masterbank", IDCol: "bank_id", NameCol: "bank_name", EntityID: req.BankID})
 	}
 }
 
@@ -116,7 +129,7 @@ func GetCurrencyMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CurrencyID string `json:"currency_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, "auditactioncurrency", "mastercurrency", "currency_id", "currency_name", req.CurrencyID)
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactioncurrency", MasterTable: "mastercurrency", IDCol: "currency_id", NameCol: "currency_name", EntityID: req.CurrencyID})
 	}
 }
 
@@ -129,7 +142,7 @@ func GetGLAccountMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			GLAccountID string `json:"gl_account_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, "auditactionglaccount", "masterglaccount", "gl_account_id", "gl_account_name", req.GLAccountID)
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactionglaccount", MasterTable: "masterglaccount", IDCol: "gl_account_id", NameCol: "gl_account_name", EntityID: req.GLAccountID})
 	}
 }
 
@@ -142,7 +155,7 @@ func GetCashFlowCategoryAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CategoryID string `json:"category_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, "auditactioncashflowcategory", "mastercashflowcategory", "category_id", "category_name", req.CategoryID)
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactioncashflowcategory", MasterTable: "mastercashflowcategory", IDCol: "category_id", NameCol: "category_name", EntityID: req.CategoryID})
 	}
 }
 
@@ -155,7 +168,7 @@ func GetCostProfitCenterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CentreID string `json:"centre_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, "auditactioncostprofitcenter", "mastercostprofitcenter", "centre_id", "centre_name", req.CentreID)
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactioncostprofitcenter", MasterTable: "mastercostprofitcenter", IDCol: "centre_id", NameCol: "centre_name", EntityID: req.CentreID})
 	}
 }
 
@@ -168,7 +181,7 @@ func GetCounterpartyAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CounterpartyID string `json:"counterparty_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, "auditactioncounterparty", "mastercounterparty", "counterparty_id", "counterparty_name", req.CounterpartyID)
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactioncounterparty", MasterTable: "mastercounterparty", IDCol: "counterparty_id", NameCol: "counterparty_name", EntityID: req.CounterpartyID})
 	}
 }
 
@@ -181,7 +194,7 @@ func GetBankAccountAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			AccountID string `json:"account_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, "auditactionbankaccount", "masterbankaccount", "account_id", "account_number", req.AccountID)
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactionbankaccount", MasterTable: "masterbankaccount", IDCol: "account_id", NameCol: "account_number", EntityID: req.AccountID})
 	}
 }
 
@@ -194,7 +207,7 @@ func GetPayableReceivableAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			TypeID string `json:"type_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, "auditactionpayablereceivable", "masterpayablereceivabletype", "type_id", "type_name", req.TypeID)
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactionpayablereceivable", MasterTable: "masterpayablereceivabletype", IDCol: "type_id", NameCol: "type_name", EntityID: req.TypeID})
 	}
 }
 
@@ -207,6 +220,6 @@ func GetEntityCashAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			EntityID string `json:"entity_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, "auditactionentity", "masterentitycash", "entity_id", "entity_name", req.EntityID)
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactionentity", MasterTable: "masterentitycash", IDCol: "entity_id", NameCol: "entity_name", EntityID: req.EntityID})
 	}
 }

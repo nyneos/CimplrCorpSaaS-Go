@@ -841,7 +841,7 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Parse recipient_strategy from change_note if present
 			if cn, ok := row["change_note"].(string); ok && cn != "" {
-				const strategyPrefix = "__STRATEGY__:"
+				const strategyPrefix = constants.ErrStrategyRequired
 				if strings.HasPrefix(cn, strategyPrefix) {
 					raw := strings.TrimPrefix(cn, strategyPrefix)
 					strategyRaw := raw
@@ -1010,7 +1010,7 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Parse recipient_strategy from change_note if present
 			if cn, ok := row["change_note"].(string); ok && cn != "" {
-				const strategyPrefix = "__STRATEGY__:"
+				const strategyPrefix = constants.ErrStrategyRequired
 				if strings.HasPrefix(cn, strategyPrefix) {
 					raw := strings.TrimPrefix(cn, strategyPrefix)
 					strategyRaw := raw
@@ -1163,7 +1163,7 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				strategyJSON = sj
 			}
 		}
-		const strategyPrefix = "__STRATEGY__:"
+		const strategyPrefix = constants.ErrStrategyRequired
 		changeNote := req.ChangeNote
 		if len(strategyJSON) > 0 {
 			// Sentinel prefix + strategy JSON, then optional human note separated by newline
@@ -1541,7 +1541,7 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		const approvalStrategyPrefix = "__STRATEGY__:"
+		const approvalStrategyPrefix = constants.ErrStrategyRequired
 
 		for _, t := range targets {
 

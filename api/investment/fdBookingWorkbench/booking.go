@@ -1259,7 +1259,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errors []string
 
 		for _, bID := range req.BookingIDs {
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", bID, req.UserID, userEmail, "", approvalengine.ActionApproved, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: bID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDBooking] RecordAction approve failed for booking %s: %v", bID, actionErr)
 				errors = append(errors, bID+": "+actionErr.Error())
@@ -1391,7 +1391,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errors []string
 
 		for _, bID := range req.BookingIDs {
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", bID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: bID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDBooking] RecordAction reject failed for booking %s: %v", bID, actionErr)
 				errors = append(errors, bID+": "+actionErr.Error())

@@ -149,7 +149,7 @@ func NewListHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(body.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -231,7 +231,7 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		}
 
 		if strings.TrimSpace(body.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -243,7 +243,7 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		var record *FileRecord
 		if strings.TrimSpace(req.FileID) == "" {
 			if cfg.List == nil {
-				api.RespondWithError(w, http.StatusBadRequest, "file_id required")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
 				return
 			}
 			records, err := cfg.List(r.Context(), pool, parentID)
@@ -266,7 +266,7 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			}
 		}
 		if record == nil || strings.TrimSpace(record.UploadS3Key) == "" {
-			api.RespondWithError(w, http.StatusNotFound, "file not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
 			return
 		}
 
@@ -306,7 +306,7 @@ func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc
 			return
 		}
 		if strings.TrimSpace(body.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -391,11 +391,11 @@ func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		if strings.TrimSpace(req.FileID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "file_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
 			return
 		}
 		if strings.TrimSpace(req.Reason) == "" {
@@ -409,7 +409,7 @@ func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			return
 		}
 		if record == nil {
-			api.RespondWithError(w, http.StatusNotFound, "file not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
 			return
 		}
 
@@ -464,11 +464,11 @@ func NewAuditHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		if strings.TrimSpace(req.FileID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "file_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
 			return
 		}
 
@@ -487,7 +487,7 @@ func NewAuditHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			return
 		}
 		if record == nil {
-			api.RespondWithError(w, http.StatusNotFound, "file not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
 			return
 		}
 
@@ -782,11 +782,11 @@ func newDeleteDecisionHandler(pool *pgxpool.Pool, cfg Config, nextStatus string)
 			return
 		}
 		if strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		if strings.TrimSpace(req.FileID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "file_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
 			return
 		}
 
@@ -805,7 +805,7 @@ func newDeleteDecisionHandler(pool *pgxpool.Pool, cfg Config, nextStatus string)
 			return
 		}
 		if record == nil {
-			api.RespondWithError(w, http.StatusNotFound, "file not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
 			return
 		}
 
@@ -828,7 +828,7 @@ func newDeleteDecisionHandler(pool *pgxpool.Pool, cfg Config, nextStatus string)
 
 		checkerBy := requestedByOrFallback(r.Context(), req.UserID)
 		checkerAt := time.Now().UTC()
-		if err := updateDeleteAuditDecision(r.Context(), tx, cfg, auditRow.AuditID, nextStatus, checkerBy, checkerAt, strings.TrimSpace(req.Comment)); err != nil {
+		if err := updateDeleteAuditDecision(r.Context(), tx, cfg, deleteAuditDecisionParams{AuditID: auditRow.AuditID, NextStatus: nextStatus, CheckerBy: checkerBy, CheckerAt: checkerAt, CheckerComment: strings.TrimSpace(req.Comment)}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -844,7 +844,7 @@ func newDeleteDecisionHandler(pool *pgxpool.Pool, cfg Config, nextStatus string)
 				return
 			}
 			if !deleted {
-				api.RespondWithError(w, http.StatusNotFound, "file not found")
+				api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
 				return
 			}
 		}
@@ -869,7 +869,7 @@ func deleteImmediate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool,
 		return
 	}
 	if strings.TrimSpace(req.FileID) == "" {
-		api.RespondWithError(w, http.StatusBadRequest, "file_id required")
+		api.RespondWithError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
 		return
 	}
 	if cfg.SoftDelete == nil {
@@ -884,7 +884,7 @@ func deleteImmediate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool,
 		return
 	}
 	if !deleted {
-		api.RespondWithError(w, http.StatusNotFound, "file not found")
+		api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
 		return
 	}
 
@@ -1295,7 +1295,20 @@ func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, cfg Co
 	return &event, nil
 }
 
-func updateDeleteAuditDecision(ctx context.Context, exec auditExecutor, cfg Config, auditID int64, nextStatus, checkerBy string, checkerAt time.Time, checkerComment string) error {
+type deleteAuditDecisionParams struct {
+	AuditID        int64
+	NextStatus     string
+	CheckerBy      string
+	CheckerAt      time.Time
+	CheckerComment string
+}
+
+func updateDeleteAuditDecision(ctx context.Context, exec auditExecutor, cfg Config, p deleteAuditDecisionParams) error {
+	auditID := p.AuditID
+	nextStatus := p.NextStatus
+	checkerBy := p.CheckerBy
+	checkerAt := p.CheckerAt
+	checkerComment := p.CheckerComment
 	query := `
 		UPDATE ` + auditTableName(cfg) + `
 		SET processing_status = $2,

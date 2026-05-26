@@ -12,7 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 type transactionAuditRequest struct {
 	UserID          string `json:"user_id"`
@@ -83,17 +84,17 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"action_id":      actionID,
-				"entity_id":      entityID,
-				"action_type":    action,
+				"action_id":         actionID,
+				"entity_id":         entityID,
+				"action_type":       action,
 				"processing_status": status,
-				"requested_by":   performedBy,
-				"requested_at":   performedAt,
-				"checker_by":     stringPointerValue(checkerBy),
-				"checker_at":     timePointerValue(checkerAt),
-				"checker_comment": stringPointerValue(checkerComment),
-				"reason":         stringPointerValue(reason),
-				"change_summary": buildTransactionChangeSummary(ctx, pgxPool, txType, req.TransactionID, action, actionID),
+				"requested_by":      performedBy,
+				"requested_at":      performedAt,
+				"checker_by":        stringPointerValue(checkerBy),
+				"checker_at":        timePointerValue(checkerAt),
+				"checker_comment":   stringPointerValue(checkerComment),
+				"reason":            stringPointerValue(reason),
+				"change_summary":    buildTransactionChangeSummary(ctx, pgxPool, txType, req.TransactionID, action, actionID),
 			})
 		}
 		if err := rows.Err(); err != nil {
@@ -108,7 +109,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY requested_at ASC, download_audit_id ASC
 		`, txType, req.TransactionID)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction download audit history"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToReadTransactionDownloadAuditHistory})
 			return
 		}
 		defer downloadRows.Close()
@@ -118,27 +119,27 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var requestedAt sql.NullTime
 			var fileName, uploadKey sql.NullString
 			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &fileName, &uploadKey); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction download audit history"})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToReadTransactionDownloadAuditHistory})
 				return
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"entity_id":     entityID,
-				"action_type":   "DOWNLOAD",
+				"entity_id":         entityID,
+				"action_type":       "DOWNLOAD",
 				"processing_status": "COMPLETED",
-				"requested_by":  strings.TrimSpace(requestedBy),
-				"requested_at":  timePointerValue(&requestedAt.Time),
-				"checker_by":    "",
-				"checker_at":    nil,
-				"checker_comment": "",
-				"reason":        "",
-				"file_name":     fileName.String,
-				"upload_s3_key": uploadKey.String,
-				"source":        txType,
+				"requested_by":      strings.TrimSpace(requestedBy),
+				"requested_at":      timePointerValue(&requestedAt.Time),
+				"checker_by":        "",
+				"checker_at":        nil,
+				"checker_comment":   "",
+				"reason":            "",
+				"file_name":         fileName.String,
+				"upload_s3_key":     uploadKey.String,
+				"source":            txType,
 			})
 		}
 		if err := downloadRows.Err(); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to read transaction download audit history"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrFailedToReadTransactionDownloadAuditHistory})
 			return
 		}
 
@@ -167,13 +168,13 @@ func buildTransactionChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, t
 
 func buildPayableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, payableID, actionID string) []map[string]interface{} {
 	var (
-		oldEntity, newEntity         sql.NullString
-		oldCounter, newCounter       sql.NullString
-		oldInvoice, newInvoice       sql.NullString
-		oldInvDate, newInvDate       sql.NullString
-		oldDueDate, newDueDate       sql.NullString
-		oldAmount, newAmount         sql.NullString
-		oldCurrency, newCurrency     sql.NullString
+		oldEntity, newEntity     sql.NullString
+		oldCounter, newCounter   sql.NullString
+		oldInvoice, newInvoice   sql.NullString
+		oldInvDate, newInvDate   sql.NullString
+		oldDueDate, newDueDate   sql.NullString
+		oldAmount, newAmount     sql.NullString
+		oldCurrency, newCurrency sql.NullString
 	)
 
 	err := pgxPool.QueryRow(ctx, `
@@ -220,13 +221,13 @@ func buildPayableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, payab
 
 func buildReceivableChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, receivableID, actionID string) []map[string]interface{} {
 	var (
-		oldEntity, newEntity         sql.NullString
-		oldCounter, newCounter       sql.NullString
-		oldInvoice, newInvoice       sql.NullString
-		oldInvDate, newInvDate       sql.NullString
-		oldDueDate, newDueDate       sql.NullString
-		oldAmount, newAmount         sql.NullString
-		oldCurrency, newCurrency     sql.NullString
+		oldEntity, newEntity     sql.NullString
+		oldCounter, newCounter   sql.NullString
+		oldInvoice, newInvoice   sql.NullString
+		oldInvDate, newInvDate   sql.NullString
+		oldDueDate, newDueDate   sql.NullString
+		oldAmount, newAmount     sql.NullString
+		oldCurrency, newCurrency sql.NullString
 	)
 
 	err := pgxPool.QueryRow(ctx, `

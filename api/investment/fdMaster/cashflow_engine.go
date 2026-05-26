@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/rounding"
 )
 
@@ -133,9 +134,19 @@ func engDaysBetween(a, b time.Time) int {
 	return int(b.Sub(a).Hours() / 24)
 }
 
-func engFormula(label string, principal, rate float64, days, divisor int, raw, rounded float64, rnd rounding.Config) string {
+type engFormulaParams struct {
+	Principal float64
+	Rate      float64
+	Days      int
+	Divisor   int
+	Raw       float64
+	Rounded   float64
+	Rnd       rounding.Config
+}
+
+func engFormula(label string, p engFormulaParams) string {
 	return fmt.Sprintf("%s P(%.2f) * r(%.4f%%) * d(%d) / D(%d) = %.4f | rnd(%s,%d,freq=%s) = %.2f",
-		label, principal, rate*100, days, divisor, raw, rnd.Method, rnd.Decimals, rnd.Frequency, rounded)
+		label, p.Principal, p.Rate*100, p.Days, p.Divisor, p.Raw, p.Rnd.Method, p.Rnd.Decimals, p.Rnd.Frequency, p.Rounded)
 }
 
 // ── SI schedule ───────────────────────────────────────────────────────────────
@@ -232,7 +243,7 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 					NetCashFlow:       gross,   // net = gross for SI accrual
 					DayCountCode:      dcCode,
 					Divisor:           periodDivisor,
-					FormulaUsed:       engFormula("[SI ACCRUAL]", P, r, periodDays, periodDivisor, rawGross, gross, rnd),
+					FormulaUsed:       engFormula("[SI ACCRUAL]", engFormulaParams{Principal: P, Rate: r, Days: periodDays, Divisor: periodDivisor, Raw: rawGross, Rounded: gross, Rnd: rnd}),
 					AccrualRatePerDay: r / float64(periodDivisor),
 				})
 				prevRowDate = ad
@@ -294,7 +305,7 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 				DueNotAccrued:     dueNotAccr,
 				DayCountCode:      dcCode,
 				Divisor:           payoutDivisor,
-				FormulaUsed:       engFormula("[SI MATURITY]", P, r, payoutDays, payoutDivisor, payoutRaw, payoutGross, rnd),
+				FormulaUsed:       engFormula("[SI MATURITY]", engFormulaParams{Principal: P, Rate: r, Days: payoutDays, Divisor: payoutDivisor, Raw: payoutRaw, Rounded: payoutGross, Rnd: rnd}),
 				AccrualRatePerDay: r / float64(payoutDivisor),
 			})
 			// Principal Return
@@ -331,7 +342,7 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 				DueNotAccrued:     dueNotAccr,
 				DayCountCode:      dcCode,
 				Divisor:           payoutDivisor,
-				FormulaUsed:       engFormula("[SI PAYOUT]", P, r, payoutDays, payoutDivisor, payoutRaw, payoutGross, rnd),
+				FormulaUsed:       engFormula("[SI PAYOUT]", engFormulaParams{Principal: P, Rate: r, Days: payoutDays, Divisor: payoutDivisor, Raw: payoutRaw, Rounded: payoutGross, Rnd: rnd}),
 				AccrualRatePerDay: r / float64(payoutDivisor),
 			})
 		}
@@ -403,7 +414,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 	}
 	payoutDateSet := make(map[string]bool, len(payoutDateSlice))
 	for _, d := range payoutDateSlice {
-		payoutDateSet[d.Format("2006-01-02")] = true
+		payoutDateSet[d.Format(constants.DateFormat)] = true
 	}
 
 	resetType := fd.ResetType // "AT_EACH_PAYOUT" or "AT_MATURITY"
@@ -433,7 +444,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 
 	for _, cd := range capDates {
 		isMaturity := cd.Equal(fd.MaturityDate)
-		isPayoutDate := payoutDateSet[cd.Format("2006-01-02")]
+		isPayoutDate := payoutDateSet[cd.Format(constants.DateFormat)]
 
 		// F source for this cap window.
 		// Use the unrounded raw J to propagate full precision (Excel does not round
@@ -476,7 +487,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 					NetCashFlow:       0,
 					DayCountCode:      dcCode,
 					Divisor:           periodDivisor,
-					FormulaUsed:       engFormula("[CO ACCRUAL]", Frnd, r, periodDays, periodDivisor, rawGross, gross, rnd),
+					FormulaUsed:       engFormula("[CO ACCRUAL]", engFormulaParams{Principal: Frnd, Rate: r, Days: periodDays, Divisor: periodDivisor, Raw: rawGross, Rounded: gross, Rnd: rnd}),
 					AccrualRatePerDay: r / float64(periodDivisor),
 				})
 				prevRowDate = ad
@@ -514,7 +525,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 			NetAmount:         capJRnd,
 			DayCountCode:      dcCode,
 			Divisor:           capDivisor,
-			FormulaUsed:       engFormula("[CO CAPITALIZATION]", Frnd, r, capDays, capDivisor, capRaw, capGross, rnd),
+			FormulaUsed:       engFormula("[CO CAPITALIZATION]", engFormulaParams{Principal: Frnd, Rate: r, Days: capDays, Divisor: capDivisor, Raw: capRaw, Rounded: capGross, Rnd: rnd}),
 			AccrualRatePerDay: r / float64(capDivisor),
 		})
 		prevCapJRaw = capJRaw
@@ -572,7 +583,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 					NetAmount:         capJRnd,
 					DayCountCode:      dcCode,
 					Divisor:           payoutDivisor,
-					FormulaUsed:       engFormula("[CO MATURITY]", P, r, payoutDays, payoutDivisor, payoutRaw, payoutGross, rnd),
+					FormulaUsed:       engFormula("[CO MATURITY]", engFormulaParams{Principal: P, Rate: r, Days: payoutDays, Divisor: payoutDivisor, Raw: payoutRaw, Rounded: payoutGross, Rnd: rnd}),
 					AccrualRatePerDay: r / float64(payoutDivisor),
 				})
 				rows = append(rows, CashflowRow{
@@ -606,7 +617,7 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 					NetAmount:         payoutGross,
 					DayCountCode:      dcCode,
 					Divisor:           payoutDivisor,
-					FormulaUsed:       engFormula("[CO PAYOUT]", P, r, payoutDays, payoutDivisor, payoutRaw, payoutGross, rnd),
+					FormulaUsed:       engFormula("[CO PAYOUT]", engFormulaParams{Principal: P, Rate: r, Days: payoutDays, Divisor: payoutDivisor, Raw: payoutRaw, Rounded: payoutGross, Rnd: rnd}),
 					AccrualRatePerDay: r / float64(payoutDivisor),
 				})
 				lastPayoutDate = cd

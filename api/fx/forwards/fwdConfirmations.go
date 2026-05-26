@@ -109,7 +109,7 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to parse updated forward booking"})
 			return
 		}
-		auditutil.RecordAction(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", req.SystemTransactionID, "EDIT", "PENDING_EDIT_APPROVAL", "", auditutil.ActorFromContext(r.Context()), oldValues, result)
+		auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: req.SystemTransactionID, ActionType: "EDIT", Status: "PENDING_EDIT_APPROVAL", Reason: "", RequestedBy: auditutil.ActorFromContext(r.Context()), OldValues: oldValues, NewValues: result})
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": result})
@@ -273,12 +273,12 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 				decisionComment = strings.TrimSpace(req.RejectionComment)
 			}
 			for _, id := range deletedIds {
-				auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", id, decisionStatus, auditutil.Actor(req.UserID), decisionComment)
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: id, Status: decisionStatus, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
 			}
 			for _, row := range updatedRows {
 				if id, ok := row["system_transaction_id"]; ok {
 					if normalizedID := normalizeForwardSystemTransactionID(id); normalizedID != "" {
-						auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", normalizedID, decisionStatus, auditutil.Actor(req.UserID), decisionComment)
+						auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: normalizedID, Status: decisionStatus, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
 					}
 				}
 			}
@@ -369,7 +369,7 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 				updated = append(updated, rowMap)
 				if id, ok := rowMap["system_transaction_id"]; ok {
 					if normalizedID := normalizeForwardSystemTransactionID(id); normalizedID != "" {
-						auditutil.RecordAction(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", normalizedID, "DELETE", "PENDING_DELETE_APPROVAL", "", auditutil.Actor(req.UserID), nil, nil)
+						auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: normalizedID, ActionType: "DELETE", Status: "PENDING_DELETE_APPROVAL", Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: nil})
 					}
 				}
 			}
@@ -460,7 +460,7 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 		var systemTransactionID string
 		_ = db.QueryRowContext(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 AND entity_level_0 = $2 LIMIT 1`, req.InternalReferenceID, req.EntityLevel0).Scan(&systemTransactionID)
 		if strings.TrimSpace(systemTransactionID) != "" {
-			auditutil.RecordAction(r.Context(), db, auditutil.TableForwardBooking, "system_transaction_id", systemTransactionID, "CONFIRM", "PENDING_EDIT_APPROVAL", "", auditutil.Actor(req.UserID), nil, result)
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: "CONFIRM", Status: "PENDING_EDIT_APPROVAL", Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: result})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)

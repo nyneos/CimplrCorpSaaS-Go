@@ -228,7 +228,7 @@ func mergeInterestTrendBuckets(ctx context.Context, pool *pgxpool.Pool, entityFi
 }
 
 func interestTrendPeriodLabel(dateTrunc, periodStart string, weekIdx *int, monthNames []string) string {
-	t, err := time.Parse("2006-01-02", periodStart)
+	t, err := time.Parse(constants.DateFormat, periodStart)
 	if err != nil {
 		return periodStart
 	}
@@ -522,10 +522,10 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		ORDER BY sort_ts DESC
 		LIMIT 200`
 
-	bookingItems := govFetchBookingItems(ctx, pool, entityFilter, pendingBookingSQL, "FD Booking", "fd-booking")
-	confirmItems := govFetchItems(ctx, pool, entityFilter, pendingConfirmSQL, "PENDING_CONFIRMATION_APPROVAL", "FD Confirmation", "fd-confirmation")
-	activationItems := govFetchItems(ctx, pool, entityFilter, pendingActivationSQL, "PENDING_ACTIVATION_APPROVAL", "FD Activation", "fd-activation")
-	maturityItems := govFetchItems(ctx, pool, entityFilter, pendingClosureSQL, "PENDING_CLOSURE_APPROVAL", "FD Maturity", "fd-maturity")
+	bookingItems := govFetchBookingItems(ctx, pool, entityFilter, pendingBookingSQL, constants.FDBookingLabel, constants.FDBooking)
+	confirmItems := govFetchItems(ctx, pool, entityFilter, pendingConfirmSQL, "PENDING_CONFIRMATION_APPROVAL", constants.FDConfirmation, constants.FDConfirmationLabel)
+	activationItems := govFetchItems(ctx, pool, entityFilter, pendingActivationSQL, "PENDING_ACTIVATION_APPROVAL", constants.FDActivationLabel, constants.FDActivation)
+	maturityItems := govFetchItems(ctx, pool, entityFilter, pendingClosureSQL, "PENDING_CLOSURE_APPROVAL", constants.FDMaturity, constants.FdmaturityLabel)
 
 	var accrualRunCount int64
 	_ = pool.QueryRow(ctx, `
@@ -565,23 +565,23 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 	}
 
 	approvals := []govApprovalRow{
-		{Type: "FD Booking", Category: "FD Booking", Status: "PENDING_APPROVAL",
-			Source: "FD Booking", SourcePage: "fd-booking",
+		{Type: constants.FDBookingLabel, Category: constants.FDBookingLabel, Status: "PENDING_APPROVAL",
+			Source: constants.FDBookingLabel, SourcePage: constants.FDBooking,
 			Count: len(bookingItems), Value: govSumPrincipal(bookingItems),
 			Priority: bookingPriority, Items: bookingItems},
-		{Type: "FD Confirmation", Category: "FD Confirmation", Status: "PENDING_APPROVAL",
-			Source: "FD Confirmation", SourcePage: "fd-confirmation",
+		{Type: constants.FDConfirmation, Category: constants.FDConfirmation, Status: "PENDING_APPROVAL",
+			Source: constants.FDConfirmation, SourcePage: constants.FDConfirmationLabel,
 			Count: len(confirmItems), Value: govSumPrincipal(confirmItems),
 			Priority: "Medium", Items: confirmItems},
-		{Type: "FD Activation", Category: "FD Activation", Status: "PENDING_APPROVAL",
-			Source: "FD Activation", SourcePage: "fd-activation",
+		{Type: constants.FDActivationLabel, Category: constants.FDActivationLabel, Status: "PENDING_APPROVAL",
+			Source: constants.FDActivationLabel, SourcePage: constants.FDActivation,
 			Count: len(activationItems), Value: govSumPrincipal(activationItems),
 			Priority: "High", Items: activationItems},
-		{Type: "FD Maturity", Category: "FD Maturity", Status: "PENDING_APPROVAL",
-			Source: "FD Maturity", SourcePage: "fd-maturity",
+		{Type: constants.FDMaturity, Category: constants.FDMaturity, Status: "PENDING_APPROVAL",
+			Source: constants.FDMaturity, SourcePage: constants.FdmaturityLabel,
 			Count: len(maturityItems), Value: govSumPrincipal(maturityItems),
 			Priority: "High", Items: maturityItems},
-		{Type: "Accrual Run", Category: "Accrual Run", Status: "PENDING_APPROVAL",
+		{Type: constants.AccrualRun, Category: constants.AccrualRun, Status: "PENDING_APPROVAL",
 			Source: "Accrual Engine", SourcePage: "fd-accrual-engine",
 			Count: int(accrualRunCount), Value: 0,
 			Priority: "Medium", Items: []govFDItem{}},
@@ -591,19 +591,19 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 	accrualPending := int(accrualRunCount)
 
 	checklist := []govChecklistItem{
-		{ID: "fd_booking", Label: "FD Booking", Category: "FD Booking", SourcePage: "fd-booking",
+		{ID: "fd_booking", Label: constants.FDBookingLabel, Category: constants.FDBookingLabel, SourcePage: constants.FDBooking,
 			PendingCount: len(bookingItems), Done: len(bookingItems) == 0, Blocker: len(bookingItems) > 0,
 			Detail: formatInt64(int64(len(bookingItems))) + " pending approval(s)"},
-		{ID: "fd_confirmation", Label: "FD Confirmation", Category: "FD Confirmation", SourcePage: "fd-confirmation",
+		{ID: "fd_confirmation", Label: constants.FDConfirmation, Category: constants.FDConfirmation, SourcePage: constants.FDConfirmationLabel,
 			PendingCount: len(confirmItems), Done: len(confirmItems) == 0, Blocker: len(confirmItems) > 0,
 			Detail: formatInt64(int64(len(confirmItems))) + " pending confirmation(s)"},
-		{ID: "fd_activation", Label: "FD Activation", Category: "FD Activation", SourcePage: "fd-activation",
+		{ID: "fd_activation", Label: constants.FDActivationLabel, Category: constants.FDActivationLabel, SourcePage: constants.FDActivation,
 			PendingCount: len(activationItems), Done: len(activationItems) == 0, Blocker: len(activationItems) > 0,
 			Detail: formatInt64(int64(len(activationItems))) + " pending activation(s)"},
-		{ID: "fd_maturity", Label: "FD Maturity", Category: "FD Maturity", SourcePage: "fd-maturity",
+		{ID: "fd_maturity", Label: constants.FDMaturity, Category: constants.FDMaturity, SourcePage: constants.FdmaturityLabel,
 			PendingCount: maturityPending, Done: maturityPending == 0, Blocker: maturityPending > 0,
 			Detail: formatInt64(int64(len(maturityItems))) + " closure approval(s), " + formatInt64(unprocessedMaturities) + " unprocessed maturity"},
-		{ID: "accrual_run", Label: "Accrual Run", Category: "Accrual Run", SourcePage: "fd-accrual-engine",
+		{ID: "accrual_run", Label: constants.AccrualRun, Category: constants.AccrualRun, SourcePage: "fd-accrual-engine",
 			PendingCount: accrualPending, Done: accrualPosted && accrualRunCount == 0, Blocker: accrualRunCount > 0,
 			Detail: "Latest run: " + latestRunStatus + "; " + formatInt64(accrualRunCount) + " pending approval(s)"},
 	}

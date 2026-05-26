@@ -13,7 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 type projectionAuditRequest struct {
 	UserID     string `json:"user_id"`
@@ -72,15 +73,15 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			entry := map[string]interface{}{
-				"entity_id":          entityID,
-				"action_type":        action,
-				"processing_status":  status,
-				"requested_by":       performedBy,
-				"requested_at":       performedAt,
-				"checker_by":         ifaceToString(checkerBy),
-				"checker_at":         ifaceToTimeString(checkerAt),
-				"checker_comment":    ifaceToString(checkerComment),
-				"reason":             ifaceToString(reason),
+				"entity_id":         entityID,
+				"action_type":       action,
+				"processing_status": status,
+				"requested_by":      performedBy,
+				"requested_at":      performedAt,
+				"checker_by":        ifaceToString(checkerBy),
+				"checker_at":        ifaceToTimeString(checkerAt),
+				"checker_comment":   ifaceToString(checkerComment),
+				"reason":            ifaceToString(reason),
 			}
 			if strings.EqualFold(action, "EDIT") {
 				if changes := buildProjectionChangeSummary(ctx, pgxPool, req.ProposalID); len(changes) > 0 {
@@ -116,7 +117,7 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY requested_at ASC, download_audit_id ASC
 		`, req.ProposalID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to read projection download audit history")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadProjectionAuditHistory)
 			return
 		}
 		defer downloadRows.Close()
@@ -126,7 +127,7 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var requestedAt sql.NullTime
 			var fileName, uploadKey sql.NullString
 			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &fileName, &uploadKey); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to read projection download audit history")
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadProjectionAuditHistory)
 				return
 			}
 
@@ -136,17 +137,17 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"processing_status": "COMPLETED",
 				"requested_by":      strings.TrimSpace(requestedBy),
 				"requested_at":      requestedAt.Time,
-				"checker_by":    "",
-				"checker_at":    nil,
-				"checker_comment": "",
-				"reason":        "",
-				"file_name":     fileName.String,
-				"upload_s3_key": uploadKey.String,
-				"source":        "PROJECTION",
+				"checker_by":        "",
+				"checker_at":        nil,
+				"checker_comment":   "",
+				"reason":            "",
+				"file_name":         fileName.String,
+				"upload_s3_key":     uploadKey.String,
+				"source":            "PROJECTION",
 			})
 		}
 		if err := downloadRows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to read projection download audit history")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadProjectionAuditHistory)
 			return
 		}
 

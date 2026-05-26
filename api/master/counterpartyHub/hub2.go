@@ -467,7 +467,7 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "COUNTERPARTY_HUB", cpID, req.UserID, userEmail, "", approvalengine.ActionApproved, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "COUNTERPARTY_HUB", RecordID: cpID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				errs = append(errs, cpID+": "+actionErr.Error())
 				continue
@@ -1245,7 +1245,7 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "COUNTERPARTY_HUB", cpID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "COUNTERPARTY_HUB", RecordID: cpID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				errList = append(errList, map[string]interface{}{
 					"counterparty_id": cpID, "success": false, "error": actionErr.Error(),

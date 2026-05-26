@@ -42,7 +42,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		cpType := strings.ToUpper(strings.TrimSpace(r.FormValue("counterparty_type")))
 
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		validTypes := map[string]bool{
@@ -69,7 +69,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to read file: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -80,7 +80,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			storedFileName = s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 				return
 			}
 		}
@@ -543,7 +543,7 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		formType := strings.ToUpper(strings.TrimSpace(r.FormValue("counterparty_type")))
 
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -562,7 +562,7 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to read file: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -573,7 +573,7 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			storedFileName = s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 				return
 			}
 		}

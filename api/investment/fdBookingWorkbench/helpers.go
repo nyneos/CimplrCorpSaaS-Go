@@ -132,7 +132,7 @@ func fdTextExpr(columns map[string]bool, tableAlias string, fallback string, can
 	if columnName == "" {
 		return fallback
 	}
-	return fmt.Sprintf("COALESCE(%s.%s,'')", tableAlias, columnName)
+	return fmt.Sprintf(constants.FormatCOALESCE, tableAlias, columnName)
 }
 
 func fdNumericExpr(columns map[string]bool, tableAlias string, fallback string, candidates ...string) string {
@@ -230,7 +230,7 @@ func resolveFDBookingAccountNumberExpression(ctx context.Context, exec fdSchemaQ
 	if columnName == "" {
 		return constants.ErrEmptyString, nil
 	}
-	return fmt.Sprintf("COALESCE(%s.%s,'')", tableAlias, columnName), nil
+	return fmt.Sprintf(constants.FormatCOALESCE, tableAlias, columnName), nil
 }
 
 // fdConfirmationHasUploadS3Key returns true when investment.fd_confirmation
@@ -264,7 +264,7 @@ func resolveFDBookingAccountExpression(ctx context.Context, exec fdSchemaQueryEx
 	if columnName == "" {
 		return constants.ErrEmptyString, nil
 	}
-	return fmt.Sprintf("COALESCE(%s.%s,'')", tableAlias, columnName), nil
+	return fmt.Sprintf(constants.FormatCOALESCE, tableAlias, columnName), nil
 }
 
 // getEntityName attempts to resolve an entity's display name using master tables.
@@ -749,21 +749,21 @@ type fdConfirmationVarianceInput struct {
 	BookingID, EntityID, RunID  string
 	ResolvedBy, ResolvedByEmail string
 
-	BookedPrincipal, ActualPrincipal             float64
-	BookedRate, ActualRate                       float64
-	BookedTenorDays, ActualTenorDays             int
-	BookedTenorMonths, ActualTenorMonths         int
-	BookedTenorYears, ActualTenorYears           int
-	BookedValueDate, ActualValueDate             string
-	BookedMaturityDate, ActualMaturityDate       string
-	BookedInterestType, ActualInterestType       string
-	BookedFrequencyID, ActualFrequencyID         string
-	BookedPayoutFrequencyID, ActualPayoutFrequencyID string
-	BookedResetType, ActualResetType             string
+	BookedPrincipal, ActualPrincipal                       float64
+	BookedRate, ActualRate                                 float64
+	BookedTenorDays, ActualTenorDays                       int
+	BookedTenorMonths, ActualTenorMonths                   int
+	BookedTenorYears, ActualTenorYears                     int
+	BookedValueDate, ActualValueDate                       string
+	BookedMaturityDate, ActualMaturityDate                 string
+	BookedInterestType, ActualInterestType                 string
+	BookedFrequencyID, ActualFrequencyID                   string
+	BookedPayoutFrequencyID, ActualPayoutFrequencyID       string
+	BookedResetType, ActualResetType                       string
 	BookedAccrualFrequencyCode, ActualAccrualFrequencyCode string
-	BookedTenorType, ActualTenorType             string
-	BookedFirstCapDate, ActualFirstCapDate       string
-	BookedFirstPayoutDate, ActualFirstPayoutDate string
+	BookedTenorType, ActualTenorType                       string
+	BookedFirstCapDate, ActualFirstCapDate                 string
+	BookedFirstPayoutDate, ActualFirstPayoutDate           string
 }
 
 func normalizeResetType(v string) string {
@@ -820,9 +820,18 @@ func normalizedPayoutFrequency(ctx context.Context, pool *pgxpool.Pool, bookedPa
 	return canonicalFrequencyIdentity(ctx, pool, b), canonicalFrequencyIdentity(ctx, pool, a)
 }
 
-func normalizedAccrualFrequency(ctx context.Context, pool *pgxpool.Pool, bookedCode, actualCode, bookedPayout, actualPayout, bookedCompound, actualCompound string) (booked, actual string) {
-	bookedNorm := normalizeAccrualFrequencyCode(bookedCode, bookedPayout, bookedCompound)
-	actualNorm := normalizeAccrualFrequencyCode(actualCode, actualPayout, actualCompound)
+type accrualFrequencyInput struct {
+	BookedCode     string
+	ActualCode     string
+	BookedPayout   string
+	ActualPayout   string
+	BookedCompound string
+	ActualCompound string
+}
+
+func normalizedAccrualFrequency(ctx context.Context, pool *pgxpool.Pool, in accrualFrequencyInput) (booked, actual string) {
+	bookedNorm := normalizeAccrualFrequencyCode(in.BookedCode, in.BookedPayout, in.BookedCompound)
+	actualNorm := normalizeAccrualFrequencyCode(in.ActualCode, in.ActualPayout, in.ActualCompound)
 	return canonicalFrequencyIdentity(ctx, pool, bookedNorm), canonicalFrequencyIdentity(ctx, pool, actualNorm)
 }
 

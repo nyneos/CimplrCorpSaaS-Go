@@ -2,6 +2,7 @@ package additionalfiles
 
 import (
 	cashfiles "CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"net/http"
@@ -36,7 +37,7 @@ var (
 		TableName:     "investment.investment_proposal_files",
 		ParentColumn:  "proposal_id",
 		ParentTable:   "investment.investment_proposal",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	initiationFilesDefinition = investmentFileDefinition{
 		Module:        "investment-initiation",
@@ -44,7 +45,7 @@ var (
 		TableName:     "investment.investment_initiation_files",
 		ParentColumn:  "initiation_id",
 		ParentTable:   "investment.investment_initiation",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	confirmationFilesDefinition = investmentFileDefinition{
 		Module:        "investment-confirmation-additional",
@@ -52,7 +53,7 @@ var (
 		TableName:     "investment.investment_confirmation_files",
 		ParentColumn:  "confirmation_id",
 		ParentTable:   "investment.investment_confirmation",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	redemptionInitiationFilesDefinition = investmentFileDefinition{
 		Module:        "investment-redemption-initiation",
@@ -60,7 +61,7 @@ var (
 		TableName:     "investment.redemption_initiation_files",
 		ParentColumn:  "redemption_id",
 		ParentTable:   "investment.redemption_initiation",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	redemptionConfirmationFilesDefinition = investmentFileDefinition{
 		Module:        "investment-redemption-confirmation-additional",
@@ -68,7 +69,7 @@ var (
 		TableName:     "investment.redemption_confirmation_files",
 		ParentColumn:  "redemption_confirm_id",
 		ParentTable:   "investment.redemption_confirmation",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	accountingActivityFilesDefinition = investmentFileDefinition{
 		Module:        "investment-accounting-activity",
@@ -76,7 +77,7 @@ var (
 		TableName:     "investment.accounting_activity_files",
 		ParentColumn:  "activity_id",
 		ParentTable:   "investment.accounting_activity",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdBookingFilesDefinition = investmentFileDefinition{
 		Module:        "fd-booking-additional",
@@ -84,7 +85,7 @@ var (
 		TableName:     "investment.fd_booking_request_files",
 		ParentColumn:  "booking_id",
 		ParentTable:   "investment.fd_booking_request",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdConfirmationFilesDefinition = investmentFileDefinition{
 		Module:        "fd-confirmation-additional",
@@ -92,7 +93,7 @@ var (
 		TableName:     "investment.fd_confirmation_files",
 		ParentColumn:  "confirmation_id",
 		ParentTable:   "investment.fd_confirmation",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdMasterFilesDefinition = investmentFileDefinition{
 		Module:        "fd-master-additional",
@@ -100,14 +101,14 @@ var (
 		TableName:     "investment.fd_master_files",
 		ParentColumn:  "fd_id",
 		ParentTable:   "investment.fd_master",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdClosureFilesDefinition = investmentFileDefinition{
 		Module:        "fd-closure-additional",
 		ParentIDField: "closure_request_id",
 		TableName:     "investment.fd_closure_request_files",
 		ParentColumn:  "closure_request_id",
-		ParentTable:   "investment.fd_closure_request",
+		ParentTable:   constants.QuerryClosureRequest,
 		ParentFilter: `AND COALESCE(p.is_deleted, FALSE) = FALSE
 		  AND COALESCE(p.closure_type, '') <> 'ROLLOVER'
 		  AND EXISTS (
@@ -121,7 +122,7 @@ var (
 		ParentIDField: "closure_request_id",
 		TableName:     "investment.fd_rollover_request_files",
 		ParentColumn:  "closure_request_id",
-		ParentTable:   "investment.fd_closure_request",
+		ParentTable:   constants.QuerryClosureRequest,
 		ParentFilter: `AND COALESCE(p.is_deleted, FALSE) = FALSE
 		  AND COALESCE(p.closure_type, '') = 'ROLLOVER'
 		  AND EXISTS (
@@ -147,7 +148,7 @@ var (
 		TableName:     "investment.fd_interest_receipt_files",
 		ParentColumn:  "receipt_id",
 		ParentTable:   "investment.fd_interest_receipt",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdTDSReceiptFilesDefinition = investmentFileDefinition{
 		Module:        "fd-tds-receipt-additional",
@@ -155,7 +156,7 @@ var (
 		TableName:     "investment.fd_tds_receipt_files",
 		ParentColumn:  "tds_id",
 		ParentTable:   "investment.fd_tds_receipt",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdReconcileResultFilesDefinition = investmentFileDefinition{
 		Module:        "fd-reconcile-result-additional",
@@ -170,7 +171,7 @@ var (
 		TableName:     "investment.fd_receipt_exception_files",
 		ParentColumn:  "exception_id",
 		ParentTable:   "investment.fd_receipt_exception",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdAccrualRunFilesDefinition = investmentFileDefinition{
 		Module:        "fd-accrual-run-additional",
@@ -185,7 +186,7 @@ var (
 		TableName:     "investment.fd_accrual_ledger_files",
 		ParentColumn:  "ledger_id",
 		ParentTable:   "investment.fd_accrual_ledger",
-		ParentFilter:  "AND COALESCE(p.is_deleted, FALSE) = FALSE",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdAccountingJournalFilesDefinition = investmentFileDefinition{
 		Module:        "fd-accounting-journal-additional",

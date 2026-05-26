@@ -1,6 +1,7 @@
 package fdReceipt
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"math/rand"
@@ -177,7 +178,7 @@ func checkReceiptPostingEligibility(ctx context.Context, pool *pgxpool.Pool, rec
 		receiptID,
 	).Scan(&receiptStatus, &reconcileStatus)
 	if err != nil {
-		return "receipt not found"
+		return constants.ReceiptNotFound
 	}
 	if receiptStatus != "APPROVED" {
 		return "receipt must be APPROVED before posting (current: " + receiptStatus + ")"

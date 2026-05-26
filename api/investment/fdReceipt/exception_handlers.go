@@ -182,12 +182,12 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":          true,
-			"exception_id":     req.ExceptionID,
-			"workflow_status":    "IN_REVIEW",
-			"exception_status":   "IN_REVIEW",
-			"processing_status":  "PENDING_APPROVAL",
-			"case_type":          "VARIANCE",
+			"success":           true,
+			"exception_id":      req.ExceptionID,
+			"workflow_status":   "IN_REVIEW",
+			"exception_status":  "IN_REVIEW",
+			"processing_status": "PENDING_APPROVAL",
+			"case_type":         "VARIANCE",
 		})
 	}
 }
@@ -206,7 +206,7 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ids := normalizeExceptionIDs(req.ExceptionID, req.ExceptionIDs)
 		if len(ids) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "exception_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ExceptionIDsRequired)
 			return
 		}
 		userEmail := resolveUserEmail(r.Context())
@@ -384,7 +384,7 @@ func closeVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ids := normalizeExceptionIDs(req.ExceptionID, req.ExceptionIDs)
 		if len(ids) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "exception_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ExceptionIDsRequired)
 			return
 		}
 		userEmail := resolveUserEmail(r.Context())
@@ -425,7 +425,7 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ids := normalizeExceptionIDs(req.ExceptionID, req.ExceptionIDs)
 		if len(ids) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "exception_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ExceptionIDsRequired)
 			return
 		}
 		if strings.TrimSpace(req.Reason) == "" {

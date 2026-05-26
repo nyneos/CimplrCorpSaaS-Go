@@ -294,7 +294,7 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 					if varianceAbs < 0 {
 						varianceAbs = -varianceAbs
 					}
-					insertVarianceRaisedAudit(ctx, pool, exID, triggeredBy, deriveExceptionType(variance, expected), expected, rec.Gross, varianceAbs) //nolint:errcheck
+					insertVarianceRaisedAudit(ctx, pool, exID, triggeredBy, varianceAuditParams{ExceptionType: deriveExceptionType(variance, expected), Expected: expected, Received: rec.Gross, Variance: varianceAbs}) //nolint:errcheck
 					if resultID != "" {
 						pool.Exec(ctx, //nolint:errcheck
 							`UPDATE investment.fd_receipt_reconcile_result
@@ -435,7 +435,7 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 						if varianceAmt < 0 {
 							varianceAmt = -varianceAmt
 						}
-						insertVarianceRaisedAudit(ctx, pool, exID, triggeredBy, deriveExceptionType(variance, expected), expected, tds.Actual, varianceAmt) //nolint:errcheck
+						insertVarianceRaisedAudit(ctx, pool, exID, triggeredBy, varianceAuditParams{ExceptionType: deriveExceptionType(variance, expected), Expected: expected, Received: tds.Actual, Variance: varianceAmt}) //nolint:errcheck
 						if tdsResultID != "" {
 							pool.Exec(ctx, //nolint:errcheck
 								`UPDATE investment.fd_receipt_reconcile_result

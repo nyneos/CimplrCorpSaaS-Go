@@ -1530,7 +1530,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -1579,11 +1579,11 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-gl-account")
+				folder := s3storage.GetStoragePrefix(constants.ErrMasterGLAccount)
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -1786,7 +1786,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			committed = true
 			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
-				ModuleKey:        "master-gl-account",
+				ModuleKey:        constants.ErrMasterGLAccount,
 				OriginalFileName: fh.Filename,
 				StoredFileName:   storedFileName,
 				UploadS3Key:      s3Key,
@@ -1867,7 +1867,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to read file: "+fh.Filename)
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -1955,11 +1955,11 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-gl-account")
+				folder := s3storage.GetStoragePrefix(constants.ErrMasterGLAccount)
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -2105,7 +2105,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			committed = true
 			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
-				ModuleKey:        "master-gl-account",
+				ModuleKey:        constants.ErrMasterGLAccount,
 				OriginalFileName: fh.Filename,
 				StoredFileName:   storedFileName,
 				UploadS3Key:      s3Key,

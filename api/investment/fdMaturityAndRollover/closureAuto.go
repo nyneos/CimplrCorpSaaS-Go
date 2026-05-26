@@ -162,7 +162,7 @@ func RunCimplrAutoMaturityDue(ctx context.Context, pool *pgxpool.Pool) (processe
 		api.LogInfo("[CimplrAutoMaturity] processing initiate_id=%s fd_id=%s type=%s tenor_days=%d rate=%v actor=%s",
 			initiateID, fdID, closureType, newTenor, newRate, actorEmail)
 
-		outcome, confirmID, err := processCimplrAutoMaturityInitiate(ctx, pool, initiateID, fdID, closureType, reqDate, rolloverBasis, newTenor, newRate, actorUserID, actorEmail)
+		outcome, confirmID, err := processCimplrAutoMaturityInitiate(ctx, pool, autoMaturityInitiateParams{InitiateID: initiateID, FDID: fdID, ClosureType: closureType, ReqDate: reqDate, RolloverBasis: rolloverBasis, NewTenor: newTenor, NewRate: newRate, ActorUserID: actorUserID, ActorEmail: actorEmail})
 		switch outcome {
 		case autoMaturityOutcomeSuccess:
 			processed++
@@ -174,7 +174,7 @@ func RunCimplrAutoMaturityDue(ctx context.Context, pool *pgxpool.Pool) (processe
 				initiateID, fdID, closureType, confirmID, err)
 		default:
 			failed++
-			if logErr := insertCimplrExecutionLog(ctx, pool, initiateID, fdID, closureType, confirmID, "AUTO_MATURITY", "FAILED", err.Error()); logErr != nil {
+			if logErr := insertCimplrExecutionLog(ctx, pool, executionLogEntry{InitiateID: initiateID, FDID: fdID, ClosureType: closureType, ConfirmID: confirmID, Source: "AUTO_MATURITY", Status: "FAILED", Message: err.Error()}); logErr != nil {
 				api.LogError("[CimplrAutoMaturity] execution log insert failed initiate_id=%s fd_id=%s: %v (original error: %v)",
 					initiateID, fdID, logErr, err)
 			}
@@ -190,14 +190,28 @@ func RunCimplrAutoMaturityDue(ctx context.Context, pool *pgxpool.Pool) (processe
 	return processed, skipped, failed
 }
 
-func processCimplrAutoMaturityInitiate(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	initiateID, fdID, closureType, reqDate, rolloverBasis string,
-	newTenor int,
-	newRate float64,
-	actorUserID, actorEmail string,
-) (autoMaturityOutcome, string, error) {
+type autoMaturityInitiateParams struct {
+	InitiateID    string
+	FDID          string
+	ClosureType   string
+	ReqDate       string
+	RolloverBasis string
+	NewTenor      int
+	NewRate       float64
+	ActorUserID   string
+	ActorEmail    string
+}
+
+func processCimplrAutoMaturityInitiate(ctx context.Context, pool *pgxpool.Pool, p autoMaturityInitiateParams) (autoMaturityOutcome, string, error) {
+	initiateID := p.InitiateID
+	fdID := p.FDID
+	closureType := p.ClosureType
+	reqDate := p.ReqDate
+	rolloverBasis := p.RolloverBasis
+	newTenor := p.NewTenor
+	newRate := p.NewRate
+	actorUserID := p.ActorUserID
+	actorEmail := p.ActorEmail
 	initiate, err := loadCimplrInitiateOld(ctx, pool, initiateID)
 	if err != nil {
 		return autoMaturityOutcomeFailed, "", fmt.Errorf("load initiate: %w", err)
@@ -276,7 +290,7 @@ func processCimplrAutoMaturityInitiate(
 	if err := insertCimplrCalculation(ctx, tx, initiateID, closureConfirmID, src, calc); err != nil {
 		return autoMaturityOutcomeFailed, closureConfirmID, fmt.Errorf("insert calculation: %w", err)
 	}
-	if err := insertCimplrConfirmAudit(ctx, tx, closureConfirmID, initiateID, "CREATE", "APPROVED", req.Reason, actorUserID, nil); err != nil {
+	if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: initiateID, Action: "CREATE", Status: "APPROVED", Reason: req.Reason, RequestedBy: actorUserID, Old: nil}); err != nil {
 		return autoMaturityOutcomeFailed, closureConfirmID, fmt.Errorf("insert confirm audit: %w", err)
 	}
 	_, err = tx.Exec(ctx, `
@@ -298,7 +312,7 @@ func processCimplrAutoMaturityInitiate(
 		msg := fmt.Sprintf("%d open variance(s) after system calc — %s", open, varDebug)
 		api.LogInfo("[CimplrAutoMaturity] variance skip initiate_id=%s fd_id=%s confirm_id=%s %s",
 			initiateID, fdID, closureConfirmID, varDebug)
-		if logErr := insertCimplrExecutionLog(ctx, pool, initiateID, fdID, closureType, closureConfirmID, "AUTO_MATURITY", "SKIPPED", msg); logErr != nil {
+		if logErr := insertCimplrExecutionLog(ctx, pool, executionLogEntry{InitiateID: initiateID, FDID: fdID, ClosureType: closureType, ConfirmID: closureConfirmID, Source: "AUTO_MATURITY", Status: "SKIPPED", Message: msg}); logErr != nil {
 			api.LogError("[CimplrAutoMaturity] execution log insert failed (variance skip) initiate_id=%s: %v", initiateID, logErr)
 		}
 		return autoMaturityOutcomeSkipped, closureConfirmID, fmt.Errorf("open variance count %d — manual confirm required (%s)", open, varDebug)
@@ -309,7 +323,7 @@ func processCimplrAutoMaturityInitiate(
 		if strings.Contains(err.Error(), "cannot approve:") || strings.Contains(err.Error(), "open variance") || strings.Contains(err.Error(), "manual confirm") {
 			outcome = autoMaturityOutcomeSkipped
 		}
-		if logErr := insertCimplrExecutionLog(ctx, pool, initiateID, fdID, closureType, closureConfirmID, "AUTO_MATURITY", string(outcome), err.Error()); logErr != nil {
+		if logErr := insertCimplrExecutionLog(ctx, pool, executionLogEntry{InitiateID: initiateID, FDID: fdID, ClosureType: closureType, ConfirmID: closureConfirmID, Source: "AUTO_MATURITY", Status: string(outcome), Message: err.Error()}); logErr != nil {
 			api.LogError("[CimplrAutoMaturity] execution log insert failed (approvable check) initiate_id=%s: %v", initiateID, logErr)
 		}
 		return outcome, closureConfirmID, err
@@ -322,7 +336,7 @@ func processCimplrAutoMaturityInitiate(
 	if err := tx.Commit(ctx); err != nil {
 		return autoMaturityOutcomeFailed, closureConfirmID, fmt.Errorf("commit tx: %w", err)
 	}
-	if err := insertCimplrExecutionLog(ctx, pool, initiateID, fdID, closureType, closureConfirmID, "AUTO_MATURITY", "SUCCESS", ""); err != nil {
+	if err := insertCimplrExecutionLog(ctx, pool, executionLogEntry{InitiateID: initiateID, FDID: fdID, ClosureType: closureType, ConfirmID: closureConfirmID, Source: "AUTO_MATURITY", Status: "SUCCESS", Message: ""}); err != nil {
 		api.LogError("[CimplrAutoMaturity] execution log insert failed (success) initiate_id=%s confirm_id=%s: %v",
 			initiateID, closureConfirmID, err)
 	}
@@ -352,12 +366,22 @@ func ensureCimplrExecutionLogTable(ctx context.Context, pool *pgxpool.Pool) erro
 	return err
 }
 
-func insertCimplrExecutionLog(ctx context.Context, pool *pgxpool.Pool, initiateID, fdID, closureType, confirmID, source, status, message string) error {
+type executionLogEntry struct {
+	InitiateID  string
+	FDID        string
+	ClosureType string
+	ConfirmID   string
+	Source      string
+	Status      string
+	Message     string
+}
+
+func insertCimplrExecutionLog(ctx context.Context, pool *pgxpool.Pool, e executionLogEntry) error {
 	_, err := pool.Exec(ctx, `
 		INSERT INTO cimplr.fd_closure_execution_log (
 			closure_initiate_id, fd_id, closure_type, closure_confirm_id, execution_source, status, message
 		) VALUES (NULLIF($1,''),$2,$3,NULLIF($4,''),$5,$6,NULLIF($7,''))`,
-		initiateID, fdID, closureType, confirmID, source, status, message)
+		e.InitiateID, e.FDID, e.ClosureType, e.ConfirmID, e.Source, e.Status, e.Message)
 	return err
 }
 

@@ -249,12 +249,12 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		src, err := loadCimplrFDSource(ctx, pool, req.FDID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "FD not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
 		calc, err := calculateCimplrClosure(ctx, pool, src, req.ClosureType, cimplrDefaultCalcDate(src, req.ClosureType, req.RequestedClosureDate), false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "closure calculation failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
 			return
 		}
 
@@ -276,7 +276,7 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "transaction start failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -311,10 +311,10 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := insertCimplrCalculation(ctx, tx, closureInitiateID, "", src, calc); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "calculation snapshot failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
 			return
 		}
-		if err := insertCimplrInitiateAudit(ctx, tx, closureInitiateID, "CREATE", "PENDING_APPROVAL", firstNonEmpty(req.Reason, "Create FD closure initiate"), req.UserID, nil); err != nil {
+		if err := insertCimplrInitiateAudit(ctx, tx, initiateAuditEntry{ID: closureInitiateID, Action: "CREATE", Status: "PENDING_APPROVAL", Reason: firstNonEmpty(req.Reason, "Create FD closure initiate"), RequestedBy: req.UserID, Old: nil}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "initiate audit failed: "+err.Error())
 			return
 		}
@@ -328,7 +328,7 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			api.LogError("[CimplrFDClosure] initiate variance failed: %v", err)
 		}
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, txCimplrInitiateCreate, "CREATE", closureInitiateID, "cimplr.fd_closure_initiate", "cimplr.fd_closure_initiate_audit", "closure_initiate_id", src.EntityID, principal, req.UserID, userEmail)
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: txCimplrInitiateCreate, Action: "CREATE", RecordID: closureInitiateID, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: src.EntityID, Amount: principal, UserID: req.UserID, UserEmail: userEmail})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] initiate approval create failed: %v", instErr)
 		}
@@ -385,15 +385,15 @@ func CimplrInitiateValidate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		src, err := loadCimplrFDSource(r.Context(), pool, req.FDID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "FD not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
 		calc, err := calculateCimplrClosure(r.Context(), pool, src, req.ClosureType, cimplrDefaultCalcDate(src, req.ClosureType, req.RequestedClosureDate), false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "closure calculation failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
 			return
 		}
-		recordID := firstNonEmpty(req.ClosureInitiateID, "PREVIEW-"+varianceengine.NewRunID())
+		recordID := firstNonEmpty(req.ClosureInitiateID, constants.PreviewPrefix+varianceengine.NewRunID())
 		summary := previewCimplrInitiateVariance(recordID, req, src, calc)
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"fd_source":         src,
@@ -423,14 +423,14 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		req.ClosureInitiateID = strings.TrimSpace(req.ClosureInitiateID)
 		if req.ClosureInitiateID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_initiate_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrClosureInitiateIDRequired)
 			return
 		}
 
 		ctx := r.Context()
 		oldRow, err := loadCimplrInitiateOld(ctx, pool, req.ClosureInitiateID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "initiate record not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrClosureInitiateRecordNotFound)
 			return
 		}
 		if fmt.Sprint(oldRow["closure_status"]) == "CONFIRM" {
@@ -439,7 +439,7 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		src, err := loadCimplrFDSource(ctx, pool, fmt.Sprint(oldRow["fd_id"]))
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "FD not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
 		if req.ClosureType == "" {
@@ -454,7 +454,7 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		calc, err := calculateCimplrClosure(ctx, pool, src, req.ClosureType, cimplrDefaultCalcDate(src, req.ClosureType, req.RequestedClosureDate), false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "closure calculation failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
 			return
 		}
 
@@ -467,7 +467,7 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "transaction start failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -492,10 +492,10 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := insertCimplrCalculation(ctx, tx, req.ClosureInitiateID, "", src, calc); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "calculation snapshot failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
 			return
 		}
-		if err := insertCimplrInitiateAudit(ctx, tx, req.ClosureInitiateID, "EDIT", "PENDING_EDIT_APPROVAL", firstNonEmpty(req.Reason, "Edit FD closure initiate"), req.UserID, oldRow); err != nil {
+		if err := insertCimplrInitiateAudit(ctx, tx, initiateAuditEntry{ID: req.ClosureInitiateID, Action: "EDIT", Status: "PENDING_EDIT_APPROVAL", Reason: firstNonEmpty(req.Reason, "Edit FD closure initiate"), RequestedBy: req.UserID, Old: oldRow}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "initiate audit failed: "+err.Error())
 			return
 		}
@@ -506,7 +506,7 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 
 		varianceSummary, _ := persistCimplrInitiateVariances(ctx, pool, req.ClosureInitiateID, req, src, calc)
 		_ = approvalengine.CancelPendingInstances(ctx, pool, cimplrClosureModule, req.ClosureInitiateID, userEmail)
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, txCimplrInitiateEdit, "EDIT", req.ClosureInitiateID, "cimplr.fd_closure_initiate", "cimplr.fd_closure_initiate_audit", "closure_initiate_id", src.EntityID, principal, req.UserID, userEmail)
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: txCimplrInitiateEdit, Action: "EDIT", RecordID: req.ClosureInitiateID, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: src.EntityID, Amount: principal, UserID: req.UserID, UserEmail: userEmail})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] initiate edit approval failed: %v", instErr)
 		}
@@ -539,7 +539,7 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ids := normalizeCimplrIDs(req.ClosureInitiateID, req.ClosureInitiateIDs)
 		if len(ids) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_initiate_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrClosureInitiateIDRequired)
 			return
 		}
 		results := make([]map[string]interface{}, 0, len(ids))
@@ -565,13 +565,13 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			if err := insertCimplrInitiateAudit(r.Context(), pool, id, "DELETE", "PENDING_DELETE_APPROVAL", firstNonEmpty(req.Comment, "Delete FD closure initiate"), req.UserID, oldRow); err != nil {
+			if err := insertCimplrInitiateAudit(r.Context(), pool, initiateAuditEntry{ID: id, Action: "DELETE", Status: "PENDING_DELETE_APPROVAL", Reason: firstNonEmpty(req.Comment, "Delete FD closure initiate"), RequestedBy: req.UserID, Old: oldRow}); err != nil {
 				res["success"] = false
 				res["error"] = err.Error()
 				results = append(results, res)
 				continue
 			}
-			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, txCimplrInitiateDelete, "DELETE", id, "cimplr.fd_closure_initiate", "cimplr.fd_closure_initiate_audit", "closure_initiate_id", fmt.Sprint(oldRow["entity_id"]), 0, req.UserID, userEmail)
+			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: txCimplrInitiateDelete, Action: "DELETE", RecordID: id, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: 0, UserID: req.UserID, UserEmail: userEmail})
 			if instanceID != "" {
 				_, _ = pool.Exec(r.Context(), `UPDATE cimplr.fd_closure_initiate SET approval_instance_id=$1 WHERE closure_initiate_id=$2`, instanceID, id)
 			}
@@ -601,7 +601,7 @@ func CimplrInitiateApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ids := normalizeCimplrIDs(req.ClosureInitiateID, req.ClosureInitiateIDs)
 		if len(ids) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_initiate_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrClosureInitiateIDRequired)
 			return
 		}
 		results := cimplrApproveInitiates(r.Context(), pool, ids, req.UserID, userEmail, req.Comment)
@@ -627,7 +627,7 @@ func CimplrInitiateReject(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ids := normalizeCimplrIDs(req.ClosureInitiateID, req.ClosureInitiateIDs)
 		if len(ids) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_initiate_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrClosureInitiateIDRequired)
 			return
 		}
 		results := cimplrRejectInitiates(r.Context(), pool, ids, req.UserID, userEmail, req.Comment)
@@ -679,7 +679,7 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			req.UserID = userEmail
 		}
 		if strings.TrimSpace(req.ClosureInitiateID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_initiate_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrClosureInitiateIDRequired)
 			return
 		}
 
@@ -695,7 +695,7 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		src, err := loadCimplrFDSource(ctx, pool, fmt.Sprint(initiate["fd_id"]))
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "FD not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
 		closureType := fmt.Sprint(initiate["closure_type"])
@@ -706,7 +706,7 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, err.Error())
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, "closure calculation failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
 			return
 		}
 
@@ -738,7 +738,7 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "transaction start failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -780,10 +780,10 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if err := insertCimplrCalculation(ctx, tx, req.ClosureInitiateID, closureConfirmID, src, calc); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "calculation snapshot failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
 			return
 		}
-		if err := insertCimplrConfirmAudit(ctx, tx, closureConfirmID, req.ClosureInitiateID, "CREATE", "PENDING_APPROVAL", firstNonEmpty(req.Reason, "Create FD closure confirm"), req.UserID, nil); err != nil {
+		if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: req.ClosureInitiateID, Action: "CREATE", Status: "PENDING_APPROVAL", Reason: firstNonEmpty(req.Reason, "Create FD closure confirm"), RequestedBy: req.UserID, Old: nil}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "confirm audit failed: "+err.Error())
 			return
 		}
@@ -795,7 +795,7 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		if persisted, perr := persistCimplrConfirmVariances(ctx, pool, closureConfirmID, req, src, calc); perr == nil {
 			varianceSummary = persisted
 		}
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, txCimplrConfirmCreate, "CREATE", closureConfirmID, "cimplr.fd_closure_confirm", "cimplr.fd_closure_confirm_audit", "closure_confirm_id", src.EntityID, principalExpected, req.UserID, userEmail)
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: txCimplrConfirmCreate, Action: "CREATE", RecordID: closureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] confirm approval create failed: %v", instErr)
 		}
@@ -840,7 +840,7 @@ func CimplrPrematureValidate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		src, err := loadCimplrFDSource(r.Context(), pool, req.FDID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "FD not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
 		calc, err := calculateCimplrClosure(r.Context(), pool, src, "PREMATURE", req.RequestedClosureDate, false)
@@ -848,7 +848,7 @@ func CimplrPrematureValidate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "premature calculation failed: "+err.Error())
 			return
 		}
-		recordID := firstNonEmpty(req.ClosureConfirmID, "PREVIEW-"+varianceengine.NewRunID())
+		recordID := firstNonEmpty(req.ClosureConfirmID, constants.PreviewPrefix+varianceengine.NewRunID())
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"fd_source":         src,
 			"calculation":       cimplrCalcToMap(calc),
@@ -888,7 +888,7 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		src, err := loadCimplrFDSource(ctx, pool, req.FDID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "FD not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
 		calc, err := calculateCimplrClosure(ctx, pool, src, "PREMATURE", req.RequestedClosureDate, false)
@@ -919,7 +919,7 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "transaction start failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -959,10 +959,10 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := insertCimplrCalculation(ctx, tx, closureInitiateID, closureConfirmID, src, calc); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "calculation snapshot failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
 			return
 		}
-		if err := insertCimplrConfirmAudit(ctx, tx, closureConfirmID, closureInitiateID, "CREATE", "PENDING_APPROVAL", firstNonEmpty(req.Reason, "Create premature closure"), req.UserID, nil); err != nil {
+		if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: closureInitiateID, Action: "CREATE", Status: "PENDING_APPROVAL", Reason: firstNonEmpty(req.Reason, "Create premature closure"), RequestedBy: req.UserID, Old: nil}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "premature audit failed: "+err.Error())
 			return
 		}
@@ -977,7 +977,7 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		if persisted, perr := persistCimplrConfirmVariances(ctx, pool, closureConfirmID, req, src, calc); perr == nil {
 			varianceSummary = persisted
 		}
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, txCimplrConfirmCreate, "CREATE", closureConfirmID, "cimplr.fd_closure_confirm", "cimplr.fd_closure_confirm_audit", "closure_confirm_id", src.EntityID, principalExpected, req.UserID, userEmail)
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: txCimplrConfirmCreate, Action: "CREATE", RecordID: closureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] premature approval create failed: %v", instErr)
 		}
@@ -1016,27 +1016,27 @@ func CimplrConfirmValidate(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if req.ClosureInitiateID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_initiate_id or closure_confirm_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
 			return
 		}
 		initiate, err := loadCimplrInitiateOld(r.Context(), pool, req.ClosureInitiateID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "initiate record not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrClosureInitiateRecordNotFound)
 			return
 		}
 		src, err := loadCimplrFDSource(r.Context(), pool, fmt.Sprint(initiate["fd_id"]))
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "FD not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
 		closureType := fmt.Sprint(initiate["closure_type"])
 		calcDate := cimplrDefaultCalcDate(src, closureType, firstNonEmpty(req.RequestedClosureDate, fmt.Sprint(initiate["requested_closure_date"])))
 		calc, err := calculateCimplrClosure(r.Context(), pool, src, closureType, calcDate, false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "closure calculation failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
 			return
 		}
-		recordID := firstNonEmpty(req.ClosureConfirmID, "PREVIEW-"+varianceengine.NewRunID())
+		recordID := firstNonEmpty(req.ClosureConfirmID, constants.PreviewPrefix+varianceengine.NewRunID())
 		summary := previewCimplrConfirmVariance(recordID, req, src, calc)
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"fd_source":         src,
@@ -1066,13 +1066,13 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			req.UserID = userEmail
 		}
 		if req.ClosureConfirmID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_confirm_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
 			return
 		}
 		ctx := r.Context()
 		oldRow, err := loadCimplrConfirmOld(ctx, pool, req.ClosureConfirmID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "confirm record not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ConfirmRecordNotFound)
 			return
 		}
 		if fmt.Sprint(oldRow["closure_status"]) == "POSTED" || oldRow["accounting_posted"] == true {
@@ -1081,13 +1081,13 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		src, err := loadCimplrFDSource(ctx, pool, fmt.Sprint(oldRow["fd_id"]))
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "FD not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
 		closureType := fmt.Sprint(oldRow["closure_type"])
 		calc, err := calculateCimplrClosure(ctx, pool, src, closureType, firstNonEmpty(req.RequestedClosureDate, fmt.Sprint(oldRow["requested_closure_date"])), false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "closure calculation failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
 			return
 		}
 		// See CimplrConfirmCreate — same baseline branching.
@@ -1118,7 +1118,7 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "transaction start failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -1166,10 +1166,10 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if err := insertCimplrCalculation(ctx, tx, closureInitiateID, req.ClosureConfirmID, src, calc); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "calculation snapshot failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
 			return
 		}
-		if err := insertCimplrConfirmAudit(ctx, tx, req.ClosureConfirmID, closureInitiateID, "EDIT", "PENDING_EDIT_APPROVAL", firstNonEmpty(req.Reason, "Edit FD closure confirm"), req.UserID, oldRow); err != nil {
+		if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: req.ClosureConfirmID, InitiateID: closureInitiateID, Action: "EDIT", Status: "PENDING_EDIT_APPROVAL", Reason: firstNonEmpty(req.Reason, "Edit FD closure confirm"), RequestedBy: req.UserID, Old: oldRow}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "confirm audit failed: "+err.Error())
 			return
 		}
@@ -1182,7 +1182,7 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			varianceSummary = persisted
 		}
 		_ = approvalengine.CancelPendingInstances(ctx, pool, cimplrClosureModule, req.ClosureConfirmID, userEmail)
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, txCimplrConfirmEdit, "EDIT", req.ClosureConfirmID, "cimplr.fd_closure_confirm", "cimplr.fd_closure_confirm_audit", "closure_confirm_id", src.EntityID, principalExpected, req.UserID, userEmail)
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: txCimplrConfirmEdit, Action: "EDIT", RecordID: req.ClosureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] confirm edit approval failed: %v", instErr)
 		}
@@ -1216,7 +1216,7 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ids := normalizeCimplrIDs(req.ClosureConfirmID, req.ClosureConfirmIDs)
 		if len(ids) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_confirm_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
 			return
 		}
 		results := make([]map[string]interface{}, 0, len(ids))
@@ -1235,13 +1235,13 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			if err := insertCimplrConfirmAudit(r.Context(), pool, id, fmt.Sprint(oldRow["closure_initiate_id"]), "DELETE", "PENDING_DELETE_APPROVAL", firstNonEmpty(req.Comment, "Delete FD closure confirm"), req.UserID, oldRow); err != nil {
+			if err := insertCimplrConfirmAudit(r.Context(), pool, confirmAuditEntry{ConfirmID: id, InitiateID: fmt.Sprint(oldRow["closure_initiate_id"]), Action: "DELETE", Status: "PENDING_DELETE_APPROVAL", Reason: firstNonEmpty(req.Comment, "Delete FD closure confirm"), RequestedBy: req.UserID, Old: oldRow}); err != nil {
 				res["success"] = false
 				res["error"] = err.Error()
 				results = append(results, res)
 				continue
 			}
-			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, txCimplrConfirmDelete, "DELETE", id, "cimplr.fd_closure_confirm", "cimplr.fd_closure_confirm_audit", "closure_confirm_id", fmt.Sprint(oldRow["entity_id"]), 0, req.UserID, userEmail)
+			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: txCimplrConfirmDelete, Action: "DELETE", RecordID: id, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: 0, UserID: req.UserID, UserEmail: userEmail})
 			if instanceID != "" {
 				_, _ = pool.Exec(r.Context(), `UPDATE cimplr.fd_closure_confirm SET approval_instance_id=$1 WHERE closure_confirm_id=$2`, instanceID, id)
 			}
@@ -1314,7 +1314,7 @@ func CimplrConfirmApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ids := normalizeCimplrIDs(req.ClosureConfirmID, req.ClosureConfirmIDs)
 		if len(ids) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_confirm_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
 			return
 		}
 		results := cimplrApproveConfirms(r.Context(), pool, ids, req.UserID, userEmail, req.Comment)
@@ -1340,7 +1340,7 @@ func CimplrConfirmReject(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ids := normalizeCimplrIDs(req.ClosureConfirmID, req.ClosureConfirmIDs)
 		if len(ids) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_confirm_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
 			return
 		}
 		results := cimplrRejectConfirms(r.Context(), pool, ids, req.UserID, userEmail, req.Comment)
@@ -1586,7 +1586,7 @@ func CimplrClosureAudit(pool *pgxpool.Pool) http.HandlerFunc {
 			})
 			return
 		}
-		api.RespondWithError(w, http.StatusBadRequest, "closure_initiate_id or closure_confirm_id is required")
+		api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
 	}
 }
 
@@ -1599,12 +1599,12 @@ func CimplrInitiateDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		id := strings.TrimSpace(req.ClosureInitiateID)
 		if id == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_initiate_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrClosureInitiateIDRequired)
 			return
 		}
 		header, err := loadCimplrInitiateOld(r.Context(), pool, id)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "initiate record not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrClosureInitiateRecordNotFound)
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -1627,12 +1627,12 @@ func CimplrConfirmDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		id := strings.TrimSpace(req.ClosureConfirmID)
 		if id == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_confirm_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
 			return
 		}
 		header, err := loadCimplrConfirmOld(r.Context(), pool, id)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "confirm record not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ConfirmRecordNotFound)
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -1693,7 +1693,7 @@ func CimplrClosureUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			req.UserID = userEmail
 		}
 		if req.ClosureInitiateID == "" && req.ClosureConfirmID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "closure_initiate_id or closure_confirm_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
 			return
 		}
 		if req.FileType == "" || req.StoredFileName == "" || req.UploadS3Key == "" {
@@ -1739,7 +1739,7 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 	closureConfirmID := strings.TrimSpace(r.FormValue("closure_confirm_id"))
 	fileType := strings.ToUpper(strings.TrimSpace(r.FormValue("file_type")))
 	if closureInitiateID == "" && closureConfirmID == "" {
-		api.RespondWithError(w, http.StatusBadRequest, "closure_initiate_id or closure_confirm_id is required")
+		api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
 		return
 	}
 	if fileType == "" {
@@ -1895,7 +1895,7 @@ func cimplrApproveInitiates(ctx context.Context, pool *pgxpool.Pool, ids []strin
 			res["success"] = true
 			res["approval_engine"] = true
 		} else {
-			pendingAction, pendingErr := cimplrLatestPendingAuditAction(ctx, pool, "cimplr.fd_closure_initiate_audit", "closure_initiate_id", id)
+			pendingAction, pendingErr := cimplrLatestPendingAuditAction(ctx, pool, constants.QuerryAuditClosureInitiate, "closure_initiate_id", id)
 			if pendingErr != nil {
 				res["success"] = false
 				res["error"] = pendingErr.Error()
@@ -2052,7 +2052,7 @@ func cimplrApproveConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string
 				res["approval_engine"] = true
 			}
 		} else {
-			pendingAction, pendingErr := cimplrLatestPendingAuditAction(ctx, pool, "cimplr.fd_closure_confirm_audit", "closure_confirm_id", id)
+			pendingAction, pendingErr := cimplrLatestPendingAuditAction(ctx, pool, constants.QuerryAuditClosureConfirmAudit, "closure_confirm_id", id)
 			if pendingErr != nil {
 				res["success"] = false
 				res["error"] = pendingErr.Error()
@@ -2137,7 +2137,7 @@ func cimplrRejectConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string,
 }
 
 func cimplrActOnApproval(ctx context.Context, pool *pgxpool.Pool, recordID, userID, userEmail, action, comment string) (bool, error) {
-	res, err := approvalengine.ActOnPendingOrDiagnose(ctx, pool, cimplrClosureModule, recordID, userID, userEmail, "", action, comment)
+	res, err := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: cimplrClosureModule, RecordID: recordID, UserID: userID, UserEmail: userEmail, RoleID: "", Action: action, Comment: comment})
 	if err != nil {
 		return false, err
 	}
@@ -2302,17 +2302,17 @@ func postCimplrClosureJournalsTx(ctx context.Context, tx pgx.Tx, closureConfirmI
 	if err := insertLine(bankAccountNumber, bankAccountName, "ASSET", netPayout, 0, "Cash received on FD closure"); err != nil {
 		return err
 	}
-	if err := insertLine("TDS-RECEIVABLE", "TDS Receivable", "ASSET", tds, 0, "TDS withheld at source"); err != nil {
+	if err := insertLine(constants.TDSReceivable, constants.TDSReceivableLabel, "ASSET", tds, 0, "TDS withheld at source"); err != nil {
 		return err
 	}
 	if err := insertLine("PENALTY-EXP", "Premature Withdrawal Penalty", "EXPENSE", penalty, 0, "Premature withdrawal penalty"); err != nil {
 		return err
 	}
-	if err := insertLine("FD-INVEST-"+fdID, "FD Investment - "+fdID, "ASSET", 0, principal, "Close FD investment asset"); err != nil {
+	if err := insertLine(constants.FDInvestmentPrefix+fdID, constants.FormatFDInvestment+fdID, "ASSET", 0, principal, "Close FD investment asset"); err != nil {
 		return err
 	}
 	interestCredit := roundToFour(totalCredit - principal)
-	if err := insertLine("FD-INT-INC-"+fdID, "Interest Income - FD", "INCOME", 0, interestCredit, "Interest recognised on closure"); err != nil {
+	if err := insertLine(constants.FDInterestIncome+fdID, constants.FormatInterestIncome, "INCOME", 0, interestCredit, "Interest recognised on closure"); err != nil {
 		return err
 	}
 
@@ -2349,7 +2349,7 @@ func postCimplrClosureJournalsTx(ctx context.Context, tx pgx.Tx, closureConfirmI
 	if err != nil {
 		return err
 	}
-	if err := insertCimplrConfirmAudit(ctx, tx, closureConfirmID, "", "POST", "POSTED", firstNonEmpty(comment, "Journals posted on approval"), actorEmail, map[string]interface{}{"accounting_posted": false, "journal_entry_id": ""}); err != nil {
+	if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: "", Action: "POST", Status: "POSTED", Reason: firstNonEmpty(comment, "Journals posted on approval"), RequestedBy: actorEmail, Old: map[string]interface{}{"accounting_posted": false, "journal_entry_id": ""}}); err != nil {
 		return err
 	}
 	return nil
@@ -2471,14 +2471,14 @@ func createCimplrRolloverBookingTx(ctx context.Context, tx pgx.Tx, closureConfir
 	if err := insertLine(firstNonEmpty(sourceAccountNumber, targetAccountID), sourceAccountName, "ASSET", netPayout, 0, "Rollover closure settlement value"); err != nil {
 		return err
 	}
-	if err := insertLine("TDS-RECEIVABLE", "TDS Receivable", "ASSET", tds, 0, "TDS withheld at source on rollover"); err != nil {
+	if err := insertLine(constants.TDSReceivable, constants.TDSReceivableLabel, "ASSET", tds, 0, "TDS withheld at source on rollover"); err != nil {
 		return err
 	}
-	if err := insertLine("FD-INVEST-"+fdID, "FD Investment - "+fdID, "ASSET", 0, principal, "Close old FD investment asset on rollover"); err != nil {
+	if err := insertLine(constants.FDInvestmentPrefix+fdID, constants.FormatFDInvestment+fdID, "ASSET", 0, principal, "Close old FD investment asset on rollover"); err != nil {
 		return err
 	}
 	interestCredit := roundToFour(totalCredit - principal)
-	if err := insertLine("FD-INT-INC-"+fdID, "Interest Income - FD", "INCOME", 0, interestCredit, "Interest recognised on rollover closure"); err != nil {
+	if err := insertLine(constants.FDInterestIncome+fdID, constants.FormatInterestIncome, "INCOME", 0, interestCredit, "Interest recognised on rollover closure"); err != nil {
 		return err
 	}
 
@@ -2556,7 +2556,7 @@ func createCimplrRolloverBookingTx(ctx context.Context, tx pgx.Tx, closureConfir
 		return err
 	}
 	_ = originalBookingID // intentionally not status-flipped — see comment above
-	if err := insertCimplrConfirmAudit(ctx, tx, closureConfirmID, "", "POST", "POSTED", firstNonEmpty(comment, "Rollover journal and booking created on approval"), actorEmail, map[string]interface{}{"accounting_posted": false, "journal_entry_id": "", "new_booking_id": ""}); err != nil {
+	if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: "", Action: "POST", Status: "POSTED", Reason: firstNonEmpty(comment, "Rollover journal and booking created on approval"), RequestedBy: actorEmail, Old: map[string]interface{}{"accounting_posted": false, "journal_entry_id": "", "new_booking_id": ""}}); err != nil {
 		return err
 	}
 	return nil
@@ -2856,7 +2856,7 @@ func persistCimplrInitiateVariances(ctx context.Context, pool *pgxpool.Pool, rec
 	if err := varianceengine.PersistVariances(ctx, pool, items); err != nil {
 		return nil, err
 	}
-	if err := updateCimplrVarianceFlags(ctx, pool, "cimplr.fd_closure_initiate", "closure_initiate_id", recordID, runID, items); err != nil {
+	if err := updateCimplrVarianceFlags(ctx, pool, constants.QuerryClosureInitiate, "closure_initiate_id", recordID, runID, items); err != nil {
 		return nil, err
 	}
 	return cimplrVarianceSummary(runID, items), nil
@@ -3003,7 +3003,7 @@ func persistCimplrConfirmVariances(ctx context.Context, pool varianceengine.Quer
 	if err := varianceengine.PersistVariances(ctx, pool, items); err != nil {
 		return nil, err
 	}
-	if err := updateCimplrVarianceFlags(ctx, pool, "cimplr.fd_closure_confirm", "closure_confirm_id", recordID, runID, items); err != nil {
+	if err := updateCimplrVarianceFlags(ctx, pool, constants.QuerryAuditClosureConfirm, "closure_confirm_id", recordID, runID, items); err != nil {
 		return nil, err
 	}
 	return cimplrVarianceSummary(runID, items), nil
@@ -3162,7 +3162,22 @@ func upsertCimplrRolloverConfirm(ctx context.Context, exec dbExec, closureConfir
 	return err
 }
 
-func insertCimplrInitiateAudit(ctx context.Context, exec dbExec, id, action, status, reason, requestedBy string, old map[string]interface{}) error {
+type initiateAuditEntry struct {
+	ID          string
+	Action      string
+	Status      string
+	Reason      string
+	RequestedBy string
+	Old         map[string]interface{}
+}
+
+func insertCimplrInitiateAudit(ctx context.Context, exec dbExec, e initiateAuditEntry) error {
+	id := e.ID
+	action := e.Action
+	status := e.Status
+	reason := e.Reason
+	requestedBy := e.RequestedBy
+	old := e.Old
 	_, err := exec.Exec(ctx, `
 		INSERT INTO cimplr.fd_closure_initiate_audit (
 			closure_initiate_id, action_type, processing_status, reason, requested_by,
@@ -3233,7 +3248,24 @@ func cimplrResolveInitiateRolloverBank(ctx context.Context, q cimplrRowQuerier, 
 	return strings.TrimSpace(src.BankID), strings.TrimSpace(src.BankName)
 }
 
-func insertCimplrConfirmAudit(ctx context.Context, exec dbExec, confirmID, initiateID, action, status, reason, requestedBy string, old map[string]interface{}) error {
+type confirmAuditEntry struct {
+	ConfirmID   string
+	InitiateID  string
+	Action      string
+	Status      string
+	Reason      string
+	RequestedBy string
+	Old         map[string]interface{}
+}
+
+func insertCimplrConfirmAudit(ctx context.Context, exec dbExec, e confirmAuditEntry) error {
+	confirmID := e.ConfirmID
+	initiateID := e.InitiateID
+	action := e.Action
+	status := e.Status
+	reason := e.Reason
+	requestedBy := e.RequestedBy
+	old := e.Old
 	if initiateID == "" {
 		// This helper is sometimes called inside a tx (e.g. inside the dry-run path
 		// and the real post path). A silently-swallowed error here would abort the
@@ -3305,9 +3337,9 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 	offset := (req.Page - 1) * req.PageSize
 	var table, idCol, auditTable, statusCol string
 	if stage == "confirm" {
-		table, idCol, auditTable, statusCol = "cimplr.fd_closure_confirm", "closure_confirm_id", "cimplr.fd_closure_confirm_audit", "closure_status"
+		table, idCol, auditTable, statusCol = constants.QuerryAuditClosureConfirm, "closure_confirm_id", constants.QuerryAuditClosureConfirmAudit, "closure_status"
 	} else {
-		table, idCol, auditTable, statusCol = "cimplr.fd_closure_initiate", "closure_initiate_id", "cimplr.fd_closure_initiate_audit", "closure_status"
+		table, idCol, auditTable, statusCol = constants.QuerryClosureInitiate, "closure_initiate_id", constants.QuerryAuditClosureInitiate, "closure_status"
 	}
 	where := []string{"t.is_deleted=false"}
 	args := []interface{}{}
@@ -3749,19 +3781,32 @@ func loadCimplrDownloadFiles(ctx context.Context, pool *pgxpool.Pool, fileID, in
 	return files, rows.Err()
 }
 
-func createCimplrApprovalInstance(ctx context.Context, pool *pgxpool.Pool, txType, action, recordID, recordTable, auditTable, auditIDColumn, entityID string, amount float64, userID, userEmail string) (string, error) {
+type approvalInstanceRequest struct {
+	TxType        string
+	Action        string
+	RecordID      string
+	RecordTable   string
+	AuditTable    string
+	AuditIDColumn string
+	EntityID      string
+	Amount        float64
+	UserID        string
+	UserEmail     string
+}
+
+func createCimplrApprovalInstance(ctx context.Context, pool *pgxpool.Pool, req approvalInstanceRequest) (string, error) {
 	return approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
 		ModuleCode:       cimplrClosureModule,
-		EntityCode:       firstNonEmpty(entityID, "DEFAULT"),
-		TransactionType:  txType,
-		RecordID:         recordID,
-		RecordTable:      recordTable,
-		AuditTable:       auditTable,
-		AuditIDColumn:    auditIDColumn,
-		ActionType:       action,
-		Amount:           amount,
-		SubmittedBy:      userID,
-		SubmittedByEmail: userEmail,
+		EntityCode:       firstNonEmpty(req.EntityID, "DEFAULT"),
+		TransactionType:  req.TxType,
+		RecordID:         req.RecordID,
+		RecordTable:      req.RecordTable,
+		AuditTable:       req.AuditTable,
+		AuditIDColumn:    req.AuditIDColumn,
+		ActionType:       req.Action,
+		Amount:           req.Amount,
+		SubmittedBy:      req.UserID,
+		SubmittedByEmail: req.UserEmail,
 	})
 }
 
@@ -3905,7 +3950,28 @@ type cimplrJournalLinePreview struct {
 	Narration   string  `json:"narration"`
 }
 
-func buildCimplrJournalPreview(closureType, fdID, bankAcctNum, bankAcctName string, principal, interest, tds, penalty, netPayout float64) map[string]interface{} {
+type journalPreviewParams struct {
+	ClosureType  string
+	FDID         string
+	BankAcctNum  string
+	BankAcctName string
+	Principal    float64
+	Interest     float64
+	TDS          float64
+	Penalty      float64
+	NetPayout    float64
+}
+
+func buildCimplrJournalPreview(p journalPreviewParams) map[string]interface{} {
+	closureType := p.ClosureType
+	fdID := p.FDID
+	bankAcctNum := p.BankAcctNum
+	bankAcctName := p.BankAcctName
+	principal := p.Principal
+	interest := p.Interest
+	tds := p.TDS
+	penalty := p.Penalty
+	netPayout := p.NetPayout
 	bankAcctNum = firstNonEmpty(bankAcctNum, "SETTLEMENT")
 	bankAcctName = firstNonEmpty(bankAcctName, "Settlement Account")
 	lines := []cimplrJournalLinePreview{}
@@ -3933,15 +3999,15 @@ func buildCimplrJournalPreview(closureType, fdID, bankAcctNum, bankAcctName stri
 	}
 	add(bankAcctNum, bankAcctName, "ASSET", netPayout, 0, "Cash / settlement on FD closure")
 	if tds > 0 {
-		add("TDS-RECEIVABLE", "TDS Receivable", "ASSET", tds, 0, "TDS withheld at source")
+		add(constants.TDSReceivable, constants.TDSReceivableLabel, "ASSET", tds, 0, "TDS withheld at source")
 	}
 	if penalty > 0 {
 		add("PENALTY-EXP", "Premature Withdrawal Penalty", "EXPENSE", penalty, 0, "Premature withdrawal penalty")
 	}
-	add("FD-INVEST-"+fdID, "FD Investment - "+fdID, "ASSET", 0, principal, "Close FD investment asset")
+	add(constants.FDInvestmentPrefix+fdID, constants.FormatFDInvestment+fdID, "ASSET", 0, principal, "Close FD investment asset")
 	interestCredit := roundToFour(totalCredit - principal)
 	if interestCredit > 0 {
-		add("FD-INT-INC-"+fdID, "Interest Income - FD", "INCOME", 0, interestCredit, "Interest recognised on closure")
+		add(constants.FDInterestIncome+fdID, constants.FormatInterestIncome, "INCOME", 0, interestCredit, "Interest recognised on closure")
 	}
 	newFDStatus := "MATURED"
 	if closureType == "PREMATURE" {
@@ -3995,14 +4061,14 @@ func CimplrJournalPreview(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE c.closure_confirm_id=$1 AND c.is_deleted=false`, id,
 			).Scan(&fdID, &closureType, &sourceAccountID, &principal, &interest, &tds, &penalty, &netPayout, &journalEntryID, &accountingPosted)
 			if err != nil {
-				api.RespondWithError(w, http.StatusNotFound, "confirm record not found")
+				api.RespondWithError(w, http.StatusNotFound, constants.ConfirmRecordNotFound)
 				return
 			}
 			bankNum, bankName := "", ""
 			if sourceAccountID != "" {
 				_ = pool.QueryRow(ctx, `SELECT COALESCE(account_number,''), COALESCE(account_nickname,'') FROM public.masterbankaccount WHERE account_id=$1 LIMIT 1`, sourceAccountID).Scan(&bankNum, &bankName)
 			}
-			preview := buildCimplrJournalPreview(closureType, fdID, bankNum, bankName, principal, interest, tds, penalty, netPayout)
+			preview := buildCimplrJournalPreview(journalPreviewParams{ClosureType: closureType, FDID: fdID, BankAcctNum: bankNum, BankAcctName: bankName, Principal: principal, Interest: interest, TDS: tds, Penalty: penalty, NetPayout: netPayout})
 			preview["closure_confirm_id"] = id
 			preview["accounting_posted"] = accountingPosted
 			preview["journal_entry_id"] = journalEntryID
@@ -4015,12 +4081,12 @@ func CimplrJournalPreview(pool *pgxpool.Pool) http.HandlerFunc {
 		if strings.TrimSpace(req.ClosureInitiateID) != "" {
 			initiate, err := loadCimplrInitiateOld(ctx, pool, strings.TrimSpace(req.ClosureInitiateID))
 			if err != nil {
-				api.RespondWithError(w, http.StatusNotFound, "initiate record not found")
+				api.RespondWithError(w, http.StatusNotFound, constants.ErrClosureInitiateRecordNotFound)
 				return
 			}
 			src, err := loadCimplrFDSource(ctx, pool, fmt.Sprint(initiate["fd_id"]))
 			if err != nil {
-				api.RespondWithError(w, http.StatusNotFound, "FD not found")
+				api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 				return
 			}
 			closureType := fmt.Sprint(initiate["closure_type"])
@@ -4034,7 +4100,7 @@ func CimplrJournalPreview(pool *pgxpool.Pool) http.HandlerFunc {
 				_ = pool.QueryRow(ctx, `SELECT COALESCE(account_number,''), COALESCE(account_nickname,'') FROM public.masterbankaccount WHERE account_id=$1 LIMIT 1`, src.SourceAccountID).Scan(&bankNum, &bankName)
 			}
 			penalty := calc.PenaltyAmount
-			preview := buildCimplrJournalPreview(closureType, src.FDID, bankNum, bankName, src.Principal, calc.RevisedInterestAmount, calc.TDSAmount, penalty, calc.NetPayout)
+			preview := buildCimplrJournalPreview(journalPreviewParams{ClosureType: closureType, FDID: src.FDID, BankAcctNum: bankNum, BankAcctName: bankName, Principal: src.Principal, Interest: calc.RevisedInterestAmount, TDS: calc.TDSAmount, Penalty: penalty, NetPayout: calc.NetPayout})
 			preview["closure_initiate_id"] = req.ClosureInitiateID
 			preview["calculation"] = cimplrCalcToMap(calc)
 			api.RespondWithPayload(w, true, "", preview)
@@ -4141,14 +4207,15 @@ func cimplrBuildEmbeddedPostedPreview(ctx context.Context, pool *pgxpool.Pool, j
 		totalDebit += cimplrFloat(ln["debit_amount"])
 		totalCredit += cimplrFloat(ln["credit_amount"])
 	}
-	preview := buildCimplrJournalPreview(
-		closureType, fdID, "", "",
-		cimplrFloat(row["principal_received"]),
-		cimplrFloat(row["interest_received"]),
-		cimplrFloat(row["tds_deducted"]),
-		cimplrFloat(row["penalty_amount"]),
-		cimplrFloat(row["net_amount_received"]),
-	)
+	preview := buildCimplrJournalPreview(journalPreviewParams{
+		ClosureType: closureType,
+		FDID:        fdID,
+		Principal:   cimplrFloat(row["principal_received"]),
+		Interest:    cimplrFloat(row["interest_received"]),
+		TDS:         cimplrFloat(row["tds_deducted"]),
+		Penalty:     cimplrFloat(row["penalty_amount"]),
+		NetPayout:   cimplrFloat(row["net_amount_received"]),
+	})
 	preview["lines"] = lines
 	preview["posted_lines"] = lines
 	preview["total_debit"] = roundToFour(totalDebit)

@@ -69,7 +69,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			if err != nil {
 				if err == http.ErrMissingFile {
 					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": "No accessible business units found"})
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": constants.ErrNoAccessibleBusinessUnit})
 					return
 				}
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve entity hierarchy: "+err.Error())
