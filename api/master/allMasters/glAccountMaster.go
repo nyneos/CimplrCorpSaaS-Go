@@ -198,6 +198,7 @@ func FindParentGLAccountAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM auditactionglaccount a
 				WHERE a.gl_account_id = m.gl_account_id
+				  AND a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
@@ -302,6 +303,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					LEFT JOIN LATERAL (
 						SELECT processing_status FROM auditactionglaccount
 						WHERE gl_account_id = m.gl_account_id
+						  AND actiontype IN ('CREATE','EDIT','DELETE')
 						ORDER BY requested_at DESC LIMIT 1
 					) a ON TRUE
 					WHERE m.gl_account_code = $1
@@ -425,7 +427,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if pid, ok := codeToID[info.Parent]; ok {
 				parentID = pid
 			} else {
-				if err := tx.QueryRow(ctx, `SELECT gl_account_id FROM masterglaccount WHERE gl_account_code=$1`, info.Parent).Scan(&parentID); err != nil {
+				if err := tx.QueryRow(ctx, `SELECT gl_account_id FROM masterglaccount WHERE gl_account_code=$1 AND COALESCE(is_deleted, false) = false`, info.Parent).Scan(&parentID); err != nil {
 					continue
 				}
 			}
@@ -505,6 +507,7 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason
 				FROM auditactionglaccount a
 				WHERE a.gl_account_id = m.gl_account_id
+				  AND a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) l ON TRUE
@@ -811,6 +814,7 @@ func GetApprovedActiveGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
             WITH latest AS (
                 SELECT DISTINCT ON (gl_account_id) gl_account_id, processing_status
                 FROM auditactionglaccount
+                WHERE actiontype IN ('CREATE','EDIT','DELETE')
                 ORDER BY gl_account_id, requested_at DESC
             )
             SELECT m.gl_account_id, m.gl_account_code, m.gl_account_name, m.gl_account_type
@@ -924,6 +928,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							LEFT JOIN LATERAL (
 								SELECT processing_status FROM auditactionglaccount
 								WHERE gl_account_id = m.gl_account_id
+								  AND actiontype IN ('CREATE','EDIT','DELETE')
 								ORDER BY requested_at DESC LIMIT 1
 							) a ON TRUE
 							WHERE m.gl_account_code = $1
@@ -987,7 +992,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						} else {
 							var pid string
 							var plevel int
-							if err := pgxPool.QueryRow(ctx, `SELECT gl_account_id, gl_account_level FROM masterglaccount WHERE gl_account_code=$1`, pcode).Scan(&pid, &plevel); err != nil {
+							if err := pgxPool.QueryRow(ctx, `SELECT gl_account_id, gl_account_level FROM masterglaccount WHERE gl_account_code=$1 AND COALESCE(is_deleted, false) = false`, pcode).Scan(&pid, &plevel); err != nil {
 								results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent gl account not found: " + pcode, "gl_account_id": row.GLAccountID})
 								return
 							}
@@ -1326,16 +1331,6 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
 		if !success {
 			resp["message"] = constants.ErrNoRowsUpdated
-		}
-		if err := tx.Commit(ctx); err != nil {
-			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrCommitFailedCapitalized)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrCommitFailedCapitalized)
@@ -1706,7 +1701,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO masterglaccount (%s, upload_s3_key)
 				SELECT %s, $2 FROM input_glaccount_table s
 				WHERE s.upload_batch_id = $1
-				ON CONFLICT (gl_account_code) DO NOTHING
+				ON CONFLICT DO NOTHING
 				RETURNING gl_account_id
 			`, tgtColsStr, srcColsStr)
 
@@ -1761,6 +1756,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT DISTINCT p.gl_account_id, c.gl_account_id, 'Active'
 				FROM masterglaccount c
 				JOIN masterglaccount p ON c.parent_gl_code = p.gl_account_code
+				WHERE COALESCE(c.is_deleted, false) = false AND COALESCE(p.is_deleted, false) = false
 				ON CONFLICT (parent_gl_account_id, child_gl_account_id) DO NOTHING;
 			`
 			if _, err := tx.Exec(ctx, syncSQL); err != nil {
@@ -2082,7 +2078,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var newIDs []string
 			var newCodes []string
 			if len(codes) > 0 {
-				q := `SELECT gl_account_id, gl_account_code FROM masterglaccount WHERE gl_account_code = ANY($1)`
+				q := `SELECT gl_account_id, gl_account_code FROM masterglaccount WHERE gl_account_code = ANY($1) AND COALESCE(is_deleted, false) = false`
 				rrows, err := tx.Query(ctx, q, codes)
 				if err != nil {
 					api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch inserted IDs: "+err.Error())
@@ -2166,6 +2162,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT DISTINCT p.gl_account_id, c.gl_account_id, 'Active'
 				FROM masterglaccount c
 				JOIN masterglaccount p ON c.parent_gl_code = p.gl_account_code
+				WHERE COALESCE(c.is_deleted, false) = false AND COALESCE(p.is_deleted, false) = false
 				ON CONFLICT (parent_gl_account_id, child_gl_account_id) DO NOTHING;
 			`
 				if _, err := tx2.Exec(ctx2, syncSQL); err != nil {
@@ -2174,7 +2171,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				if len(codesForAudit) > 0 {
-					auditSQL := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT gl_account_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterglaccount WHERE gl_account_code = ANY($2)`
+					auditSQL := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT gl_account_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterglaccount WHERE gl_account_code = ANY($2) AND COALESCE(is_deleted, false) = false`
 					if _, err := tx2.Exec(ctx2, auditSQL, userName, codesForAudit); err != nil {
 						logger.LogError("UploadGLAccountSimple: async audit insert failed: %v", err)
 						// continue to commit/close

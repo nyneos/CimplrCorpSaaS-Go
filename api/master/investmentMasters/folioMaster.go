@@ -562,6 +562,7 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactionfolio a
+				WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.folio_id, a.requested_at DESC
 			),
 			history AS (
@@ -764,6 +765,7 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					folio_id,
 					processing_status
 				FROM investment.auditactionfolio
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY folio_id, requested_at DESC
 			)
 			SELECT
@@ -1460,7 +1462,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (folio_id) action_id, folio_id, actiontype, processing_status
 			FROM investment.auditactionfolio
-			WHERE folio_id = ANY($1)
+			WHERE folio_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY folio_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.FolioIDs)
@@ -1583,7 +1585,7 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT DISTINCT ON (folio_id) action_id, folio_id, processing_status
 			FROM investment.auditactionfolio
-			WHERE folio_id = ANY($1)
+			WHERE folio_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY folio_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.FolioIDs)
@@ -1669,6 +1671,7 @@ func GetSingleFolioWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
                     a.requested_by, a.requested_at, a.checker_by, a.checker_at,
                     a.checker_comment, a.reason
                 FROM investment.auditactionfolio a
+                WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
                 ORDER BY a.folio_id, a.requested_at DESC
             ),
             history AS (

@@ -455,7 +455,7 @@ func loadApprovedBanks(ctx context.Context, db *pgxpool.Pool) ([]map[string]stri
 				bank_id, 
 				processing_status
 			FROM auditactionbank
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY bank_id, requested_at DESC
 		)
 		SELECT 
@@ -497,7 +497,7 @@ func loadApprovedCurrencies(ctx context.Context, db *pgxpool.Pool) ([]map[string
 				currency_id, 
 				processing_status
 			FROM auditactioncurrency
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY currency_id, requested_at DESC
 		)
 		SELECT 
@@ -538,7 +538,7 @@ func loadApprovedCashFlowCategories(ctx context.Context, db *pgxpool.Pool) ([]ma
 				category_id, 
 				processing_status
 			FROM auditactioncashflowcategory
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY category_id, requested_at DESC
 		)
 		SELECT 
@@ -580,7 +580,7 @@ func loadApprovedAMCs(ctx context.Context, db *pgxpool.Pool) ([]map[string]strin
 				amc_id, 
 				processing_status
 			FROM investment.auditactionamc
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY amc_id, requested_at DESC
 		)
 		SELECT 
@@ -622,7 +622,7 @@ func loadApprovedSchemes(ctx context.Context, db *pgxpool.Pool) ([]map[string]st
 				scheme_id, 
 				processing_status
 			FROM investment.auditactionscheme
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY scheme_id, requested_at DESC
 		)
 		SELECT 
@@ -668,7 +668,7 @@ func loadApprovedDPs(ctx context.Context, db *pgxpool.Pool) ([]map[string]string
 				dp_id, 
 				processing_status
 			FROM investment.auditactiondp
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY dp_id, requested_at DESC
 		)
 		SELECT 
@@ -712,7 +712,7 @@ func loadApprovedBankAccounts(ctx context.Context, db *pgxpool.Pool) ([]map[stri
 				account_id, 
 				processing_status
 			FROM public.auditactionbankaccount
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY account_id, requested_at DESC
 		)
 		SELECT 
@@ -761,7 +761,7 @@ func loadApprovedFolios(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 				folio_id,
 				processing_status
 			FROM investment.auditactionfolio
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY folio_id, requested_at DESC
 		)
 		SELECT
@@ -812,7 +812,7 @@ func loadApprovedDemats(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 				demat_id,
 				processing_status
 			FROM investment.auditactiondemat
-			WHERE processing_status = 'APPROVED'
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY demat_id, requested_at DESC
 		)
 		SELECT

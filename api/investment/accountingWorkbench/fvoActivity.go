@@ -199,10 +199,12 @@ func CreateFVOSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		uploadS3Key := ""
 		if isMultipart {
 			if err := uploadutil.EnsureUniqueMultipartUpload(ctx, pgxPool, s3storage.CollectMultipartFiles(r.MultipartForm, "file", "files", "attachment"), `
-				SELECT upload_s3_key
-				FROM investment.accounting_fvo
-				WHERE COALESCE(is_deleted, false) = false
-				  AND COALESCE(upload_s3_key, '') <> ''
+				SELECT fvo.upload_s3_key
+				FROM investment.accounting_fvo fvo
+				JOIN investment.accounting_activity act ON act.activity_id = fvo.activity_id
+				WHERE COALESCE(fvo.is_deleted, false) = false
+				  AND COALESCE(act.is_deleted, false) = false
+				  AND COALESCE(fvo.upload_s3_key, '') <> ''
 			`); err != nil {
 				if errors.Is(err, uploadutil.ErrFileAlreadyUploaded) {
 					api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
@@ -594,6 +596,7 @@ func GetFVOsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactionaccountingactivity a
+				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY a.activity_id, a.requested_at DESC
 			)
 			SELECT

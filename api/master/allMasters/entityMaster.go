@@ -252,7 +252,7 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 				parentEntityID = id
 			} else {
 				// try to find existing parent by name
-				if err := db.QueryRow(`SELECT entity_id FROM masterentity WHERE entity_name = $1 LIMIT 1`, entity.ParentName).Scan(&parentEntityID); err != nil {
+				if err := db.QueryRow(`SELECT entity_id FROM masterentity WHERE entity_name = $1 AND (is_deleted = false OR is_deleted IS NULL) LIMIT 1`, entity.ParentName).Scan(&parentEntityID); err != nil {
 					// parent not found, skip relationship
 					continue
 				}

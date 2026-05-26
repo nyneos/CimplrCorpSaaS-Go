@@ -180,6 +180,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/amc/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetAMCsWithAudit(pgxPool)))
 	mux.Handle("/master/amc/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetApprovedActiveAMCs(pgxPool)))
 	mux.Handle("/master/amc/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadAMCSimple(pgxPool)))
+	mux.Handle("/master/amc/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetAMCAuditHistory(pgxPool)))
 
 	// Scheme Master routes
 	mux.Handle("/master/scheme/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadSchemeSimple(pgxPool)))
@@ -193,6 +194,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/scheme/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetApprovedActiveSchemes(pgxPool)))
 	mux.Handle("/master/scheme/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetSchemesWithAudit(pgxPool)))
 	mux.Handle("/master/scheme/by-amc", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetApprovedActiveSchemesByAMC(pgxPool)))
+	mux.Handle("/master/scheme/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetSchemeAuditHistory(pgxPool)))
 
 	// DP Master routes
 	mux.Handle("/master/dp/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadDPSimple(pgxPool)))
@@ -205,6 +207,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/dp/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectDPActions(pgxPool)))
 	mux.Handle("/master/dp/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetApprovedActiveDPs(pgxPool)))
 	mux.Handle("/master/dp/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDPsWithAudit(pgxPool)))
+	mux.Handle("/master/dp/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDPAuditHistory(pgxPool)))
 
 	// Demat Master routes
 	mux.Handle("/master/demat/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadDematSimple(pgxPool)))
@@ -217,6 +220,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/demat/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectDematActions(pgxPool)))
 	mux.Handle("/master/demat/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetApprovedActiveDemats(pgxPool)))
 	mux.Handle("/master/demat/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDematsWithAudit(pgxPool)))
+	mux.Handle("/master/demat/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDematAuditHistory(pgxPool)))
 
 	// Interest Type Master routes
 	mux.Handle("/master/interest-type/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateInterestTypeSingle(pgxPool)))
@@ -287,6 +291,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/folio/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectFolioActions(pgxPool)))
 	mux.Handle("/master/folio/meta", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetSingleFolioWithAudit(pgxPool)))
 	mux.Handle("/master/folio/schemes-by-approved", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetSchemesByApprovedFolios(pgxPool)))
+	mux.Handle("/master/folio/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetFolioAuditHistory(pgxPool)))
 
 	// AMFI Config Master routes
 	mux.Handle("/master/amfi/scheme", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetAMFISchemeMasterSimple(pgxPool)))
@@ -316,6 +321,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/calendar/holiday/update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateHoliday(pgxPool)))
 	mux.Handle("/master/calendar/update-with-holidays", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateCalendarWithHolidays(pgxPool)))
 	mux.Handle("/master/calendar/years", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetPastYearsHolidays(pgxPool)))
+	mux.Handle("/master/calendar/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetCalendarAuditHistory(pgxPool)))
 
 	// Day Count Convention Master routes
 	mux.Handle("/master/day-count-convention/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateDayCountConventionSingle(pgxPool)))

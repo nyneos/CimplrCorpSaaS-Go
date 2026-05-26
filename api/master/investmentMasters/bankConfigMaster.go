@@ -1464,6 +1464,7 @@ func BulkApproveBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE a.config_id = ANY($1::text[])
 				  AND a.action_type='DELETE'
 				  AND a.processing_status='APPROVED'
+				  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			)
 		`, req.ConfigIDs)
 		if err != nil {
@@ -1579,6 +1580,7 @@ func GetBankConfigsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INNER JOIN investment.fd_audit_bank_config a ON a.config_id = m.config_id
 			LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
 			WHERE a.processing_status='APPROVED'
+			  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			  AND m.is_active=true
 			  AND COALESCE(m.is_deleted,false)=false
 			ORDER BY m.config_id, m.bank_code
@@ -1707,6 +1709,7 @@ func GetBankConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_config_notes,
 					a.old_is_active
 				FROM investment.fd_audit_bank_config a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.config_id,
 				         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
 			),

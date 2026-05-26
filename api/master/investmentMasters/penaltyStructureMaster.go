@@ -1186,7 +1186,7 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
             SELECT audit_id, penalty_id, action_type, processing_status
             FROM investment.fd_audit_penalty_structure
-            WHERE penalty_id = ANY($1::text[]) AND processing_status LIKE 'PENDING%'
+            WHERE penalty_id = ANY($1::text[]) AND processing_status LIKE 'PENDING%' AND action_type IN ('CREATE','EDIT','DELETE')
             FOR UPDATE
         `
 
@@ -1476,6 +1476,7 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_effective_to,
 					a.old_is_active
 				FROM investment.fd_audit_penalty_structure a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.penalty_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (

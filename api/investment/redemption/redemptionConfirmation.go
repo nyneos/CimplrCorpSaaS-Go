@@ -915,6 +915,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 			SELECT DISTINCT ON (redemption_confirm_id) action_id, redemption_confirm_id, actiontype, processing_status
 			FROM investment.auditactionredemptionconfirmation
 			WHERE redemption_confirm_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY redemption_confirm_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.RedemptionConfirmIDs)
@@ -1193,6 +1194,7 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 			SELECT DISTINCT ON (redemption_confirm_id) action_id, redemption_confirm_id, processing_status
 			FROM investment.auditactionredemptionconfirmation
 			WHERE redemption_confirm_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY redemption_confirm_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.RedemptionConfirmIDs)
@@ -1294,6 +1296,7 @@ func fetchRedemptionConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool,
 				a.checker_comment,
 				a.reason
 			FROM investment.auditactionredemptionconfirmation a
+			WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
 			ORDER BY a.redemption_confirm_id, a.requested_at DESC
 		),
 		history AS (
@@ -1455,6 +1458,7 @@ func GetApprovedRedemptionConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc 
 					redemption_confirm_id,
 					processing_status
 				FROM investment.auditactionredemptionconfirmation
+				WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 				ORDER BY redemption_confirm_id, requested_at DESC
 			)
 			SELECT

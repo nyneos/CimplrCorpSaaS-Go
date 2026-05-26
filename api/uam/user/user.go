@@ -295,7 +295,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback()
 
-		// Uniqueness checks: active users only (ignore soft-deleted records).
+		// Uniqueness checks: ensure username_or_employee_id and email are unique (exclude soft-deleted users)
 		var existingID string
 		var existingUsername, existingEmail string
 		err = tx.QueryRow(`

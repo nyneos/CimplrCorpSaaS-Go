@@ -290,7 +290,9 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// ...existing code...
 			auditQuery := `SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason 
-						   FROM auditactionbank WHERE bank_id = $1 ORDER BY requested_at DESC LIMIT 1`
+						   FROM auditactionbank
+						   WHERE bank_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE')
+						   ORDER BY requested_at DESC LIMIT 1`
 			var processingStatusPtr, requestedByPtr, actionTypePtr, actionIDPtr, checkerByPtr, checkerCommentPtr, reasonPtr *string
 			var requestedAtPtr, checkerAtPtr *time.Time
 			_ = pgxPool.QueryRow(ctx, auditQuery, bankID).Scan(&processingStatusPtr, &requestedByPtr, &requestedAtPtr, &actionTypePtr, &actionIDPtr, &checkerByPtr, &checkerAtPtr, &checkerCommentPtr, &reasonPtr)
@@ -553,6 +555,7 @@ func GetBankNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.bank_id,
 					a.processing_status
 				FROM auditactionbank a
+				WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.bank_id, a.requested_at DESC
 			)
 			SELECT

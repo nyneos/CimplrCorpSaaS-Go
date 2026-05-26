@@ -33,6 +33,8 @@ const (
 	defaultFileAuditTableName      = "cimplrcorpsaas.cash_additional_file_audit"
 )
 
+var ErrFileAlreadyUploaded = errors.New("file already uploaded")
+
 type FileRecord struct {
 	FileID            string     `json:"file_id"`
 	StoredFileName    string     `json:"stored_file_name"`
@@ -79,6 +81,7 @@ type Config struct {
 	GetOne                func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*FileRecord, error)
 	GetAnyFile            func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*FileRecord, error)
 	GetMany               func(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]FileRecord, []string, error)
+	DuplicateExists       func(ctx context.Context, pool *pgxpool.Pool, parentID, fileHash string) (bool, error)
 	SoftDelete            func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error)
 	SoftDeleteTx          func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error)
 	RecordMainUploadAudit func(ctx context.Context, tx pgx.Tx, parentID string, payload MainUploadAuditPayload) error
@@ -207,6 +210,10 @@ func NewUploadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		for _, header := range fileHeaders {
 			record, err := uploadOneFile(r.Context(), pool, cfg, parentID, uploadedBy, header)
 			if err != nil {
+				if errors.Is(err, ErrFileAlreadyUploaded) {
+					api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
+					return
+				}
 				api.RespondWithError(w, http.StatusBadRequest, err.Error())
 				return
 			}
@@ -663,6 +670,16 @@ func uploadOneFile(ctx context.Context, pool *pgxpool.Pool, cfg Config, parentID
 	storedFileName := s3storage.BuildUploadedFilename(header.Filename, uploadedBy, uploadedAt)
 	s3Key := BuildAdditionalFilesS3Key(cfg.Module, storedFileName, cfg.FolderName)
 	fileHash := s3storage.ContentHashHex(body)
+
+	if cfg.DuplicateExists != nil {
+		exists, err := cfg.DuplicateExists(ctx, pool, parentID, fileHash)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check duplicate upload: %w", err)
+		}
+		if exists {
+			return nil, ErrFileAlreadyUploaded
+		}
+	}
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -1127,7 +1144,7 @@ func InsertMainUploadAudit(ctx context.Context, tx pgx.Tx, tableName, parentColu
 		parentColumn,
 		actionColumn,
 	)
-	_, err = tx.Exec(ctx, query, parentID, "UPLOAD_FILE", fileAuditCompletedStatus, reason, payload.UploadedBy, payload.UploadedAt)
+	_, err = tx.Exec(ctx, query, parentID, "UPLOAD_FILE", fileAuditApprovedStatus, reason, payload.UploadedBy, payload.UploadedAt)
 	return err
 }
 

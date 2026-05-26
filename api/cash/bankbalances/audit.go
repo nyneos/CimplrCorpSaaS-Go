@@ -115,18 +115,17 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			payload = append(payload, map[string]interface{}{
-				"entity_id":         entityID,
-				"action_type":       "DOWNLOAD",
-				"processing_status": "COMPLETED",
-				"requested_by":      strings.TrimSpace(requestedBy),
-				"requested_at":      auditTime(requestedAt),
-				"checker_by":        "",
-				"checker_at":        nil,
-				"checker_comment":   "",
-				"reason":            "",
-				"file_name":         auditString(fileName),
-				"upload_s3_key":     auditString(uploadKey),
-				"source":            "BANK_BALANCE",
+				"entity_id":       entityID,
+				"action_type":     "DOWNLOAD",
+				"requested_by":    strings.TrimSpace(requestedBy),
+				"requested_at":    auditTime(requestedAt),
+				"checker_by":      "",
+				"checker_at":      nil,
+				"checker_comment": "",
+				"reason":          "",
+				"file_name":       auditString(fileName),
+				"upload_s3_key":   auditString(uploadKey),
+				"source":          "BANK_BALANCE",
 			})
 		}
 		if err := downloadRows.Err(); err != nil {

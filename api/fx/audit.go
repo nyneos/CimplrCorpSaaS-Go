@@ -526,19 +526,18 @@ func queryFXDownloadAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parent
 			return nil, err
 		}
 		entry := map[string]interface{}{
-			"entity_id":         entityID,
-			"action_type":       "DOWNLOAD",
-			"processing_status": "COMPLETED",
-			"requested_by":      strings.TrimSpace(requestedBy),
-			"requested_at":      nullTime(requestedAt),
-			"checker_by":        "",
-			"checker_at":        nil,
-			"checker_comment":   "",
-			"reason":            "",
-			"file_name":         nullString(fileName),
-			"upload_s3_key":     nullString(uploadKey),
-			"download_type":     cfg.DownloadType,
-			"source":            cfg.Source,
+			"entity_id":       entityID,
+			"action_type":     "DOWNLOAD",
+			"requested_by":    strings.TrimSpace(requestedBy),
+			"requested_at":    nullTime(requestedAt),
+			"checker_by":      "",
+			"checker_at":      nil,
+			"checker_comment": "",
+			"reason":          "",
+			"file_name":       nullString(fileName),
+			"upload_s3_key":   nullString(uploadKey),
+			"download_type":   cfg.DownloadType,
+			"source":          cfg.Source,
 		}
 		payload = append(payload, entry)
 	}

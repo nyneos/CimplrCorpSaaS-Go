@@ -182,6 +182,7 @@ func GetTdsPlansApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_tds_plan_master m
 			INNER JOIN investment.fd_audit_tds_plan a ON a.tds_plan_id = m.tds_plan_id
 			WHERE a.processing_status = 'APPROVED'
+				AND a.action_type IN ('CREATE','EDIT','DELETE')
 				AND m.is_active = true
 				AND COALESCE(m.is_deleted, false) = false
 			ORDER BY m.tds_plan_name
@@ -1026,6 +1027,7 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_is_active,
 					a.old_is_deleted
 				FROM investment.fd_audit_tds_plan a
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY a.tds_plan_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (
@@ -1334,6 +1336,7 @@ func BulkApproveTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE a.tds_plan_id = ANY($1::text[]) 
 				  AND a.action_type = 'DELETE' 
 				  AND a.processing_status = 'APPROVED'
+				  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			)
 		`, req.TdsIDs)
 

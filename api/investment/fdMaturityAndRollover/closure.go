@@ -2117,6 +2117,7 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 		acted := 0
+		var actedIDs []string
 		var errors []string
 
 		for _, crID := range req.ClosureRequestIDs {
@@ -2125,7 +2126,17 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, crID+": not found")
 				continue
 			}
-			if curStatus != "PENDING_APPROVAL" {
+			var latestActionType, latestProcessingStatus string
+			_ = pool.QueryRow(ctx, `
+				SELECT action_type, processing_status
+				FROM investment.fd_audit_closure_request
+				WHERE closure_request_id=$1
+				ORDER BY created_at DESC, audit_id DESC
+				LIMIT 1`, crID,
+			).Scan(&latestActionType, &latestProcessingStatus)
+			isDeleteApproval := latestActionType == "DELETE" && latestProcessingStatus == "PENDING_DELETE_APPROVAL"
+
+			if !isDeleteApproval && curStatus != "PENDING_APPROVAL" {
 				errors = append(errors, crID+": status is "+curStatus)
 				continue
 			}
@@ -2140,6 +2151,7 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				//   1. Updates processing_status → REJECTED on the audit table
 				//   2. Fires postFinalizeHook which sets closure_status='REJECTED' + clears fd_master
 				acted++
+				actedIDs = append(actedIDs, crID)
 			} else {
 				if actionRes.CancelledStale {
 					api.LogInfo("[FDClosure] Cancelled stale approval instance for closure=%s: %s", crID, actionRes.Reason)
@@ -2148,6 +2160,11 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				// No engine instance — handle rejection directly with audit row.
+				if isDeleteApproval {
+					errors = append(errors, crID+": delete approval is pending but it is not your turn in approval sequence")
+					continue
+				}
+
 				tx, txErr := pool.Begin(ctx)
 				if txErr != nil {
 					errors = append(errors, crID+": tx begin failed")
@@ -2166,10 +2183,11 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				acted++
+				actedIDs = append(actedIDs, crID)
 			}
 		}
 
-		for _, crID := range req.ClosureRequestIDs {
+		for _, crID := range actedIDs {
 			go func(id, uEmail string) {
 				defer func() { recover() }() //nolint:errcheck
 				notifcatalog.TriggerNotification(context.Background(), pool,
@@ -2186,6 +2204,20 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			msg = "No closures were rejected"
 		}
 		api.LogInfo("[FDClosure] BulkRejectClosureRequest: acted=%d errors=%d by=%s", acted, len(errors), userEmail)
+		if !success {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: false,
+				constants.ValueError:   msg,
+				"rows": map[string]interface{}{
+					"acted":   acted,
+					"errors":  errors,
+					"checker": userEmail,
+				},
+			})
+			return
+		}
 		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"acted": acted, "errors": errors, "checker": userEmail,
 		})
@@ -2218,13 +2250,13 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 
-		var curStatus, fdID, entityID string
+		var curStatus, fdID, entityID, approvalInstanceID string
 		err := pool.QueryRow(ctx, `
-			SELECT closure_status, fd_id, COALESCE(entity_id,'')
+			SELECT closure_status, fd_id, COALESCE(entity_id,''), COALESCE(approval_instance_id, '')
 			FROM investment.fd_closure_request
 			WHERE closure_request_id=$1 AND is_deleted=false`,
 			req.ClosureRequestID,
-		).Scan(&curStatus, &fdID, &entityID)
+		).Scan(&curStatus, &fdID, &entityID, &approvalInstanceID)
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				api.RespondWithError(w, http.StatusNotFound, constants.ErrClosureRequestNotFound)
@@ -2247,33 +2279,11 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			LIMIT 1`,
 			req.ClosureRequestID,
 		).Scan(&latestActionType, &latestProcessingStatus)
-		if latestErr == nil && latestActionType == "DELETE" && latestProcessingStatus == "PENDING_DELETE_APPROVAL" {
+		if latestErr == nil &&
+			latestActionType == "DELETE" &&
+			latestProcessingStatus == "PENDING_DELETE_APPROVAL" &&
+			strings.TrimSpace(approvalInstanceID) != "" {
 			api.RespondWithError(w, http.StatusBadRequest, "Delete approval is already pending for this closure request")
-			return
-		}
-
-		tx, txErr := pool.Begin(ctx)
-		if txErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
-			return
-		}
-		defer tx.Rollback(ctx) //nolint:errcheck
-
-		snapshotJSON, _ := json.Marshal(map[string]interface{}{"closure_status": curStatus, "fd_id": fdID, "delete_reason": req.Reason})
-		_ = insertClosureAudit(ctx, ClosureAuditParams{
-			Exec:             tx,
-			ClosureRequestID: req.ClosureRequestID,
-			PerformedBy:      req.UserID,
-			PerformedByEmail: userEmail,
-			ActionType:       "DELETE",
-			ProcessingStatus: "PENDING_DELETE_APPROVAL",
-			Reason:           req.Reason,
-			Snapshot:         snapshotJSON,
-			OldValues:        map[string]interface{}{"closure_status": curStatus},
-		})
-
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
 			return
 		}
 
@@ -2299,9 +2309,37 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "No approval matrix configured for delete request")
 			return
 		}
-		if _, updErr := pool.Exec(ctx, `UPDATE investment.fd_closure_request SET approval_instance_id=$1, updated_at=NOW() WHERE closure_request_id=$2`, instID, req.ClosureRequestID); updErr != nil {
+
+		tx, txErr := pool.Begin(ctx)
+		if txErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
+			return
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		snapshotJSON, _ := json.Marshal(map[string]interface{}{"closure_status": curStatus, "fd_id": fdID, "delete_reason": req.Reason})
+		if err := insertClosureAudit(ctx, ClosureAuditParams{
+			Exec:             tx,
+			ClosureRequestID: req.ClosureRequestID,
+			PerformedBy:      req.UserID,
+			PerformedByEmail: userEmail,
+			ActionType:       "DELETE",
+			ProcessingStatus: "PENDING_DELETE_APPROVAL",
+			Reason:           req.Reason,
+			Snapshot:         snapshotJSON,
+			OldValues:        map[string]interface{}{"closure_status": curStatus},
+		}); err != nil {
+			api.LogError("[FDClosure] insert delete audit failed: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to create delete audit trail")
+			return
+		}
+		if _, updErr := tx.Exec(ctx, `UPDATE investment.fd_closure_request SET approval_instance_id=$1, updated_at=NOW() WHERE closure_request_id=$2`, instID, req.ClosureRequestID); updErr != nil {
 			api.LogError("[FDClosure] Update approval_instance_id for DELETE failed: %v", updErr)
 			api.RespondWithError(w, http.StatusInternalServerError, "Delete approval instance created, but request linking failed")
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
 			return
 		}
 		api.LogInfo("[FDClosure] CreateInstance DELETE created instance=%s", instID)

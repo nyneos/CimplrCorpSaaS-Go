@@ -392,6 +392,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					   checker_by, checker_at, checker_comment, reason
 				FROM auditactionpayablereceivable a
 				WHERE a.type_id = m.type_id
+				  AND a.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
@@ -713,6 +714,7 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			WITH latest AS (
 				SELECT DISTINCT ON (type_id) type_id, processing_status
 				FROM auditactionpayablereceivable
+				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY type_id, requested_at DESC
 			)
 			SELECT m.type_id, m.type_code, m.type_name, m.cash_flow_category
@@ -1109,7 +1111,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		defer tx.Rollback(ctx)
 		defer tx.Rollback(ctx)
 
-		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
+		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
@@ -1205,7 +1207,7 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 		defer tx.Rollback(ctx)
 		defer tx.Rollback(ctx)
-		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, actiontype, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
+		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, actiontype, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())

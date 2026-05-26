@@ -209,6 +209,12 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&createdRun.AcrualGranularity, &createdRun.EngineVersion,
 			&createdRun.CreatedBy, &createdRun.CreatedAt,
 		)
+		_, _ = pgxPool.Exec(ctx, `
+			INSERT INTO investment.fd_accrual_run_audit (
+				run_id, action_type, processing_status, requested_by, requested_at
+			) VALUES ($1, 'CREATE', 'DRAFT', $2, now())`,
+			runID, userEmail)
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"run": createdRun,
 			"next_step": map[string]interface{}{
@@ -985,6 +991,12 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Status update failed: "+err.Error())
 			return
 		}
+
+		_, _ = pgxPool.Exec(ctx, `
+			INSERT INTO investment.fd_accrual_run_audit (
+				run_id, action_type, processing_status, requested_by, requested_at
+			) VALUES ($1, 'SUBMIT', 'PENDING_APPROVAL', $2, now())`,
+			req.RunID, userEmail)
 
 		go func(runID, uID, uEmail, eID string, amount float64) {
 			defer func() {

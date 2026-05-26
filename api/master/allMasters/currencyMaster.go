@@ -316,6 +316,7 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT requested_at , checker_at
 				FROM auditactioncurrency
 				WHERE currency_id = m.currency_id
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 		) a ON TRUE
@@ -360,6 +361,7 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				       checker_by, checker_at, checker_comment, reason
 				FROM auditactioncurrency
 				WHERE currency_id = $1
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			`
@@ -831,6 +833,7 @@ func GetActiveApprovedCurrencyCodes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM auditactioncurrency a
 				WHERE a.currency_id = m.currency_id
+				  AND a.actiontype IN ('CREATE', 'EDIT', 'DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE

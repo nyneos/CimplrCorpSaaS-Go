@@ -963,6 +963,7 @@ WITH latest_audit AS (
         a.checker_comment,
         a.reason
     FROM investment.auditactioncalendar a
+    WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
     ORDER BY a.calendar_id, a.requested_at DESC
 ),
 history AS (
@@ -1088,6 +1089,7 @@ WITH latest_audit AS (
         requested_at,
         checker_at
     FROM investment.auditactioncalendar
+    WHERE actiontype IN ('CREATE','EDIT','DELETE')
     ORDER BY calendar_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 )
 SELECT
@@ -1160,7 +1162,7 @@ WITH latest_audit AS (
         requested_by, requested_at, checker_by, checker_at,
         checker_comment, reason
     FROM investment.auditactioncalendar
-    WHERE calendar_id = $1
+    WHERE calendar_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE')
     ORDER BY calendar_id, requested_at DESC
 ),
 history AS (

@@ -582,7 +582,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						OldOptionalCodeValue string
 					}
 					existingClearing := make([]existingClearingRow, 0)
-					selClearing := `SELECT code_type, code_value, optional_code_type, optional_code_value, old_code_type, old_code_value, old_optional_code_type, old_optional_code_value FROM masterclearingcode WHERE account_id=$1 ORDER BY clearing_id`
+					selClearing := `SELECT code_type, code_value, optional_code_type, optional_code_value, old_code_type, old_code_value, old_optional_code_type, old_optional_code_value FROM masterclearingcode WHERE account_id=$1 AND COALESCE(is_deleted, false) = false ORDER BY clearing_id`
 					erows, _ := tx.Query(ctx, selClearing, updatedAccountID)
 					if erows != nil {
 						defer erows.Close()
@@ -916,6 +916,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 					aa.requested_at,
 					aa.checker_at
 				FROM auditactionbankaccount aa
+				WHERE aa.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY aa.account_id, aa.requested_at DESC
 			),
 			clearing AS (
@@ -1653,6 +1654,8 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				// Insert into masterclearingcode (NEW) only when master rows were created
+				// Scope join to newly inserted account IDs to avoid matching soft-deleted accounts
+				// with the same account_number+bank_id that still have active clearing codes.
 				_, err = tx.Exec(ctx, `
 					INSERT INTO masterclearingcode (
 						account_id, code_type, code_value, optional_code_type, optional_code_value
@@ -1667,9 +1670,10 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					JOIN masterbankaccount m
 						ON m.account_number = i.account_number
 						AND m.bank_id::text = i.bank_id::text
+						AND m.account_id = ANY($2)
 					WHERE i.upload_batch_id = $1
 					AND i.clearing_code_type IS NOT NULL
-				`, batchID)
+				`, batchID, ids)
 				if err != nil {
 					tx.Rollback(ctx)
 					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert clearing codes: "+err.Error())
@@ -1751,6 +1755,7 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM auditactionbankaccount aa
 				WHERE aa.account_id = a.account_id
+				  AND aa.actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) astatus ON TRUE
@@ -2100,7 +2105,7 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		} // fetch audit info for this account
 		auditMap := make(map[string]map[string]interface{})
-		auditQuery := `SELECT DISTINCT ON (account_id) account_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankaccount WHERE account_id=$1 ORDER BY account_id, requested_at DESC`
+		auditQuery := `SELECT DISTINCT ON (account_id) account_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankaccount WHERE account_id=$1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY account_id, requested_at DESC`
 		arows, err := pgxPool.Query(ctx, auditQuery, req.AccountID)
 		if err == nil {
 			defer arows.Close()
@@ -2470,6 +2475,7 @@ LEFT JOIN LATERAL (
     SELECT *
     FROM auditactionbankaccount aa
     WHERE aa.account_id = a.account_id
+      AND aa.actiontype IN ('CREATE','EDIT','DELETE')
     ORDER BY aa.requested_at DESC
     LIMIT 1
 ) aa ON TRUE
