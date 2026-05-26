@@ -92,10 +92,10 @@ func buildInvestmentFilesConfig(moduleKey, parentField, parentTable, parentCol, 
 			return files, missingInvestmentFileIDs(trimmed, files), nil
 		},
 		SoftDelete: func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
-			return deleteInvestmentAdditionalFile(ctx, pool, parentID, fileID, deletedBy, deletedAt, parentCol, filesTable)
+			return deleteInvestmentAdditionalFile(ctx, pool, investmentDeleteFileParams{ParentID: parentID, FileID: fileID, DeletedBy: deletedBy, DeletedAt: deletedAt, ParentCol: parentCol, FilesTable: filesTable})
 		},
 		SoftDeleteTx: func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
-			return deleteInvestmentAdditionalFile(ctx, tx, parentID, fileID, deletedBy, deletedAt, parentCol, filesTable)
+			return deleteInvestmentAdditionalFile(ctx, tx, investmentDeleteFileParams{ParentID: parentID, FileID: fileID, DeletedBy: deletedBy, DeletedAt: deletedAt, ParentCol: parentCol, FilesTable: filesTable})
 		},
 		RecordMainUploadAudit: func(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 			return additionalfiles.InsertMainUploadAudit(ctx, tx, auditTable, parentCol, actionCol, parentID, payload)
@@ -126,11 +126,20 @@ type investmentFileExec interface {
 	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
 }
 
-func deleteInvestmentAdditionalFile(ctx context.Context, exec investmentFileExec, parentID, fileID, deletedBy string, deletedAt time.Time, parentCol, filesTable string) (bool, error) {
-	q := `UPDATE ` + filesTable + `
+type investmentDeleteFileParams struct {
+	ParentID   string
+	FileID     string
+	DeletedBy  string
+	DeletedAt  time.Time
+	ParentCol  string
+	FilesTable string
+}
+
+func deleteInvestmentAdditionalFile(ctx context.Context, exec investmentFileExec, p investmentDeleteFileParams) (bool, error) {
+	q := `UPDATE ` + p.FilesTable + `
 	      SET is_deleted = TRUE, deleted_by = $3, deleted_at = $4
-	      WHERE ` + parentCol + ` = $1 AND file_id = $2 AND COALESCE(is_deleted, FALSE) = FALSE`
-	result, err := exec.Exec(ctx, q, parentID, fileID, deletedBy, deletedAt)
+	      WHERE ` + p.ParentCol + ` = $1 AND file_id = $2 AND COALESCE(is_deleted, FALSE) = FALSE`
+	result, err := exec.Exec(ctx, q, p.ParentID, p.FileID, p.DeletedBy, p.DeletedAt)
 	if err != nil {
 		return false, err
 	}

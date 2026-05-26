@@ -119,7 +119,7 @@ func resolveFDPeriodBounds(period, startDate, endDate string, now time.Time) fdP
 		case hasStart && !hasEnd:
 			endT = today
 		case !hasStart && hasEnd:
-			startT, endT = endT, endT
+			startT = endT
 		default:
 			startT = periodStartDate("MTD", now)
 			endT = today

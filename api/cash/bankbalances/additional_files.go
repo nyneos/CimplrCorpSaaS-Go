@@ -3,6 +3,7 @@ package bankbalances
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"errors"
 	"fmt"
@@ -291,7 +292,7 @@ func bankBalanceAccessScope(ctx context.Context, startPosition int) (string, []i
 	}
 
 	if len(clauses) == 0 {
-		return "", nil, errors.New("no accessible business units found")
+		return "", nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
 
 	return strings.Join(clauses, " AND "), args, nil

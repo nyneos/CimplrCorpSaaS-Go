@@ -5,7 +5,7 @@ package varianceengine
 // Usage (any module):
 //   items := varianceengine.Compare("FD_CLOSURE", closureID, entityID, runID, rules)
 //   varianceengine.PersistVariances(ctx, pool, items)
-//   varianceengine.UpdateRecordFlags(ctx, pool, "investment.fd_closure_request", "closure_request_id", closureID, runID, items)
+//   varianceengine.UpdateRecordFlags(ctx, pool, constants.QuerryClosureRequest, "closure_request_id", closureID, runID, items)
 
 import (
 	"CimplrCorpSaas/api/constants"
@@ -209,7 +209,7 @@ func PersistVariances(ctx context.Context, pool QueryExecutor, items []VarianceI
 
 // UpdateRecordFlags stamps has_variance, has_unresolved_variance, last_validated_at,
 // last_variance_run_id on the calling module's record.
-// table: "investment.fd_closure_request", pkCol: "closure_request_id"
+// table: constants.QuerryClosureRequest, pkCol: "closure_request_id"
 func UpdateRecordFlags(ctx context.Context, pool QueryExecutor, table, pkCol, pkVal, runID string, items []VarianceItem) error {
 	hasAny := false
 	hasUnresolved := false

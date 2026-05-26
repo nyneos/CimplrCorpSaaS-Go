@@ -1251,6 +1251,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
+		userID := api.GetUserIDFromCtx(r.Context())
 
 		ctx := r.Context()
 		engineActed := 0
@@ -1258,7 +1259,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errors []string
 
 		for _, bID := range req.BookingIDs {
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", bID, req.UserID, userEmail, "", approvalengine.ActionApproved, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: bID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDBooking] RecordAction approve failed for booking %s: %v", bID, actionErr)
 				errors = append(errors, bID+": "+actionErr.Error())
@@ -1340,7 +1341,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"errors": errors, "checker": userEmail,
 		})
 		for _, bID := range req.BookingIDs {
-			go func(id, uEmail string) {
+			go func(id, uEmail, uID string) {
 				defer func() {
 					if rec := recover(); rec != nil {
 						api.LogError("[FDBooking] approve notification goroutine panic for booking %s: %v", id, rec)
@@ -1349,9 +1350,10 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/approve", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_BOOKING_APPROVED",
+					"user_id":     uID,
 					"actor_email": uEmail,
 				})
-			}(bID, userEmail)
+			}(bID, userEmail, userID)
 		}
 		api.LogInfo("[FDBooking] BulkApproveBooking: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)
@@ -1381,6 +1383,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
+		userID := api.GetUserIDFromCtx(r.Context())
 
 		ctx := r.Context()
 		engineActed := 0
@@ -1388,7 +1391,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errors []string
 
 		for _, bID := range req.BookingIDs {
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", bID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: bID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDBooking] RecordAction reject failed for booking %s: %v", bID, actionErr)
 				errors = append(errors, bID+": "+actionErr.Error())
@@ -1449,7 +1452,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"errors": errors, "checker": userEmail,
 		})
 		for _, bID := range req.BookingIDs {
-			go func(id, uEmail string) {
+			go func(id, uEmail, uID string) {
 				defer func() {
 					if rec := recover(); rec != nil {
 						api.LogError("[FDBooking] reject notification goroutine panic for booking %s: %v", id, rec)
@@ -1458,9 +1461,10 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/reject", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_BOOKING_REJECTED",
+					"user_id":     uID,
 					"actor_email": uEmail,
 				})
-			}(bID, userEmail)
+			}(bID, userEmail, userID)
 		}
 		api.LogInfo("[FDBooking] BulkRejectBooking: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)
@@ -2116,8 +2120,17 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, statusFilter)
 			argIdx++
 		} else {
-			// default: bookings eligible for confirmation — APPROVED and SENT_TO_BANK
-			q = baseSelect + ` AND m.booking_status IN ('APPROVED','SENT_TO_BANK')`
+			// default: bookings eligible for first-time capture — APPROVED and SENT_TO_BANK
+			// only, excluding rows that already have a live confirmation (pending approval,
+			// variance, confirmed, etc.). REJECTED / VARIANCE_REJECTED may reappear for re-capture.
+			q = baseSelect + ` AND m.booking_status IN ('APPROVED','SENT_TO_BANK')
+			  AND NOT EXISTS (
+			    SELECT 1
+			    FROM investment.fd_confirmation c
+			    WHERE c.booking_id = m.booking_id
+			      AND COALESCE(c.is_deleted, false) = false
+			      AND UPPER(COALESCE(c.confirmation_status, '')) NOT IN ('REJECTED', 'VARIANCE_REJECTED')
+			  )`
 		}
 
 		if entityID != "" {

@@ -30,7 +30,7 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 
 		var body bankStatementAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			http.Error(w, "Missing user_id or bank_statement_id", http.StatusBadRequest)
+			http.Error(w, constants.ErrMissingUserIDOrBankStatementID, http.StatusBadRequest)
 			return
 		}
 
@@ -114,7 +114,7 @@ func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 
 		var body bankStatementDownloadAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			http.Error(w, "Missing user_id or bank_statement_id", http.StatusBadRequest)
+			http.Error(w, constants.ErrMissingUserIDOrBankStatementID, http.StatusBadRequest)
 			return
 		}
 
@@ -153,6 +153,7 @@ func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 			payload = append(payload, map[string]interface{}{
 				"entity_id":         bankStatementID.String,
 				"action_type":       "DOWNLOAD",
+				"processing_status": "COMPLETED",
 				"requested_by":      performedBy.String,
 				"requested_at":      performedAt,
 				"checker_by":        "",
@@ -187,7 +188,7 @@ func GetBankStatementBalanceImpactAuditHandler(db *sql.DB) http.Handler {
 
 		var body bankStatementAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			http.Error(w, "Missing user_id or bank_statement_id", http.StatusBadRequest)
+			http.Error(w, constants.ErrMissingUserIDOrBankStatementID, http.StatusBadRequest)
 			return
 		}
 
@@ -260,7 +261,7 @@ func GetBankStatementTransactionAuditHandler(db *sql.DB) http.Handler {
 
 		var body bankStatementAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			http.Error(w, "Missing user_id or bank_statement_id", http.StatusBadRequest)
+			http.Error(w, constants.ErrMissingUserIDOrBankStatementID, http.StatusBadRequest)
 			return
 		}
 
@@ -345,7 +346,7 @@ func validateBankStatementAuditAccess(ctx context.Context, db *sql.DB, bankState
 func validateEntityAuditAccess(ctx context.Context, db *sql.DB, entityName string) (int, string) {
 	entityIDs := api.GetEntityIDsFromCtx(ctx)
 	if len(entityIDs) == 0 {
-		return http.StatusUnauthorized, "No accessible business units found"
+		return http.StatusUnauthorized, constants.ErrNoAccessibleBusinessUnit
 	}
 
 	var entityID string

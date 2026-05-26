@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
@@ -42,6 +43,46 @@ func toFloat64(v interface{}) float64 {
 		fmt.Sscanf(fmt.Sprintf("%v", v), "%f", &f)
 		return f
 	}
+}
+
+// checkFDDates validates that date strings fall inside the FD start-to-maturity window.
+// Returns a human-friendly error message, or "" when all dates are valid.
+func checkFDDates(fdStart, fdMaturity time.Time, labels, values []string) string {
+	for i, v := range values {
+		if v == "" {
+			continue
+		}
+		t, err := time.Parse(constants.DateFormat, v)
+		if err != nil {
+			return fmt.Sprintf("%s must be in YYYY-MM-DD format", labels[i])
+		}
+		if t.Before(fdStart) || t.After(fdMaturity) {
+			return fmt.Sprintf(
+				"%s (%s) must be within this FD's window (%s to %s)",
+				labels[i], v, fdStart.Format(constants.DateFormat), fdMaturity.Format(constants.DateFormat))
+		}
+	}
+	return ""
+}
+
+func checkFDPeriodDates(fdStart, fdMaturity time.Time, periodStart, periodEnd string) string {
+	if errMsg := checkFDDates(fdStart, fdMaturity,
+		[]string{"period_start", "period_end"},
+		[]string{periodStart, periodEnd}); errMsg != "" {
+		return errMsg
+	}
+	if periodStart == "" || periodEnd == "" {
+		return ""
+	}
+	ps, psErr := time.Parse(constants.DateFormat, periodStart)
+	pe, peErr := time.Parse(constants.DateFormat, periodEnd)
+	if psErr != nil || peErr != nil {
+		return ""
+	}
+	if ps.After(pe) {
+		return fmt.Sprintf("period_start (%s) cannot be after period_end (%s)", periodStart, periodEnd)
+	}
+	return ""
 }
 
 // ─── TDS Register Create ────────────────────────────────────────────────────
@@ -87,17 +128,39 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// ── Resolve fd_ref_no, bank_id, entity_name, bank_name from fd_master ──
+		// ── Resolve fd_ref_no, bank_id, entity_name, bank_name, date bounds from fd_master ──
 		var fdRefNo, bankID, entityName, bankName string
-		_ = pool.QueryRow(ctx, `
+		var fdStart, fdMaturity time.Time
+		if err := pool.QueryRow(ctx, `
 			SELECT
 				COALESCE(bank_fd_ref_no, ''),
 				COALESCE(bank_id, ''),
 				COALESCE(entity_name, ''),
-				COALESCE(bank_name, '')
+				COALESCE(bank_name, ''),
+				start_date,
+				maturity_date
 			FROM investment.fd_master
 			WHERE fd_id = $1 AND is_deleted = false
-			LIMIT 1`, req.FDID).Scan(&fdRefNo, &bankID, &entityName, &bankName)
+			LIMIT 1`, req.FDID).Scan(&fdRefNo, &bankID, &entityName, &bankName, &fdStart, &fdMaturity); err != nil {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
+			return
+		}
+
+		// deduction_date falls back to period_end if not provided
+		deductionDate := req.TDSDeductionDate
+		if strings.TrimSpace(deductionDate) == "" {
+			deductionDate = req.PeriodEnd
+		}
+		if errMsg := checkFDPeriodDates(fdStart, fdMaturity, req.PeriodStart, req.PeriodEnd); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+		if errMsg := checkFDDates(fdStart, fdMaturity,
+			[]string{"tds_deduction_date"},
+			[]string{deductionDate}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			return
+		}
 
 		tdsVariance := req.TDSDeductedActual - req.TDSExpected
 		exceptionRaised := tdsVariance != 0
@@ -107,12 +170,6 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		if strings.TrimSpace(req.ReceiptID) != "" {
 			receiptIDArg = req.ReceiptID
 		}
-		// deduction_date falls back to period_end if not provided
-		deductionDate := req.TDSDeductionDate
-		if strings.TrimSpace(deductionDate) == "" {
-			deductionDate = req.PeriodEnd
-		}
-
 		var tdsID string
 		err := pool.QueryRow(ctx, `
 			INSERT INTO investment.fd_tds_receipt (
@@ -269,7 +326,9 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(h.edited_by,'')               AS edited_by,
 				COALESCE(h.edited_at,'')               AS edited_at,
 				COALESCE(h.deleted_by,'')              AS deleted_by,
-				COALESCE(h.deleted_at,'')              AS deleted_at
+				COALESCE(h.deleted_at,'')              AS deleted_at,
+				COALESCE(tds.reconcile_status,'PENDING')  AS reconcile_status,
+				COALESCE(tds.reconcile_run_id,'')         AS reconcile_run_id
 			FROM investment.fd_tds_receipt tds
 			LEFT JOIN investment.fd_master fd ON fd.fd_id = tds.fd_id
 			LEFT JOIN latest_audit la ON la.tds_id = tds.tds_id
@@ -378,7 +437,7 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction start failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -457,6 +516,416 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				"entity_id": eID, "reconcile_action": action,
 			})
 		}(userEmail, req.EntityID, req.ReconcileAction)
+	}
+}
+
+// ─── TDS Register Approve ──────────────────────────────────────────────────
+// POST /investment/fd/tds-register/approve
+// Moves a single TDS entry from CAPTURED → APPROVED and writes checker audit.
+
+func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID  string `json:"user_id"`
+			TDSID   string `json:"tds_id"`
+			Comment string `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if strings.TrimSpace(req.TDSID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
+			return
+		}
+
+		userEmail := resolveUserEmail(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+
+		// Only CAPTURED entries can be approved
+		var currentStatus string
+		err := pool.QueryRow(ctx,
+			`SELECT tds_status FROM investment.fd_tds_receipt WHERE tds_id = $1 AND is_deleted = false`,
+			req.TDSID).Scan(&currentStatus)
+		if err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "TDS entry not found")
+			return
+		}
+		if currentStatus != "CAPTURED" {
+			api.RespondWithError(w, http.StatusBadRequest,
+				"only CAPTURED entries can be approved (current status: "+currentStatus+")")
+			return
+		}
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
+			return
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		// Promote status
+		if _, err = tx.Exec(ctx,
+			`UPDATE investment.fd_tds_receipt SET tds_status = 'APPROVED' WHERE tds_id = $1`,
+			req.TDSID); err != nil {
+			api.LogError("[TDSApprove] status update failed for %s: %v", req.TDSID, err)
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to approve TDS entry")
+			return
+		}
+
+		// Write checker audit row
+		if _, err = tx.Exec(ctx, `
+			UPDATE investment.fd_tds_receipt_audit
+			SET processing_status = 'APPROVED',
+			    checker_by        = $1,
+			    checker_at        = now(),
+			    checker_comment   = $2
+			WHERE tds_id = $3
+			  AND processing_status = 'PENDING_APPROVAL'`,
+			userEmail, nullIfEmpty(req.Comment), req.TDSID); err != nil {
+			api.LogError("[TDSApprove] audit update failed for %s: %v", req.TDSID, err)
+		}
+
+		if err = tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			"success": true,
+			"message": "TDS entry approved successfully",
+			"tds_id":  req.TDSID,
+		})
+	}
+}
+
+// ─── TDS Register Update ───────────────────────────────────────────────────
+// POST /investment/fd/tds-register/update
+// Edits a CAPTURED TDS entry and writes an EDIT audit row.
+
+func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID            string  `json:"user_id"`
+			TDSID             string  `json:"tds_id"`
+			PeriodStart       string  `json:"period_start"`
+			PeriodEnd         string  `json:"period_end"`
+			GrossInterest     float64 `json:"gross_interest"`
+			TDSExpected       float64 `json:"tds_expected"`
+			TDSDeductedActual float64 `json:"tds_deducted_actual"`
+			TDSDeductionDate  string  `json:"tds_deduction_date"`
+			TDSRateApplied    float64 `json:"tds_rate_applied"`
+			TDSSection        string  `json:"tds_section"`
+			HasPAN            bool    `json:"has_pan"`
+			Reason            string  `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if strings.TrimSpace(req.TDSID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
+			return
+		}
+
+		userEmail := resolveUserEmail(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+
+		var currentStatus, fdIDForTDS string
+		if err := pool.QueryRow(ctx,
+			`SELECT tds_status, fd_id FROM investment.fd_tds_receipt WHERE tds_id = $1 AND is_deleted = false`,
+			req.TDSID).Scan(&currentStatus, &fdIDForTDS); err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "TDS entry not found")
+			return
+		}
+		if currentStatus == "APPROVED" || currentStatus == "POSTED" {
+			api.RespondWithError(w, http.StatusBadRequest, "approved/posted entries cannot be edited")
+			return
+		}
+
+		deductionDate := req.TDSDeductionDate
+		if strings.TrimSpace(deductionDate) == "" {
+			deductionDate = req.PeriodEnd
+		}
+		if fdIDForTDS != "" {
+			var fdStartU, fdMaturityU time.Time
+			if scanErr := pool.QueryRow(ctx,
+				`SELECT start_date, maturity_date FROM investment.fd_master WHERE fd_id=$1 AND is_deleted=false`,
+				fdIDForTDS).Scan(&fdStartU, &fdMaturityU); scanErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "FD date lookup failed: "+scanErr.Error())
+				return
+			}
+			if errMsg := checkFDPeriodDates(fdStartU, fdMaturityU, req.PeriodStart, req.PeriodEnd); errMsg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
+			}
+			if errMsg := checkFDDates(fdStartU, fdMaturityU,
+				[]string{"tds_deduction_date"},
+				[]string{deductionDate}); errMsg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
+			}
+		}
+
+		tdsVariance := req.TDSDeductedActual - req.TDSExpected
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "tx start failed")
+			return
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		if _, err = tx.Exec(ctx, `
+			UPDATE investment.fd_tds_receipt SET
+				period_start       = $1::date,
+				period_end         = $2::date,
+				deduction_date     = $3::date,
+				gross_interest     = $4,
+				tds_expected       = $5,
+				tds_deducted_actual = $6,
+				tds_variance       = $7,
+				tds_rate_applied   = $8,
+				tds_rate_expected  = $8,
+				tds_section        = $9,
+				has_pan            = $10,
+				exception_raised   = ($7 != 0)
+			WHERE tds_id = $11`,
+			req.PeriodStart, req.PeriodEnd, deductionDate,
+			req.GrossInterest, req.TDSExpected, req.TDSDeductedActual, tdsVariance,
+			req.TDSRateApplied, nullIfEmpty(req.TDSSection), req.HasPAN, req.TDSID,
+		); err != nil {
+			api.LogError("[TDSUpdate] update failed for %s: %v", req.TDSID, err)
+			api.RespondWithError(w, http.StatusInternalServerError, "update failed")
+			return
+		}
+
+		tx.Exec(ctx, `
+			INSERT INTO investment.fd_tds_receipt_audit
+				(tds_id, action_type, processing_status, requested_by, requested_at, checker_comment)
+			VALUES ($1, 'EDIT', 'PENDING_APPROVAL', $2, now(), $3)`,
+			req.TDSID, userEmail, nullIfEmpty(req.Reason)) //nolint:errcheck
+
+		if err = tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			"success": true,
+			"message": "TDS entry updated",
+			"tds_id":  req.TDSID,
+		})
+	}
+}
+
+// ─── TDS Register Bulk Approve ─────────────────────────────────────────────
+// POST /investment/fd/tds-register/approve-bulk
+// Approves multiple TDS entries at once.
+
+func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID  string   `json:"user_id"`
+			TDSIDs  []string `json:"tds_ids"`
+			Comment string   `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if len(req.TDSIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
+			return
+		}
+
+		userEmail := resolveUserEmail(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		type result struct {
+			TDSID   string `json:"tds_id"`
+			OK      bool   `json:"ok"`
+			Message string `json:"message,omitempty"`
+		}
+		results := make([]result, 0, len(req.TDSIDs))
+		approved := 0
+
+		for _, tdsID := range req.TDSIDs {
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				results = append(results, result{TDSID: tdsID, OK: false, Message: "tx start failed"})
+				continue
+			}
+			tag, err := tx.Exec(ctx,
+				`UPDATE investment.fd_tds_receipt SET tds_status = 'APPROVED'
+				 WHERE tds_id = $1 AND tds_status = 'CAPTURED' AND is_deleted = false`,
+				tdsID)
+			if err != nil || tag.RowsAffected() == 0 {
+				tx.Rollback(ctx) //nolint:errcheck
+				results = append(results, result{TDSID: tdsID, OK: false, Message: "not CAPTURED or not found"})
+				continue
+			}
+			tx.Exec(ctx, `
+				UPDATE investment.fd_tds_receipt_audit
+				SET processing_status = 'APPROVED', checker_by = $1,
+				    checker_at = now(), checker_comment = $2
+				WHERE tds_id = $3 AND processing_status = 'PENDING_APPROVAL'`,
+				userEmail, nullIfEmpty(req.Comment), tdsID) //nolint:errcheck
+			if err = tx.Commit(ctx); err != nil {
+				results = append(results, result{TDSID: tdsID, OK: false, Message: "commit failed"})
+				continue
+			}
+			approved++
+			results = append(results, result{TDSID: tdsID, OK: true})
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			"success":  approved > 0,
+			"approved": approved,
+			"failed":   len(req.TDSIDs) - approved,
+			"results":  results,
+		})
+	}
+}
+
+// ─── TDS Register Bulk Reject ──────────────────────────────────────────────
+// POST /investment/fd/tds-register/reject-bulk
+
+func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID  string   `json:"user_id"`
+			TDSIDs  []string `json:"tds_ids"`
+			Comment string   `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if len(req.TDSIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
+			return
+		}
+
+		userEmail := resolveUserEmail(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		rejected := 0
+		for _, tdsID := range req.TDSIDs {
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				continue
+			}
+			tag, err := tx.Exec(ctx,
+				`UPDATE investment.fd_tds_receipt SET tds_status = 'REJECTED'
+				 WHERE tds_id = $1 AND is_deleted = false`, tdsID)
+			if err != nil || tag.RowsAffected() == 0 {
+				tx.Rollback(ctx) //nolint:errcheck
+				continue
+			}
+			tx.Exec(ctx, `
+				UPDATE investment.fd_tds_receipt_audit
+				SET processing_status = 'REJECTED', checker_by = $1,
+				    checker_at = now(), checker_comment = $2
+				WHERE tds_id = $3 AND processing_status = 'PENDING_APPROVAL'`,
+				userEmail, nullIfEmpty(req.Comment), tdsID) //nolint:errcheck
+			if err = tx.Commit(ctx); err != nil {
+				continue
+			}
+			rejected++
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			"success":  rejected > 0,
+			"rejected": rejected,
+		})
+	}
+}
+
+// ─── TDS Register Reject ──────────────────────────────────────────────────
+// POST /investment/fd/tds-register/reject
+
+func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID  string `json:"user_id"`
+			TDSID   string `json:"tds_id"`
+			Comment string `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if strings.TrimSpace(req.TDSID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
+			return
+		}
+
+		userEmail := resolveUserEmail(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
+			return
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		if _, err = tx.Exec(ctx,
+			`UPDATE investment.fd_tds_receipt SET tds_status = 'REJECTED' WHERE tds_id = $1 AND is_deleted = false`,
+			req.TDSID); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to reject TDS entry")
+			return
+		}
+
+		tx.Exec(ctx, `
+			UPDATE investment.fd_tds_receipt_audit
+			SET processing_status = 'REJECTED',
+			    checker_by        = $1,
+			    checker_at        = now(),
+			    checker_comment   = $2
+			WHERE tds_id = $3
+			  AND processing_status = 'PENDING_APPROVAL'`,
+			userEmail, nullIfEmpty(req.Comment), req.TDSID) //nolint:errcheck
+
+		if err = tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			"success": true,
+			"message": "TDS entry rejected",
+			"tds_id":  req.TDSID,
+		})
 	}
 }
 
@@ -558,6 +1027,76 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    payload,
+		})
+	}
+}
+
+// ─── TDS Register Bulk Soft-Delete ────────────────────────────────────────────
+// POST /investment/fd/tds-register/delete-bulk
+// Soft-deletes TDS entries (sets is_deleted=true).
+// Only CAPTURED or REJECTED entries from ingestion_source=TDS_WORKBENCH can be deleted.
+
+func BulkDeleteTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			TDSIDs []string `json:"tds_ids"`
+			Reason string   `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if len(req.TDSIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrTDSIDRequired)
+			return
+		}
+
+		userEmail := resolveUserEmail(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		deleted := 0
+		failed := 0
+
+		for _, tdsID := range req.TDSIDs {
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				failed++
+				continue
+			}
+			tag, err := tx.Exec(ctx,
+				`UPDATE investment.fd_tds_receipt
+				 SET is_deleted = true, deleted_by = $1, deleted_at = now()
+				 WHERE tds_id = $2
+				   AND tds_status IN ('CAPTURED', 'REJECTED')
+				   AND ingestion_source = 'TDS_WORKBENCH'
+				   AND is_deleted = false`,
+				userEmail, tdsID)
+			if err != nil || tag.RowsAffected() == 0 {
+				tx.Rollback(ctx) //nolint:errcheck
+				failed++
+				continue
+			}
+			// Record deletion in audit
+			tx.Exec(ctx, `
+				UPDATE investment.fd_tds_receipt_audit
+				SET deleted_by = $1, deleted_at = now()
+				WHERE tds_id = $2`, userEmail, tdsID) //nolint:errcheck
+			if err = tx.Commit(ctx); err != nil {
+				failed++
+				continue
+			}
+			deleted++
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			"success": deleted > 0,
+			"deleted": deleted,
+			"failed":  failed,
 		})
 	}
 }

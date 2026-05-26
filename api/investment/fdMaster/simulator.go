@@ -791,10 +791,10 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 		if err != nil {
 			return nil, fmt.Errorf("maturity_date must be YYYY-MM-DD, got: %q", d)
 		}
-		// Back-compute tenor days from explicit dates if not supplied
-		if tenorDays <= 0 {
-			tenorDays = int(maturityDate.Sub(startDate).Hours() / 24)
-		}
+		// Explicit dates define the simulated period. Recompute tenor days even
+		// when the request also sends tenor_days, otherwise summary yield can use
+		// a stale denominator while the schedule accrues over the date span.
+		tenorDays = int(maturityDate.Sub(startDate).Hours() / 24)
 	} else {
 		// No explicit maturity_date — derive from tenor.
 		// Use proper calendar math (AddDate) rather than the approximation
@@ -1433,30 +1433,31 @@ func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 // Schedule total_interest_accrued is the sum of per-period rounded rows; with unified rounding
 // it should match workbook totals when decimals and method align with bank config.
 func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, tdsRatePct float64, convention string) {
-    if fd == nil || s == nil {
-        return
-    }
+	if fd == nil || s == nil {
+		return
+	}
 
-    divisor := 365.0
-    switch strings.ToUpper(convention) {
-    case "30_360", "30/360":
-        divisor = 360.0
-    case "ACT_ACT", "ACT/ACT":
-        // Use 366 if maturity year is leap, else 365
-        if isLeapYear(fd.MaturityDate.Year()) {
-            divisor = 366.0
-        }
-    }
+	divisor := 365.0
+	switch strings.ToUpper(convention) {
+	case "30_360", "30/360":
+		divisor = 360.0
+	case "ACT_ACT", "ACT/ACT":
+		// Use 366 if maturity year is leap, else 365
+		if isLeapYear(fd.MaturityDate.Year()) {
+			divisor = 366.0
+		}
+	}
 
-    rnd := engRoundingFromCfg(cfg)
-    s.WorkbookTotalInterest = rnd.RoundFinal(
-        fd.PrincipalAmount * (fd.InterestRate / 100.0) * float64(fd.TenorDays) / divisor,
-    )
+	rnd := engRoundingFromCfg(cfg)
+	s.WorkbookTotalInterest = rnd.RoundFinal(
+		fd.PrincipalAmount * (fd.InterestRate / 100.0) * float64(fd.TenorDays) / divisor,
+	)
 
-    if tdsRatePct > 0 && s.WorkbookTotalInterest > 0 {
-        s.WorkbookTotalTDS = rnd.RoundFinal(s.WorkbookTotalInterest * tdsRatePct / 100.0)
-    }
+	if tdsRatePct > 0 && s.WorkbookTotalInterest > 0 {
+		s.WorkbookTotalTDS = rnd.RoundFinal(s.WorkbookTotalInterest * tdsRatePct / 100.0)
+	}
 }
+
 // enrichCompoundWorkbookSummary fills workbook C17-style header totals on a summary.
 // WorkbookTotalInterest uses the closed-form compound formula for Excel parity.
 // WorkbookTotalTDS is sourced from the schedule: Σ TDSAmount across CAPITALIZATION rows,
@@ -1485,42 +1486,42 @@ func enrichSimpleWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConf
 //         fd.PrincipalAmount * (math.Pow(1+r/n, n*tenorYears) - 1),
 //     )
 
-//     if tdsRatePct > 0 {
-//         var tdsSum float64
-//         for _, row := range rawRows {
-//             if row.EventType == "CAPITALIZATION" {
-//                 tdsSum += row.TDSAmount
-//             }
-//         }
-//         s.WorkbookTotalTDS = tdsSum
-//     }
-// }
+//	    if tdsRatePct > 0 {
+//	        var tdsSum float64
+//	        for _, row := range rawRows {
+//	            if row.EventType == "CAPITALIZATION" {
+//	                tdsSum += row.TDSAmount
+//	            }
+//	        }
+//	        s.WorkbookTotalTDS = tdsSum
+//	    }
+//	}
 func enrichCompoundWorkbookSummary(s *SimulateSummary, fd *FDRecord, cfg *BankConfig, capFreqType string, tdsRatePct float64, rawRows []CashflowRow) {
-    if fd == nil || s == nil {
-        return
-    }
+	if fd == nil || s == nil {
+		return
+	}
 
-    // Workbook C17 formula: =ROUND(C11*(1+C12/n)^(n*(C10/365))-C11, 0)
-    // The exponent always uses 365 regardless of day count convention —
-    // it's a header approximation cell, not the per-period schedule calculation.
-    n := float64(capPeriodsPerYear(capFreqType))
-    r := fd.InterestRate / 100.0
-    tenorYears := float64(fd.TenorDays) / 365.0 // always 365, matches workbook
+	// Workbook C17 formula: =ROUND(C11*(1+C12/n)^(n*(C10/365))-C11, 0)
+	// The exponent always uses 365 regardless of day count convention —
+	// it's a header approximation cell, not the per-period schedule calculation.
+	n := float64(capPeriodsPerYear(capFreqType))
+	r := fd.InterestRate / 100.0
+	tenorYears := float64(fd.TenorDays) / 365.0 // always 365, matches workbook
 
-    rnd := engRoundingFromCfg(cfg)
-    s.WorkbookTotalInterest = rnd.RoundFinal(
-        fd.PrincipalAmount * (math.Pow(1+r/n, n*tenorYears) - 1),
-    )
+	rnd := engRoundingFromCfg(cfg)
+	s.WorkbookTotalInterest = rnd.RoundFinal(
+		fd.PrincipalAmount * (math.Pow(1+r/n, n*tenorYears) - 1),
+	)
 
-    if tdsRatePct > 0 {
-        var tdsSum float64
-        for _, row := range rawRows {
-            if row.EventType == "CAPITALIZATION" {
-                tdsSum += row.TDSAmount
-            }
-        }
-        s.WorkbookTotalTDS = tdsSum
-    }
+	if tdsRatePct > 0 {
+		var tdsSum float64
+		for _, row := range rawRows {
+			if row.EventType == "CAPITALIZATION" {
+				tdsSum += row.TDSAmount
+			}
+		}
+		s.WorkbookTotalTDS = tdsSum
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1256,11 +1256,11 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 		logger.LogInfo("[FBUP] committed batch %s for file %s", batchID.String(), fh.Filename)
 		for _, exposureID := range docToID {
-			auditutil.RecordActionPGX(ctx, pool, auditutil.TableExposure, "exposure_header_id", exposureID, "CREATE", "PENDING_APPROVAL", "Imported via uploader", userName, nil, map[string]interface{}{
+			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: exposureID, ActionType: "CREATE", Status: "PENDING_APPROVAL", Reason: "Imported via uploader", RequestedBy: userName, OldValues: nil, NewValues: map[string]interface{}{
 				"batch_id":      batchID.String(),
 				"file_name":     fh.Filename,
 				"upload_s3_key": s3Key,
-			})
+			}})
 		}
 
 		// Authoritative preview: use DB-driven preview builder instead of in-memory approximation.
@@ -1931,7 +1931,7 @@ func recordExposureBatchDownloadAuditPGX(ctx context.Context, pool *pgxpool.Pool
 			logger.LogError("fx exposure download audit scan failed batch=%s: %v", batchID.String(), err)
 			continue
 		}
-		auditutil.RecordDownloadPGX(ctx, pool, auditutil.TableExposureDownloads, "exposure_header_id", exposureHeaderID, requestedBy, uploadS3Key, nil)
+		auditutil.RecordDownloadPGX(ctx, pool, auditutil.DownloadParams{TableName: auditutil.TableExposureDownloads, ParentColumn: "exposure_header_id", ParentID: exposureHeaderID, RequestedBy: requestedBy, UploadS3Key: uploadS3Key, ExtraColumns: nil})
 	}
 	if err := rows.Err(); err != nil {
 		logger.LogError("fx exposure download audit rows failed batch=%s: %v", batchID.String(), err)
@@ -2216,7 +2216,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if req.BatchID == "" {
-			httpError(w, http.StatusBadRequest, "batch_id required")
+			httpError(w, http.StatusBadRequest, constants.BatchIDsRequired)
 			return
 		}
 		batchUUID, err := uuid.Parse(req.BatchID)

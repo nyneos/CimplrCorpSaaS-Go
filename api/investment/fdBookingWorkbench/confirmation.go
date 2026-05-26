@@ -38,6 +38,7 @@ type fdConfirmationCaptureRequest struct {
 	ReceiptDate              string           `json:"receipt_date"`
 	ConfirmedInterestType    string           `json:"confirmed_interest_type"`
 	ConfirmedFrequencyID     string           `json:"confirmed_frequency_id"`
+	PayoutFrequencyID        string           `json:"payout_frequency_id"`
 	PenaltyID                string           `json:"penalty_id"`
 	PayoutDates              *json.RawMessage `json:"payout_dates"`
 	CompoundingDates         *json.RawMessage `json:"compounding_dates"`
@@ -93,6 +94,7 @@ func fdConfirmationCaptureRequestFromForm(r *http.Request) fdConfirmationCapture
 		ReceiptDate:              strings.TrimSpace(r.FormValue("receipt_date")),
 		ConfirmedInterestType:    strings.TrimSpace(r.FormValue("confirmed_interest_type")),
 		ConfirmedFrequencyID:     strings.TrimSpace(r.FormValue("confirmed_frequency_id")),
+		PayoutFrequencyID:        strings.TrimSpace(r.FormValue("payout_frequency_id")),
 		PenaltyID:                strings.TrimSpace(r.FormValue("penalty_id")),
 		PayoutDates:              fdFormRawJSON(r, "payout_dates"),
 		CompoundingDates:         fdFormRawJSON(r, "compounding_dates"),
@@ -228,22 +230,54 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.ConfirmedFrequencyID == "" {
 			req.ConfirmedFrequencyID = bookedPayoutFreqID
 		}
+		if req.PayoutFrequencyID == "" {
+			req.PayoutFrequencyID = bookedPayoutFreqID
+		}
+
+		bankFDRef := strings.TrimSpace(req.BankFDReference)
+		if bankFDRef == "" {
+			bankFDRef = req.BookingID
+		}
+		var existingConfirmationID string
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT confirmation_id FROM investment.fd_confirmation
+			WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false
+			LIMIT 1`, req.BookingID).Scan(&existingConfirmationID)
+		if msg, status := validateFDConfirmationReferenceUniqueness(ctx, pgxPool, fdConfirmationReferenceCheck{
+			EntityID:              entityID,
+			BankFDRefNo:           bankFDRef,
+			BankReferenceNumber:   req.BankReferenceNumber,
+			ExcludeConfirmationID: existingConfirmationID,
+		}); msg != "" {
+			cleanupUpload()
+			api.RespondWithError(w, status, msg)
+			return
+		}
 
 		// ── Run variance engine ───────────────────────────────────────────────
 		runID := varianceengine.NewRunID()
-		varRules := []varianceengine.Rule{
-			{FieldName: "interest_rate", VarianceType: varianceengine.TypeRate, ExpectedValue: formatNumber(bookedRate), ActualValue: formatNumber(req.ConfirmedInterestRate), Priority: varianceengine.PriorityHigh},
-			{FieldName: "principal_amount", VarianceType: varianceengine.TypeAmount, ExpectedValue: formatNumber(bookedPrincipal), ActualValue: formatNumber(req.ConfirmedPrincipalAmount), Priority: varianceengine.PriorityHigh},
-			{FieldName: "tenor_days", VarianceType: varianceengine.TypeDays, ExpectedValue: fmt.Sprintf("%d", bookedTenorDays), ActualValue: fmt.Sprintf("%d", req.ConfirmedTenorDays), Priority: varianceengine.PriorityMedium},
-			{FieldName: "tenor_months", VarianceType: varianceengine.TypeDays, ExpectedValue: fmt.Sprintf("%d", bookedTenorMonths), ActualValue: fmt.Sprintf("%d", req.ConfirmedTenorMonths), Priority: varianceengine.PriorityMedium},
-			{FieldName: "tenor_years", VarianceType: varianceengine.TypeDays, ExpectedValue: fmt.Sprintf("%d", bookedTenorYears), ActualValue: fmt.Sprintf("%d", req.ConfirmedTenorYears), Priority: varianceengine.PriorityMedium},
-			{FieldName: "value_date", VarianceType: varianceengine.TypeDate, ExpectedValue: bookedValueDate, ActualValue: req.ConfirmedValueDate, Priority: varianceengine.PriorityMedium},
-			{FieldName: "maturity_date", VarianceType: varianceengine.TypeDate, ExpectedValue: bookedMaturityDate, ActualValue: req.ConfirmedMaturityDate, Priority: varianceengine.PriorityHigh},
-			{FieldName: "interest_type_code", VarianceType: varianceengine.TypeIdentity, ExpectedValue: bookedInterestTypeCode, ActualValue: req.ConfirmedInterestType, Priority: varianceengine.PriorityHigh},
-			{FieldName: "frequency_id", VarianceType: varianceengine.TypeIdentity, ExpectedValue: bookedFrequencyID, ActualValue: req.ConfirmedFrequencyID, Priority: varianceengine.PriorityMedium},
-			{FieldName: "tenor_type", VarianceType: varianceengine.TypeIdentity, ExpectedValue: bookedTenorType, ActualValue: strings.ToUpper(strings.TrimSpace(req.ConfirmedTenorType)), Priority: varianceengine.PriorityLow},
-		}
-		varItems := varianceengine.Compare("FD_CONFIRMATION", req.BookingID, entityID, runID, varRules)
+		bookedPayout, actualPayout := normalizedPayoutFrequency(ctx, pgxPool,
+			bookedPayoutFreqID, bookedFrequencyID, req.PayoutFrequencyID, req.ConfirmedFrequencyID,
+		)
+		bookedAccrual, actualAccrual := normalizedAccrualFrequency(ctx, pgxPool,
+			accrualFrequencyInput{BookedCode: bookedAccrualFreqCode, ActualCode: req.AccrualFrequencyCode, BookedPayout: bookedPayout, ActualPayout: actualPayout, BookedCompound: bookedFrequencyID, ActualCompound: req.ConfirmedFrequencyID},
+		)
+		varIn := prepareFDConfirmationVarianceInput(ctx, pgxPool, fdConfirmationVarianceInput{
+			BookedPrincipal: bookedPrincipal, ActualPrincipal: req.ConfirmedPrincipalAmount,
+			BookedRate: bookedRate, ActualRate: req.ConfirmedInterestRate,
+			BookedTenorDays: bookedTenorDays, ActualTenorDays: req.ConfirmedTenorDays,
+			BookedTenorMonths: bookedTenorMonths, ActualTenorMonths: req.ConfirmedTenorMonths,
+			BookedTenorYears: bookedTenorYears, ActualTenorYears: req.ConfirmedTenorYears,
+			BookedValueDate: bookedValueDate, ActualValueDate: req.ConfirmedValueDate,
+			BookedMaturityDate: bookedMaturityDate, ActualMaturityDate: req.ConfirmedMaturityDate,
+			BookedInterestType: bookedInterestTypeCode, ActualInterestType: req.ConfirmedInterestType,
+			BookedFrequencyID: bookedFrequencyID, ActualFrequencyID: req.ConfirmedFrequencyID,
+			BookedPayoutFrequencyID: bookedPayout, ActualPayoutFrequencyID: actualPayout,
+			BookedResetType: bookedResetType, ActualResetType: req.ResetType,
+			BookedAccrualFrequencyCode: bookedAccrual, ActualAccrualFrequencyCode: actualAccrual,
+			BookedTenorType: bookedTenorType, ActualTenorType: strings.ToUpper(strings.TrimSpace(req.ConfirmedTenorType)),
+		})
+		varItems := varianceengine.Compare("FD_CONFIRMATION", req.BookingID, entityID, runID, buildFDConfirmationVarianceRules(varIn))
 
 		hasVariance := false
 		for _, v := range varItems {
@@ -256,6 +290,9 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── Variance found: return items, no DB ingestion ─────────────────────
 		if hasVariance {
 			cleanupUpload()
+			userEmail := api.GetUserEmailFromCtx(ctx)
+			_ = varianceengine.PersistVariances(ctx, pgxPool, varItems)
+			_ = varianceengine.AutoResolveCleared(ctx, pgxPool, req.BookingID, varItems, req.UserID, userEmail)
 			out := make([]map[string]interface{}, 0, len(varItems))
 			for _, v := range varItems {
 				out = append(out, serializeVarianceItem(ctx, pgxPool, v))
@@ -280,10 +317,6 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// ── No variance: insert confirmation and confirm directly ─────────────
-		bankFDRef := req.BankFDReference
-		if bankFDRef == "" {
-			bankFDRef = req.BookingID
-		}
 		receivedDate := req.ReceiptDate
 		if receivedDate == "" {
 			receivedDate = time.Now().Format(constants.DateFormat)
@@ -341,6 +374,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					reset_type                = NULLIF($22,''),
 					bank_reference_number     = NULLIF($23,''),
 					premature_closure_terms   = NULLIF($24,''),
+					payout_frequency_id       = NULLIF($25,''),
 					upload_s3_key             = COALESCE(NULLIF($20,''), upload_s3_key),
 					updated_by                = $16,
 					updated_at                = now()
@@ -361,6 +395,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				strings.ToUpper(strings.TrimSpace(req.ResetType)),
 				nullIfEmpty(req.BankReferenceNumber),
 				nullIfEmpty(req.PrematureClosureTerms),
+				nullIfEmpty(req.PayoutFrequencyID),
 			); err != nil {
 				cleanupUpload()
 				msg, status := getUserFriendlyFDError(err, constants.ErrUpdateConfirmationFailed)
@@ -389,6 +424,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					reset_type,
 					bank_reference_number,
 					premature_closure_terms,
+					payout_frequency_id,
 					upload_s3_key,
 					created_by
 				) VALUES (
@@ -410,6 +446,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					NULLIF($22,''),
 					NULLIF($23,''),
 					NULLIF($24,''),
+					NULLIF($25,''),
 					NULLIF($20,''),
 					$17
 				) RETURNING confirmation_id`,
@@ -430,6 +467,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				strings.ToUpper(strings.TrimSpace(req.ResetType)),
 				nullIfEmpty(req.BankReferenceNumber),
 				nullIfEmpty(req.PrematureClosureTerms),
+				nullIfEmpty(req.PayoutFrequencyID),
 			).Scan(&confirmationID)
 			if err != nil {
 				cleanupUpload()
@@ -533,7 +571,7 @@ func GetFDConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_confirmation
 			WHERE confirmation_id = $1 AND COALESCE(is_deleted,false) = false
 		`, confirmationID).Scan(&uploadS3Key); err != nil {
-			api.RespondWithResult(w, false, "file not found")
+			api.RespondWithResult(w, false, constants.ErrFileNotFound)
 			return
 		}
 		key := strings.TrimSpace(uploadS3Key.String)
@@ -568,7 +606,7 @@ func GetFDConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfirmationIDs) == 0 {
-			api.RespondWithResult(w, false, "confirmation_ids required")
+			api.RespondWithResult(w, false, constants.ConfirmationIDsRequired)
 			return
 		}
 		files := make([]map[string]string, 0, len(req.ConfirmationIDs))
@@ -638,6 +676,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ReceiptDate              string           `json:"receipt_date"`
 			ConfirmedInterestType    string           `json:"confirmed_interest_type"`
 			ConfirmedFrequencyID     string           `json:"confirmed_frequency_id"`
+			PayoutFrequencyID        string           `json:"payout_frequency_id"`
 			PenaltyID                string           `json:"penalty_id"`
 			PayoutDates              *json.RawMessage `json:"payout_dates"`
 			CompoundingDates         *json.RawMessage `json:"compounding_dates"`
@@ -744,8 +783,37 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.ConfirmedFrequencyID == "" {
 			req.ConfirmedFrequencyID = bookedPayoutFreqID
 		}
+		if req.PayoutFrequencyID == "" {
+			req.PayoutFrequencyID = bookedPayoutFreqID
+		}
+
+		bankFDRef := strings.TrimSpace(req.BankFDReference)
+		if bankFDRef == "" {
+			bankFDRef = bookingID
+		}
+		if confirmationID == "" {
+			_ = pgxPool.QueryRow(ctx, `
+				SELECT confirmation_id FROM investment.fd_confirmation
+				WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false
+				LIMIT 1`, bookingID).Scan(&confirmationID)
+		}
+		if msg, status := validateFDConfirmationReferenceUniqueness(ctx, pgxPool, fdConfirmationReferenceCheck{
+			EntityID:              entityID,
+			BankFDRefNo:           bankFDRef,
+			BankReferenceNumber:   req.BankReferenceNumber,
+			ExcludeConfirmationID: confirmationID,
+		}); msg != "" {
+			api.RespondWithError(w, status, msg)
+			return
+		}
 
 		runID := varianceengine.NewRunID()
+		bookedPayout, actualPayout := normalizedPayoutFrequency(ctx, pgxPool,
+			bookedPayoutFreqID, bookedFrequencyID, req.PayoutFrequencyID, req.ConfirmedFrequencyID,
+		)
+		bookedAccrual, actualAccrual := normalizedAccrualFrequency(ctx, pgxPool,
+			accrualFrequencyInput{BookedCode: bookedAccrualFreqCode, ActualCode: req.AccrualFrequencyCode, BookedPayout: bookedPayout, ActualPayout: actualPayout, BookedCompound: bookedFrequencyID, ActualCompound: req.ConfirmedFrequencyID},
+		)
 		varItems, hasVariance := runFDConfirmationVarianceCompare(ctx, pgxPool, fdConfirmationVarianceInput{
 			BookingID: bookingID, EntityID: entityID, RunID: runID,
 			ResolvedBy: req.UserID, ResolvedByEmail: userEmail,
@@ -758,15 +826,14 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			BookedMaturityDate: bookedMaturityDate, ActualMaturityDate: req.ConfirmedMaturityDate,
 			BookedInterestType: bookedInterestType, ActualInterestType: req.ConfirmedInterestType,
 			BookedFrequencyID: bookedFrequencyID, ActualFrequencyID: req.ConfirmedFrequencyID,
+			BookedPayoutFrequencyID: bookedPayout, ActualPayoutFrequencyID: actualPayout,
+			BookedResetType: bookedResetType, ActualResetType: req.ResetType,
+			BookedAccrualFrequencyCode: bookedAccrual, ActualAccrualFrequencyCode: actualAccrual,
 			BookedTenorType: bookedTenorType, ActualTenorType: tenorType,
 			ActualFirstCapDate:    coerceDateString(req.FirstCapitalizationDate),
 			ActualFirstPayoutDate: coerceDateString(req.FirstPayoutDate),
 		})
 
-		bankFDRef := req.BankFDReference
-		if bankFDRef == "" {
-			bankFDRef = bookingID
-		}
 		receivedDate := req.ReceiptDate
 		if receivedDate == "" {
 			receivedDate = time.Now().Format(constants.DateFormat)
@@ -836,6 +903,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					accrual_frequency_code       = NULLIF($23,''),
 					reset_type                   = NULLIF($24,''),
 					bank_reference_number        = NULLIF($25,''),
+					payout_frequency_id          = NULLIF($26,''),
 					updated_by                   = $19,
 					updated_at                   = now()
 				WHERE confirmation_id = $20`,
@@ -851,6 +919,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				strings.ToUpper(strings.TrimSpace(req.AccrualFrequencyCode)),
 				strings.ToUpper(strings.TrimSpace(req.ResetType)),
 				strings.TrimSpace(req.BankReferenceNumber),
+				strings.TrimSpace(req.PayoutFrequencyID),
 			); err != nil {
 				api.LogError("[VarianceResolve] UPDATE fd_confirmation error: %v", err)
 				msg, status := getUserFriendlyFDError(err, constants.ErrUpdateConfirmationFailed)
@@ -897,6 +966,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					accrual_frequency_code,
 					reset_type,
 					bank_reference_number,
+					payout_frequency_id,
 					created_by
 				) VALUES (
 					$1,
@@ -916,6 +986,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					NULLIF($23,''),
 					NULLIF($24,''),
 					NULLIF($25,''),
+					NULLIF($26,''),
 					$20
 				) RETURNING confirmation_id`,
 				bookingID,
@@ -931,6 +1002,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				strings.ToUpper(strings.TrimSpace(req.AccrualFrequencyCode)),
 				strings.ToUpper(strings.TrimSpace(req.ResetType)),
 				strings.TrimSpace(req.BankReferenceNumber),
+				strings.TrimSpace(req.PayoutFrequencyID),
 			).Scan(&confirmationID)
 			if err != nil {
 				msg, status := getUserFriendlyFDError(err, "Insert confirmation failed")
@@ -1049,7 +1121,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		confCols, colErr := loadFDTableColumns(ctx, pgxPool, "investment", "fd_confirmation")
 		if colErr != nil {
-			msg, status := getUserFriendlyFDError(colErr, "Load confirmation schema failed")
+			msg, status := getUserFriendlyFDError(colErr, constants.ErrLoadConfirmationSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1077,16 +1149,23 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Load current confirmation + linked booking (FOR UPDATE) ─────────────
 		var bookingID, entityID, currentStatus, oldTenorType, oldPenaltyID string
-		var oldInterestTypeCode, oldFrequencyID, oldAccrualFreqCode, oldResetType string
+		var oldInterestTypeCode, oldFrequencyID, oldPayoutFreqID, oldAccrualFreqCode, oldResetType string
+		var oldBankFDRefNo, oldBankReferenceNumber string
 		var oldPrincipal, oldRate float64
 		var oldTenorDays, oldTenorMonths, oldTenorYears int
 		var oldValueDate, oldMaturityDate, oldFirstCapDate, oldFirstPayoutDate string
 
-		err = tx.QueryRow(ctx, `
+		bankRefSelect := "''"
+		if confCols["bank_reference_number"] {
+			bankRefSelect = "COALESCE(c.bank_reference_number::text,'')"
+		}
+
+		err = tx.QueryRow(ctx, fmt.Sprintf(`
 			SELECT
 				COALESCE(c.booking_id,''), COALESCE(b.entity_id,''),
 				COALESCE(c.confirmation_status,''), COALESCE(c.tenor_type,''), COALESCE(c.penalty_id,''),
 				COALESCE(c.confirmed_interest_type_code,''), COALESCE(c.confirmed_frequency_id,''),
+				COALESCE(c.payout_frequency_id,''),
 				COALESCE(c.actual_principal,0), COALESCE(c.confirmed_rate,0),
 				COALESCE(c.tenor_days,0), COALESCE(c.tenor_months,0), COALESCE(c.tenor_years,0),
 				COALESCE(TO_CHAR(c.actual_start_date,'YYYY-MM-DD'),''),
@@ -1094,17 +1173,19 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),''),
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),''),
 				COALESCE(c.accrual_frequency_code,''),
-				COALESCE(c.reset_type,'')
+				COALESCE(c.reset_type,''),
+				COALESCE(c.bank_fd_ref_no,''),
+				%s
 			FROM investment.fd_confirmation c
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false
-			FOR UPDATE OF c`, req.ConfirmationID).
+			FOR UPDATE OF c`, bankRefSelect), req.ConfirmationID).
 			Scan(&bookingID, &entityID, &currentStatus, &oldTenorType, &oldPenaltyID,
-				&oldInterestTypeCode, &oldFrequencyID,
+				&oldInterestTypeCode, &oldFrequencyID, &oldPayoutFreqID,
 				&oldPrincipal, &oldRate,
 				&oldTenorDays, &oldTenorMonths, &oldTenorYears,
 				&oldValueDate, &oldMaturityDate, &oldFirstCapDate, &oldFirstPayoutDate,
-				&oldAccrualFreqCode, &oldResetType)
+				&oldAccrualFreqCode, &oldResetType, &oldBankFDRefNo, &oldBankReferenceNumber)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				api.RespondWithError(w, http.StatusNotFound,
@@ -1121,6 +1202,19 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if currentStatus == "CONFIRMED" || currentStatus == "APPROVED" {
 			api.RespondWithError(w, http.StatusBadRequest,
 				"Cannot edit a "+currentStatus+" confirmation — create a new change request or reopen through the allowed workflow")
+			return
+		}
+
+		effectiveBankFDRef, effectiveBankReference := resolveEditConfirmationReferenceFields(
+			req.Fields, oldBankFDRefNo, oldBankReferenceNumber,
+		)
+		if msg, status := validateFDConfirmationReferenceUniqueness(ctx, tx, fdConfirmationReferenceCheck{
+			EntityID:              entityID,
+			BankFDRefNo:           effectiveBankFDRef,
+			BankReferenceNumber:   effectiveBankReference,
+			ExcludeConfirmationID: req.ConfirmationID,
+		}); msg != "" {
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -1170,6 +1264,9 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		effMaturityDate := oldMaturityDate
 		effInterestTypeCode := oldInterestTypeCode
 		effFrequencyID := oldFrequencyID
+		effPayoutFreqID := oldPayoutFreqID
+		effResetType := oldResetType
+		effAccrualFreqCode := oldAccrualFreqCode
 		effTenorType := oldTenorType
 		effFirstCapDate := oldFirstCapDate
 		effFirstPayoutDate := oldFirstPayoutDate
@@ -1248,6 +1345,21 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				effFrequencyID = sv
 			}
 		}
+		if v, ok := req.Fields["payout_frequency_id"]; ok {
+			if sv, ok2 := v.(string); ok2 {
+				effPayoutFreqID = sv
+			}
+		}
+		if v, ok := req.Fields["reset_type"]; ok {
+			if sv, ok2 := v.(string); ok2 && sv != "" {
+				effResetType = strings.ToUpper(strings.TrimSpace(sv))
+			}
+		}
+		if v, ok := req.Fields["accrual_frequency_code"]; ok {
+			if sv, ok2 := v.(string); ok2 {
+				effAccrualFreqCode = strings.ToUpper(strings.TrimSpace(sv))
+			}
+		}
 		if v, ok := req.Fields["tenor_type"]; ok {
 			if sv, ok2 := v.(string); ok2 && sv != "" {
 				effTenorType = strings.ToUpper(strings.TrimSpace(sv))
@@ -1269,6 +1381,12 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var varItems []varianceengine.VarianceItem
 		var hasVariance bool
 		if bookingID != "" {
+			bookedPayout, actualPayout := normalizedPayoutFrequency(ctx, pgxPool,
+				bookedPayoutFreqID, bookedFrequencyID, effPayoutFreqID, effFrequencyID,
+			)
+			bookedAccrual, actualAccrual := normalizedAccrualFrequency(ctx, pgxPool,
+				accrualFrequencyInput{BookedCode: bookedAccrualFreqCode, ActualCode: effAccrualFreqCode, BookedPayout: bookedPayout, ActualPayout: actualPayout, BookedCompound: bookedFrequencyID, ActualCompound: effFrequencyID},
+			)
 			varItems, hasVariance = runFDConfirmationVarianceCompare(ctx, pgxPool, fdConfirmationVarianceInput{
 				BookingID: bookingID, EntityID: entityID, RunID: runID,
 				ResolvedBy: req.UserID, ResolvedByEmail: userEmail,
@@ -1281,6 +1399,9 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				BookedMaturityDate: bookedMaturityDate, ActualMaturityDate: effMaturityDate,
 				BookedInterestType: bookedInterestTypeCode, ActualInterestType: effInterestTypeCode,
 				BookedFrequencyID: bookedFrequencyID, ActualFrequencyID: effFrequencyID,
+				BookedPayoutFrequencyID: bookedPayout, ActualPayoutFrequencyID: actualPayout,
+				BookedResetType: bookedResetType, ActualResetType: effResetType,
+				BookedAccrualFrequencyCode: bookedAccrual, ActualAccrualFrequencyCode: actualAccrual,
 				BookedTenorType: bookedTenorType, ActualTenorType: effTenorType,
 				ActualFirstCapDate: effFirstCapDate, ActualFirstPayoutDate: effFirstPayoutDate,
 			})
@@ -1481,7 +1602,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// returns SQLSTATE 42703 (column does not exist).
 		confCols, err := loadFDTableColumns(ctx, pgxPool, "investment", "fd_confirmation")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load confirmation schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadConfirmationSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1644,6 +1765,20 @@ func ResolveVariance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return VarianceResolve(pgxPool)
 }
 
+// confirmationPendingDeleteApproval reports whether checker approval should finalize
+// a DELETE workflow (not a capture/edit confirm). Variance gates must not block that path.
+func confirmationPendingDeleteApproval(ctx context.Context, pool *pgxpool.Pool, confirmationID string) bool {
+	var pending bool
+	_ = pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM investment.fd_audit_confirmation
+			WHERE confirmation_id = $1
+			  AND action_type = 'DELETE'
+			  AND processing_status = 'PENDING_DELETE_APPROVAL'
+		)`, confirmationID).Scan(&pending)
+	return pending
+}
+
 // ─── BulkApproveConfirmation ─────────────────────────────────────────────────
 // Engine-first: RecordAction handles eye sequence + audit stamp + status flip
 // for the final eye. Falls back to direct stamp only when no engine instance.
@@ -1687,21 +1822,24 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// ── Variance guard: block approval if OPEN variance_log rows exist ────
-			var openVarCount int
-			_ = pgxPool.QueryRow(ctx,
-				`SELECT COUNT(*) FROM public.variance_log WHERE record_id=$1 AND status='OPEN'`, cID).
-				Scan(&openVarCount)
-			if openVarCount > 0 {
-				errors = append(errors, cID+": has unresolved variance — resolve or accept as exception first")
-				continue
-			}
-			if confStatus == "VARIANCE_PENDING" {
-				errors = append(errors, cID+": variance pending — resolve or accept as exception before approving")
-				continue
+			// ── Variance guard: applies to capture/edit approval only, not DELETE approval ──
+			pendingDelete := confirmationPendingDeleteApproval(ctx, pgxPool, cID)
+			if !pendingDelete {
+				var openVarCount int
+				_ = pgxPool.QueryRow(ctx,
+					`SELECT COUNT(*) FROM public.variance_log WHERE record_id=$1 AND status='OPEN'`, cID).
+					Scan(&openVarCount)
+				if openVarCount > 0 {
+					errors = append(errors, cID+": has unresolved variance — resolve or accept as exception first")
+					continue
+				}
+				if confStatus == "VARIANCE_PENDING" {
+					errors = append(errors, cID+": variance pending — resolve or accept as exception before approving")
+					continue
+				}
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", cID, req.UserID, userEmail, "", approvalengine.ActionApproved, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: cID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDConfirmation] RecordAction approve failed for %s: %v", cID, actionErr)
 				errors = append(errors, cID+": "+actionErr.Error())
@@ -1906,7 +2044,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, "FIXED_DEPOSIT", cID, req.UserID, userEmail, "", approvalengine.ActionRejected, req.Comment)
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: cID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDConfirmation] RecordAction reject failed for %s: %v", cID, actionErr)
 				errors = append(errors, cID+": "+actionErr.Error())
@@ -2337,7 +2475,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		confCols, err := loadFDTableColumns(ctx, pgxPool, "investment", "fd_confirmation")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load confirmation schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadConfirmationSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -2471,7 +2609,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		confCols, err := loadFDTableColumns(ctx, pgxPool, "investment", "fd_confirmation")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load confirmation schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadConfirmationSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -2567,39 +2705,89 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		bookingID, _ := conf["booking_id"].(string)
 		var booking map[string]interface{}
 		if bookingID != "" {
+			bookingCols, colErr := loadFDTableColumns(ctx, pgxPool, "investment", "fd_booking_request")
+			if colErr != nil {
+				api.LogError("[FDBooking] GetConfirmationDetail booking schema: %v", colErr)
+				bookingCols = map[string]bool{}
+			}
 			bookingAccountExprBk, _ := resolveFDBookingAccountExpression(ctx, pgxPool, "m")
+			bookingAccountNumberExprBk, numErr := resolveFDBookingAccountNumberExpression(ctx, pgxPool, "m")
+			if numErr != nil {
+				api.LogError("[FDBooking] GetConfirmationDetail account number schema: %v", numErr)
+				bookingAccountNumberExprBk = constants.ErrEmptyString
+			}
 			bkRows, bkErr := pgxPool.Query(ctx, fmt.Sprintf(`
 				SELECT
 					m.booking_id,
-					COALESCE(m.entity_id,'')                                       AS entity_id,
-					COALESCE(m.entity_name,'')                                     AS entity_name,
-					COALESCE(m.bank_id,'')                                         AS bank_id,
-					COALESCE(m.bank_name,'')                                       AS bank_name,
+					%s                                                             AS entity_id,
+					%s                                                             AS entity_name,
+					%s                                                             AS bank_id,
+					%s                                                             AS bank_name,
 					%s                                                             AS bank_account_id,
-					COALESCE(m.source_account_number,'')                           AS bank_account_number,
-					COALESCE(m.bank_config_id,'')                                  AS bank_config_id,
-					COALESCE(m.principal_amount,0)                                 AS principal_amount,
-					COALESCE(m.interest_rate,0)                                    AS interest_rate,
-					COALESCE(m.interest_type_code,'')                              AS interest_type,
-					COALESCE(m.interest_type_id,'')                                AS interest_type_id,
-					COALESCE(m.tenure_days,0)                                      AS tenor_days,
-					COALESCE(m.tenure_months,0)                                    AS tenor_months,
-					COALESCE(m.tenure_years,0)                                     AS tenor_years,
-					COALESCE(m.tenor_type,'')                                      AS tenor_type,
-					COALESCE(TO_CHAR(m.expected_start_date,'YYYY-MM-DD'),'')       AS expected_start_date,
-					COALESCE(TO_CHAR(m.value_date,'YYYY-MM-DD'),'')                AS value_date,
-					COALESCE(TO_CHAR(m.expected_maturity_date,'YYYY-MM-DD'),'')    AS maturity_date,
-					COALESCE(m.frequency_id,'')                                    AS frequency_id,
-					COALESCE(m.day_count_code,'')                                  AS day_count_code,
-					COALESCE(m.tds_plan_id,'')                                     AS tds_plan_id,
-					COALESCE(m.product_code,'')                                    AS product_code,
-					COALESCE(m.auto_renewal,false)                                 AS auto_renewal,
-					COALESCE(m.booking_remarks,'')                                 AS booking_remarks,
-					COALESCE(m.booking_status,'')                                  AS booking_status,
-					COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD HH24:MI:SS'),'')    AS record_created_at,
-					COALESCE(m.created_by,'')                                      AS record_created_by
+					%s                                                             AS bank_account_number,
+					%s                                                             AS bank_config_id,
+					%s                                                             AS principal_amount,
+					%s                                                             AS interest_rate,
+					%s                                                             AS interest_type,
+					%s                                                             AS interest_type_id,
+					%s                                                             AS tenor_days,
+					%s                                                             AS tenor_months,
+					%s                                                             AS tenor_years,
+					%s                                                             AS tenor_type,
+					%s                                                             AS expected_start_date,
+					%s                                                             AS value_date,
+					%s                                                             AS maturity_date,
+					%s                                                             AS frequency_id,
+					COALESCE(NULLIF(%s,''), %s, '')                                AS payout_frequency_id,
+					%s                                                             AS accrual_frequency_code,
+					%s                                                             AS reset_type,
+					%s                                                             AS first_payout_date,
+					%s                                                             AS first_capitalization_date,
+					%s                                                             AS day_count_code,
+					%s                                                             AS tds_plan_id,
+					%s                                                             AS holiday_calendar_code,
+					%s                                                             AS product_code,
+					%s                                                             AS auto_renewal,
+					%s                                                             AS booking_remarks,
+					%s                                                             AS booking_status,
+					%s                                                             AS record_created_at,
+					%s                                                             AS record_created_by
 				FROM investment.fd_booking_request m
-				WHERE m.booking_id = $1 AND COALESCE(m.is_deleted,false) = false`, bookingAccountExprBk),
+				WHERE m.booking_id = $1 AND COALESCE(m.is_deleted,false) = false`,
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "entity_id"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "entity_name"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "bank_id"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "bank_name"),
+				bookingAccountExprBk,
+				bookingAccountNumberExprBk,
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "bank_config_id"),
+				fdNumericExpr(bookingCols, "m", "0", "principal_amount"),
+				fdNumericExpr(bookingCols, "m", "0", "interest_rate"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "interest_type_code", "interest_type"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "interest_type_id"),
+				fdNumericExpr(bookingCols, "m", "0", "tenure_days", "tenor_days"),
+				fdNumericExpr(bookingCols, "m", "0", "tenure_months", "tenor_months"),
+				fdNumericExpr(bookingCols, "m", "0", "tenure_years", "tenor_years"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "tenor_type"),
+				fdDateTextExpr(bookingCols, "m", constants.ErrEmptyString, "expected_start_date", "start_date"),
+				fdDateTextExpr(bookingCols, "m", constants.ErrEmptyString, "value_date", "actual_start_date"),
+				fdDateTextExpr(bookingCols, "m", constants.ErrEmptyString, "expected_maturity_date", "maturity_date"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "frequency_id"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "payout_frequency_id"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "frequency_id"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "accrual_frequency_code"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "reset_type"),
+				fdDateTextExpr(bookingCols, "m", constants.ErrEmptyString, "first_payout_date"),
+				fdDateTextExpr(bookingCols, "m", constants.ErrEmptyString, "first_capitalization_date"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "day_count_code"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "tds_plan_id"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "holiday_calendar_code"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "product_code"),
+				fdBoolExpr(bookingCols, "m", "false", "auto_renewal", "auto_renewal_flag"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "booking_remarks"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "booking_status"),
+				fdTimestampTextExpr(bookingCols, "m", constants.ErrEmptyString, "created_at"),
+				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "created_by")),
 				bookingID)
 			if bkErr == nil {
 				defer bkRows.Close()

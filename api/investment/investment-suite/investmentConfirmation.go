@@ -61,7 +61,7 @@ func GetConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.investment_confirmation
 			WHERE confirmation_id = $1
 		`, req.ConfirmationID).Scan(&uploadS3Key); err != nil {
-			api.RespondWithResult(w, false, "file not found")
+			api.RespondWithResult(w, false, constants.ErrFileNotFound)
 			return
 		}
 
@@ -99,7 +99,7 @@ func GetConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfirmationIDs) == 0 {
-			api.RespondWithResult(w, false, "confirmation_ids required")
+			api.RespondWithResult(w, false, constants.ConfirmationIDsRequired)
 			return
 		}
 
@@ -745,7 +745,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfirmationIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_ids required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ConfirmationIDsRequired)
 			return
 		}
 
@@ -1949,7 +1949,7 @@ func ConfirmInvestment(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfirmationIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_ids required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ConfirmationIDsRequired)
 			return
 		}
 

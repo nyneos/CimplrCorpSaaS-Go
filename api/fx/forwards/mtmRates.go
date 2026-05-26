@@ -555,7 +555,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 		})
 		for _, row := range validRows {
 			if len(row) > 0 {
-				auditutil.RecordAction(ctx, db, auditutil.TableForwardMTM, "mtm_id", fmt.Sprint(row[0]), "CREATE", "PENDING_APPROVAL", "Imported via uploader", uploadedBy, nil, map[string]interface{}{"upload_s3_key": s3Key})
+				auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: fmt.Sprint(row[0]), ActionType: "CREATE", Status: "PENDING_APPROVAL", Reason: "Imported via uploader", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": s3Key}})
 			}
 		}
 	}
@@ -634,7 +634,7 @@ func GetMTMDownloadURL(db *sql.DB) http.HandlerFunc {
 		if requestedBy == "" {
 			requestedBy = strings.TrimSpace(auditutil.Actor(req.UserID))
 		}
-		auditutil.RecordDownload(r.Context(), db, auditutil.TableForwardMTMDownloads, "mtm_id", mtmID, requestedBy, s3Key, nil)
+		auditutil.RecordDownload(r.Context(), db, auditutil.DownloadParams{TableName: auditutil.TableForwardMTMDownloads, ParentColumn: "mtm_id", ParentID: mtmID, RequestedBy: requestedBy, UploadS3Key: s3Key, ExtraColumns: nil})
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -659,7 +659,7 @@ func GetMTMBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 
 		ids := normalizeBulkIDs(req.MTMIDs)
 		if len(ids) == 0 {
-			respondWithError(w, http.StatusBadRequest, "mtm_ids is required")
+			respondWithError(w, http.StatusBadRequest, constants.MTMIDsRequired)
 			return
 		}
 
@@ -705,7 +705,7 @@ func GetMTMBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 				"mtm_id":       mtmID,
 				"download_url": downloadURL,
 			})
-			auditutil.RecordDownload(ctx, db, auditutil.TableForwardMTMDownloads, "mtm_id", mtmID, requestedBy, s3Key, nil)
+			auditutil.RecordDownload(ctx, db, auditutil.DownloadParams{TableName: auditutil.TableForwardMTMDownloads, ParentColumn: "mtm_id", ParentID: mtmID, RequestedBy: requestedBy, UploadS3Key: s3Key, ExtraColumns: nil})
 		}
 
 		writeBulkDownloadResponse(w, files, failedIDs)
@@ -865,7 +865,7 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		if len(req.MTMIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "mtm_ids is required")
+			respondWithError(w, http.StatusBadRequest, constants.MTMIDsRequired)
 			return
 		}
 		if !forwardMTMHasIsDeletedColumn(r.Context(), db) {
@@ -881,7 +881,7 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 
 		normalizedIDs := normalizeBulkIDs(req.MTMIDs)
 		if len(normalizedIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "mtm_ids is required")
+			respondWithError(w, http.StatusBadRequest, constants.MTMIDsRequired)
 			return
 		}
 
@@ -957,19 +957,7 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 			if mtmID == "" || mtmID == "<nil>" {
 				continue
 			}
-			auditutil.RecordAction(
-				r.Context(),
-				db,
-				auditutil.TableForwardMTM,
-				"mtm_id",
-				mtmID,
-				"DELETE",
-				"PENDING_DELETE_APPROVAL",
-				req.Reason,
-				requestedBy,
-				oldSnapshots[mtmID],
-				rowMap,
-			)
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: mtmID, ActionType: "DELETE", Status: "PENDING_DELETE_APPROVAL", Reason: req.Reason, RequestedBy: requestedBy, OldValues: oldSnapshots[mtmID], NewValues: rowMap,})
 		}
 		resultRows.Close()
 
@@ -1002,7 +990,7 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB) http.HandlerFunc {
 
 		normalizedIDs := normalizeBulkIDs(req.MTMIDs)
 		if len(normalizedIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "mtm_ids is required")
+			respondWithError(w, http.StatusBadRequest, constants.MTMIDsRequired)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
@@ -1101,7 +1089,7 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB) http.HandlerFunc {
 			}
 
 			for _, id := range deletePendingIDs {
-				auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardMTM, "mtm_id", id, strings.ToUpper(req.ProcessingStatus), checker, decisionComment)
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: id, Status: strings.ToUpper(req.ProcessingStatus), CheckerBy: checker, Comment: decisionComment})
 			}
 		}
 
@@ -1134,7 +1122,7 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB) http.HandlerFunc {
 			resultRows.Close()
 
 			for _, id := range regularPendingIDs {
-				auditutil.RecordDecision(r.Context(), db, auditutil.TableForwardMTM, "mtm_id", id, strings.ToUpper(req.ProcessingStatus), checker, decisionComment)
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: id, Status: strings.ToUpper(req.ProcessingStatus), CheckerBy: checker, Comment: decisionComment})
 			}
 		}
 

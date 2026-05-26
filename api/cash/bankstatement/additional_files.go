@@ -3,6 +3,7 @@ package bankstatement
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"errors"
 	"strings"
@@ -70,7 +71,7 @@ func recordBankStatementMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID
 func listBankStatementAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
 	entityIDs := api.GetEntityIDsFromCtx(ctx)
 	if len(entityIDs) == 0 {
-		return nil, errors.New("no accessible business units found")
+		return nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
 
 	return additionalfiles.QueryFiles(ctx, pool, `
@@ -87,7 +88,7 @@ func listBankStatementAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, p
 func createBankStatementAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
 	entityIDs := api.GetEntityIDsFromCtx(ctx)
 	if len(entityIDs) == 0 {
-		return "", errors.New("no accessible business units found")
+		return "", errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
 
 	return additionalfiles.InsertAdditionalFileRowReturningID(
@@ -116,7 +117,7 @@ func getAnyBankStatementAdditionalFile(ctx context.Context, pool *pgxpool.Pool, 
 func getBankStatementAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
 	entityIDs := api.GetEntityIDsFromCtx(ctx)
 	if len(entityIDs) == 0 {
-		return nil, errors.New("no accessible business units found")
+		return nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
 
 	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
@@ -138,7 +139,7 @@ func getBankStatementAdditionalFileWithDeleted(ctx context.Context, pool *pgxpoo
 func getBankStatementAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]additionalfiles.FileRecord, []string, error) {
 	entityIDs := api.GetEntityIDsFromCtx(ctx)
 	if len(entityIDs) == 0 {
-		return nil, nil, errors.New("no accessible business units found")
+		return nil, nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
 
 	trimmedIDs := trimAdditionalFileIDs(fileIDs)
@@ -174,7 +175,7 @@ type bankStatementFileExec interface {
 func deleteBankStatementAdditionalFileExec(ctx context.Context, exec bankStatementFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	entityIDs := api.GetEntityIDsFromCtx(ctx)
 	if len(entityIDs) == 0 {
-		return false, errors.New("no accessible business units found")
+		return false, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
 
 	result, err := exec.Exec(ctx, `

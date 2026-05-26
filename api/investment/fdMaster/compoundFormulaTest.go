@@ -2,7 +2,7 @@ package fdMaster
 
 import "testing"
 
-func TestCompoundFormulaInterest_CO_Q_MAT_M(t *testing.T) {
+func TestCompoundFormulaInterestCOQMATM(t *testing.T) {
 	cfg := &BankConfig{InterestRoundingDecimals: 0, RoundingMethod: "ROUND", RoundingFrequency: "EACH_PERIOD"}
 	got := compoundFormulaInterest(1_000_000, 10, 4, 730, cfg)
 	want := float64(218403)

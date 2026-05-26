@@ -76,7 +76,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 		ctx := r.Context()
 		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
 		if len(entityIDs) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusUnauthorized)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusUnauthorized)
 			return
 		}
 		rows, err := db.QueryContext(ctx, `
@@ -173,14 +173,14 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
 			body.UserID == "" || body.BankStatementID == "" {
-			http.Error(w, "Missing user_id or bank_statement_id", http.StatusBadRequest)
+			http.Error(w, constants.ErrMissingUserIDOrBankStatementID, http.StatusBadRequest)
 			return
 		}
 
 		ctx := r.Context()
 		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
 		if len(entityIDs) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusUnauthorized)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusUnauthorized)
 			return
 		}
 		rows, err := db.QueryContext(ctx, `
@@ -325,11 +325,11 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				"category_id":        categoryID.String,
 				"misclassified_flag": misclassified,
 				// Smart categorization fields
-				"narration_clean":      narrationClean,
-				"narration_ref":        narrationRef,
-				"payment_channel":      paymentChannel,
-				"confidence_score":     confScore,
-				"classification_step":  classificationStep,
+				"narration_clean":     narrationClean,
+				"narration_ref":       narrationRef,
+				"payment_channel":     paymentChannel,
+				"confidence_score":    confScore,
+				"classification_step": classificationStep,
 				// Review / status fields
 				"categorization_status": categorizationStatus,
 				"review_suggested":      reviewSuggested,

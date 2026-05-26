@@ -168,7 +168,7 @@ func (s *CronService) cleanupIdleConnections() {
 
 	tag, err := s.db.Exec(context.Background(), query)
 	if err != nil {
-		logger.LogError("DB cleanup error:", err)
+		logger.LogError("DB cleanup error: %v", err)
 		if logger.GlobalLogger != nil {
 			logger.GlobalLogger.LogAudit("DB cleanup failed: " + err.Error())
 		}

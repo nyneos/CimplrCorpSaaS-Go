@@ -322,7 +322,14 @@ func auditOldFromHeader(h *varianceCaseHeader) varianceAuditOld {
 	}
 }
 
-func insertVarianceRaisedAudit(ctx context.Context, pool *pgxpool.Pool, exceptionID, actor, exceptionType string, expected, received, variance float64) {
+type varianceAuditParams struct {
+	ExceptionType string
+	Expected      float64
+	Received      float64
+	Variance      float64
+}
+
+func insertVarianceRaisedAudit(ctx context.Context, pool *pgxpool.Pool, exceptionID, actor string, _ varianceAuditParams) {
 	_, _ = pool.Exec(ctx, `
 		INSERT INTO investment.fd_receipt_exception_audit (
 			exception_id, action_type, processing_status, requested_by

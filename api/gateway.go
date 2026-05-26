@@ -831,7 +831,7 @@ func StartGateway(port string, pathPrefix string) {
 		if logr != nil {
 			logr.LogAudit(msg)
 		} else {
-			logger.LogInfo(msg)
+			logger.LogInfo("%s", msg)
 		}
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte("404 - Route not found"))

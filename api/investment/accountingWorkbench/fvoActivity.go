@@ -60,7 +60,7 @@ func GetFVODownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.accounting_fvo
 			WHERE fvo_id = $1
 		`, req.FVOID).Scan(&uploadS3Key); err != nil {
-			api.RespondWithResult(w, false, "file not found")
+			api.RespondWithResult(w, false, constants.ErrFileNotFound)
 			return
 		}
 

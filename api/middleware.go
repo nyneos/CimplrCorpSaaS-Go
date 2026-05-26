@@ -12,7 +12,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 type contextKey string
 
@@ -508,7 +509,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					constants.ValueSuccess: false,
-					constants.ValueError:   "No accessible business units found",
+					constants.ValueError:   constants.ErrNoAccessibleBusinessUnit,
 				})
 				return
 			}

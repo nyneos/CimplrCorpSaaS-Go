@@ -163,10 +163,43 @@ func FetchRowSnapshotPGX(ctx context.Context, pool *pgxpool.Pool, tableName, par
 	return snapshot
 }
 
-func RecordAction(ctx context.Context, db *sql.DB, tableName, parentColumn, parentID, actionType, status, reason, requestedBy string, oldValues, newValues interface{}) {
-	parentID = strings.TrimSpace(parentID)
-	requestedBy = strings.TrimSpace(requestedBy)
-	if parentID == "" || requestedBy == "" || db == nil {
+// ActionParams groups the audit-action parameters to keep function signatures short.
+type ActionParams struct {
+	TableName    string
+	ParentColumn string
+	ParentID     string
+	ActionType   string
+	Status       string
+	Reason       string
+	RequestedBy  string
+	OldValues    interface{}
+	NewValues    interface{}
+}
+
+// DecisionParams groups the audit-decision parameters.
+type DecisionParams struct {
+	TableName    string
+	ParentColumn string
+	ParentID     string
+	Status       string
+	CheckerBy    string
+	Comment      string
+}
+
+// DownloadParams groups the audit-download parameters.
+type DownloadParams struct {
+	TableName    string
+	ParentColumn string
+	ParentID     string
+	RequestedBy  string
+	UploadS3Key  string
+	ExtraColumns map[string]string
+}
+
+func RecordAction(ctx context.Context, db *sql.DB, p ActionParams) {
+	p.ParentID = strings.TrimSpace(p.ParentID)
+	p.RequestedBy = strings.TrimSpace(p.RequestedBy)
+	if p.ParentID == "" || p.RequestedBy == "" || db == nil {
 		return
 	}
 	attempts := []execAttempt{
@@ -174,26 +207,26 @@ func RecordAction(ctx context.Context, db *sql.DB, tableName, parentColumn, pare
 			query: fmt.Sprintf(`
 			INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values, change_summary)
 			VALUES ($1, $2, $3, $4, $5, now(), $6, $7, $8)
-		`, tableName, parentColumn),
-			args: []interface{}{parentID, actionType, status, NullIfBlank(reason), requestedBy, JSONValue(oldValues), JSONValue(newValues), JSONValue(BuildChangeSummary(oldValues, newValues))},
+		`, p.TableName, p.ParentColumn),
+			args: []interface{}{p.ParentID, p.ActionType, p.Status, NullIfBlank(p.Reason), p.RequestedBy, JSONValue(p.OldValues), JSONValue(p.NewValues), JSONValue(BuildChangeSummary(p.OldValues, p.NewValues))},
 		},
 		{
 			query: fmt.Sprintf(`
 			INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at)
 			VALUES ($1, $2, $3, $4, $5, now())
-		`, tableName, parentColumn),
-			args: []interface{}{parentID, actionType, status, NullIfBlank(reason), requestedBy},
+		`, p.TableName, p.ParentColumn),
+			args: []interface{}{p.ParentID, p.ActionType, p.Status, NullIfBlank(p.Reason), p.RequestedBy},
 		},
 	}
 	if err := execFirstSuccess(ctx, sqlExecAdapter{db: db}, attempts); err != nil {
-		logger.LogError("fx audit insert failed table=%s parent=%s action=%s: %v", tableName, parentID, actionType, err)
+		logger.LogError("fx audit insert failed table=%s parent=%s action=%s: %v", p.TableName, p.ParentID, p.ActionType, err)
 	}
 }
 
-func RecordActionPGX(ctx context.Context, pool *pgxpool.Pool, tableName, parentColumn, parentID, actionType, status, reason, requestedBy string, oldValues, newValues interface{}) {
-	parentID = strings.TrimSpace(parentID)
-	requestedBy = strings.TrimSpace(requestedBy)
-	if parentID == "" || requestedBy == "" || pool == nil {
+func RecordActionPGX(ctx context.Context, pool *pgxpool.Pool, p ActionParams) {
+	p.ParentID = strings.TrimSpace(p.ParentID)
+	p.RequestedBy = strings.TrimSpace(p.RequestedBy)
+	if p.ParentID == "" || p.RequestedBy == "" || pool == nil {
 		return
 	}
 	attempts := []execAttempt{
@@ -201,23 +234,29 @@ func RecordActionPGX(ctx context.Context, pool *pgxpool.Pool, tableName, parentC
 			query: fmt.Sprintf(`
 			INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values, change_summary)
 			VALUES ($1, $2, $3, $4, $5, now(), $6, $7, $8)
-		`, tableName, parentColumn),
-			args: []interface{}{parentID, actionType, status, NullIfBlank(reason), requestedBy, JSONValue(oldValues), JSONValue(newValues), JSONValue(BuildChangeSummary(oldValues, newValues))},
+		`, p.TableName, p.ParentColumn),
+			args: []interface{}{p.ParentID, p.ActionType, p.Status, NullIfBlank(p.Reason), p.RequestedBy, JSONValue(p.OldValues), JSONValue(p.NewValues), JSONValue(BuildChangeSummary(p.OldValues, p.NewValues))},
 		},
 		{
 			query: fmt.Sprintf(`
 			INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at)
 			VALUES ($1, $2, $3, $4, $5, now())
-		`, tableName, parentColumn),
-			args: []interface{}{parentID, actionType, status, NullIfBlank(reason), requestedBy},
+		`, p.TableName, p.ParentColumn),
+			args: []interface{}{p.ParentID, p.ActionType, p.Status, NullIfBlank(p.Reason), p.RequestedBy},
 		},
 	}
 	if err := execFirstSuccess(ctx, pgxExecAdapter{pool: pool}, attempts); err != nil {
-		logger.LogError("fx audit insert failed table=%s parent=%s action=%s: %v", tableName, parentID, actionType, err)
+		logger.LogError("fx audit insert failed table=%s parent=%s action=%s: %v", p.TableName, p.ParentID, p.ActionType, err)
 	}
 }
 
-func recordDecision(ctx context.Context, exec ExecContext, tableName, parentColumn, parentID, status, checkerBy, comment string) error {
+func recordDecision(ctx context.Context, exec ExecContext, p DecisionParams) error {
+	tableName := p.TableName
+	parentColumn := p.ParentColumn
+	parentID := p.ParentID
+	status := p.Status
+	checkerBy := p.CheckerBy
+	comment := p.Comment
 	attempts := []execAttempt{
 		{
 			query: fmt.Sprintf(`
@@ -271,39 +310,39 @@ func recordDecision(ctx context.Context, exec ExecContext, tableName, parentColu
 	return execFirstSuccess(ctx, exec, attempts)
 }
 
-func RecordDecision(ctx context.Context, db *sql.DB, tableName, parentColumn, parentID, status, checkerBy, comment string) {
-	parentID = strings.TrimSpace(parentID)
-	checkerBy = strings.TrimSpace(checkerBy)
-	if parentID == "" || checkerBy == "" || db == nil {
+func RecordDecision(ctx context.Context, db *sql.DB, p DecisionParams) {
+	p.ParentID = strings.TrimSpace(p.ParentID)
+	p.CheckerBy = strings.TrimSpace(p.CheckerBy)
+	if p.ParentID == "" || p.CheckerBy == "" || db == nil {
 		return
 	}
-	if err := recordDecision(ctx, sqlExecAdapter{db: db}, tableName, parentColumn, parentID, status, checkerBy, comment); err != nil {
-		logger.LogError("fx audit decision failed table=%s parent=%s status=%s: %v", tableName, parentID, status, err)
+	if err := recordDecision(ctx, sqlExecAdapter{db: db}, p); err != nil {
+		logger.LogError("fx audit decision failed table=%s parent=%s status=%s: %v", p.TableName, p.ParentID, p.Status, err)
 	}
 }
 
-func RecordDecisionPGX(ctx context.Context, pool *pgxpool.Pool, tableName, parentColumn, parentID, status, checkerBy, comment string) {
-	parentID = strings.TrimSpace(parentID)
-	checkerBy = strings.TrimSpace(checkerBy)
-	if parentID == "" || checkerBy == "" || pool == nil {
+func RecordDecisionPGX(ctx context.Context, pool *pgxpool.Pool, p DecisionParams) {
+	p.ParentID = strings.TrimSpace(p.ParentID)
+	p.CheckerBy = strings.TrimSpace(p.CheckerBy)
+	if p.ParentID == "" || p.CheckerBy == "" || pool == nil {
 		return
 	}
-	if err := recordDecision(ctx, pgxExecAdapter{pool: pool}, tableName, parentColumn, parentID, status, checkerBy, comment); err != nil {
-		logger.LogError("fx audit decision failed table=%s parent=%s status=%s: %v", tableName, parentID, status, err)
+	if err := recordDecision(ctx, pgxExecAdapter{pool: pool}, p); err != nil {
+		logger.LogError("fx audit decision failed table=%s parent=%s status=%s: %v", p.TableName, p.ParentID, p.Status, err)
 	}
 }
 
-func RecordDownload(ctx context.Context, db *sql.DB, tableName, parentColumn, parentID, requestedBy, uploadS3Key string, extraColumns map[string]string) {
-	parentID = strings.TrimSpace(parentID)
-	requestedBy = strings.TrimSpace(requestedBy)
-	if parentID == "" || requestedBy == "" || db == nil {
+func RecordDownload(ctx context.Context, db *sql.DB, p DownloadParams) {
+	p.ParentID = strings.TrimSpace(p.ParentID)
+	p.RequestedBy = strings.TrimSpace(p.RequestedBy)
+	if p.ParentID == "" || p.RequestedBy == "" || db == nil {
 		return
 	}
-	columns := []string{parentColumn, "requested_by", "requested_at", "file_name", "upload_s3_key"}
+	columns := []string{p.ParentColumn, "requested_by", "requested_at", "file_name", "upload_s3_key"}
 	values := []string{"$1", "$2", "now()", "$3", "$4"}
-	args := []interface{}{parentID, requestedBy, FileName(uploadS3Key), NullIfBlank(uploadS3Key)}
+	args := []interface{}{p.ParentID, p.RequestedBy, FileName(p.UploadS3Key), NullIfBlank(p.UploadS3Key)}
 	next := 5
-	for col, val := range extraColumns {
+	for col, val := range p.ExtraColumns {
 		if strings.TrimSpace(col) == "" {
 			continue
 		}
@@ -312,23 +351,23 @@ func RecordDownload(ctx context.Context, db *sql.DB, tableName, parentColumn, pa
 		args = append(args, strings.TrimSpace(val))
 		next++
 	}
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", tableName, strings.Join(columns, ", "), strings.Join(values, ", "))
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", p.TableName, strings.Join(columns, ", "), strings.Join(values, ", "))
 	if _, err := db.ExecContext(ctx, query, args...); err != nil {
-		logger.LogError("fx audit download insert failed table=%s parent=%s: %v", tableName, parentID, err)
+		logger.LogError("fx audit download insert failed table=%s parent=%s: %v", p.TableName, p.ParentID, err)
 	}
 }
 
-func RecordDownloadPGX(ctx context.Context, pool *pgxpool.Pool, tableName, parentColumn, parentID, requestedBy, uploadS3Key string, extraColumns map[string]string) {
-	parentID = strings.TrimSpace(parentID)
-	requestedBy = strings.TrimSpace(requestedBy)
-	if parentID == "" || requestedBy == "" || pool == nil {
+func RecordDownloadPGX(ctx context.Context, pool *pgxpool.Pool, p DownloadParams) {
+	p.ParentID = strings.TrimSpace(p.ParentID)
+	p.RequestedBy = strings.TrimSpace(p.RequestedBy)
+	if p.ParentID == "" || p.RequestedBy == "" || pool == nil {
 		return
 	}
-	columns := []string{parentColumn, "requested_by", "requested_at", "file_name", "upload_s3_key"}
+	columns := []string{p.ParentColumn, "requested_by", "requested_at", "file_name", "upload_s3_key"}
 	values := []string{"$1", "$2", "now()", "$3", "$4"}
-	args := []interface{}{parentID, requestedBy, FileName(uploadS3Key), NullIfBlank(uploadS3Key)}
+	args := []interface{}{p.ParentID, p.RequestedBy, FileName(p.UploadS3Key), NullIfBlank(p.UploadS3Key)}
 	next := 5
-	for col, val := range extraColumns {
+	for col, val := range p.ExtraColumns {
 		if strings.TrimSpace(col) == "" {
 			continue
 		}
@@ -337,9 +376,9 @@ func RecordDownloadPGX(ctx context.Context, pool *pgxpool.Pool, tableName, paren
 		args = append(args, strings.TrimSpace(val))
 		next++
 	}
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", tableName, strings.Join(columns, ", "), strings.Join(values, ", "))
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", p.TableName, strings.Join(columns, ", "), strings.Join(values, ", "))
 	if _, err := pool.Exec(ctx, query, args...); err != nil {
-		logger.LogError("fx audit download insert failed table=%s parent=%s: %v", tableName, parentID, err)
+		logger.LogError("fx audit download insert failed table=%s parent=%s: %v", p.TableName, p.ParentID, err)
 	}
 }
 

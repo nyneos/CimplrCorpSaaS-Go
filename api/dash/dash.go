@@ -129,6 +129,8 @@ func StartDashService(db *sql.DB, port string) {
 	mux.Handle("/dash/investment/fd/operational-dashboard", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetFDOperationalDashboard(pgxPool)))
 	// FD BOD/EOD Control Room — maturities, confirmations due, accrual runs, receipts, GL postings, checklist
 	mux.Handle("/dash/investment/fd/bod-eod-dashboard", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetFDBodEodDashboard(pgxPool)))
+	// FD BOD/EOD Checklist — persist per-item user overrides + final EOD sign-off
+	mux.Handle("/dash/investment/fd/bod-eod-checklist/save", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.SaveBodEodChecklistItems(pgxPool)))
 	// FD Audit & Governance Dashboard — audit log, maker-checker rate, overrides, missing evidence, period reopens
 	mux.Handle("/dash/investment/fd/audit-dashboard", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetFDAuditDashboard(pgxPool)))
 

@@ -492,12 +492,18 @@ func dispatchForEvent(
 	}
 	var work []templateWithRecipients
 
+	// Warnings (no template / no recipients) are deferred: only pushed to the actor
+	// if NO channel succeeded. This prevents spamming the user with "PUSH template
+	// not approved" when EMAIL sent fine — they only see warnings when everything failed.
+	var deferredWarnings []SystemNotifParams
+
 	for _, ch := range channels {
 		// lookupTemplates returns ALL approved templates for this (event, channel) pair.
 		// Each approved template is dispatched independently — different subject/body/recipients.
 		tpls, err := lookupTemplates(ctx, pool, event.eventID, ch.channel)
 		if err != nil {
 			api.LogError("[NOTIF] lookupTemplates event=%s ch=%s: %v", event.eventID, ch.channel, err)
+			// Errors (DB failures) are always pushed immediately — not deferred.
 			PushSystemNotification(actor, SystemNotifParams{
 				Level:         LevelError,
 				Subject:       "Notification template error",
@@ -509,8 +515,8 @@ func dispatchForEvent(
 			continue
 		}
 		if len(tpls) == 0 {
-			api.LogInfo("[NOTIF] no approved template for event=%s ch=%s", event.eventID, ch.channel)
-			PushSystemNotification(actor, SystemNotifParams{
+			api.LogInfo("[NOTIF] no approved template for event=%s ch=%s (deferred warn)", event.eventID, ch.channel)
+			deferredWarnings = append(deferredWarnings, SystemNotifParams{
 				Level:         LevelWarn,
 				Subject:       "Notification not sent — template not approved",
 				Body:          fmt.Sprintf("No approved %s template found for '%s'. Ask your admin to approve a template for this notification event.", ch.channel, sourceRoute),
@@ -538,8 +544,8 @@ func dispatchForEvent(
 				continue
 			}
 			if len(recipients) == 0 {
-				api.LogInfo("[NOTIF] no recipients resolved for event=%s ch=%s auditID=%s", event.eventID, ch.channel, tpl.auditID)
-				PushSystemNotification(actor, SystemNotifParams{
+				api.LogInfo("[NOTIF] no recipients resolved for event=%s ch=%s auditID=%s (deferred warn)", event.eventID, ch.channel, tpl.auditID)
+				deferredWarnings = append(deferredWarnings, SystemNotifParams{
 					Level:         LevelWarn,
 					Subject:       "Notification not sent — no recipients",
 					Body:          fmt.Sprintf("No recipients configured for the %s notification on '%s'. Ask your admin to add recipients to the notification template.", ch.channel, sourceRoute),
@@ -553,6 +559,17 @@ func dispatchForEvent(
 				len(recipients), event.eventID, ch.channel, tpl.auditID, ch.priorityLevel)
 			work = append(work, templateWithRecipients{tpl: tpl, recipients: recipients, chPriority: ch.priorityLevel})
 		}
+	}
+
+	// Only fire deferred warnings if nothing was dispatched. If at least one channel
+	// sent successfully, the partial misses are admin-config issues — not actionable
+	// noise for the end user who triggered the event.
+	if len(work) == 0 {
+		for _, w := range deferredWarnings {
+			PushSystemNotification(actor, w)
+		}
+	} else if len(deferredWarnings) > 0 {
+		api.LogInfo("[NOTIF] suppressing %d deferred warning(s) — at least one channel dispatched successfully", len(deferredWarnings))
 	}
 
 	if len(work) == 0 {
@@ -1038,8 +1055,10 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 		WHERE tr.template_id = $1
 		  AND tr.is_active = true
 		  AND (
-			COALESCE(u.email, '') <> ''
+			-- Internal user resolved (email or no email — PUSH channel needs only user_id)
+			u.id IS NOT NULL
 			OR
+			-- External email stored directly in recipient_user_id (no users row)
 			(tr.recipient_type = 'USER'
 			 AND POSITION('@' IN COALESCE(tr.recipient_user_id,'')) > 0)
 		  )
@@ -1076,7 +1095,14 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 		if err := rows.Scan(&r.userID, &r.email, &r.phone, &r.name, &r.role, &r.recipientPriority); err != nil {
 			continue
 		}
-		key := r.email
+		// Prefer user_id as dedup key for internal users; fall back to email for
+		// external recipients (no users row, raw email in recipient_user_id).
+		// Using email alone caused all users with no email column to collapse into
+		// key="" — only the first one survived, silently dropping PUSH recipients.
+		key := r.userID
+		if key == "" {
+			key = r.email
+		}
 		if seen[key] {
 			continue
 		}

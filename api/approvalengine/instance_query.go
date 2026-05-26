@@ -39,7 +39,7 @@ func GetPendingForUser(ctx context.Context, pool *pgxpool.Pool, userID string) (
 		    EXISTS (
 		      SELECT 1 FROM uam.approval_matrix_eye_member m
 		      WHERE m.eye_id      = ie.matrix_eye_id
-		        AND m.member_type = 'APPROVER'
+		        -- AND m.member_type = 'APPROVER'
 		        AND m.is_deleted  = false
 		        AND m.is_active   = true
 		        AND (
@@ -406,10 +406,11 @@ func GetRichInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID, 
 			}
 		}
 
-		// Query approver members for this eye from the matrix config.
+		// Query all active members for this eye from the matrix config.
 		mRows, err := pool.Query(ctx, `
 			SELECT
 			  m.slot_order,
+			  m.member_type,
 			  m.assignment_type,
 			  COALESCE(m.user_id,''),
 			  COALESCE(u.email,''),
@@ -420,7 +421,6 @@ func GetRichInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID, 
 			LEFT JOIN public.users  u ON u.id    = m.user_id
 			LEFT JOIN public.roles  r ON r.id    = m.role_id
 			WHERE m.eye_id      = $1
-			  AND m.member_type = 'APPROVER'
 			  AND m.is_deleted  = false
 			  AND m.is_active   = true
 			ORDER BY m.slot_order ASC`,
@@ -435,17 +435,19 @@ func GetRichInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID, 
 			slot++
 			var (
 				slotOrder      int
+				memberType     string
 				assignType     string
 				userID, userEmail, userName string
 				roleID, roleName            string
 			)
-			if err := mRows.Scan(&slotOrder, &assignType, &userID, &userEmail, &userName, &roleID, &roleName); err != nil {
+			if err := mRows.Scan(&slotOrder, &memberType, &assignType, &userID, &userEmail, &userName, &roleID, &roleName); err != nil {
 				mRows.Close()
 				return nil, fmt.Errorf("GetRichInstanceDetail member scan eye=%s: %w", eyeID, err)
 			}
 
 			info := ApproverInfo{
 				SlotOrder:      slotOrder,
+				MemberType:     memberType,
 				AssignmentType: assignType,
 				UserID:         userID,
 				UserEmail:      userEmail,
@@ -483,7 +485,7 @@ func GetRichInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID, 
 				SELECT COUNT(*)
 				FROM uam.approval_matrix_eye_member m
 				WHERE m.eye_id      = $1
-				  AND m.member_type = 'APPROVER'
+				  -- AND m.member_type = 'APPROVER'
 				  AND m.is_deleted  = false
 				  AND m.is_active   = true
 				  AND (

@@ -295,7 +295,25 @@ func DiagnosePendingInstance(ctx context.Context, pool *pgxpool.Pool, moduleCode
 	return d, nil
 }
 
-func ActOnPendingOrDiagnose(ctx context.Context, pool *pgxpool.Pool, moduleCode, recordID, userID, userEmail, roleID, action, comment string) (ActOnPendingResult, error) {
+// ActOnPendingRequest groups the parameters for ActOnPendingOrDiagnose.
+type ActOnPendingRequest struct {
+	ModuleCode string
+	RecordID   string
+	UserID     string
+	UserEmail  string
+	RoleID     string
+	Action     string
+	Comment    string
+}
+
+func ActOnPendingOrDiagnose(ctx context.Context, pool *pgxpool.Pool, req ActOnPendingRequest) (ActOnPendingResult, error) {
+	moduleCode := req.ModuleCode
+	recordID := req.RecordID
+	userID := req.UserID
+	userEmail := req.UserEmail
+	roleID := req.RoleID
+	action := req.Action
+	comment := req.Comment
 	var result ActOnPendingResult
 	rows, err := pool.Query(ctx, `
 		SELECT DISTINCT ie.instance_eye_id

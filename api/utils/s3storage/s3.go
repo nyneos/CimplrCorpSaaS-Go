@@ -200,145 +200,82 @@ func storagePrefixEnvVar(module string) string {
 	return strings.ToUpper(normalized) + "_S3_PREFIX"
 }
 
-func moduleDefaultPrefix(module string) string {
-	switch strings.ToLower(strings.TrimSpace(module)) {
-	case "bankstatement":
-		return "cash/bankstatements/"
-	case "bankbalance":
-		return "cash/bank-balance/"
-	case "rule-master":
-		return "cash/rule-master/"
-	case "entitylogo":
-		return "Entity logo/"
-	case "projection":
-		return "cash/projections/"
-	case "payables":
-		return "cash/transactions/payables/"
-	case "receivables":
-		return "cash/transactions/receivables/"
-	case "fx-exposure":
-		return "fx/exposures/"
-	case "fx-exposure-bucketing":
-		return "fx/exposures/exposure bucketing/"
-	case "fx-pending-exposure-bucketing":
-		return "fx/exposures/pending exposure bucketing/"
-	case "fx-forward":
-		return "fx/forwards/"
-	case "fx-mtm":
-		return "fx/mtm/"
-	case "fund-planning":
-		return "cash/fund-planning/"
-	case "limit-utilization":
-		return "cash/limit utilization/"
-	case "limit-position":
-		return "cash/limit position/"
-	case "sweep-planning":
-		return "cash/sweep-planning/"
-	case "sweep-initiation":
-		return "cash/sweep-initiation/"
-	case "investment-onboarding":
-		return "investment/onboarding center/"
-	case "investment-onboarding-additional":
-		return "investment/onboarding center/"
-	case "investment-proposal":
-		return "investment/proposal/"
-	case "investment-initiation":
-		return "investment/initiation/"
-	case "investment-confirmation":
-		return "investment/confirmation/"
-	case "investment-confirmation-additional":
-		return "investment/confirmation/"
-	case "investment-redemption-initiation":
-		return "investment/redemption/initiation/"
-	case "investment-redemption-confirmation-additional":
-		return "investment/redemption/confirmation/"
-	case "investment-fvo":
-		return "investment/financial closing work bench/"
-	case "investment-accounting-activity":
-		return "investment/financial closing work bench/"
-	case "fd-bank-confirmation-capture":
-		return "fd/bank-confirmation-capture/"
-	case "fd-maturity-payout-processing":
-		return "fd/maturity-payout-processing/"
-	case "fd-premature-closure":
-		return "fd/premature-closure/"
-	case "fd-booking-additional":
-		return "fd/fd-booking/"
-	case "fd-confirmation-additional":
-		return "fd/fd-confirmation/"
-	case "fd-master-additional":
-		return "fd/fd-master/"
-	case "fd-closure-additional":
-		return "fd/fd-closure/"
-	case "fd-rollover-additional":
-		return "fd/fd-rollover/"
-	case "fd-cashflow-additional":
-		return "fd/fd-cashflow/"
-	case "fd-interest-receipt-additional":
-		return "fd/fd-interest-receipt/"
-	case "fd-tds-receipt-additional":
-		return "fd/fd-tds-receipt/"
-	case "fd-reconcile-result-additional":
-		return "fd/fd-reconcile-result/"
-	case "fd-receipt-exception-additional":
-		return "fd/fd-receipt-exception/"
-	case "fd-accrual-run-additional":
-		return "fd/fd-accrual-run/"
-	case "fd-accrual-ledger-additional":
-		return "fd/fd-accrual-ledger/"
-	case "fd-accounting-journal-additional":
-		return "fd/fd-accounting-journal/"
+var moduleDefaultPrefixes = map[string]string{
+	"bankstatement":                      "cash/bankstatements/",
+	"bankbalance":                        "cash/bank-balance/",
+	"rule-master":                        "cash/rule-master/",
+	"entitylogo":                         "Entity logo/",
+	"projection":                         "cash/projections/",
+	"payables":                           "cash/transactions/payables/",
+	"receivables":                        "cash/transactions/receivables/",
+	"fx-exposure":                        "fx/exposures/",
+	"fx-exposure-bucketing":              "fx/exposures/exposure bucketing/",
+	"fx-pending-exposure-bucketing":      "fx/exposures/pending exposure bucketing/",
+	"fx-forward":                         "fx/forwards/",
+	"fx-mtm":                             "fx/mtm/",
+	"fund-planning":                      "cash/fund-planning/",
+	"limit-utilization":                  "cash/limit utilization/",
+	"limit-position":                     "cash/limit position/",
+	"sweep-planning":                     "cash/sweep-planning/",
+	"sweep-initiation":                   "cash/sweep-initiation/",
+	"investment-onboarding":              "investment/onboarding center/",
+	"investment-onboarding-additional":   "investment/onboarding center/",
+	"investment-proposal":                "investment/proposal/",
+	"investment-initiation":              "investment/initiation/",
+	"investment-confirmation":            "investment/confirmation/",
+	"investment-confirmation-additional": "investment/confirmation/",
+	"investment-redemption-initiation":   "investment/redemption/initiation/",
+	"investment-redemption-confirmation-additional": "investment/redemption/confirmation/",
+	"investment-fvo":                   "investment/financial closing work bench/",
+	"investment-accounting-activity":   "investment/financial closing work bench/",
+	"fd-bank-confirmation-capture":     "fd/bank-confirmation-capture/",
+	"fd-maturity-payout-processing":    "fd/maturity-payout-processing/",
+	"fd-premature-closure":             "fd/premature-closure/",
+	"fd-booking-additional":            "fd/fd-booking/",
+	"fd-confirmation-additional":       "fd/fd-confirmation/",
+	"fd-master-additional":             "fd/fd-master/",
+	"fd-closure-additional":            "fd/fd-closure/",
+	"fd-rollover-additional":           "fd/fd-rollover/",
+	"fd-cashflow-additional":           "fd/fd-cashflow/",
+	"fd-interest-receipt-additional":   "fd/fd-interest-receipt/",
+	"fd-tds-receipt-additional":        "fd/fd-tds-receipt/",
+	"fd-reconcile-result-additional":   "fd/fd-reconcile-result/",
+	"fd-receipt-exception-additional":  "fd/fd-receipt-exception/",
+	"fd-accrual-run-additional":        "fd/fd-accrual-run/",
+	"fd-accrual-ledger-additional":     "fd/fd-accrual-ledger/",
+	"fd-accounting-journal-additional": "fd/fd-accounting-journal/",
 	// allMasters
-	case "master-bank":
-		return "masters/bank/"
-	case "master-currency":
-		return "masters/currency/"
-	case "master-bank-account":
-		return "masters/bank-account/"
-	case "master-counterparty":
-		return "masters/counterparty/"
-	case "master-gl-account":
-		return "masters/gl-account/"
-	case "master-cashflow-category":
-		return "masters/cashflow-category/"
-	case "master-costprofit-center":
-		return "masters/costprofit-center/"
-	case "master-payable-receivable":
-		return "masters/payable-receivable/"
-	case "master-entity-cash":
-		return "masters/entity-cash/"
-	case "master-entity":
-		return "masters/entity/"
+	"master-bank":                          "masters/bank/",
+	"master-currency":                      "masters/currency/",
+	"master-bank-account":                  "masters/bank-account/",
+	constants.ErrMasterCounterparty:        "masters/counterparty/",
+	constants.ErrMasterGLAccount:           "masters/gl-account/",
+	constants.FormatMasterCashflowCategory: "masters/cashflow-category/",
+	constants.FormatMasterCostProfitCenter: "masters/costprofit-center/",
+	"master-payable-receivable":            "masters/payable-receivable/",
+	constants.ErrMasterEntityCash:          "masters/entity-cash/",
+	"master-entity":                        "masters/entity/",
 	// investmentMasters
-	case "master-amc":
-		return "masters/amc/"
-	case "master-scheme":
-		return "masters/scheme/"
-	case "master-dp":
-		return "masters/dp/"
-	case "master-demat":
-		return "masters/demat/"
-	case "master-folio":
-		return "masters/folio/"
-	case "master-interest-type":
-		return "masters/interest-type/"
-	case "master-penalty-structure":
-		return "masters/penalty-structure/"
-	case "master-compounding-frequency":
-		return "masters/compounding-frequency/"
-	case "master-tds-plan":
-		return "masters/tds-plan/"
-	case "master-calendar":
-		return "masters/calendar/"
-	case "master-day-count-convention":
-		return "masters/day-count-convention/"
-	case "master-bank-config":
-		return "masters/bank-config/"
-	case "master-bank-rate-card":
-		return "masters/bank-rate-card/"
-	default:
-		return ""
+	"master-amc":                   "masters/amc/",
+	"master-scheme":                "masters/scheme/",
+	"master-dp":                    "masters/dp/",
+	"master-demat":                 "masters/demat/",
+	"master-folio":                 "masters/folio/",
+	"master-interest-type":         "masters/interest-type/",
+	"master-penalty-structure":     "masters/penalty-structure/",
+	"master-compounding-frequency": "masters/compounding-frequency/",
+	"master-tds-plan":              "masters/tds-plan/",
+	"master-calendar":              "masters/calendar/",
+	"master-day-count-convention":  "masters/day-count-convention/",
+	"master-bank-config":           "masters/bank-config/",
+	"master-bank-rate-card":        "masters/bank-rate-card/",
+}
+
+func moduleDefaultPrefix(module string) string {
+	if p, ok := moduleDefaultPrefixes[strings.ToLower(strings.TrimSpace(module))]; ok {
+		return p
 	}
+	return ""
 }
 
 func normalizePrefix(p string) string {

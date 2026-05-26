@@ -106,7 +106,7 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 
@@ -428,7 +428,7 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 
@@ -1264,7 +1264,7 @@ func UploadUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		fileBytes, err := io.ReadAll(f)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "failed to read file: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+err.Error())
 			return
 		}
 

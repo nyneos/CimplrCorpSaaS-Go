@@ -41,7 +41,7 @@ var txTypeRegistry = map[string]txTableConfig{
 
 	// ── FD Accrual ────────────────────────────────────────────────────────
 	"FD_ACCRUAL_APPROVE":          {AuditTable: "investment.fd_accrual_run_audit", AuditIDColumn: "run_id"},
-	"FD_ACCRUAL_SCHEDULE_APPROVE": {AuditTable: "investment.fd_accrual_schedule_config_audit", AuditIDColumn: "config_id"},
+	"FD_ACCRUAL_SCHEDULE_APPROVE": {AuditTable: constants.QuerryAccrualScheduleConfigAudit, AuditIDColumn: "config_id"},
 
 	// ── FD Receipt ───────────────────────────────────────────────────────
 	"FD_RECEIPT_APPROVE": {AuditTable: constants.QuerryAuditInterestReceipt, AuditIDColumn: "receipt_id"},
@@ -74,12 +74,12 @@ var txTypeRegistry = map[string]txTableConfig{
 	"FD_CLOSURE_DELETE":       {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
 
 	// ── FD Closure / Maturity & Rollover (cimplr schema) ─────────────────
-	"FD_CLOSURE_INITIATE_CREATE": {AuditTable: "cimplr.fd_closure_initiate_audit", AuditIDColumn: "closure_initiate_id"},
-	"FD_CLOSURE_INITIATE_EDIT":   {AuditTable: "cimplr.fd_closure_initiate_audit", AuditIDColumn: "closure_initiate_id"},
-	"FD_CLOSURE_INITIATE_DELETE": {AuditTable: "cimplr.fd_closure_initiate_audit", AuditIDColumn: "closure_initiate_id"},
-	"FD_CLOSURE_CONFIRM_CREATE":  {AuditTable: "cimplr.fd_closure_confirm_audit", AuditIDColumn: "closure_confirm_id"},
-	"FD_CLOSURE_CONFIRM_EDIT":    {AuditTable: "cimplr.fd_closure_confirm_audit", AuditIDColumn: "closure_confirm_id"},
-	"FD_CLOSURE_CONFIRM_DELETE":  {AuditTable: "cimplr.fd_closure_confirm_audit", AuditIDColumn: "closure_confirm_id"},
+	"FD_CLOSURE_INITIATE_CREATE": {AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id"},
+	"FD_CLOSURE_INITIATE_EDIT":   {AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id"},
+	"FD_CLOSURE_INITIATE_DELETE": {AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id"},
+	"FD_CLOSURE_CONFIRM_CREATE":  {AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id"},
+	"FD_CLOSURE_CONFIRM_EDIT":    {AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id"},
+	"FD_CLOSURE_CONFIRM_DELETE":  {AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id"},
 } // LookupTxTableConfig returns the audit table name and audit ID column for the
 // given transaction type. If the type is not registered, both strings are empty.
 func LookupTxTableConfig(transactionType string) (auditTable, auditIDColumn string) {

@@ -38,7 +38,7 @@ func MFASetupHandler(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"success": false, "error": "user_id is required",
+				"success": false, "error": constants.ErrUserIIsRequired,
 			})
 			return
 		}
@@ -259,7 +259,7 @@ func MFAStatusHandler(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"success": false, "error": "user_id is required",
+				"success": false, "error": constants.ErrUserIIsRequired,
 			})
 			return
 		}

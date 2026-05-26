@@ -13,6 +13,7 @@ package categorizer
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -388,11 +389,11 @@ func BulkClassifyNarrations(ctx context.Context, pool *pgxpool.Pool, items []Bul
 	const expiredMsg = "AI Subscription Expired"
 	if err != nil {
 		errMsg := fmt.Sprintf("SmartCatAI call failed: %v", err)
-		log.Printf("[AI-BULK] %s", errMsg)
+		log.Printf(constants.ErrAIBulk, errMsg)
 		return fillUnallocated(items, errMsg), nil
 	}
 	if status == http.StatusUnauthorized {
-		log.Printf("[AI-BULK] %s", expiredMsg)
+		log.Printf(constants.ErrAIBulk, expiredMsg)
 		return fillUnallocated(items, expiredMsg), nil
 	}
 	if status != http.StatusOK {
@@ -406,7 +407,7 @@ func BulkClassifyNarrations(ctx context.Context, pool *pgxpool.Pool, items []Bul
 	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
 		errMsg := fmt.Sprintf("parse SmartCatAI response: %v", err)
-		log.Printf("[AI-BULK] %s", errMsg)
+		log.Printf(constants.ErrAIBulk, errMsg)
 		return fillUnallocated(items, errMsg), nil
 	}
 
@@ -429,4 +430,3 @@ func fillUnallocated(items []BulkNarrationInput, reason string) []BulkSuggestion
 	}
 	return out
 }
-

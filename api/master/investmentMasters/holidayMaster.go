@@ -542,7 +542,7 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, 500, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, 500, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
@@ -782,7 +782,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, 500, "Failed to store file: "+err.Error())
+					api.RespondWithError(w, 500, constants.ErrFailedToStoreFile+err.Error())
 					return
 				}
 			}
