@@ -29,7 +29,7 @@ func InitDB() (*sql.DB, error) {
 	name := os.Getenv("DB_NAME")
 	sslMode := os.Getenv("DB_SSLMODE")
 	if sslMode == "" {
-		sslMode = "disable"
+		sslMode = "require"
 	}
 	connStr := fmt.Sprintf(
 		"user=%s password=%s host=%s port=%s dbname=%s sslmode=%s",
@@ -66,12 +66,10 @@ func main() {
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	// Use sslmode=disable when connecting directly to RDS (no SSL terminator).
-	// Switch to sslmode=require only when routing through a Supabase/pgBouncer pooler.
 	// connect_timeout and statement_timeout guard against hung connections.
 	sslMode := os.Getenv("DB_SSLMODE")
 	if sslMode == "" {
-		sslMode = "disable"
+		sslMode = "require"
 	}
 	pgxConnStr := fmt.Sprintf(
 		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&statement_timeout=30000",
@@ -106,7 +104,7 @@ func main() {
 	manager := appmanager.NewAppManager()
 
 	// Load service configs from YAML
-	servicesCfg, err := appmanager.LoadServiceSequence("../services.yaml")
+	servicesCfg, err := appmanager.LoadServiceSequence("./services.yaml")
 	if err != nil {
 		log.Fatal("failed to load service sequence:", err)
 	}
