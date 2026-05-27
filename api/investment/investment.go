@@ -277,6 +277,14 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux.Handle("/investment/fd/exception/additional-files/audit", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.AuditFDReceiptExceptionAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/exception/additional-files/delete/approve", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ApproveDeleteFDReceiptExceptionAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/exception/additional-files/delete/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.RejectDeleteFDReceiptExceptionAdditionalFileHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListVarianceExceptionAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadVarianceExceptionAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadVarianceExceptionAdditionalFileHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadSelectedVarianceExceptionAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DeleteVarianceExceptionAdditionalFileHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/audit", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.AuditVarianceExceptionAdditionalFileHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/delete/approve", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ApproveDeleteVarianceExceptionAdditionalFileHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/delete/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.RejectDeleteVarianceExceptionAdditionalFileHandler(pool))))
 
 	// FD Accrual & Accounting additional files
 	mux.Handle("/investment/fd/accrual/run/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListFDAccrualRunAdditionalFilesHandler(pool))))

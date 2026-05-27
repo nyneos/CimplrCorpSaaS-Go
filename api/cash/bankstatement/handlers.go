@@ -86,6 +86,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 											INNER JOIN (
 												SELECT bankstatementid, MAX(action_id) AS max_action_id
 												FROM cimplrcorpsaas.auditactionbankstatement
+												WHERE COALESCE(actiontype, '') <> 'UPLOAD_FILE'
 												GROUP BY bankstatementid
 											) b ON a.bankstatementid = b.bankstatementid AND a.action_id = b.max_action_id
 										)
