@@ -1376,6 +1376,11 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		if effPrincipal <= 0 || effRate <= 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "confirmed_principal_amount and confirmed_interest_rate must be positive")
+			return
+		}
+
 		// ── Run variance engine against booked baseline ───────────────────────
 		runID := varianceengine.NewRunID()
 		var varItems []varianceengine.VarianceItem
@@ -1413,8 +1418,8 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Any edit that re-introduces variance re-opens the variance workflow
 			newConfStatus = "VARIANCE_PENDING"
 		} else if currentStatus == "VARIANCE_PENDING" || currentStatus == "REJECTED" {
-			// No more variance and it was previously dirty — promote to CONFIRMED
-			newConfStatus = "CONFIRMED"
+			// No more variance and it was previously dirty — promote to PENDING_APPROVAL
+			newConfStatus = "PENDING_APPROVAL"
 		}
 		// VARIANCE_ACCEPTED with no new variance: keep VARIANCE_ACCEPTED (ready for /approve)
 		// If caller explicitly overrides confirmation_status, allow it (unless APPROVED)
@@ -1496,12 +1501,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Update booking status if variance now clean
-		if !hasVariance && bookingID != "" && (currentStatus == "VARIANCE_PENDING" || currentStatus == "REJECTED") {
-			_, _ = tx.Exec(ctx,
-				`UPDATE investment.fd_booking_request SET booking_status='CONFIRMED' WHERE booking_id=$1`,
-				bookingID)
-		}
+		// Do not update booking status to CONFIRMED yet; it must go through checker approval first.
 
 		// ── Audit the update ──────────────────────────────────────────────────
 		if _, err = tx.Exec(ctx, `

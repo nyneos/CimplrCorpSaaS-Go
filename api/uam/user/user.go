@@ -199,21 +199,23 @@ func upsertActiveUserRole(exec sqlExecutor, userID, roleName string) error {
 		return err
 	}
 
-	if _, err := exec.Exec(
-		`UPDATE user_roles SET is_deleted = true WHERE user_id = $1 AND COALESCE(is_deleted, false) = false`,
-		userID,
-	); err != nil {
+	// 1. Clean up any soft-deleted roles for this user first. 
+	// This prevents the unique constraint error when updating the active row to a role_id that was previously soft-deleted.
+	if _, err := exec.Exec(`DELETE FROM user_roles WHERE user_id = $1 AND is_deleted = true`, userID); err != nil {
 		return err
 	}
 
-	reactivated, err := exec.Exec(
-		`UPDATE user_roles SET is_deleted = false WHERE user_id = $1 AND role_id = $2`,
+	// 2. Update the single existing active row to the new role
+	updated, err := exec.Exec(
+		`UPDATE user_roles SET role_id = $2, is_deleted = false WHERE user_id = $1`,
 		userID, roleID,
 	)
 	if err != nil {
 		return err
 	}
-	if rows, _ := reactivated.RowsAffected(); rows == 0 {
+
+	// 3. If the user had no active row to update, insert one
+	if rows, _ := updated.RowsAffected(); rows == 0 {
 		if _, err := exec.Exec(
 			`INSERT INTO user_roles (user_id, role_id, is_deleted) VALUES ($1, $2, false)`,
 			userID, roleID,

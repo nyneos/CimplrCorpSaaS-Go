@@ -103,7 +103,7 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 
 	logger.LogInfo("[AUTH DEBUG] querying users row by email username=%q", strings.TrimSpace(username))
 	err := a.db.QueryRow(
-		`SELECT id, employee_name, email, password, status FROM users WHERE email = $1`, username,
+		`SELECT id, employee_name, email, password, status FROM users WHERE email = $1 AND COALESCE(is_deleted, false) = false LIMIT 1`, username,
 	).Scan(&dbUserID, &dbName, &dbEmail, &dbPassword, &dbStatus)
 	if err != nil {
 		if err == sql.ErrNoRows {
