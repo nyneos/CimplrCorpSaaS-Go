@@ -644,10 +644,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit: "+pgUserFriendlyMessage(err))
-			return
-		}
+
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, "failed to commit approve: "+pgUserFriendlyMessage(err))
 			return

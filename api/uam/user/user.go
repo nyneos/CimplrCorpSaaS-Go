@@ -40,8 +40,11 @@ func generateRandomPassword(length int) (string, error) {
 }
 
 // sensitiveUserCols lists columns that must never be sent to the client.
+// This is a second-line-of-defence deny-list; the primary defence is the
+// explicit column list used in every SELECT on the users table.
 var sensitiveUserCols = map[string]bool{
 	"password":    true,
+	"mfa_secret":  true, // raw TOTP seed — must never leave the server
 	"created_by":  true,
 	"updated_by":  true,
 	"approved_by": true,
@@ -425,7 +428,10 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		tx.Commit()
+		if err := tx.Commit(); err != nil {
+			respondWithInternalError(w, err)
+			return
+		}
 
 		// Fire welcome / credentials email (fire-and-forget)
 		if pool != nil {

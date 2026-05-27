@@ -14,14 +14,22 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
-	"CimplrCorpSaas/api/dash/fxrates"
+	"CimplrCorpSaas/api/dash/ticker"
 
 	"github.com/lib/pq"
 
 	"CimplrCorpSaas/internal/logger"
 )
 
-var rates = fxrates.FxRates
+// toUSD returns how many USD equal 1 unit of cur, using live rates from rate.json.
+// Falls back to 1.0 if the currency is unavailable.
+func toUSD(cur string) float64 {
+	rate, err := ticker.RateBetween(cur, "USD")
+	if err != nil || rate == 0 {
+		return 1.0
+	}
+	return rate
+}
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	logger.LogError("%s", errMsg)
@@ -61,7 +69,7 @@ func GetTopCurrenciesFromHeaders(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 			val := math.Abs(amount.Float64)
-			usdValue := val * (rates[cur])
+			usdValue := val * toUSD(cur)
 			currencyTotals[cur] += usdValue
 		}
 		// Sort currencies by value descending and take top 5
@@ -158,11 +166,7 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 			}
 
 			// Handle missing or unknown currency conversion rate
-			rate, found := rates[cur]
-			if !found {
-				rate = 1.0 // Default to 1 if no rate is found
-				logger.LogInfo("No rate found for currency: %s. Using default rate of 1.0", cur)
-			}
+			rate := toUSD(cur)
 
 			usdValue := math.Abs(amount.Float64) * rate
 
@@ -262,10 +266,7 @@ func GetMaturityBucketsByCurrencyPair(db *sql.DB) http.HandlerFunc {
 			if !api.CtxHasApprovedCurrency(r.Context(), curr) {
 				continue
 			}
-			rate := rates[curr]
-			if rate == 0 {
-				rate = 1.0
-			}
+			rate := toUSD(curr)
 			amountUsd := math.Abs(amount) * rate
 
 			// Categorize based on maturity_date

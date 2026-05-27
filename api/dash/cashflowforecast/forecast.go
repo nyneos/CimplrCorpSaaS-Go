@@ -8,12 +8,20 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
-	"CimplrCorpSaas/api/dash/fxrates"
+	"CimplrCorpSaas/api/dash/ticker"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var rates = fxrates.FxRates
+// toUSD returns how many USD equal 1 unit of cur, using live rates from rate.json.
+// Falls back to 1.0 (i.e. treats the currency as USD) if the rate is unavailable.
+func toUSD(cur string) float64 {
+	rate, err := ticker.RateBetween(cur, "USD")
+	if err != nil || rate == 0 {
+		return 1.0
+	}
+	return rate
+}
 
 type ForecastKPIs struct {
 	StartingBalance         float64 `json:"starting_balance"`
@@ -104,10 +112,7 @@ func getStartingBalanceUSD(pgxPool *pgxpool.Pool, asOf time.Time) (float64, erro
 		if err := openingRows.Scan(&amt, &cur); err != nil {
 			return 0, err
 		}
-		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
+		rate := toUSD(cur)
 		startingUSD += amt * rate
 	}
 	return startingUSD, nil
@@ -170,10 +175,7 @@ func GetForecastKPIs(pgxPool *pgxpool.Pool, horizon int, entityName, currency st
 		if err := rows.Scan(&ctype, &cur, &amt); err != nil {
 			return k, err
 		}
-		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
+		rate := toUSD(cur)
 		n := amt * rate
 		if ctype == "Inflow" {
 			inflowsUSD += n
@@ -238,10 +240,7 @@ func GetForecastRows(pgxPool *pgxpool.Pool, horizon int, entityName, currency st
 		if err := prow.Scan(&year, &month, &ctype, &category, &desc, &amt, &cur); err != nil {
 			return rowsOut, err
 		}
-		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
+		rate := toUSD(cur)
 		n := amt * rate
 		date := fmt.Sprintf("%04d-%02d-01", year, month)
 		rowsOut = append(rowsOut, ForecastRow{
@@ -290,10 +289,7 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
 		if err := rows.Scan(&amt, &cur); err != nil {
 			return out, err
 		}
-		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
+		rate := toUSD(cur)
 		baseClosingUSD += amt * rate
 	}
 
@@ -358,10 +354,7 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
 			// only include if inside our simulation window (baseDate+1 .. end)
 			if !target.Before(baseDate.AddDate(0, 0, 1)) && !target.After(end) {
 				key := target.Format(constants.DateFormat)
-				rate := rates[cur]
-				if rate == 0 {
-					rate = 1.0
-				}
+				rate := toUSD(cur)
 				if ctype == "Inflow" {
 					inflows[key] += amt * rate
 				} else if ctype == "Outflow" {
@@ -379,10 +372,7 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
 					break
 				}
 				key := d.Format(constants.DateFormat)
-				rate := rates[cur]
-				if rate == 0 {
-					rate = 1.0
-				}
+				rate := toUSD(cur)
 				if ctype == "Inflow" {
 					inflows[key] += daily * rate
 				} else if ctype == "Outflow" {
@@ -595,10 +585,7 @@ func GetForecastCategorySums(pgxPool *pgxpool.Pool, horizon int, entityName, cur
 		if err := rows.Scan(&cat, &ctype, &cur, &amt); err != nil {
 			return nil, err
 		}
-		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
+		rate := toUSD(cur)
 		key := fmt.Sprintf("%s-(%s)", cat, ctype)
 		out[key] += amt * rate
 	}
