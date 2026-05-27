@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	middlewares "CimplrCorpSaas/api/middlewares"
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	push "CimplrCorpSaas/api/notification/push"
+	"CimplrCorpSaas/internal/dbutil"
+	"CimplrCorpSaas/internal/observability"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -17,6 +20,7 @@ import (
 )
 
 func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
+	const serviceName = "notification"
 	mux := http.NewServeMux()
 
 	if pool == nil {
@@ -26,10 +30,7 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 		port := os.Getenv("DB_PORT")
 		name := os.Getenv("DB_NAME")
 		if user != "" && pass != "" && host != "" && port != "" && name != "" {
-			sslMode := os.Getenv("DB_SSLMODE")
-			if sslMode == "" {
-				sslMode = "disable"
-			}
+			sslMode := dbutil.EffectiveSSLMode(host)
 			dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
 			var err error
 			pool, err = pgxpool.New(context.Background(), dsn)
@@ -38,6 +39,11 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 				return
 			}
 			defer pool.Close()
+			pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := pool.Ping(pingCtx); err != nil {
+				logger.LogError("Notification: failed to verify pgxpool DB connectivity at startup: %v", err)
+			}
 		}
 	}
 
@@ -89,9 +95,10 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 
 	// Register browser push subscription routes (VAPID public key, register, unregister)
 	push.RegisterSubscriptionRoutes(mux, pool)
+	mux.Handle("/notification/metrics", observability.MetricsHandler(serviceName))
 
 	logger.LogInfo("Notification Service started on :%s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	if err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux)); err != nil {
 		logger.LogError("Notification Service failed: %v", err)
 	}
 }

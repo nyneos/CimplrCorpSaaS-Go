@@ -974,7 +974,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 						continue
 					}
 				}
-				if ctx.Value("ApprovedBankAccounts") != nil {
+				if ctx.Value(apictx.ApprovedBankAccountsKey) != nil {
 					if !ctxHasApprovedBankAccount(ctx, accountNumber) {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,

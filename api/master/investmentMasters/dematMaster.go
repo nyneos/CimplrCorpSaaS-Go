@@ -187,7 +187,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		approvedDPs, _ := ctx.Value("ApprovedDPs").([]map[string]string)
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
@@ -489,7 +489,7 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Validate bank account
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 		accountFound := false
 		for _, acc := range approvedBankAccounts {
 			if acc["account_number"] == req.DefaultSettlementAccount || acc["account_id"] == req.DefaultSettlementAccount {
@@ -594,7 +594,7 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
 		approvedDPs, _ := ctx.Value("ApprovedDPs").([]map[string]string)
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 
 		results := make([]map[string]interface{}, 0, len(req.Rows))
 
@@ -1250,7 +1250,7 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 		accountNumbers := make([]string, 0, len(approvedBankAccounts))
 		for _, acc := range approvedBankAccounts {
 			if acc["account_number"] != "" {
@@ -1388,7 +1388,7 @@ func GetApprovedActiveDemats(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 		accountNumbers := make([]string, 0, len(approvedBankAccounts))
 		for _, acc := range approvedBankAccounts {
 			if acc["account_number"] != "" {

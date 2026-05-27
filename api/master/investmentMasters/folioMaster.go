@@ -195,7 +195,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Get context-based approved data for validations
 			approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
 			approvedAMCs, _ := ctx.Value("ApprovedAMCs").([]map[string]string)
-			approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+			approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 			approvedSchemes, _ := ctx.Value("ApprovedSchemes").([]map[string]string)
 
 			// Validate entities, AMCs, and bank accounts from uploaded data
@@ -527,7 +527,7 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get approved bank accounts from context
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 		accountIdentifiers := make([]string, 0, len(approvedBankAccounts)*2)
 		for _, acc := range approvedBankAccounts {
 			// Include both account_id and account_number for filtering
@@ -751,7 +751,7 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get approved bank accounts from context
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 		accountIdentifiers := make([]string, 0, len(approvedBankAccounts))
 		for _, acc := range approvedBankAccounts {
 			if acc["account_number"] != "" {
@@ -893,7 +893,7 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Validate bank accounts
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 		if len(approvedBankAccounts) == 0 {
 			api.RespondWithError(w, http.StatusForbidden, "No approved bank accounts found in context")
 			return

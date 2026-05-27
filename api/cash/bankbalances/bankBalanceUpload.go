@@ -456,7 +456,6 @@ func normalizeTime(timeStr string) string {
 func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		fmt.Printf("[DEBUG] Handler ctx.Value(\"ApprovedBankAccounts\"): %v\n", ctx.Value("ApprovedBankAccounts"))
 		entityIDs := ctxEntityIDs(ctx)
 
 		userID := r.FormValue(constants.KeyUserID)

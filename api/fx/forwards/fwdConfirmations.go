@@ -76,8 +76,8 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 				updateFields[k] = v
 			}
 		}
-		// Always set processing_status to 'pending'
-		updateFields["processing_status"] = "pending"
+		// Always set processing_status to pending
+		updateFields["processing_status"] = constants.FwdProcessingStatusPending
 		if len(updateFields) == 0 {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "No valid fields to update"})
@@ -132,7 +132,7 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
-		if len(req.SystemTransactionIDs) == 0 || (req.ProcessingStatus != "Approved" && req.ProcessingStatus != "Rejected") {
+		if len(req.SystemTransactionIDs) == 0 || (req.ProcessingStatus != constants.FwdProcessingStatusApproved && req.ProcessingStatus != constants.FwdProcessingStatusRejected) {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "system_transaction_ids (array) and valid processing_status (Approved/Rejected) required"})
 			return
@@ -144,12 +144,16 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Find which records are delete-approval and accessible
-		delRows, err := db.Query(`
-			SELECT system_transaction_id, entity_level_0
-			FROM forward_bookings
-			WHERE system_transaction_id = ANY($1)
-			  AND UPPER(COALESCE(processing_status, '')) IN ('DELETE-APPROVAL', 'PENDING_DELETE_APPROVAL')
-		`, pq.Array(req.SystemTransactionIDs))
+delRows, err := db.Query(`
+    SELECT system_transaction_id, entity_level_0
+    FROM forward_bookings
+    WHERE system_transaction_id = ANY($1)
+      AND processing_status IN ($2, $3)
+`, pq.Array(req.SystemTransactionIDs),
+    constants.FwdProcessingStatusDeleteApproval,
+    "PENDING_DELETE_APPROVAL",
+)
+
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
@@ -238,10 +242,10 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			rows.Close()
 			if len(eligibleIds) > 0 {
 				var resultRows *sql.Rows
-				if req.ProcessingStatus == "Approved" {
-					resultRows, err = db.Query(`UPDATE forward_bookings SET processing_status = $1, status = 'Confirmed' WHERE system_transaction_id = ANY($2) RETURNING *`, req.ProcessingStatus, pq.Array(eligibleIds))
+				if req.ProcessingStatus == constants.FwdProcessingStatusApproved {
+					resultRows, err = db.Query(`UPDATE forward_bookings SET processing_status = $1, status = $2 WHERE system_transaction_id = ANY($3) RETURNING *`, req.ProcessingStatus, constants.FwdStatusConfirmed, pq.Array(eligibleIds))
 				} else {
-					resultRows, err = db.Query(`UPDATE forward_bookings SET processing_status = $1 WHERE system_transaction_id = ANY($2) RETURNING *`, req.ProcessingStatus, pq.Array(eligibleIds))
+					resultRows, err = db.Query(`UPDATE forward_bookings SET processing_status = $1 WHERE system_transaction_id = ANY($2) RETURNING *`, constants.FwdProcessingStatusRejected, pq.Array(eligibleIds))
 				}
 				if err == nil {
 					cols, _ := resultRows.Columns()
@@ -421,12 +425,12 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 			bankConfirmationDate = "1970-01-01" // or set to nil if you want NULL
 		}
 		updateQuery := `UPDATE forward_bookings SET
-		       status = 'Confirmed',
-		       bank_transaction_id = $1,
-		       swift_unique_id = $2,
-		       bank_confirmation_date = $3,
-		       processing_status = 'pending'
-	       WHERE internal_reference_id = $4 AND status = 'Pending Confirmation' AND entity_level_0 = $5
+		       status = $1,
+		       bank_transaction_id = $2,
+		       swift_unique_id = $3,
+		       bank_confirmation_date = $4,
+		       processing_status = $5
+	       WHERE internal_reference_id = $6 AND status = $7 AND entity_level_0 = $8
 	       RETURNING internal_reference_id, entity_level_0, bank_transaction_id, swift_unique_id, bank_confirmation_date, status, processing_status`
 		var bankConfirmationDateVal interface{}
 		if bankConfirmationDate == "" {
@@ -435,10 +439,13 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 			bankConfirmationDateVal = bankConfirmationDate
 		}
 		updateValues := []interface{}{
+			constants.FwdStatusConfirmed,
 			req.BankTransactionID,
 			req.SwiftUniqueID,
 			bankConfirmationDateVal,
+			constants.FwdProcessingStatusPending,
 			req.InternalReferenceID,
+			constants.FwdStatusPendingConfirmation,
 			req.EntityLevel0,
 		}
 		row := db.QueryRow(updateQuery, updateValues...)

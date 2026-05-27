@@ -119,6 +119,8 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
 	defer cancel()
 
+	logger.GlobalLogger.LogAudit("Recategorization: Starting to count transactions")
+
 	if batchSize <= 0 {
 		batchSize = 1000
 	}

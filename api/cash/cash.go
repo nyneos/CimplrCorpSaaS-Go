@@ -12,11 +12,14 @@ import (
 	sweepconfig "CimplrCorpSaas/api/cash/sweepConfig"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/travel"
+	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -24,24 +27,31 @@ import (
 )
 
 func StartCashService(db *sql.DB, port string) {
-
+	const serviceName = "cash"
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	sslmode := os.Getenv("DB_SSLMODE")
-	if sslmode == "" {
-		sslmode = "require"
+	sslMode := strings.TrimSpace(os.Getenv("DB_SSLMODE"))
+	if sslMode == "" {
+		sslMode = "require"
 	}
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslmode)
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
+		
 		logger.LogError("failed to connect to pgxpool DB: %v", err)
 		return
 	}
 	defer pgxPool.Close()
+
+	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := pgxPool.Ping(pingCtx); err != nil {
+		logger.LogError("failed to verify pgxpool DB connectivity at startup: %v", err)
+	}
 	mux.Handle("/cash/upload-bank-statement", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV2Handler(db, pgxPool)))
 	mux.Handle("/cash/upload-bank-statement-zip", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadZippedBankStatementsHandler(db, pgxPool)))
 
@@ -126,9 +136,9 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/upload-payrec", api.BusinessUnitMiddleware(db)(payablerecievable.UploadPayRec(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/transactions/misclassify", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.MarkBankStatementTransactionsMisclassifiedHandler(db)))
 	// mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetBankStatements(pgxPool)))
-	mux.Handle("/cash/bank-statements/bulk-approve", bankstatement.BulkApproveBankStatements(pgxPool))
-	mux.Handle("/cash/bank-statements/bulk-reject", bankstatement.BulkRejectBankStatements(pgxPool))
-	mux.Handle("/cash/bank-statements/bulk-delete", bankstatement.BulkDeleteBankStatements(pgxPool))
+	mux.Handle("/cash/bank-statements/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.BulkApproveBankStatements(pgxPool)))
+	mux.Handle("/cash/bank-statements/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.BulkRejectBankStatements(pgxPool)))
+	mux.Handle("/cash/bank-statements/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.BulkDeleteBankStatements(pgxPool)))
 	mux.Handle("/cash/bank-statements/create", api.BusinessUnitMiddleware(db)(bankstatement.CreateBankStatements(pgxPool)))
 	mux.Handle("/cash/bank-statements/update", api.BusinessUnitMiddleware(db)(bankstatement.UpdateBankStatement(pgxPool)))
 	mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetAllBankStatements(pgxPool)))
@@ -315,15 +325,16 @@ func StartCashService(db *sql.DB, port string) {
 	limit.RegisterLimitRoutes(mux, pgxPool)
 
 	// Travel package endpoints
-	mux.Handle("/cash/package/create", (travel.CreatePackageHandler(db)))
-	mux.Handle("/cash/package", (travel.GetPackageHandler(db)))
-	mux.Handle("/cash/package/delete", (travel.DeletePackageHandler(db)))
+	mux.Handle("/cash/package/create", api.BusinessUnitMiddleware(db)(travel.CreatePackageHandler(db)))
+	mux.Handle("/cash/package", api.BusinessUnitMiddleware(db)(travel.GetPackageHandler(db)))
+	mux.Handle("/cash/package/delete", api.BusinessUnitMiddleware(db)(travel.DeletePackageHandler(db)))
 
 	mux.HandleFunc("/cash/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Cash Service is active"))
 	})
+	mux.Handle("/cash/metrics", observability.MetricsHandler(serviceName))
 	logger.LogInfo("Cash Service started on :%s", port)
-	err = http.ListenAndServe(":"+port, mux)
+	err = http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {
 		logger.LogError("Cash Service failed: %v", err)
 	}

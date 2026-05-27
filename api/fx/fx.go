@@ -6,11 +6,14 @@ import (
 	"CimplrCorpSaas/api/fx/forwards"
 	v91 "CimplrCorpSaas/api/fx/v91"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/internal/dbutil"
+	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -18,10 +21,12 @@ import (
 )
 
 func StartFXService(db *sql.DB, port string) {
+	const serviceName = "fx"
 	mux := http.NewServeMux()
 	mux.HandleFunc("/fx/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("FX Service is active"))
 	})
+	mux.Handle("/fx/metrics", observability.MetricsHandler(serviceName))
 	// mux.HandleFunc("/fx/forward-booking", ForwardBooking)
 
 	user := os.Getenv("DB_USER")
@@ -30,10 +35,7 @@ func StartFXService(db *sql.DB, port string) {
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
 	if user != "" && pass != "" && host != "" && dbPort != "" && name != "" {
-		sslMode := os.Getenv("DB_SSLMODE")
-		if sslMode == "" {
-			sslMode = "disable"
-		}
+		sslMode := dbutil.EffectiveSSLMode(host)
 		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 
 		// create a shared pgx pool once for the v91 and prevalidation middleware
@@ -43,6 +45,11 @@ func StartFXService(db *sql.DB, port string) {
 			return
 		}
 		defer pgxPool.Close()
+		pingCtx, pingCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer pingCancel()
+		if err := pgxPool.Ping(pingCtx); err != nil {
+			logger.LogError("FX: failed to verify pgxpool DB connectivity at startup: %v", err)
+		}
 
 		// wrapper calls the v91 handler using the shared pool
 		v91Wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -342,7 +349,7 @@ func StartFXService(db *sql.DB, port string) {
 	// mux.Handle("/fx/forwards/upload-bank-multi",  middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadBankForwardBookingsMulti(db)))
 
 	logger.LogInfo("FX Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
+	err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {
 		logger.LogError("FX Service failed: %v", err)
 	}

@@ -71,7 +71,7 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		expRows, err := db.Query(`SELECT exposure_header_id, company_code, entity, entity1, entity2, entity3, exposure_type, document_id, value_date, counterparty_name, currency, total_original_amount, total_open_amount, value_date FROM exposure_headers WHERE entity = ANY($1)`, pq.Array(buNames))
+		expRows, err := db.QueryContext(r.Context(), `SELECT exposure_header_id, company_code, entity, entity1, entity2, entity3, exposure_type, document_id, document_date, counterparty_name, currency, total_original_amount, total_open_amount, value_date FROM exposure_headers WHERE entity = ANY($1)`, pq.Array(buNames))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch exposures"})
@@ -96,7 +96,7 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 		// 4. Fetch all hedged values in one query
 		hedgeMap := make(map[string]float64)
 		if len(exposureIds) > 0 {
-			hedgeRows, err := db.Query(`SELECT exposure_header_id, COALESCE(SUM(hedged_amount), 0) AS hedged_value FROM exposure_hedge_links WHERE exposure_header_id = ANY($1) GROUP BY exposure_header_id`, pq.Array(exposureIds))
+			hedgeRows, err := db.QueryContext(r.Context(), `SELECT exposure_header_id, COALESCE(SUM(hedged_amount), 0) AS hedged_value FROM exposure_hedge_links WHERE exposure_header_id = ANY($1) GROUP BY exposure_header_id`, pq.Array(exposureIds))
 			if err == nil {
 				for hedgeRows.Next() {
 					var eid string
@@ -235,7 +235,7 @@ type ForwardCancellation struct {
 }
 
 func fetchForwardBookings(ctx context.Context, db *sql.DB, buNames []string) ([]ForwardBooking, error) {
-	rows, err := db.Query(`
+	rows, err := db.QueryContext(ctx, `
 		SELECT
 			system_transaction_id, internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3,
 			local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period,
@@ -283,8 +283,8 @@ func fetchForwardBookings(ctx context.Context, db *sql.DB, buNames []string) ([]
 	return list, nil
 }
 
-func fetchForwardRollovers(db *sql.DB, buNames []string) ([]ForwardRollover, error) {
-	rows, err := db.Query(`
+func fetchForwardRollovers(ctx context.Context, db *sql.DB, buNames []string) ([]ForwardRollover, error) {
+	rows, err := db.QueryContext(ctx, `
 		SELECT
 			r.rollover_id, r.booking_id, r.amount_rolled_over, r.rollover_date,
 			r.original_maturity_date, r.new_maturity_date, r.rollover_cost,
@@ -313,8 +313,8 @@ func fetchForwardRollovers(db *sql.DB, buNames []string) ([]ForwardRollover, err
 	return list, nil
 }
 
-func fetchForwardCancellations(db *sql.DB, buNames []string) ([]ForwardCancellation, error) {
-	rows, err := db.Query(`
+func fetchForwardCancellations(ctx context.Context, db *sql.DB, buNames []string) ([]ForwardCancellation, error) {
+	rows, err := db.QueryContext(ctx, `
 		SELECT
 			c.cancellation_id, c.booking_id, c.amount_cancelled, c.cancellation_date,
 			c.cancellation_rate, c.realized_gain_loss, c.cancellation_reason,
@@ -368,13 +368,13 @@ func GetLinkedSummaryByCategory(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rollovers, err := fetchForwardRollovers(db, buNames)
+		rollovers, err := fetchForwardRollovers(r.Context(), db, buNames)
 		if err != nil {
 			http.Error(w, `{constants.ValueError:"Failed to fetch forward rollovers"}`, http.StatusInternalServerError)
 			return
 		}
 
-		cancellations, err := fetchForwardCancellations(db, buNames)
+		cancellations, err := fetchForwardCancellations(r.Context(), db, buNames)
 		if err != nil {
 			http.Error(w, `{constants.ValueError:"Failed to fetch forward cancellations"}`, http.StatusInternalServerError)
 			return

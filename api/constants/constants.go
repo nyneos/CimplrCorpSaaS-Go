@@ -297,6 +297,20 @@ const (
 	StatusCodeDeleteApproval   = "Delete-Approval"
 )
 
+// Forward booking processing_status values
+const (
+	FwdProcessingStatusPending        = "pending"
+	FwdProcessingStatusApproved       = "Approved"
+	FwdProcessingStatusRejected       = "Rejected"
+	FwdProcessingStatusDeleteApproval = "Delete-approval"
+)
+
+// Forward booking status values
+const (
+	FwdStatusConfirmed          = "Confirmed"
+	FwdStatusPendingConfirmation = "Pending Confirmation"
+)
+
 const (
 	HeaderAccessControlAllowOrigin       = "Access-Control-Allow-Origin"
 	HeaderAccessControlAllowMethods      = "Access-Control-Allow-Methods"
