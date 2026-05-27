@@ -50,7 +50,7 @@ func GetProposalAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ProposalID string `json:"proposal_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if api.GetSessionFromCtx(r.Context()) == nil {
@@ -130,7 +130,7 @@ func GetInitiationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			InitiationID string `json:"initiation_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if api.GetSessionFromCtx(r.Context()) == nil {
@@ -211,7 +211,7 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ConfirmationID string `json:"confirmation_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if api.GetSessionFromCtx(r.Context()) == nil {

@@ -138,7 +138,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ConfirmedPrincipalAmount <= 0 || req.ConfirmedInterestRate <= 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmed_principal_amount and confirmed_interest_rate must be positive")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmedPrincipalAndInterest)
 			return
 		}
 		if req.ConfirmedValueDate == "" || req.ConfirmedMaturityDate == "" {
@@ -695,7 +695,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ConfirmedPrincipalAmount <= 0 || req.ConfirmedInterestRate <= 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmed_principal_amount and confirmed_interest_rate must be positive")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmedPrincipalAndInterest)
 			return
 		}
 		if req.ConfirmedValueDate == "" || req.ConfirmedMaturityDate == "" {
@@ -1377,7 +1377,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if effPrincipal <= 0 || effRate <= 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmed_principal_amount and confirmed_interest_rate must be positive")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmedPrincipalAndInterest)
 			return
 		}
 
