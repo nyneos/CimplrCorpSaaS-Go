@@ -492,6 +492,7 @@ const (
 	ConfirmationIDsRequired               = "confirmation_ids required"
 	BatchIDsRequired                      = "batch_ids required"
 	ErrFailedToDeleteStagedStatements     = "failed to delete staged statements"
+	ErrConfirmedPrincipalAndInterest      = "confirmed_principal_amount and confirmed_interest_rate must be positive"
 )
 
 var (
