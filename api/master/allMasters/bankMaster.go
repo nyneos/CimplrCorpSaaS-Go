@@ -195,7 +195,7 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, auditErr := tx.Exec(ctx, auditQuery,
 			bankID,
 			"CREATE",
-			"PENDING_APPROVAL",
+			constants.StatusPendingApproval,
 			nil,
 			createdBy,
 		)
@@ -1073,7 +1073,7 @@ func UpdateBankMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditQuery := `INSERT INTO auditactionbank (
 					bank_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
-				if _, err := tx.Exec(ctx, auditQuery, updatedBankID, "EDIT", "PENDING_EDIT_APPROVAL", nil, updatedBy); err != nil {
+				if _, err := tx.Exec(ctx, auditQuery, updatedBankID, "EDIT", constants.StatusPendingEditApproval, nil, updatedBy); err != nil {
 					errMsg, _ := getUserFriendlyBankError(err, "Audit log failed")
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "bank_id": updatedBankID})
 					return

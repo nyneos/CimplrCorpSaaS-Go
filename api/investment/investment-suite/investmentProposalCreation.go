@@ -193,7 +193,7 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := insertProposalAudit(ctx, tx, proposalID, userEmail, req.Reason, "CREATE", "PENDING_APPROVAL"); err != nil {
+		if err := insertProposalAudit(ctx, tx, proposalID, userEmail, req.Reason, constants.AuditActionCreate, constants.StatusPendingApproval); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to insert audit record: %v", err))
 			return
 		}
@@ -204,7 +204,7 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func() {
-			payload := BuildProposalNotifPayload(context.Background(), pool, []string{proposalID}, "CREATE", userEmail)
+			payload := BuildProposalNotifPayload(context.Background(), pool, []string{proposalID}, constants.AuditActionCreate, userEmail)
 			catalog.TriggerNotification(
 				context.Background(), pool,
 				"/investment/proposal/create",
@@ -269,7 +269,7 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := insertProposalAudit(ctx, tx, req.ProposalID, userEmail, req.Reason, "EDIT", "PENDING_EDIT_APPROVAL"); err != nil {
+		if err := insertProposalAudit(ctx, tx, req.ProposalID, userEmail, req.Reason, constants.AuditActionEdit, constants.StatusPendingEditApproval); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to insert audit record: %v", err))
 			return
 		}
@@ -296,12 +296,12 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 
 // BulkApproveProposals allows checkers to approve multiple proposals
 func BulkApproveProposals(pool *pgxpool.Pool) http.HandlerFunc {
-	return bulkProposalDecision(pool, "APPROVE")
+	return bulkProposalDecision(pool, constants.AuditActionApprove)
 }
 
 // BulkRejectProposals allows checkers to reject multiple proposals
 func BulkRejectProposals(pool *pgxpool.Pool) http.HandlerFunc {
-	return bulkProposalDecision(pool, "REJECT")
+	return bulkProposalDecision(pool, constants.AuditActionReject)
 }
 
 func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
@@ -403,8 +403,8 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 				continue
 			}
 
-			if action == "APPROVE" {
-				if snap.status == "PENDING_DELETE_APPROVAL" || strings.EqualFold(snap.actionType, "DELETE") {
+			if action == constants.AuditActionApprove {
+				if snap.status == constants.StatusPendingDeleteApproval || strings.EqualFold(snap.actionType, constants.AuditActionDelete) {
 					deletedActions = append(deletedActions, snap.actionID)
 					deletedProposals = append(deletedProposals, proposalID)
 				} else {
@@ -418,7 +418,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 		}
 
 		if len(approvedActions) > 0 {
-			if err := updateAuditStatuses(ctx, tx, approvedActions, "APPROVED", userEmail, req.Comment); err != nil {
+			if err := updateAuditStatuses(ctx, tx, approvedActions, constants.StatusApproved, userEmail, req.Comment); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
@@ -430,7 +430,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			}
 		}
 		if len(rejectedActions) > 0 {
-			if err := updateAuditStatuses(ctx, tx, rejectedActions, "REJECTED", userEmail, req.Comment); err != nil {
+			if err := updateAuditStatuses(ctx, tx, rejectedActions, constants.StatusRejected, userEmail, req.Comment); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
@@ -489,7 +489,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := userEmail
 			go func() {
-				pl := BuildProposalNotifPayload(context.Background(), pool, ids, "APPROVE", uEmail)
+				pl := BuildProposalNotifPayload(context.Background(), pool, ids, constants.AuditActionApprove, uEmail)
 				catalog.TriggerNotification(
 					context.Background(), pool,
 					"/investment/proposal/approve",
@@ -503,7 +503,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := userEmail
 			go func() {
-				pl := BuildProposalNotifPayload(context.Background(), pool, ids, "DELETE", uEmail)
+				pl := BuildProposalNotifPayload(context.Background(), pool, ids, constants.AuditActionDelete, uEmail)
 				catalog.TriggerNotification(
 					context.Background(), pool,
 					"/investment/proposal/delete",
@@ -517,7 +517,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := userEmail
 			go func() {
-				pl := BuildProposalNotifPayload(context.Background(), pool, ids, "REJECT", uEmail)
+				pl := BuildProposalNotifPayload(context.Background(), pool, ids, constants.AuditActionReject, uEmail)
 				catalog.TriggerNotification(
 					context.Background(), pool,
 					"/investment/proposal/reject",
@@ -631,7 +631,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, id := range readyForDelete {
-			if err := insertProposalAudit(ctx, tx, id, userEmail, req.Reason, "DELETE", "PENDING_DELETE_APPROVAL"); err != nil {
+			if err := insertProposalAudit(ctx, tx, id, userEmail, req.Reason, constants.AuditActionDelete, constants.StatusPendingDeleteApproval); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to insert delete audit for %s", id))
 				return
 			}

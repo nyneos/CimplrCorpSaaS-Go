@@ -349,7 +349,7 @@ func govFetchBookingItems(ctx context.Context, pool *pgxpool.Pool, entityFilter,
 		case processingStatus != "":
 			f.Action = processingStatus
 		case strings.EqualFold(bookingStatus, "DRAFT") || strings.EqualFold(bookingStatus, "APPROVAL_PENDING"):
-			f.Action = "PENDING_APPROVAL"
+			f.Action = constants.StatusPendingApproval
 		default:
 			f.Action = bookingStatus
 		}
@@ -539,7 +539,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		SELECT COALESCE(run_status,'') FROM investment.fd_accrual_run
 		WHERE COALESCE(is_deleted,false)=false AND ($1::text='' OR entity_id=$1)
 		ORDER BY created_at DESC LIMIT 1`, entityFilter).Scan(&latestRunStatus)
-	accrualPosted := latestRunStatus == "POSTED" || latestRunStatus == "APPROVED"
+	accrualPosted := latestRunStatus == "POSTED" || latestRunStatus == constants.StatusApproved
 
 	var unprocessedMaturities int64
 	_ = pool.QueryRow(ctx, `
@@ -555,9 +555,9 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 	bookingPriority := "Low"
 	for _, it := range bookingItems {
 		switch it.Action {
-		case "PENDING_DELETE_APPROVAL", "PENDING_APPROVAL":
+		case constants.StatusPendingDeleteApproval, constants.StatusPendingApproval:
 			bookingPriority = "High"
-		case "PENDING_EDIT_APPROVAL":
+		case constants.StatusPendingEditApproval:
 			if bookingPriority != "High" {
 				bookingPriority = "Medium"
 			}
@@ -565,23 +565,23 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 	}
 
 	approvals := []govApprovalRow{
-		{Type: constants.FDBookingLabel, Category: constants.FDBookingLabel, Status: "PENDING_APPROVAL",
+		{Type: constants.FDBookingLabel, Category: constants.FDBookingLabel, Status: constants.StatusPendingApproval,
 			Source: constants.FDBookingLabel, SourcePage: constants.FDBooking,
 			Count: len(bookingItems), Value: govSumPrincipal(bookingItems),
 			Priority: bookingPriority, Items: bookingItems},
-		{Type: constants.FDConfirmation, Category: constants.FDConfirmation, Status: "PENDING_APPROVAL",
+		{Type: constants.FDConfirmation, Category: constants.FDConfirmation, Status: constants.StatusPendingApproval,
 			Source: constants.FDConfirmation, SourcePage: constants.FDConfirmationLabel,
 			Count: len(confirmItems), Value: govSumPrincipal(confirmItems),
 			Priority: "Medium", Items: confirmItems},
-		{Type: constants.FDActivationLabel, Category: constants.FDActivationLabel, Status: "PENDING_APPROVAL",
+		{Type: constants.FDActivationLabel, Category: constants.FDActivationLabel, Status: constants.StatusPendingApproval,
 			Source: constants.FDActivationLabel, SourcePage: constants.FDActivation,
 			Count: len(activationItems), Value: govSumPrincipal(activationItems),
 			Priority: "High", Items: activationItems},
-		{Type: constants.FDMaturity, Category: constants.FDMaturity, Status: "PENDING_APPROVAL",
+		{Type: constants.FDMaturity, Category: constants.FDMaturity, Status: constants.StatusPendingApproval,
 			Source: constants.FDMaturity, SourcePage: constants.FdmaturityLabel,
 			Count: len(maturityItems), Value: govSumPrincipal(maturityItems),
 			Priority: "High", Items: maturityItems},
-		{Type: constants.AccrualRun, Category: constants.AccrualRun, Status: "PENDING_APPROVAL",
+		{Type: constants.AccrualRun, Category: constants.AccrualRun, Status: constants.StatusPendingApproval,
 			Source: "Accrual Engine", SourcePage: "fd-accrual-engine",
 			Count: int(accrualRunCount), Value: 0,
 			Priority: "Medium", Items: []govFDItem{}},
@@ -1454,8 +1454,8 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// Map UI status alias → DB column value
 		dbStatusFilter := ""
 		switch fdStatusFilter {
-		case "ACTIVE":
-			dbStatusFilter = "ACTIVE"
+		case constants.StatusActive:
+			dbStatusFilter = constants.StatusActive
 		case "MATURED":
 			dbStatusFilter = "MATURED"
 		case "ROLLED_OVER":

@@ -265,7 +265,7 @@ func synthesizeMTMAuditRow(r *http.Request, db *sql.DB, parentID string) map[str
 	requestedAt := firstNonZeroTime(row["calculated_at"], row["created_at"], row["deal_date"])
 	status := firstNonBlankString(row["processing_status"], row["status"])
 	if status == "" {
-		status = "PENDING_APPROVAL"
+		status = constants.StatusPendingApproval
 	}
 
 	entry := map[string]interface{}{

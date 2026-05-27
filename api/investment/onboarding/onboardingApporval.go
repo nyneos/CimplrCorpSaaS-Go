@@ -22,7 +22,7 @@ type BatchApprovalRequest struct {
 	UserID   string   `json:"user_id"`
 	BatchIDs []string `json:"batch_ids"`          // Array of batch IDs for bulk operations
 	BatchID  string   `json:"batch_id,omitempty"` // Single batch ID for backward compatibility
-	Action   string   `json:"action"`             // "APPROVE" or "REJECT"
+	Action   string   `json:"action"`             // constants.AuditActionApprove or constants.AuditActionReject
 	Comment  string   `json:"comment,omitempty"`
 }
 
@@ -57,7 +57,7 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if req.Action != "APPROVE" && req.Action != "REJECT" {
+		if req.Action != constants.AuditActionApprove && req.Action != constants.AuditActionReject {
 			api.RespondWithError(w, 400, "action must be APPROVE or REJECT")
 			return
 		}
@@ -143,9 +143,9 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Update all batch approval statuses in bulk
-		batchApprovalStatus := "APPROVED"
-		if req.Action == "REJECT" {
-			batchApprovalStatus = "REJECTED"
+		batchApprovalStatus := constants.StatusApproved
+		if req.Action == constants.AuditActionReject {
+			batchApprovalStatus = constants.StatusRejected
 		}
 
 		_, err = tx.Exec(ctx, `
@@ -241,8 +241,8 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 		auditRows.Scan(&actionID, &amcID, &actionType, &status)
 		amcsWithAudit[amcID] = true
 
-		if action == "APPROVE" {
-			if status == "PENDING_DELETE_APPROVAL" {
+		if action == constants.AuditActionApprove {
+			if status == constants.StatusPendingDeleteApproval {
 				// For delete approval, mark as DELETED and soft-delete the master record
 				_, err = tx.Exec(ctx, `
 					UPDATE investment.auditactionamc 
@@ -264,26 +264,26 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 				}
 
 				deleteAMCIDs = append(deleteAMCIDs, amcID)
-			} else if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" {
+			} else if status == constants.StatusPendingApproval || status == constants.StatusPendingEditApproval {
 				// For create/edit approval, mark as APPROVED
 				actionIDs = append(actionIDs, actionID)
 			}
-		} else if action == "REJECT" {
-			if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || status == "PENDING_DELETE_APPROVAL" {
+		} else if action == constants.AuditActionReject {
+			if status == constants.StatusPendingApproval || status == constants.StatusPendingEditApproval || status == constants.StatusPendingDeleteApproval {
 				actionIDs = append(actionIDs, actionID)
 			}
 		}
 	}
 
 	// For enriched entities without audit records, create approval audit if action is APPROVE
-	if action == "APPROVE" {
+	if action == constants.AuditActionApprove {
 		for _, amcID := range amcIDs {
 			if !amcsWithAudit[amcID] {
 				// Create an approval audit record for enriched entities
 				_, err = tx.Exec(ctx, `
 					INSERT INTO investment.auditactionamc (amc_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
-					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
-				`, amcID, userEmail, constants.ErrAutoApprovedEnrichedEntity)
+					VALUES ($1, $4, $5, $2, now(), $2, now(), $3)
+				`, amcID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved)
 				if err != nil {
 					return nil, err
 				}
@@ -294,9 +294,9 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 
 	// Update audit records for approve/reject (non-delete actions)
 	if len(actionIDs) > 0 {
-		status := "APPROVED"
-		if action == "REJECT" {
-			status = "REJECTED"
+		status := constants.StatusApproved
+		if action == constants.AuditActionReject {
+			status = constants.StatusRejected
 		}
 
 		_, err = tx.Exec(ctx, `
@@ -361,7 +361,7 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 		auditRows.Scan(&actionID, &schemeID, &actionType, &status)
 		schemesWithAudit[schemeID] = true
 
-		if action == "APPROVE" && status == "PENDING_DELETE_APPROVAL" {
+		if action == constants.AuditActionApprove && status == constants.StatusPendingDeleteApproval {
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.auditactionscheme 
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
@@ -381,19 +381,19 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 			}
 
 			deleteSchemeIDs = append(deleteSchemeIDs, schemeID)
-		} else if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || (action == "REJECT" && status == "PENDING_DELETE_APPROVAL") {
+		} else if status == constants.StatusPendingApproval || status == constants.StatusPendingEditApproval || (action == constants.AuditActionReject && status == constants.StatusPendingDeleteApproval) {
 			actionIDs = append(actionIDs, actionID)
 		}
 	}
 
 	// For enriched entities without audit records, create approval audit if action is APPROVE
-	if action == "APPROVE" {
+	if action == constants.AuditActionApprove {
 		for _, schemeID := range schemeIDs {
 			if !schemesWithAudit[schemeID] {
 				_, err = tx.Exec(ctx, `
 					INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
-					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
-				`, schemeID, userEmail, constants.ErrAutoApprovedEnrichedEntity)
+					VALUES ($1, $4, $5, $2, now(), $2, now(), $3)
+				`, schemeID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved)
 				if err != nil {
 					return nil, err
 				}
@@ -403,9 +403,9 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 	}
 
 	if len(actionIDs) > 0 {
-		status := "APPROVED"
-		if action == "REJECT" {
-			status = "REJECTED"
+		status := constants.StatusApproved
+		if action == constants.AuditActionReject {
+			status = constants.StatusRejected
 		}
 
 		_, err = tx.Exec(ctx, `
@@ -466,7 +466,7 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 		auditRows.Scan(&actionID, &dpID, &actionType, &status)
 		dpsWithAudit[dpID] = true
 
-		if action == "APPROVE" && status == "PENDING_DELETE_APPROVAL" {
+		if action == constants.AuditActionApprove && status == constants.StatusPendingDeleteApproval {
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.auditactiondp 
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
@@ -486,18 +486,18 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 			}
 
 			deleteDPIDs = append(deleteDPIDs, dpID)
-		} else if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || (action == "REJECT" && status == "PENDING_DELETE_APPROVAL") {
+		} else if status == constants.StatusPendingApproval || status == constants.StatusPendingEditApproval || (action == constants.AuditActionReject && status == constants.StatusPendingDeleteApproval) {
 			actionIDs = append(actionIDs, actionID)
 		}
 	}
 
-	if action == "APPROVE" {
+	if action == constants.AuditActionApprove {
 		for _, dpID := range dpIDs {
 			if !dpsWithAudit[dpID] {
 				_, err = tx.Exec(ctx, `
 					INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
-					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
-				`, dpID, userEmail, constants.ErrAutoApprovedEnrichedEntity)
+					VALUES ($1, $4, $5, $2, now(), $2, now(), $3)
+				`, dpID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved)
 				if err != nil {
 					return nil, err
 				}
@@ -507,9 +507,9 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 	}
 
 	if len(actionIDs) > 0 {
-		status := "APPROVED"
-		if action == "REJECT" {
-			status = "REJECTED"
+		status := constants.StatusApproved
+		if action == constants.AuditActionReject {
+			status = constants.StatusRejected
 		}
 
 		_, err = tx.Exec(ctx, `
@@ -572,7 +572,7 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 		auditRows.Scan(&actionID, &dematID, &actionType, &status)
 		dematsWithAudit[dematID] = true
 
-		if action == "APPROVE" && status == "PENDING_DELETE_APPROVAL" {
+		if action == constants.AuditActionApprove && status == constants.StatusPendingDeleteApproval {
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.auditactiondemat 
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
@@ -592,18 +592,18 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 			}
 
 			deleteDematIDs = append(deleteDematIDs, dematID)
-		} else if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || (action == "REJECT" && status == "PENDING_DELETE_APPROVAL") {
+		} else if status == constants.StatusPendingApproval || status == constants.StatusPendingEditApproval || (action == constants.AuditActionReject && status == constants.StatusPendingDeleteApproval) {
 			actionIDs = append(actionIDs, actionID)
 		}
 	}
 
-	if action == "APPROVE" {
+	if action == constants.AuditActionApprove {
 		for _, dematID := range dematIDs {
 			if !dematsWithAudit[dematID] {
 				_, err = tx.Exec(ctx, `
 					INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
-					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
-				`, dematID, userEmail, constants.ErrAutoApprovedEnrichedEntity)
+					VALUES ($1, $4, $5, $2, now(), $2, now(), $3)
+				`, dematID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved)
 				if err != nil {
 					return nil, err
 				}
@@ -613,9 +613,9 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 	}
 
 	if len(actionIDs) > 0 {
-		status := "APPROVED"
-		if action == "REJECT" {
-			status = "REJECTED"
+		status := constants.StatusApproved
+		if action == constants.AuditActionReject {
+			status = constants.StatusRejected
 		}
 
 		_, _ = tx.Exec(ctx, `
@@ -678,7 +678,7 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 		auditRows.Scan(&actionID, &folioID, &actionType, &status)
 		foliosWithAudit[folioID] = true
 
-		if action == "APPROVE" && status == "PENDING_DELETE_APPROVAL" {
+		if action == constants.AuditActionApprove && status == constants.StatusPendingDeleteApproval {
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.auditactionfolio 
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
@@ -698,18 +698,18 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 			}
 
 			deleteFolioIDs = append(deleteFolioIDs, folioID)
-		} else if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || (action == "REJECT" && status == "PENDING_DELETE_APPROVAL") {
+		} else if status == constants.StatusPendingApproval || status == constants.StatusPendingEditApproval || (action == constants.AuditActionReject && status == constants.StatusPendingDeleteApproval) {
 			actionIDs = append(actionIDs, actionID)
 		}
 	}
 
-	if action == "APPROVE" {
+	if action == constants.AuditActionApprove {
 		for _, folioID := range folioIDs {
 			if !foliosWithAudit[folioID] {
 				_, err = tx.Exec(ctx, `
 					INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
-					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
-				`, folioID, userEmail, constants.ErrAutoApprovedEnrichedEntity)
+					VALUES ($1, $4, $5, $2, now(), $2, now(), $3)
+				`, folioID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved)
 				if err != nil {
 					return nil, err
 				}
@@ -719,9 +719,9 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 	}
 
 	if len(actionIDs) > 0 {
-		status := "APPROVED"
-		if action == "REJECT" {
-			status = "REJECTED"
+		status := constants.StatusApproved
+		if action == constants.AuditActionReject {
+			status = constants.StatusRejected
 		}
 
 		_, _ = tx.Exec(ctx, `

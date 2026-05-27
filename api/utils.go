@@ -23,13 +23,13 @@ type ActionAuditInfo struct {
 func GetAuditInfo(actionType string, requestedBy *string, requestedAt *time.Time) ActionAuditInfo {
 	info := ActionAuditInfo{}
 	switch actionType {
-	case "CREATE":
+	case constants.AuditActionCreate:
 		info.CreatedBy = getPtrString(requestedBy)
 		info.CreatedAt = getPtrTime(requestedAt)
-	case "EDIT":
+	case constants.AuditActionEdit:
 		info.EditedBy = getPtrString(requestedBy)
 		info.EditedAt = getPtrTime(requestedAt)
-	case "DELETE":
+	case constants.AuditActionDelete:
 		info.DeletedBy = getPtrString(requestedBy)
 		info.DeletedAt = getPtrTime(requestedAt)
 	}

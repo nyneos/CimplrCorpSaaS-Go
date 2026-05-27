@@ -2666,7 +2666,7 @@ RETURNING bank_statement_id
 			       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
 				       bankstatementid, actiontype, processing_status, requested_by, requested_at
 			       ) VALUES ($1, $2, $3, $4, $5)
-		       `, bankStatementID, "CREATE", "PENDING_APPROVAL", requestedBy, time.Now())
+		       `, bankStatementID, "CREATE", constants.StatusPendingApproval, requestedBy, time.Now())
 	if err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf(constants.ErrFailedToInsertAuditAction, err)

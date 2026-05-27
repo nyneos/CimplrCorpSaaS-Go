@@ -271,7 +271,7 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, pid).Scan(&latestActionType, &latestStatus)
-			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, "delete request already pending for proposal: "+pid)
 				return
 			}
@@ -345,7 +345,7 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			foundProposals[pid] = true
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved {
 				cannotReject = append(cannotReject, pid)
 			} else {
 				actionIDs = append(actionIDs, aid)
@@ -455,7 +455,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 			foundProposals[pid] = true
 			actionTypeByProposal[pid] = atype
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved {
 				cannotApprove = append(cannotApprove, pid)
 			} else {
 				actionIDs = append(actionIDs, aid)

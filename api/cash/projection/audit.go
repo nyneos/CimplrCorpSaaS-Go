@@ -170,9 +170,9 @@ func projectionDecisionAction(action, status string, checkerAt interface{}) stri
 	}
 
 	switch strings.ToUpper(strings.TrimSpace(status)) {
-	case "APPROVED":
+	case constants.StatusApproved:
 		return "APPROVE"
-	case "REJECTED":
+	case constants.StatusRejected:
 		return "REJECT"
 	default:
 		return ""

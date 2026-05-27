@@ -1240,8 +1240,8 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"template_id":        req.TemplateID,
 			"audit_id":           newAuditID,
 			"version_label":      newVersion,
-			"action_type":        "EDIT",
-			"status":             "PENDING_EDIT_APPROVAL",
+			"action_type":        constants.AuditActionEdit,
+			"status":             constants.StatusPendingEditApproval,
 			"requested_by":       editor,
 			"old_recipients":     string(oldRecipientsJSON),
 			"recipients_applied": recipientsApplied,
@@ -1597,7 +1597,7 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// ── Apply recipient_strategy on EDIT approval ────────────────────────
 			// The strategy was embedded in change_note with a sentinel prefix during
 			// EditTemplateSingle. Extract it here and sync template_recipient.
-			if t.ActionType == "EDIT" && strings.HasPrefix(t.ChangeNote, approvalStrategyPrefix) {
+			if t.ActionType == constants.AuditActionEdit && strings.HasPrefix(t.ChangeNote, approvalStrategyPrefix) {
 				// Strip the sentinel prefix; human note (if any) follows after a newline
 				rawAfterPrefix := strings.TrimPrefix(t.ChangeNote, approvalStrategyPrefix)
 				strategyRaw := rawAfterPrefix
@@ -1759,7 +1759,7 @@ func BulkRejectTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		for _, id := range req.AuditIDs {
 			results = append(results, map[string]interface{}{
-				"audit_id": id, "success": true, "status": "REJECTED",
+				"audit_id": id, "success": true, "status": constants.StatusRejected,
 			})
 		}
 		// api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -1864,7 +1864,7 @@ func DeleteTemplateVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"audit_id":      v,
 				"template_id":   v,
 				"version_label": v,
-				"status":        "PENDING_DELETE_APPROVAL",
+				"status":        constants.StatusPendingDeleteApproval,
 				"requested_by":  userEmail,
 			})
 		}

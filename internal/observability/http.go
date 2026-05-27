@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"CimplrCorpSaas/internal/logger"
 	"github.com/google/uuid"
 )
 
@@ -92,7 +92,7 @@ func WrapHTTP(service string, next http.Handler) http.Handler {
 
 		duration := time.Since(start)
 		recordMetric(service, r.Method, r.URL.Path, rw.statusCode, rw.bytes, duration)
-		log.Printf(
+		logger.LogInfo(
 			"[HTTP] service=%s method=%s path=%s status=%d duration_ms=%d bytes=%d request_id=%s trace_id=%s remote=%s",
 			service,
 			r.Method,

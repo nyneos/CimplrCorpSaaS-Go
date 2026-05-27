@@ -457,7 +457,7 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"calendar_id":       req.CalendarID,
 			"rows":              len(req.Rows),
-			constants.KeyStatus: "PENDING_EDIT_APPROVAL",
+			constants.KeyStatus: constants.StatusPendingEditApproval,
 		})
 	}
 }
@@ -1570,17 +1570,17 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows.Scan(&aid, &cid, &atype, &pstatus)
 
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
-			if ps == "APPROVED" {
+			if ps == constants.StatusApproved {
 				continue
 			}
 
-			if ps == "PENDING_DELETE_APPROVAL" {
+			if ps == constants.StatusPendingDeleteApproval {
 				toDeleteActionIDs = append(toDeleteActionIDs, aid)
 				deleteMasterIDs = append(deleteMasterIDs, cid)
 				continue
 			}
 
-			if ps == "PENDING_APPROVAL" || ps == "PENDING_EDIT_APPROVAL" {
+			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
 			}
 		}
@@ -1691,7 +1691,7 @@ func BulkRejectCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows.Scan(&aid, &cid, &ps)
 
 			found[cid] = true
-			if strings.ToUpper(ps) == "APPROVED" {
+			if strings.ToUpper(ps) == constants.StatusApproved {
 				cannotReject = append(cannotReject, cid)
 			} else {
 				actionIDs = append(actionIDs, aid)
@@ -2126,7 +2126,7 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"holiday_id":        req.HolidayID,
 			"calendar_id":       calendarID,
 			"requested_by":      userEmail,
-			constants.KeyStatus: "PENDING_EDIT_APPROVAL",
+			constants.KeyStatus: constants.StatusPendingEditApproval,
 		})
 	}
 }
@@ -2314,7 +2314,7 @@ func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"calendar_id": req.CalendarID,
 			"result":      holidayResults,
-			"audit":       "PENDING_EDIT_APPROVAL",
+			"audit":       constants.StatusPendingEditApproval,
 		})
 	}
 }

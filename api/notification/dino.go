@@ -47,6 +47,10 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 		}
 	}
 
+	mux.HandleFunc("/notification/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("Notification Service is healthy"))
+	})
+
 	// Register routes for event catalog
 	mux.Handle("/notification/event/create", middlewares.PreValidationMiddleware(pool)(catalog.CreateEventSingle(pool)))
 	mux.Handle("/notification/event/bulk-create", middlewares.PreValidationMiddleware(pool)(catalog.CreateEvent(pool)))

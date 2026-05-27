@@ -595,7 +595,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		if currentStatus != "ACTIVE" && currentStatus != "MATURED" {
+		if currentStatus != constants.StatusActive && currentStatus != "MATURED" {
 			api.RespondWithError(w, http.StatusBadRequest,
 				fmt.Sprintf("FD is in status %s — closure requires ACTIVE or MATURED", currentStatus))
 			return
@@ -830,10 +830,10 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			"partial_withdrawal": req.PartialWithdrawal, "new_maturity_date": req.NewMaturityDate,
 			"closure_reason": req.ClosureReason, "closure_notes": req.ClosureNotes,
 			"variance_remark": req.VarianceRemark, "proceed_with_exception": req.ProceedWithException,
-			"closure_status": "PENDING_APPROVAL",
+			"closure_status": constants.StatusPendingApproval,
 		}
 		initialSnapJSON, _ := json.Marshal(initialSnapshot)
-		_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: closureRequestID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "CREATE", ProcessingStatus: "PENDING_APPROVAL", Reason: "Closure initiated", Snapshot: initialSnapJSON, OldValues: initialSnapshot})
+		_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: closureRequestID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "CREATE", ProcessingStatus: constants.StatusPendingApproval, Reason: "Closure initiated", Snapshot: initialSnapJSON, OldValues: initialSnapshot})
 		_, _ = tx.Exec(ctx, `UPDATE investment.fd_master SET closure_request_id=$1, updated_at=NOW() WHERE fd_id=$2`, closureRequestID, req.FDID)
 
 		instID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
@@ -904,7 +904,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		api.LogInfo("[FDClosure] InitiateClosure: closureID=%s fd=%s type=%s by=%s", closureRequestID, req.FDID, req.ClosureType, userEmail)
 		api.RespondWithPayload(w, true, "Closure request created and submitted for approval", map[string]interface{}{
 			"closure_request_id": closureRequestID, "fd_id": req.FDID,
-			"closure_type": req.ClosureType, "closure_status": "PENDING_APPROVAL",
+			"closure_type": req.ClosureType, "closure_status": constants.StatusPendingApproval,
 			"principal_amount": principalAmount, "accrued_interest": roundToFour(accruedInterest),
 			"tds_deducted": roundToFour(tdsDeducted), "penalty_amount": roundToFour(penaltyAmount),
 			"net_payout_amount": netPayout, "approval_instance_id": instID,
@@ -1052,7 +1052,7 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		if oldStatus != "PENDING_APPROVAL" {
+		if oldStatus != constants.StatusPendingApproval {
 			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot update closure in status %s", oldStatus))
 			return
 		}
@@ -1397,7 +1397,7 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		snapshotJSON, _ := json.Marshal(oldRow)
 		// Pass all old values to audit as individual columns.
 		// Use PENDING_EDIT_APPROVAL so the audit trail shows this was an edit on a pending record.
-		_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: req.ClosureRequestID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "EDIT", ProcessingStatus: "PENDING_EDIT_APPROVAL", Reason: req.UpdateReason, Snapshot: snapshotJSON, OldValues: oldRow})
+		_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: req.ClosureRequestID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "EDIT", ProcessingStatus: constants.StatusPendingEditApproval, Reason: req.UpdateReason, Snapshot: snapshotJSON, OldValues: oldRow})
 
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
@@ -1983,9 +1983,9 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY created_at DESC, audit_id DESC
 				LIMIT 1`, crID,
 			).Scan(&latestActionType, &latestProcessingStatus)
-			isDeleteApproval := latestActionType == "DELETE" && latestProcessingStatus == "PENDING_DELETE_APPROVAL"
+			isDeleteApproval := latestActionType == "DELETE" && latestProcessingStatus == constants.StatusPendingDeleteApproval
 
-			if !isDeleteApproval && closureStatus != "PENDING_APPROVAL" {
+			if !isDeleteApproval && closureStatus != constants.StatusPendingApproval {
 				errors = append(errors, crID+": status is "+closureStatus)
 				continue
 			}
@@ -2003,7 +2003,7 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				engineActed++ // action recorded; count regardless of whether this is the final eye
 				var instTransactionType string
 				_ = pool.QueryRow(ctx, `SELECT transaction_type FROM uam.approval_instance WHERE instance_id=$1`, actionRes.InstanceID).Scan(&instTransactionType)
-				if actionRes.InstanceStatus == "APPROVED" && instTransactionType != "FD_CLOSURE_DELETE" && !isDeleteApproval {
+				if actionRes.InstanceStatus == constants.StatusApproved && instTransactionType != "FD_CLOSURE_DELETE" && !isDeleteApproval {
 					if postErr := postClosureJournals(ctx, PostClosureJournalsParams{Pool: pool, ClosureRequestID: crID, FDID: fdID, ClosureType: closureType, EntityID: entityID, EntityName: entityName, PrincipalAmt: principalAmt, AccruedInterest: accruedInt, TDSAmt: tdsAmt, PenaltyAmt: penaltyAmt, NetPayout: netPayout, ApprovedBy: req.UserID, ApprovedByEmail: userEmail}); postErr != nil {
 						api.LogError("[FDClosure] postClosureJournals failed for %s: %v", crID, postErr)
 						errors = append(errors, crID+": journal posting failed: "+postErr.Error())
@@ -2062,7 +2062,7 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				// to avoid double-posting if another goroutine or request raced us.
 				var currentStatusCheck string
 				_ = pool.QueryRow(ctx, `SELECT closure_status FROM investment.fd_closure_request WHERE closure_request_id=$1 AND is_deleted=false FOR UPDATE`, crID).Scan(&currentStatusCheck)
-				if currentStatusCheck != "PENDING_APPROVAL" {
+				if currentStatusCheck != constants.StatusPendingApproval {
 					errors = append(errors, crID+": status changed to "+currentStatusCheck+" — skipped")
 					continue
 				}
@@ -2134,9 +2134,9 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY created_at DESC, audit_id DESC
 				LIMIT 1`, crID,
 			).Scan(&latestActionType, &latestProcessingStatus)
-			isDeleteApproval := latestActionType == "DELETE" && latestProcessingStatus == "PENDING_DELETE_APPROVAL"
+			isDeleteApproval := latestActionType == "DELETE" && latestProcessingStatus == constants.StatusPendingDeleteApproval
 
-			if !isDeleteApproval && curStatus != "PENDING_APPROVAL" {
+			if !isDeleteApproval && curStatus != constants.StatusPendingApproval {
 				errors = append(errors, crID+": status is "+curStatus)
 				continue
 			}
@@ -2174,8 +2174,8 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				_, _ = tx.Exec(ctx, `UPDATE investment.fd_closure_request SET closure_status='REJECTED',rejected_at=NOW(),rejected_by=$1,rejection_reason=$2,updated_by=$1,updated_at=NOW() WHERE closure_request_id=$3`, userEmail, req.Comment, crID)
 				_, _ = tx.Exec(ctx, `UPDATE investment.fd_master SET closure_request_id=NULL,updated_at=NOW() WHERE closure_request_id=$1`, crID)
 
-				snapshotJSON, _ := json.Marshal(map[string]interface{}{"closure_status": "PENDING_APPROVAL", "rejected_by": userEmail, "rejection_reason": req.Comment})
-				_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: crID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "EDIT", ProcessingStatus: "REJECTED", Reason: req.Comment, Snapshot: snapshotJSON, OldValues: map[string]interface{}{"closure_status": "PENDING_APPROVAL"}})
+				snapshotJSON, _ := json.Marshal(map[string]interface{}{"closure_status": constants.StatusPendingApproval, "rejected_by": userEmail, "rejection_reason": req.Comment})
+				_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: crID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "EDIT", ProcessingStatus: constants.StatusRejected, Reason: req.Comment, Snapshot: snapshotJSON, OldValues: map[string]interface{}{"closure_status": constants.StatusPendingApproval}})
 
 				if cerr := tx.Commit(ctx); cerr != nil {
 					_ = tx.Rollback(ctx)
@@ -2265,7 +2265,7 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		if curStatus != "PENDING_APPROVAL" && curStatus != "REJECTED" {
+		if curStatus != constants.StatusPendingApproval && curStatus != constants.StatusRejected {
 			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot delete closure request in status %s", curStatus))
 			return
 		}
@@ -2281,7 +2281,7 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&latestActionType, &latestProcessingStatus)
 		if latestErr == nil &&
 			latestActionType == "DELETE" &&
-			latestProcessingStatus == "PENDING_DELETE_APPROVAL" &&
+			latestProcessingStatus == constants.StatusPendingDeleteApproval &&
 			strings.TrimSpace(approvalInstanceID) != "" {
 			api.RespondWithError(w, http.StatusBadRequest, "Delete approval is already pending for this closure request")
 			return
@@ -2324,7 +2324,7 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			PerformedBy:      req.UserID,
 			PerformedByEmail: userEmail,
 			ActionType:       "DELETE",
-			ProcessingStatus: "PENDING_DELETE_APPROVAL",
+			ProcessingStatus: constants.StatusPendingDeleteApproval,
 			Reason:           req.Reason,
 			Snapshot:         snapshotJSON,
 			OldValues:        map[string]interface{}{"closure_status": curStatus},
@@ -2348,7 +2348,7 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "Closure delete submitted for approval", map[string]interface{}{
 			"closure_request_id": req.ClosureRequestID,
 			"requested_by":       userEmail,
-			"processing_status":  "PENDING_DELETE_APPROVAL",
+			"processing_status":  constants.StatusPendingDeleteApproval,
 		})
 	}
 }
@@ -2966,7 +2966,7 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		"accounting_period": accountingPeriod, "total_debit": totalDebitAmt, "total_credit": totalCreditAmt, "approved_by_email": approvedByEmail,
 	}
 	snapshotJSON, _ := json.Marshal(postSnap)
-	if auditErr := insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: closureRequestID, PerformedBy: approvedBy, PerformedByEmail: approvedByEmail, ActionType: "EDIT", ProcessingStatus: "APPROVED", Reason: "Journals posted on approval", Snapshot: snapshotJSON, OldValues: postSnap}); auditErr != nil {
+	if auditErr := insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: closureRequestID, PerformedBy: approvedBy, PerformedByEmail: approvedByEmail, ActionType: "EDIT", ProcessingStatus: constants.StatusApproved, Reason: "Journals posted on approval", Snapshot: snapshotJSON, OldValues: postSnap}); auditErr != nil {
 		return fmt.Errorf("postClosureJournals audit: %w", auditErr)
 	}
 
@@ -3352,7 +3352,7 @@ func init() {
 		t := txType
 		approvalengine.RegisterPostFinalizeHook(t, func(ctx context.Context, pool *pgxpool.Pool, recordID, transactionType, finalStatus, actorEmail, comment string) {
 			if transactionType == "FD_CLOSURE_DELETE" {
-				if finalStatus == "APPROVED" {
+				if finalStatus == constants.StatusApproved {
 					_, _ = pool.Exec(ctx,
 						`UPDATE investment.fd_closure_request
 						 SET is_deleted=true,
@@ -3372,7 +3372,7 @@ func init() {
 				return
 			}
 
-			if finalStatus == "APPROVED" {
+			if finalStatus == constants.StatusApproved {
 				// Load closure data and post journals.
 				var fdID, closureType, entityID, entityName string
 				var principalAmt, accruedInterest, tdsAmt, penaltyAmt, netPayout float64
@@ -3400,7 +3400,7 @@ func init() {
 				if postErr := postClosureJournals(ctx, PostClosureJournalsParams{Pool: pool, ClosureRequestID: recordID, FDID: fdID, ClosureType: closureType, EntityID: entityID, EntityName: entityName, PrincipalAmt: principalAmt, AccruedInterest: accruedInterest, TDSAmt: tdsAmt, PenaltyAmt: penaltyAmt, NetPayout: netPayout, ApprovedBy: approvedBy, ApprovedByEmail: actorEmail}); postErr != nil {
 					api.LogError("[FDClosure] postFinalizeHook journal posting failed for %s: %v", recordID, postErr)
 				}
-			} else if finalStatus == "REJECTED" {
+			} else if finalStatus == constants.StatusRejected {
 				_, _ = pool.Exec(ctx,
 					`UPDATE investment.fd_closure_request
 					 SET closure_status='REJECTED', rejected_at=NOW(),

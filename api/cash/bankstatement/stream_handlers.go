@@ -1613,7 +1613,7 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			INSERT INTO cimplrcorpsaas.auditactionbankstatement (
 				bankstatementid, actiontype, processing_status, requested_by, requested_at
 			) VALUES ($1, $2, $3, $4, $5)
-		`, bankStatementID, "CREATE", "PENDING_APPROVAL", requestedBy, time.Now())
+		`, bankStatementID, "CREATE", constants.StatusPendingApproval, requestedBy, time.Now())
 		if err != nil {
 			tx.Rollback()
 			respondWithError(w, err, "Failed to record audit action", http.StatusInternalServerError)
@@ -1929,7 +1929,7 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 				TXNS:           payload.Clean.Transactions,
 				KPICats:        kpiCats,
 				CategoryRules:  rules,
-				Status:         "PENDING_APPROVAL",
+				Status:         constants.StatusPendingApproval,
 			})
 			go notif.TriggerNotification(
 				context.Background(), pool,

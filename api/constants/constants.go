@@ -297,18 +297,57 @@ const (
 	StatusCodeDeleteApproval   = "Delete-Approval"
 )
 
+// General approval workflow status constants (uppercase, used across all modules).
+// Use these for processing_status, approval_status, and similar workflow state fields.
+const (
+	StatusApproved              = "APPROVED"
+	StatusRejected              = "REJECTED"
+	StatusPending               = "PENDING"
+	StatusPendingApproval       = "PENDING_APPROVAL"
+	StatusPendingEditApproval   = "PENDING_EDIT_APPROVAL"
+	StatusPendingDeleteApproval = "PENDING_DELETE_APPROVAL"
+	StatusActive                = "ACTIVE"
+	StatusInactive              = "INACTIVE"
+)
+
+// User account status values (title-case, stored in the users.status column).
+const (
+	UserStatusApproved = "Approved"
+	UserStatusPending  = "pending"
+	UserStatusDisabled = "Disabled"
+)
+
+// Audit action type constants — used in RecordAction / RecordDecision calls.
+const (
+	AuditActionCreate  = "CREATE"
+	AuditActionEdit    = "EDIT"
+	AuditActionDelete  = "DELETE"
+	AuditActionConfirm = "CONFIRM"
+	AuditActionApprove = "APPROVE"
+	AuditActionReject  = "REJECT"
+)
+
 // Forward booking processing_status values
 const (
-	FwdProcessingStatusPending        = "pending"
-	FwdProcessingStatusApproved       = "Approved"
-	FwdProcessingStatusRejected       = "Rejected"
-	FwdProcessingStatusDeleteApproval = "Delete-approval"
+	FwdProcessingStatusPending               = "pending"
+	FwdProcessingStatusApproved              = "Approved"
+	FwdProcessingStatusRejected              = "Rejected"
+	FwdProcessingStatusDeleteApproval        = "Delete-approval"
+	FwdProcessingStatusPendingDeleteApproval = StatusPendingDeleteApproval
+	FwdProcessingStatusPendingEditApproval   = StatusPendingEditApproval
 )
 
 // Forward booking status values
 const (
 	FwdStatusConfirmed          = "Confirmed"
 	FwdStatusPendingConfirmation = "Pending Confirmation"
+)
+
+// Forward booking audit action types
+const (
+	FwdActionTypeEdit    = AuditActionEdit
+	FwdActionTypeDelete  = AuditActionDelete
+	FwdActionTypeConfirm = AuditActionConfirm
 )
 
 const (

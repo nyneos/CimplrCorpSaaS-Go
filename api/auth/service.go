@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/dashboard"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/serviceiface"
@@ -117,8 +118,8 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	logger.LogInfo("[AUTH DEBUG] users row loaded user_id=%s email=%q status_valid=%v status=%q pass_present=%v", dbUserID, dbEmail, dbStatus.Valid, dbStatus.String, dbPassword.Valid && dbPassword.String != "")
 
 	// Reject disabled/non-approved accounts before any password check
-	if dbStatus.Valid && !strings.EqualFold(dbStatus.String, "Approved") &&
-		!strings.EqualFold(dbStatus.String, "pending") {
+	if dbStatus.Valid && !strings.EqualFold(dbStatus.String, constants.UserStatusApproved) &&
+		!strings.EqualFold(dbStatus.String, constants.UserStatusPending) {
 		logger.LogInfo("[AUTH DEBUG] login blocked: account status=%q user_id=%s", dbStatus.String, dbUserID)
 		LogSecurityEvent(a.db, dbUserID, "login_failed", "account not active: "+dbStatus.String, clientIP)
 		return nil, false, errors.New("Account is not active")

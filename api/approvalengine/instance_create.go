@@ -2,6 +2,7 @@ package approvalengine
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"strings"
@@ -142,13 +143,13 @@ func (d PendingInstanceDiagnosis) IsStale() bool {
 	if !d.HasPending {
 		return false
 	}
-	if d.MatrixStatus != "APPROVED" || d.MatrixAction == "DELETE" {
+	if d.MatrixStatus != constants.StatusApproved || d.MatrixAction == "DELETE" {
 		return true
 	}
 	if d.ActiveEyeID == "" {
 		return true
 	}
-	if d.ActiveEyeStatus != "APPROVED" || d.ActiveEyeAction == "DELETE" {
+	if d.ActiveEyeStatus != constants.StatusApproved || d.ActiveEyeAction == "DELETE" {
 		return true
 	}
 	if d.ApprovedApproverCount == 0 {
@@ -198,7 +199,7 @@ func DiagnosePendingInstance(ctx context.Context, pool *pgxpool.Pool, moduleCode
 		return d, nil
 	}
 	d.HasPending = true
-	if d.MatrixStatus != "APPROVED" || d.MatrixAction == "DELETE" {
+	if d.MatrixStatus != constants.StatusApproved || d.MatrixAction == "DELETE" {
 		d.Reason = fmt.Sprintf("pending approval instance %s uses matrix %s whose latest status is %s/%s; matrix is not approved-active", d.InstanceID, d.MatrixID, d.MatrixAction, d.MatrixStatus)
 		return d, nil
 	}
@@ -206,7 +207,7 @@ func DiagnosePendingInstance(ctx context.Context, pool *pgxpool.Pool, moduleCode
 		d.Reason = fmt.Sprintf("pending approval instance %s has no active eye", d.InstanceID)
 		return d, nil
 	}
-	if d.ActiveEyeStatus != "APPROVED" || d.ActiveEyeAction == "DELETE" {
+	if d.ActiveEyeStatus != constants.StatusApproved || d.ActiveEyeAction == "DELETE" {
 		d.Reason = fmt.Sprintf("pending approval instance %s uses active eye %s whose latest status is %s/%s; eye is not approved-active", d.InstanceID, d.ActiveEyeID, d.ActiveEyeAction, d.ActiveEyeStatus)
 		return d, nil
 	}
@@ -427,7 +428,7 @@ func PendingInstanceUsesUnapprovedMatrix(ctx context.Context, pool *pgxpool.Pool
 	if !d.HasPending {
 		return false, ""
 	}
-	if d.MatrixStatus != "APPROVED" || d.MatrixAction == "DELETE" {
+	if d.MatrixStatus != constants.StatusApproved || d.MatrixAction == "DELETE" {
 		return true, d.Reason
 	}
 	return false, ""

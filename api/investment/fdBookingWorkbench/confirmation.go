@@ -529,7 +529,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"confirmation_id":     confirmationID,
 			"booking_id":          req.BookingID,
-			"confirmation_status": "PENDING_APPROVAL",
+			"confirmation_status": constants.StatusPendingApproval,
 			"has_variance":        false,
 			"captured_by":         userEmail,
 		})
@@ -730,7 +730,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = pgxPool.QueryRow(ctx,
 				`SELECT confirmation_status FROM investment.fd_confirmation WHERE confirmation_id=$1`,
 				confirmationID).Scan(&currentConfStatus)
-			if currentConfStatus == "APPROVED" {
+			if currentConfStatus == constants.StatusApproved {
 				api.RespondWithError(w, http.StatusBadRequest,
 					"Cannot resolve variance on an APPROVED confirmation — the FD is live and immutable")
 				return
@@ -841,7 +841,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		confStatus := "VARIANCE_PENDING"
 		if !hasVariance {
-			confStatus = "PENDING_APPROVAL"
+			confStatus = constants.StatusPendingApproval
 		}
 
 		// Build variance_details JSON from items
@@ -1199,7 +1199,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// ── Final-state guard — confirmed/live records are immutable here ─────
-		if currentStatus == "CONFIRMED" || currentStatus == "APPROVED" {
+		if currentStatus == "CONFIRMED" || currentStatus == constants.StatusApproved {
 			api.RespondWithError(w, http.StatusBadRequest,
 				"Cannot edit a "+currentStatus+" confirmation — create a new change request or reopen through the allowed workflow")
 			return
@@ -1417,14 +1417,14 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if hasVariance {
 			// Any edit that re-introduces variance re-opens the variance workflow
 			newConfStatus = "VARIANCE_PENDING"
-		} else if currentStatus == "VARIANCE_PENDING" || currentStatus == "REJECTED" {
+		} else if currentStatus == "VARIANCE_PENDING" || currentStatus == constants.StatusRejected {
 			// No more variance and it was previously dirty — promote to PENDING_APPROVAL
-			newConfStatus = "PENDING_APPROVAL"
+			newConfStatus = constants.StatusPendingApproval
 		}
 		// VARIANCE_ACCEPTED with no new variance: keep VARIANCE_ACCEPTED (ready for /approve)
 		// If caller explicitly overrides confirmation_status, allow it (unless APPROVED)
 		if sv, ok := req.Fields["confirmation_status"]; ok {
-			if svStr, ok2 := sv.(string); ok2 && svStr != "APPROVED" {
+			if svStr, ok2 := sv.(string); ok2 && svStr != constants.StatusApproved {
 				newConfStatus = svStr
 			}
 		}
@@ -1636,7 +1636,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Fetch confirmation failed: "+err.Error())
 			return
 		}
-		if currentStatus == "APPROVED" {
+		if currentStatus == constants.StatusApproved {
 			api.RespondWithError(w, http.StatusBadRequest,
 				"Cannot accept variance exception on an APPROVED confirmation — the FD is live and immutable")
 			return
@@ -1652,8 +1652,8 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			return
 		}
-		if currentStatus != "VARIANCE_PENDING" && currentStatus != "REJECTED" &&
-			currentStatus != "PENDING_APPROVAL" && currentStatus != "PENDING_EDIT_APPROVAL" &&
+		if currentStatus != "VARIANCE_PENDING" && currentStatus != constants.StatusRejected &&
+			currentStatus != constants.StatusPendingApproval && currentStatus != constants.StatusPendingEditApproval &&
 			currentStatus != "CONFIRMED" {
 			api.RespondWithError(w, http.StatusBadRequest,
 				fmt.Sprintf("variance-exception not allowed on confirmations with status %s — use /edit to change values or /reject to reject", currentStatus))
@@ -1817,7 +1817,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Scan(&confStatus)
 
 			// ── APPROVED guard — already approved, skip silently ─────────────────
-			if confStatus == "APPROVED" {
+			if confStatus == constants.StatusApproved {
 				errors = append(errors, cID+": already APPROVED — skipped")
 				continue
 			}
@@ -1848,7 +1848,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if actionRes.Acted {
 				engineActed++
 				// If the instance is now fully APPROVED, flip statuses.
-				if actionRes.InstanceStatus == "APPROVED" {
+				if actionRes.InstanceStatus == constants.StatusApproved {
 					if _, execErr := pgxPool.Exec(ctx,
 						`UPDATE investment.fd_confirmation
 						 SET confirmation_status = 'CONFIRMED'
@@ -2039,7 +2039,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = pgxPool.QueryRow(ctx,
 				`SELECT confirmation_status FROM investment.fd_confirmation WHERE confirmation_id=$1`, cID).
 				Scan(&rejectConfStatus)
-			if rejectConfStatus == "APPROVED" {
+			if rejectConfStatus == constants.StatusApproved {
 				errors = append(errors, cID+": already APPROVED — cannot reject")
 				continue
 			}

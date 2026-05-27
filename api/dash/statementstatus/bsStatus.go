@@ -17,9 +17,9 @@ import (
 
 // UploadStatus values
 const (
-	UploadStatusApproved    = "APPROVED"
+	UploadStatusApproved    = constants.StatusApproved
 	UploadStatusPending     = "PENDING"
-	UploadStatusRejected    = "REJECTED"
+	UploadStatusRejected    = constants.StatusRejected
 	UploadStatusNotUploaded = "NOT_UPLOADED"
 )
 

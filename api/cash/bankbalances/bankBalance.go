@@ -550,7 +550,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			found[balanceID] = true
-			if procStatus != "PENDING_APPROVAL" && procStatus != "PENDING_EDIT_APPROVAL" && procStatus != "PENDING_DELETE_APPROVAL" {
+			if procStatus != constants.StatusPendingApproval && procStatus != constants.StatusPendingEditApproval && procStatus != constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, "cannot approve non-pending balance: "+balanceID)
 				return
 			}
@@ -702,7 +702,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			found[balanceID] = true
-			if procStatus != "PENDING_APPROVAL" && procStatus != "PENDING_EDIT_APPROVAL" && procStatus != "PENDING_DELETE_APPROVAL" {
+			if procStatus != constants.StatusPendingApproval && procStatus != constants.StatusPendingEditApproval && procStatus != constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, "cannot reject non-pending balance: "+balanceID)
 				return
 			}
@@ -803,7 +803,7 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
-			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, fmt.Sprintf("delete request already pending for balance_id: %s", id))
 				return
 			}

@@ -385,7 +385,7 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		cleanupUploadedObject = false
 
 		go func() {
-			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, []string{confirmID}, "CREATE", userEmail)
+			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, []string{confirmID}, constants.AuditActionCreate, userEmail)
 			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/create", confirmID, payload.ToMap())
 		}()
 
@@ -554,7 +554,7 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(createdConfirmIDs) > 0 {
 			go func() {
-				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, createdConfirmIDs, "CREATE", userEmail)
+				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, createdConfirmIDs, constants.AuditActionCreate, userEmail)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/create-bulk", createdConfirmIDs[0], payload.ToMap())
 			}()
 		}
@@ -936,15 +936,15 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 				continue
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
-			if ps == "APPROVED" {
+			if ps == constants.StatusApproved {
 				continue
 			}
-			if ps == "PENDING_DELETE_APPROVAL" {
+			if ps == constants.StatusPendingDeleteApproval {
 				toDeleteActionIDs = append(toDeleteActionIDs, aid)
 				deleteMasterIDs = append(deleteMasterIDs, cid)
 				continue
 			}
-			if ps == "PENDING_APPROVAL" || ps == "PENDING_EDIT_APPROVAL" {
+			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
 				toApproveConfirmIDs = append(toApproveConfirmIDs, cid)
 			}
@@ -1147,13 +1147,13 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 
 		if len(toApproveConfirmIDs) > 0 {
 			go func() {
-				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, toApproveConfirmIDs, "APPROVE", checkerBy)
+				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, toApproveConfirmIDs, constants.AuditActionApprove, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/approve", toApproveConfirmIDs[0], payload.ToMap())
 			}()
 		}
 		if len(deleteMasterIDs) > 0 {
 			go func() {
-				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, deleteMasterIDs, "DELETE", checkerBy)
+				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, deleteMasterIDs, constants.AuditActionDelete, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/approve", deleteMasterIDs[0], payload.ToMap())
 			}()
 		}
@@ -1213,7 +1213,7 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 				continue
 			}
 			found[cid] = true
-			if strings.ToUpper(strings.TrimSpace(ps)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusApproved {
 				cannotReject = append(cannotReject, cid)
 			} else {
 				actionIDs = append(actionIDs, aid)
@@ -1254,7 +1254,7 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 
 		if len(req.RedemptionConfirmIDs) > 0 {
 			go func() {
-				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, req.RedemptionConfirmIDs, "REJECT", checkerBy)
+				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, req.RedemptionConfirmIDs, constants.AuditActionReject, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/reject", req.RedemptionConfirmIDs[0], payload.ToMap())
 			}()
 		}

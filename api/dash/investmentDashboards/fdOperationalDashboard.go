@@ -520,11 +520,11 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			// Friendly status mapping (UI uses "Completed"/"Pending Approval"/"Failed").
 			friendlyStatus := runStatus
 			switch runStatus {
-			case "POSTED", "APPROVED":
+			case "POSTED", constants.StatusApproved:
 				friendlyStatus = "Completed"
-			case "PENDING_APPROVAL", "COMPUTED":
+			case constants.StatusPendingApproval, "COMPUTED":
 				friendlyStatus = "Pending Approval"
-			case "REJECTED", "FAILED":
+			case constants.StatusRejected, "FAILED":
 				friendlyStatus = "Failed"
 			}
 			return map[string]interface{}{
@@ -745,9 +745,9 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				rr.TDSDeducted = fdRound(rr.TDSDeducted, 2)
 				rr.NetAmount = fdRound(rr.NetAmount, 2)
 				switch rr.ProcessingStatus {
-				case "PENDING_APPROVAL":
+				case constants.StatusPendingApproval:
 					pendingCount++
-				case "APPROVED":
+				case constants.StatusApproved:
 					approvedCount++
 				default:
 					if rr.ReceiptStatus == "CAPTURED" {
@@ -854,9 +854,9 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				tr.TDSActual = fdRound(tr.TDSActual, 2)
 				tr.TDSExpected = fdRound(tr.TDSExpected, 2)
 				switch tr.ProcessingStatus {
-				case "PENDING_APPROVAL":
+				case constants.StatusPendingApproval:
 					pendingCount++
-				case "APPROVED":
+				case constants.StatusApproved:
 					approvedCount++
 				}
 				out = append(out, tr)

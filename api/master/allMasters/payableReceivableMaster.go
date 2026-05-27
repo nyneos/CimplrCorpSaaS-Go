@@ -1129,7 +1129,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				return
 			}
 			foundTypes[tid] = true
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved {
 				cannotReject = append(cannotReject, tid)
 			}
 			actionIDs = append(actionIDs, aid)
@@ -1228,7 +1228,7 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			foundTypes[tid] = true
 			actionIDs = append(actionIDs, aid)
 			actionTypeByType[tid] = atype
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved {
 				cannotApprove = append(cannotApprove, tid)
 			}
 		}

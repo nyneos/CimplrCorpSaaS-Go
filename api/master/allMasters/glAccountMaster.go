@@ -661,7 +661,7 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			glIDs = append(glIDs, id)
-			if isDeletedBool && strings.ToUpper(ifaceToString(procStatusI)) == "APPROVED" {
+			if isDeletedBool && strings.ToUpper(ifaceToString(procStatusI)) == constants.StatusApproved {
 				hideIds[id] = true
 			}
 		}

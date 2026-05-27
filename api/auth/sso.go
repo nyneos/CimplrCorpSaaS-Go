@@ -435,8 +435,8 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 		return nil, false, errors.New("internal error")
 	}
 
-	if dbStatus.Valid && !strings.EqualFold(dbStatus.String, "Approved") &&
-		!strings.EqualFold(dbStatus.String, "pending") {
+	if dbStatus.Valid && !strings.EqualFold(dbStatus.String, constants.UserStatusApproved) &&
+		!strings.EqualFold(dbStatus.String, constants.UserStatusPending) {
 		return nil, false, errors.New("Account is not active")
 	}
 
