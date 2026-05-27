@@ -425,7 +425,7 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 	var dbStatus sql.NullString
 
 	err := a.db.QueryRow(
-		`SELECT id, employee_name, email, status FROM users WHERE LOWER(email) = LOWER($1)`,
+		`SELECT id, employee_name, email, status FROM users WHERE LOWER(email) = LOWER($1) AND COALESCE(is_deleted, false) = false LIMIT 1`,
 		email,
 	).Scan(&dbUserID, &dbName, &dbEmail, &dbStatus)
 	if err != nil {

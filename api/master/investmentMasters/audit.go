@@ -760,7 +760,7 @@ func GetAMCAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req amcAuditReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {
@@ -859,7 +859,7 @@ func GetSchemeAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req schemeAuditHistReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {
@@ -941,7 +941,7 @@ func GetDPAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req dpAuditHistReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {
@@ -1018,7 +1018,7 @@ func GetFolioAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req folioAuditHistReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {
@@ -1105,7 +1105,7 @@ func GetDematAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req dematAuditHistReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {
@@ -1192,7 +1192,7 @@ func GetCalendarAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req calendarAuditHistReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if !validateMasterAuditSession(r.Context()) {
