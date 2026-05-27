@@ -816,7 +816,7 @@ func ctxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
 	if accountNumber == "" {
 		return false
 	}
-	v := ctx.Value("ApprovedBankAccounts")
+	v := ctx.Value(api.ApprovedBankAccountsKey)
 	if v == nil {
 		return true
 	}
@@ -843,7 +843,7 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		return false
 	}
 
-	v := ctx.Value("ApprovedBankAccounts")
+	v := ctx.Value(api.ApprovedBankAccountsKey)
 	if v == nil {
 		return true
 	}

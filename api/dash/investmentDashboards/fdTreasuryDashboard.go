@@ -659,7 +659,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					cr.SLAHours = 120
 				case "APPROVAL_PENDING":
 					cr.SLAHours = 72
-				case "APPROVED":
+				case constants.StatusApproved:
 					cr.SLAHours = 72
 				case "SENT_TO_BANK":
 					cr.SLAHours = 336
@@ -672,7 +672,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 				// Derive a clear confirmation lifecycle state.
 				switch {
-				case cr.FDStatus == "ACTIVE":
+				case cr.FDStatus == constants.StatusActive:
 					cr.ConfirmationState = "Activated"
 					cr.ConfirmationStage = 6
 				case cr.FDID != "":
@@ -682,7 +682,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					cr.ConfirmationState = "Sent to Bank — Awaiting Confirmation"
 					cr.ConfirmationStage = 4
 					sentToBank++
-				case cr.Status == "APPROVED":
+				case cr.Status == constants.StatusApproved:
 					cr.ConfirmationState = "Approved — Ready to Send"
 					cr.ConfirmationStage = 3
 				case cr.Status == "APPROVAL_PENDING":
@@ -1326,13 +1326,13 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					w.ProgressPct = int(float64(w.ApprovalsReceived) / float64(w.ApprovalsRequired) * 100)
 				}
 				switch w.InstanceStatus {
-				case "PENDING", "ACTIVE", "SUBMITTED":
+				case "PENDING", constants.StatusActive, "SUBMITTED":
 					pending++
 					w.StatusLabel = "In Progress"
-				case "APPROVED", "RESOLVED", "COMPLETED":
+				case constants.StatusApproved, "RESOLVED", "COMPLETED":
 					approved++
 					w.StatusLabel = "Approved"
-				case "REJECTED", "DECLINED":
+				case constants.StatusRejected, "DECLINED":
 					rejected++
 					w.StatusLabel = "Rejected"
 				default:

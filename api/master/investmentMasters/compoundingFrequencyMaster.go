@@ -1407,7 +1407,7 @@ func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		auditCols := []string{"frequency_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-		auditVals := []interface{}{req.FrequencyID, "EDIT", "PENDING_EDIT_APPROVAL", req.Reason, userEmail}
+		auditVals := []interface{}{req.FrequencyID, "EDIT", constants.StatusPendingEditApproval, req.Reason, userEmail}
 		auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 		paramPos := 6
 
@@ -1607,7 +1607,7 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			auditCols := []string{"frequency_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-			auditVals := []interface{}{up.FrequencyID, "EDIT", "PENDING_EDIT_APPROVAL", up.Reason, userEmail}
+			auditVals := []interface{}{up.FrequencyID, "EDIT", constants.StatusPendingEditApproval, up.Reason, userEmail}
 			auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 			paramPos := 6
 

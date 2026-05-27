@@ -148,7 +148,7 @@ type BankStatementNotifPayload struct {
 	FileName             string  `json:"FileName"`
 	UploadedAt           string  `json:"UploadedAt"`
 	EntityID             string  `json:"EntityID"`
-	Status               string  `json:"Status"` // "PENDING_APPROVAL" | "APPROVED" etc.
+	Status               string  `json:"Status"` // constants.StatusPendingApproval | constants.StatusApproved etc.
 
 	// ── List fields ────────────────────────────────────────────────────────────
 	Transactions              []TxnRow         `json:"Transactions"`
@@ -438,7 +438,7 @@ type BuildBankStatementParams struct {
 //	txns           — slice of RecalculateTransaction (from the commit payload)
 //	kpiCats        — the category_kpis slice built during categorization
 //	categoryRules  — the loaded category rule components (for name lookup)
-//	status         — workflow status string (e.g. "PENDING_APPROVAL")
+//	status         — workflow status string (e.g. constants.StatusPendingApproval)
 func BuildBankStatementPayload(
 	params BuildBankStatementParams,
 ) *BankStatementNotifPayload {
@@ -635,7 +635,7 @@ func BuildBankStatementPayload(
 //
 //	uploadedBy  — user_id / email of the uploader  (form field user_id)
 //	fileName    — original file name
-//	status      — workflow status ("PENDING_APPROVAL" etc.)
+//	status      — workflow status (constants.StatusPendingApproval etc.)
 func BuildBankStatementPayloadFromV2Result(
 	result map[string]interface{},
 	uploadedBy string,

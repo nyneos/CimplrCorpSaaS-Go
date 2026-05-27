@@ -180,7 +180,7 @@ func checkReceiptPostingEligibility(ctx context.Context, pool *pgxpool.Pool, rec
 	if err != nil {
 		return constants.ReceiptNotFound
 	}
-	if receiptStatus != "APPROVED" {
+	if receiptStatus != constants.StatusApproved {
 		return "receipt must be APPROVED before posting (current: " + receiptStatus + ")"
 	}
 	switch reconcileStatus {

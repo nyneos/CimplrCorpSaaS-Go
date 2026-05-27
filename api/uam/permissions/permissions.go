@@ -940,7 +940,7 @@ func parseAllowed(raw interface{}) bool {
 }
 
 // normAction normalises action to title-case "Approved" or "Rejected".
-// Accepts any casing: "approved", "APPROVED", "Approved" → "Approved"
+// Accepts any casing: "approved", constants.StatusApproved, "Approved" → "Approved"
 func normAction(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "approved":

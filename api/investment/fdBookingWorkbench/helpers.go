@@ -611,8 +611,8 @@ func validateBookingFields(req map[string]interface{}) string {
 	// booking_status
 	if v, ok := req["booking_status"].(string); ok && v != "" {
 		valid := map[string]bool{
-			"DRAFT": true, "PENDING_APPROVAL": true,
-			"APPROVED": true, "REJECTED": true, "SENT_TO_BANK": true,
+			"DRAFT": true, constants.StatusPendingApproval: true,
+			constants.StatusApproved: true, constants.StatusRejected: true, "SENT_TO_BANK": true,
 		}
 		if !valid[v] {
 			return fmt.Sprintf("Invalid booking_status '%s'.", v)

@@ -1,14 +1,17 @@
 package approvalengine
 
-import "time"
+import (
+	"CimplrCorpSaas/api/constants"
+	"time"
+)
 
 // ─── Status / Action constants ────────────────────────────────────────────────
 
 // Instance statuses
 const (
 	InstStatusPending   = "PENDING"
-	InstStatusApproved  = "APPROVED"
-	InstStatusRejected  = "REJECTED"
+	InstStatusApproved  = constants.StatusApproved
+	InstStatusRejected  = constants.StatusRejected
 	InstStatusCancelled = "CANCELLED"
 	InstStatusExpired   = "EXPIRED"
 )
@@ -16,17 +19,17 @@ const (
 // Eye statuses
 const (
 	EyeStatusWaiting   = "WAITING"
-	EyeStatusActive    = "ACTIVE"
-	EyeStatusApproved  = "APPROVED"
-	EyeStatusRejected  = "REJECTED"
+	EyeStatusActive    = constants.StatusActive
+	EyeStatusApproved  = constants.StatusApproved
+	EyeStatusRejected  = constants.StatusRejected
 	EyeStatusEscalated = "ESCALATED"
 	EyeStatusSkipped   = "SKIPPED"
 )
 
 // Action types recorded in approval_instance_action
 const (
-	ActionApproved      = "APPROVED"
-	ActionRejected      = "REJECTED"
+	ActionApproved      = constants.StatusApproved
+	ActionRejected      = constants.StatusRejected
 	ActionEscalated     = "ESCALATED"
 	ActionAutoEscalated = "AUTO_ESCALATED"
 	ActionRecalled      = "RECALLED"

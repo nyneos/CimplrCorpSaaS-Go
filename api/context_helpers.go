@@ -29,7 +29,7 @@ func RequestedByFromCtx(ctx context.Context, userID string) string {
 }
 
 func CtxApprovedAccountNumbers(ctx context.Context) []string {
-	v := ctx.Value("ApprovedBankAccounts")
+	v := ctx.Value(ApprovedBankAccountsKey)
 	if v == nil {
 		return nil
 	}
@@ -114,7 +114,7 @@ func CtxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
 	if accountNumber == "" {
 		return false
 	}
-	v := ctx.Value("ApprovedBankAccounts")
+	v := ctx.Value(ApprovedBankAccountsKey)
 	if v == nil {
 		return true
 	}

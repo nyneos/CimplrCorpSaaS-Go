@@ -1022,15 +1022,15 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
-			if ps == "APPROVED" {
+			if ps == constants.StatusApproved {
 				continue
 			}
-			if ps == "PENDING_DELETE_APPROVAL" {
+			if ps == constants.StatusPendingDeleteApproval {
 				toDeleteActionIDs = append(toDeleteActionIDs, aid)
 				deleteActivityIDs = append(deleteActivityIDs, actid)
 				continue
 			}
-			if ps == "PENDING_APPROVAL" || ps == "PENDING_EDIT_APPROVAL" {
+			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
 				toApproveActivityIDs = append(toApproveActivityIDs, actid)
 			}
@@ -1244,7 +1244,7 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			found[actid] = true
-			if strings.ToUpper(strings.TrimSpace(ps)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusApproved {
 				cannotReject = append(cannotReject, actid)
 			} else {
 				actionIDs = append(actionIDs, aid)

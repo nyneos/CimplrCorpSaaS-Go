@@ -237,7 +237,7 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, auditErr := tx.Exec(ctx, auditQuery,
 				currencyID,
 				"CREATE",
-				"PENDING_APPROVAL",
+				constants.StatusPendingApproval,
 				nil,
 				createdBy,
 			)
@@ -589,7 +589,7 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditQuery := `INSERT INTO auditactioncurrency (
 					currency_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
-				if _, err := tx.Exec(ctx, auditQuery, currencyID, "EDIT", "PENDING_EDIT_APPROVAL", cur.Reason, updatedBy); err != nil {
+				if _, err := tx.Exec(ctx, auditQuery, currencyID, "EDIT", constants.StatusPendingEditApproval, cur.Reason, updatedBy); err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditLogFailed, "currency_id": currencyID})
 					return
 				}

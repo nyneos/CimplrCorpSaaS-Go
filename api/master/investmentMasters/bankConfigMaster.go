@@ -1042,7 +1042,7 @@ func UpdateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Build audit INSERT with old values
 		auditCols := []string{"config_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-		auditVals := []interface{}{req.ConfigID, "EDIT", "PENDING_EDIT_APPROVAL", req.Reason, userEmail}
+		auditVals := []interface{}{req.ConfigID, "EDIT", constants.StatusPendingEditApproval, req.Reason, userEmail}
 		auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 		paramPos := 6
 		for k := range req.Fields {
@@ -1267,7 +1267,7 @@ func UpdateBankConfigBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			auditCols := []string{"config_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-			auditVals := []interface{}{update.ConfigID, "EDIT", "PENDING_EDIT_APPROVAL", update.Reason, userEmail}
+			auditVals := []interface{}{update.ConfigID, "EDIT", constants.StatusPendingEditApproval, update.Reason, userEmail}
 			auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 			paramPos := 6
 			for k := range update.Fields {

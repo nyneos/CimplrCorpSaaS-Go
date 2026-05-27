@@ -390,7 +390,7 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// If record is marked deleted and latest processing is APPROVED, skip it (soft-delete)
 			if isDeleted {
-				if ps := strings.ToUpper(strings.TrimSpace(ifaceToString(processingStatus))); ps == "APPROVED" {
+				if ps := strings.ToUpper(strings.TrimSpace(ifaceToString(processingStatus))); ps == constants.StatusApproved {
 					continue
 				}
 			}
@@ -1066,7 +1066,7 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			found[cid] = true
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved {
 				cannotReject = append(cannotReject, cid)
 			}
 			actionIDs = append(actionIDs, aid)
@@ -1164,7 +1164,7 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			foundTypes[cid] = true
 			actionIDs = append(actionIDs, aid)
 			actionTypeByID[cid] = atype
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved {
 				cannotApprove = append(cannotApprove, cid)
 			}
 		}

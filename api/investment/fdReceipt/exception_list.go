@@ -1,6 +1,7 @@
 package fdReceipt
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 
@@ -152,7 +153,7 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 		if varianceOutcome != nil {
 			varianceOutcomeStr = *varianceOutcome
 		}
-		checkerApproved := auditProcessingStatus == "APPROVED" && exceptionStatus == "IN_REVIEW"
+		checkerApproved := auditProcessingStatus == constants.StatusApproved && exceptionStatus == "IN_REVIEW"
 		awaitingClose := checkerApproved && exceptionStatus == "IN_REVIEW"
 		isLocked := exceptionStatus == "CLOSE"
 

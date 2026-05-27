@@ -360,11 +360,11 @@ func getAuditInfoPayable(ctx context.Context, pgxPool *pgxpool.Pool, payableID s
 					createdBy = by
 					createdAt = at
 					createdStatus = status
-				} else if atype == "EDIT" && editedBy == "" {
+				} else if atype == constants.AuditActionEdit && editedBy == "" {
 					editedBy = by
 					editedAt = at
 					editedStatus = status
-				} else if atype == "DELETE" && deletedBy == "" {
+				} else if atype == constants.AuditActionDelete && deletedBy == "" {
 					deletedBy = by
 					deletedAt = at
 					deletedStatus = status
@@ -397,11 +397,11 @@ func getAuditInfoReceivable(ctx context.Context, pgxPool *pgxpool.Pool, receivab
 					createdBy = by
 					createdAt = at
 					createdStatus = status
-				} else if atype == "EDIT" && editedBy == "" {
+				} else if atype == constants.AuditActionEdit && editedBy == "" {
 					editedBy = by
 					editedAt = at
 					editedStatus = status
-				} else if atype == "DELETE" && deletedBy == "" {
+				} else if atype == constants.AuditActionDelete && deletedBy == "" {
 					deletedBy = by
 					deletedAt = at
 					deletedStatus = status
@@ -872,13 +872,13 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							auditPayableMap[pid]["created_at"] = requestedAt.Format(constants.DateTimeFormat)
 						}
 						auditPayableMap[pid]["created_status"] = status
-					} else if atype == "EDIT" {
+					} else if atype == constants.AuditActionEdit {
 						auditPayableMap[pid]["edited_by"] = requestedBy
 						if requestedAt != nil {
 							auditPayableMap[pid]["edited_at"] = requestedAt.Format(constants.DateTimeFormat)
 						}
 						auditPayableMap[pid]["edited_status"] = status
-					} else if atype == "DELETE" {
+					} else if atype == constants.AuditActionDelete {
 						auditPayableMap[pid]["deleted_by"] = requestedBy
 						if requestedAt != nil {
 							auditPayableMap[pid]["deleted_at"] = requestedAt.Format(constants.DateTimeFormat)
@@ -927,13 +927,13 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							auditReceivableMap[rid]["created_at"] = requestedAt.Format(constants.DateTimeFormat)
 						}
 						auditReceivableMap[rid]["created_status"] = status
-					} else if atype == "EDIT" {
+					} else if atype == constants.AuditActionEdit {
 						auditReceivableMap[rid]["edited_by"] = requestedBy
 						if requestedAt != nil {
 							auditReceivableMap[rid]["edited_at"] = requestedAt.Format(constants.DateTimeFormat)
 						}
 						auditReceivableMap[rid]["edited_status"] = status
-					} else if atype == "DELETE" {
+					} else if atype == constants.AuditActionDelete {
 						auditReceivableMap[rid]["deleted_by"] = requestedBy
 						if requestedAt != nil {
 							auditReceivableMap[rid]["deleted_at"] = requestedAt.Format(constants.DateTimeFormat)
@@ -1033,7 +1033,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
-			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+			if latestErr == nil && latestActionType == constants.AuditActionDelete && latestStatus == constants.StatusPendingDeleteApproval {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "delete request already pending for transaction: " + id})
 				return
 			}
@@ -1053,7 +1053,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
-			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+			if latestErr == nil && latestActionType == constants.AuditActionDelete && latestStatus == constants.StatusPendingDeleteApproval {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "delete request already pending for transaction: " + id})
 				return
 			}
@@ -1139,12 +1139,12 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + pid})
 					return
 				}
-				if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+				if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot reject non-pending transaction: " + pid})
 					return
 				}
 				payActionIDs = append(payActionIDs, aid)
-				if atype == "EDIT" {
+				if atype == constants.AuditActionEdit {
 					payEditActionIDs = append(payEditActionIDs, aid)
 				}
 			}
@@ -1162,12 +1162,12 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + rid})
 					return
 				}
-				if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+				if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot reject non-pending transaction: " + rid})
 					return
 				}
 				recActionIDs = append(recActionIDs, aid)
-				if atype == "EDIT" {
+				if atype == constants.AuditActionEdit {
 					recEditActionIDs = append(recEditActionIDs, aid)
 				}
 			}
@@ -1298,14 +1298,14 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + pid})
 				return
 			}
-			if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+			if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot approve non-pending transaction: " + pid})
 				return
 			}
 			payActionIDs = append(payActionIDs, aid)
-			if atype == "DELETE" && status == "PENDING_DELETE_APPROVAL" {
+			if atype == constants.AuditActionDelete && status == constants.StatusPendingDeleteApproval {
 				payDeleteActionIDs = append(payDeleteActionIDs, aid)
-			} else if atype == "EDIT" {
+			} else if atype == constants.AuditActionEdit {
 				payEditActionIDs = append(payEditActionIDs, aid)
 			}
 		}
@@ -1325,14 +1325,14 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + rid})
 				return
 			}
-			if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+			if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "cannot approve non-pending transaction: " + rid})
 				return
 			}
 			recActionIDs = append(recActionIDs, aid)
-			if atype == "DELETE" && status == "PENDING_DELETE_APPROVAL" {
+			if atype == constants.AuditActionDelete && status == constants.StatusPendingDeleteApproval {
 				recDeleteActionIDs = append(recDeleteActionIDs, aid)
-			} else if atype == "EDIT" {
+			} else if atype == constants.AuditActionEdit {
 				recEditActionIDs = append(recEditActionIDs, aid)
 			}
 		}

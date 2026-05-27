@@ -290,7 +290,7 @@ func processCimplrAutoMaturityInitiate(ctx context.Context, pool *pgxpool.Pool, 
 	if err := insertCimplrCalculation(ctx, tx, initiateID, closureConfirmID, src, calc); err != nil {
 		return autoMaturityOutcomeFailed, closureConfirmID, fmt.Errorf("insert calculation: %w", err)
 	}
-	if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: initiateID, Action: "CREATE", Status: "APPROVED", Reason: req.Reason, RequestedBy: actorUserID, Old: nil}); err != nil {
+	if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: initiateID, Action: "CREATE", Status: constants.StatusApproved, Reason: req.Reason, RequestedBy: actorUserID, Old: nil}); err != nil {
 		return autoMaturityOutcomeFailed, closureConfirmID, fmt.Errorf("insert confirm audit: %w", err)
 	}
 	_, err = tx.Exec(ctx, `

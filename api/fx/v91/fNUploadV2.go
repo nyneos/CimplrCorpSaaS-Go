@@ -1256,7 +1256,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 		logger.LogInfo("[FBUP] committed batch %s for file %s", batchID.String(), fh.Filename)
 		for _, exposureID := range docToID {
-			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: exposureID, ActionType: "CREATE", Status: "PENDING_APPROVAL", Reason: "Imported via uploader", RequestedBy: userName, OldValues: nil, NewValues: map[string]interface{}{
+			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: exposureID, ActionType: "CREATE", Status: constants.StatusPendingApproval, Reason: "Imported via uploader", RequestedBy: userName, OldValues: nil, NewValues: map[string]interface{}{
 				"batch_id":      batchID.String(),
 				"file_name":     fh.Filename,
 				"upload_s3_key": s3Key,

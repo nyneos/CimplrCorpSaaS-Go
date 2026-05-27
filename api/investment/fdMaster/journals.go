@@ -120,7 +120,7 @@ func CreateFDAccountingActivity(ctx context.Context, exec queryExecutor, fdID st
 			activity_type, activity_subtype, effective_date, accounting_period, data_source, status
 		) VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING activity_id
-	`, "FIXED_DEPOSIT", "ACTIVATION", effectiveDate, buildAccountingPeriod(effectiveDate), "FD_MASTER", "APPROVED").Scan(&activityID)
+	`, "FIXED_DEPOSIT", "ACTIVATION", effectiveDate, buildAccountingPeriod(effectiveDate), "FD_MASTER", constants.StatusApproved).Scan(&activityID)
 	if err != nil {
 		return "", fmt.Errorf("create accounting activity: %w", err)
 	}

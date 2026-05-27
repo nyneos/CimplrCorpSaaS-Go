@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/lib/pq"
@@ -78,7 +79,7 @@ func ctxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
 	if strings.TrimSpace(accountNumber) == "" {
 		return false
 	}
-	v := ctx.Value("ApprovedBankAccounts")
+	v := ctx.Value(api.ApprovedBankAccountsKey)
 	if v == nil {
 		return true
 	}

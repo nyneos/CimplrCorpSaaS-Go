@@ -5,11 +5,14 @@ import (
 	counterpartyHub "CimplrCorpSaas/api/master/counterpartyHub"
 	investmentMasters "CimplrCorpSaas/api/master/investmentMasters"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/internal/dbutil"
+	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -17,28 +20,31 @@ import (
 )
 
 func StartMasterService(db *sql.DB, port string) {
+	const serviceName = "master"
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	sslMode := os.Getenv("DB_SSLMODE")
-	if sslMode == "" {
-		sslMode = "disable"
-	}
+	sslMode := dbutil.EffectiveSSLMode(host)
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		logger.LogError("failed to connect to pgxpool DB: %v", err)
 		return
 	}
-	// ensure pool is closed when service exits
 	defer pgxPool.Close()
+	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := pgxPool.Ping(pingCtx); err != nil {
+		logger.LogError("Master: failed to verify pgxpool DB connectivity at startup: %v", err)
+	}
 
 	mux.HandleFunc("/master/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Masters Service is healthy"))
 	})
+	mux.Handle("/master/metrics", observability.MetricsHandler(serviceName))
 
 	// Cost / Profit Center Master routes
 	mux.Handle("/master/v2/costprofit-center/bulk-create-sync", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateAndSyncCostProfitCenters(pgxPool)))
@@ -625,7 +631,7 @@ func StartMasterService(db *sql.DB, port string) {
 	counterpartyHub.RegisterCounterpartyHubRoutes(mux, pgxPool, db)
 
 	logger.LogInfo("Master Service started on :%s", port)
-	err = http.ListenAndServe(":"+port, mux)
+	err = http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {
 		logger.LogError("Master Service failed: %v", err)
 	}

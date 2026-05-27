@@ -993,7 +993,7 @@ func UpdatePenaltyStructureBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Build audit insert dynamically
 			auditCols := []string{"penalty_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-			auditVals := []interface{}{update.PenaltyID, "EDIT", "PENDING_EDIT_APPROVAL", update.Reason, userEmail}
+			auditVals := []interface{}{update.PenaltyID, "EDIT", constants.StatusPendingEditApproval, update.Reason, userEmail}
 			auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 			paramPos := 6
 

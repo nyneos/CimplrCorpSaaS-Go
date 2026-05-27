@@ -11,8 +11,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -37,6 +39,26 @@ func generateRandomPassword(length int) (string, error) {
 	return string(result), nil
 }
 
+// sensitiveUserCols lists columns that must never be sent to the client.
+var sensitiveUserCols = map[string]bool{
+	"password":    true,
+	"created_by":  true,
+	"updated_by":  true,
+	"approved_by": true,
+	"rejected_by": true,
+	"created_at":  true,
+	"updated_at":  true,
+	"approved_at": true,
+	"rejected_at": true,
+}
+
+func sanitizeUserMap(m map[string]interface{}) map[string]interface{} {
+	for col := range sensitiveUserCols {
+		delete(m, col)
+	}
+	return m
+}
+
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -45,6 +67,13 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 		"success": false,
 		"error":   errMsg,
 	})
+}
+
+// respondWithInternalError logs the real error internally and returns a generic
+// 500 message to the client so DB internals are never exposed.
+func respondWithInternalError(w http.ResponseWriter, err error) {
+	log.Println("[ERROR] user:", err)
+	respondWithError(w, http.StatusInternalServerError, "Internal server error")
 }
 
 // decodeSQLValue converts SQL driver types to JSON-friendly Go values.
@@ -281,8 +310,13 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			// if genErr != nil {
 			// 	respondWithError(w, http.StatusInternalServerError, "Failed to generate password")
 			// 	return
-			// }
-			cimplr = "changeme"
+			// }cimplr = "changeme"
+			envDefaultPassword := strings.TrimSpace(os.Getenv("UAM_DEFAULT_PASSWORD"))
+			if envDefaultPassword != "" {
+				cimplr = envDefaultPassword
+			} else {
+				cimplr = "changeme"
+			}
 		}
 		hashedPassword, hashErr := bcrypt.GenerateFromPassword([]byte(cimplr), bcrypt.DefaultCost)
 		if hashErr != nil {
@@ -292,7 +326,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer tx.Rollback()
@@ -324,7 +358,8 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, msg)
 			return
 		} else if err != sql.ErrNoRows {
-			respondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+			log.Println("[ERROR] user uniqueness check:", err)
+			respondWithError(w, http.StatusInternalServerError, "Internal server error")
 			return
 		}
 		var userId string
@@ -352,7 +387,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			createdBy,
 		).Scan(&userId)
 		if err != nil {
-			respondWithError(w, http.StatusBadRequest, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		var roleId string
@@ -373,7 +408,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			userId, roleId,
 		)
 		if err != nil {
-			respondWithError(w, http.StatusBadRequest, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		// Insert entity mappings
@@ -385,7 +420,8 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				userId, em.EntityID, em.EntityName,
 			)
 			if err != nil {
-				respondWithError(w, http.StatusBadRequest, "Failed to insert entity mapping: "+err.Error())
+				log.Println("[ERROR] user entity mapping insert:", err)
+				respondWithError(w, http.StatusInternalServerError, "Internal server error")
 				return
 			}
 		}
@@ -484,7 +520,7 @@ WHERE COALESCE(u.is_deleted, false) = false AND` + fmt.Sprintf(userEntityAccessE
 
 		rows, err := db.Query(query, args...)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -501,7 +537,7 @@ WHERE COALESCE(u.is_deleted, false) = false AND` + fmt.Sprintf(userEntityAccessE
 			for i, col := range cols {
 				rowMap[col] = decodeSQLValue(vals[i])
 			}
-			users = append(users, rowMap)
+			users = append(users, sanitizeUserMap(rowMap))
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -557,18 +593,22 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 			req.UserID, pq.Array(entityIDs),
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
 		cols, _ := rows.Columns()
+		if !rows.Next() {
+			respondWithError(w, http.StatusNotFound, "User not found")
+			return
+		}
 		vals := make([]interface{}, len(cols))
 		valPtrs := make([]interface{}, len(cols))
 		for i := range vals {
 			valPtrs[i] = &vals[i]
 		}
 		if err := rows.Scan(valPtrs...); err != nil {
-			respondWithError(w, http.StatusNotFound, "User not found")
+			respondWithInternalError(w, err)
 			return
 		}
 		userMap := map[string]interface{}{}
@@ -578,7 +618,7 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"user":    userMap,
+			"user":    sanitizeUserMap(userMap),
 		})
 	}
 }
@@ -643,7 +683,7 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 		}
 
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -666,7 +706,7 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 				userMap[col] = decodeSQLValue(vals[i])
 			}
 
-			users = append(users, userMap)
+			users = append(users, sanitizeUserMap(userMap))
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -882,7 +922,7 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "user": userMap})
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "user": sanitizeUserMap(userMap)})
 	}
 }
 
@@ -940,7 +980,7 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 			deleter, pq.Array(targetIds), pq.Array(entityIDs),
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -997,7 +1037,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 			pq.Array(req.Ids), pq.Array(entityIDs),
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -1024,7 +1064,8 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 				pq.Array(toDelete),
 			)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Failed to delete user_roles: "+err.Error())
+				log.Println("[ERROR] delete user_roles:", err)
+				respondWithError(w, http.StatusInternalServerError, "Internal server error")
 				return
 			}
 			// Soft delete users (set is_deleted = true)
@@ -1054,7 +1095,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 					for i, col := range cols {
 						userMap[col] = decodeSQLValue(vals[i])
 					}
-					results["deleted"] = append(results["deleted"].([]map[string]interface{}), userMap)
+					results["deleted"] = append(results["deleted"].([]map[string]interface{}), sanitizeUserMap(userMap))
 				}
 			}
 		}
@@ -1091,7 +1132,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 					for i, col := range cols {
 						userMap[col] = decodeSQLValue(vals[i])
 					}
-					results["approved"] = append(results["approved"].([]map[string]interface{}), userMap)
+					results["approved"] = append(results["approved"].([]map[string]interface{}), sanitizeUserMap(userMap))
 				}
 			}
 		}
@@ -1136,7 +1177,7 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			rejectedBy, req.RejectionComment, pq.Array(req.Ids), pq.Array(entityIDs),
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -1153,7 +1194,7 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			for i, col := range cols {
 				userMap[col] = vals[i]
 			}
-			updated = append(updated, userMap)
+			updated = append(updated, sanitizeUserMap(userMap))
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})

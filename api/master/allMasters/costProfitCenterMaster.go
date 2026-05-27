@@ -1543,7 +1543,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			centreIDs = append(centreIDs, centreID)
-			if isDeleted && strings.ToUpper(ifaceToString(procStatusI)) == "APPROVED" {
+			if isDeleted && strings.ToUpper(ifaceToString(procStatusI)) == constants.StatusApproved {
 				hideIds[centreID] = true
 			}
 		}

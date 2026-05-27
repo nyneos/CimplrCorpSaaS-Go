@@ -59,7 +59,7 @@ func requestedByFromCtx(ctx context.Context, userID string) string {
 }
 
 func ctxApprovedAccountNumbers(ctx context.Context) []string {
-	v := ctx.Value("ApprovedBankAccounts")
+	v := ctx.Value(api.ApprovedBankAccountsKey)
 	if v == nil {
 		return nil
 	}
@@ -147,9 +147,7 @@ func ctxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
 	if accountNumber == "" {
 		return false
 	}
-	v := ctx.Value("ApprovedBankAccounts")
-	fmt.Printf("CHECK ACCOUNT: %q\n", accountNumber)
-	fmt.Printf("CTX ApprovedBankAccounts: %v\n", v)
+	v := ctx.Value(api.ApprovedBankAccountsKey)
 	if v == nil {
 		return true
 	}
@@ -339,7 +337,7 @@ func ensureBalanceIDsAccessible(ctx context.Context, pgxPool *pgxpool.Pool, bala
 	if len(balanceIDs) == 0 {
 		return 0, ""
 	}
-	if ctx.Value("ApprovedBankAccounts") == nil {
+	if ctx.Value(api.ApprovedBankAccountsKey) == nil {
 		return 0, ""
 	}
 	rows, err := pgxPool.Query(ctx, `SELECT balance_id, account_no FROM bank_balances_manual WHERE balance_id = ANY($1)`, balanceIDs)
@@ -552,7 +550,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			found[balanceID] = true
-			if procStatus != "PENDING_APPROVAL" && procStatus != "PENDING_EDIT_APPROVAL" && procStatus != "PENDING_DELETE_APPROVAL" {
+			if procStatus != constants.StatusPendingApproval && procStatus != constants.StatusPendingEditApproval && procStatus != constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, "cannot approve non-pending balance: "+balanceID)
 				return
 			}
@@ -634,6 +632,21 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithResult(w, false, "failed to read deleted balances: "+pgUserFriendlyMessage(drows.Err()))
 				return
 			}
+			for drows.Next() {
+				var id string
+				drows.Scan(&id) //nolint:errcheck
+				deleted = append(deleted, id)
+			}
+			drows.Close()
+			if drows.Err() != nil {
+				api.RespondWithResult(w, false, "failed to read deleted IDs: "+pgUserFriendlyMessage(drows.Err()))
+				return
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to commit: "+pgUserFriendlyMessage(err))
+			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, "failed to commit approve: "+pgUserFriendlyMessage(err))
@@ -643,7 +656,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// return structured JSON
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(actionIDs), "deleted": deleted})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(actionIDs), "deleted": deleted}) //nolint:errcheck
 	}
 }
 
@@ -689,7 +702,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			found[balanceID] = true
-			if procStatus != "PENDING_APPROVAL" && procStatus != "PENDING_EDIT_APPROVAL" && procStatus != "PENDING_DELETE_APPROVAL" {
+			if procStatus != constants.StatusPendingApproval && procStatus != constants.StatusPendingEditApproval && procStatus != constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, "cannot reject non-pending balance: "+balanceID)
 				return
 			}
@@ -790,7 +803,7 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
-			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, fmt.Sprintf("delete request already pending for balance_id: %s", id))
 				return
 			}
