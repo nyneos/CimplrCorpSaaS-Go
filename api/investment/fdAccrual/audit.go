@@ -283,6 +283,7 @@ func GetScheduleConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				config_id,
 				action_type,
 				processing_status,
+				COALESCE(reason, '')                                              AS reason,
 				COALESCE(requested_by, '')                                        AS requested_by,
 				COALESCE(TO_CHAR(requested_at, 'YYYY-MM-DD HH24:MI:SS'), '')      AS requested_at,
 				COALESCE(checker_by, '')                                          AS checker_by,
@@ -310,6 +311,35 @@ func GetScheduleConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to read schedule config audit history")
 			return
 		}
+		uploadRows, err := pgxPool.Query(ctx, `
+			SELECT
+				('file-' || a.audit_id::text) AS audit_id,
+				a.parent_record_id AS config_id,
+				a.file_id,
+				'UPLOAD_FILE' AS action_type,
+				COALESCE(a.processing_status, '') AS processing_status,
+				COALESCE(a.reason, '') AS reason,
+				COALESCE(a.requested_by, '') AS requested_by,
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+				COALESCE(a.checker_by, '') AS checker_by,
+				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+				COALESCE(a.checker_comment, '') AS checker_comment
+			FROM investment.additional_file_audit a
+			JOIN investment.fd_accrual_schedule_config_files f ON f.file_id = a.file_id AND f.config_id::text = a.parent_record_id
+			WHERE a.module_key = 'fd-accrual-schedule-config-additional'
+			  AND a.parent_record_id = $1
+			  AND a.action_type = 'CREATE'
+			ORDER BY a.requested_at DESC`, req.ConfigID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		uploadPayload, err := collectAccrualPgxRows(uploadRows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read schedule config upload audit history")
+			return
+		}
+		payload = append(payload, uploadPayload...)
 
 		respondFDAccrualAuditPayload(w, payload)
 	}

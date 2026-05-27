@@ -242,6 +242,7 @@ var moduleDefaultPrefixes = map[string]string{
 	"fd-tds-receipt-additional":                "fd/fd-tds-receipt/",
 	"fd-reconcile-result-additional":           "fd/fd-reconcile-result/",
 	"fd-receipt-exception-additional":          "fd/fd-receipt-exception/",
+	"fd-accrual-schedule-config-additional":    "fd/fd-accrual-schedule-config/",
 	"fd-accrual-run-additional":                "fd/fd-accrual-run/",
 	"fd-accrual-ledger-additional":             "fd/fd-accrual-ledger/",
 	"fd-accounting-journal-additional":         "fd/fd-accounting-journal/",
