@@ -5,7 +5,9 @@ import (
 	"CimplrCorpSaas/internal/dashboard"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/serviceiface"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -214,7 +216,11 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	).Scan(&roleName, &roleCode)
 	logger.LogInfo("[AUTH DEBUG] role lookup user_id=%s role=%q role_code=%q", dbUserID, roleName.String, roleCode.String)
 
-	sessionID := generateSessionID()
+	sessionID, err := generateSessionID()
+	if err != nil {
+		logger.LogError("[AUTH DEBUG] session ID generation failed user_id=%s err=%v", dbUserID, err)
+		return nil, false, errors.New("internal error")
+	}
 	session := &UserSession{
 		SessionID:       sessionID,
 		UserID:          dbUserID,
@@ -529,8 +535,13 @@ func (a *AuthService) sessionCleaner() {
 	}
 }
 
-func generateSessionID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+func generateSessionID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		logger.LogError("[auth] failed to generate secure session ID: %v", err)
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func (a *AuthService) LogDifferentIPRequest(userID string, clientIP string) {

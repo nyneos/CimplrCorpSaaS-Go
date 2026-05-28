@@ -461,7 +461,11 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 		}
 	}
 
-	sessionID := generateSessionID()
+	sessionID, err := generateSessionID()
+	if err != nil {
+		logger.LogError("[AUTH DEBUG] SSO session ID generation failed user_id=%s err=%v", dbUserID, err)
+		return nil, false, errors.New("internal error")
+	}
 	session := &UserSession{
 		SessionID:       sessionID,
 		UserID:          dbUserID,
