@@ -724,7 +724,7 @@ func groupFundPlanningData(rawData []RawRow, includeCounterparty, includeType bo
 				direction = strings.ToUpper(direction[:1]) + direction[1:]
 			}
 			group = &FundPlanningGroup{
-				GroupID:       fmt.Sprintf("G-%d-%s-%s-%s", len(groupMap)+1, row.Date.Format("20061010"), row.Currency, strings.ReplaceAll(primaryValue, " ", "")),
+				GroupID:       fmt.Sprintf("G-%d-%s-%s-%s", len(groupMap)+1, row.Date.Format("20060102"), row.Currency, strings.ReplaceAll(primaryValue, " ", "")),
 				GroupLabel:    fmt.Sprintf("%s · %s · %s · %s: %s", row.Date.Format("2006-10-10"), direction, row.Currency, primaryKey, primaryValue),
 				Direction:     row.Direction,
 				Currency:      row.Currency,
