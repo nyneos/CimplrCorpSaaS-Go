@@ -26,6 +26,7 @@ type fdConfirmationCaptureRequest struct {
 	UserID                   string           `json:"user_id"`
 	BookingID                string           `json:"booking_id"`
 	ConfirmedPrincipalAmount float64          `json:"confirmed_principal_amount"`
+	ValueType                string           `json:"value_type"`
 	ConfirmedInterestRate    float64          `json:"confirmed_interest_rate"`
 	ConfirmedTenorDays       int              `json:"confirmed_tenor_days"`
 	ConfirmedTenorMonths     int              `json:"confirmed_tenor_months"`
@@ -82,6 +83,7 @@ func fdConfirmationCaptureRequestFromForm(r *http.Request) fdConfirmationCapture
 		UserID:                   strings.TrimSpace(r.FormValue("user_id")),
 		BookingID:                strings.TrimSpace(r.FormValue("booking_id")),
 		ConfirmedPrincipalAmount: fdFormFloat(r, "confirmed_principal_amount"),
+		ValueType:                strings.TrimSpace(r.FormValue("value_type")),
 		ConfirmedInterestRate:    fdFormFloat(r, "confirmed_interest_rate"),
 		ConfirmedTenorDays:       fdFormInt(r, "confirmed_tenor_days"),
 		ConfirmedTenorMonths:     fdFormInt(r, "confirmed_tenor_months"),
@@ -185,7 +187,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var bookedPrincipal, bookedRate float64
 		var bookedTenorDays, bookedTenorMonths, bookedTenorYears int
 		var bookedValueDate, bookedMaturityDate, bookedInterestTypeCode, bookedFrequencyID, bookedTenorType, entityID, bookingStatus string
-		var bookedAccrualFreqCode, bookedResetType, bookedPayoutFreqID string
+		var bookedAccrualFreqCode, bookedResetType, bookedPayoutFreqID, bookedValueType string
 		err := pgxPool.QueryRow(ctx, `
 			SELECT
 				COALESCE(principal_amount,0),
@@ -202,14 +204,15 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(booking_status,''),
 				COALESCE(accrual_frequency_code,''),
 				COALESCE(reset_type,''),
-				COALESCE(NULLIF(payout_frequency_id,''), frequency_id, '')
+				COALESCE(NULLIF(payout_frequency_id,''), frequency_id, ''),
+				COALESCE(NULLIF(value_type,''),'Actual')
 			FROM investment.fd_booking_request
 			WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false`,
 			req.BookingID,
 		).Scan(&bookedPrincipal, &bookedRate, &bookedTenorDays, &bookedTenorMonths, &bookedTenorYears,
 			&bookedValueDate, &bookedMaturityDate, &bookedInterestTypeCode, &bookedFrequencyID, &bookedTenorType,
 			&entityID, &bookingStatus,
-			&bookedAccrualFreqCode, &bookedResetType, &bookedPayoutFreqID)
+			&bookedAccrualFreqCode, &bookedResetType, &bookedPayoutFreqID, &bookedValueType)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				api.RespondWithError(w, http.StatusBadRequest,
@@ -233,6 +236,10 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.PayoutFrequencyID == "" {
 			req.PayoutFrequencyID = bookedPayoutFreqID
 		}
+		if strings.TrimSpace(req.ValueType) == "" {
+			req.ValueType = bookedValueType
+		}
+		req.ValueType = normalizePrincipalValueType(req.ValueType)
 
 		bankFDRef := strings.TrimSpace(req.BankFDReference)
 		if bankFDRef == "" {
@@ -375,6 +382,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					bank_reference_number     = NULLIF($23,''),
 					premature_closure_terms   = NULLIF($24,''),
 					payout_frequency_id       = NULLIF($25,''),
+					value_type                = $26,
 					upload_s3_key             = COALESCE(NULLIF($20,''), upload_s3_key),
 					updated_by                = $16,
 					updated_at                = now()
@@ -396,6 +404,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				nullIfEmpty(req.BankReferenceNumber),
 				nullIfEmpty(req.PrematureClosureTerms),
 				nullIfEmpty(req.PayoutFrequencyID),
+				req.ValueType,
 			); err != nil {
 				cleanupUpload()
 				msg, status := getUserFriendlyFDError(err, constants.ErrUpdateConfirmationFailed)
@@ -425,6 +434,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					bank_reference_number,
 					premature_closure_terms,
 					payout_frequency_id,
+					value_type,
 					upload_s3_key,
 					created_by
 				) VALUES (
@@ -447,6 +457,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					NULLIF($23,''),
 					NULLIF($24,''),
 					NULLIF($25,''),
+					$26,
 					NULLIF($20,''),
 					$17
 				) RETURNING confirmation_id`,
@@ -468,6 +479,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				nullIfEmpty(req.BankReferenceNumber),
 				nullIfEmpty(req.PrematureClosureTerms),
 				nullIfEmpty(req.PayoutFrequencyID),
+				req.ValueType,
 			).Scan(&confirmationID)
 			if err != nil {
 				cleanupUpload()
@@ -2218,6 +2230,8 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.accrual_frequency_code,'')                                  AS confirmed_accrual_frequency_code,
 				COALESCE(c.reset_type,'')                                              AS confirmed_reset_type,
 				COALESCE(b.principal_amount,0)                                         AS principal_amount,
+				COALESCE(NULLIF(b.value_type,''),'Actual')                             AS booking_value_type,
+				COALESCE(NULLIF(c.value_type,''), NULLIF(b.value_type,''), 'Actual')  AS value_type,
 				COALESCE(b.interest_rate,0)                                            AS interest_rate,
 				COALESCE(b.interest_type_code,'')                                      AS interest_type,
 				COALESCE(b.tenure_days,0)                                              AS tenor_days,
@@ -2727,6 +2741,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					%s                                                             AS bank_account_number,
 					%s                                                             AS bank_config_id,
 					%s                                                             AS principal_amount,
+					%s                                                             AS value_type,
 					%s                                                             AS interest_rate,
 					%s                                                             AS interest_type,
 					%s                                                             AS interest_type_id,
@@ -2762,6 +2777,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				bookingAccountNumberExprBk,
 				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "bank_config_id"),
 				fdNumericExpr(bookingCols, "m", "0", "principal_amount"),
+				fdTextExpr(bookingCols, "m", "'Actual'", "value_type"),
 				fdNumericExpr(bookingCols, "m", "0", "interest_rate"),
 				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "interest_type_code", "interest_type"),
 				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "interest_type_id"),
@@ -3164,6 +3180,7 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(br.source_account_id,'')                            AS bank_account_id,
 				COALESCE(br.source_account_number,'')                        AS bank_account_number,
 				COALESCE(br.principal_amount,0)                              AS principal_amount,
+				COALESCE(NULLIF(br.value_type,''),'Actual')                  AS value_type,
 				COALESCE(br.interest_rate,0)                                 AS interest_rate,
 				COALESCE(br.interest_type_code,'')                           AS interest_type,
 				COALESCE(br.tenure_days,0)                                   AS tenure_days,
