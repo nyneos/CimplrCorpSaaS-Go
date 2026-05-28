@@ -255,6 +255,7 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux.Handle("/investment/fd/receipt/additional-files/delete/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.RejectDeleteFDInterestReceiptAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListFDTDSReceiptAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadFDTDSReceiptAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/fd/tds-reconciliation/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadFDTDSReceiptAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadFDTDSReceiptAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadSelectedFDTDSReceiptAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DeleteFDTDSReceiptAdditionalFileHandler(pool))))
