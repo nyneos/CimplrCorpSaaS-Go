@@ -70,21 +70,22 @@ type MainUploadAuditPayload struct {
 }
 
 type Config struct {
-	Module                string
-	AuditSource           string
-	AuditTableName        string
-	ParentIDField         string
-	FolderName            string
-	List                  func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]FileRecord, error)
-	Create                func(ctx context.Context, tx pgx.Tx, input CreateInput) error
-	CreateReturning       func(ctx context.Context, tx pgx.Tx, input CreateInput) (string, error)
-	GetOne                func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*FileRecord, error)
-	GetAnyFile            func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*FileRecord, error)
-	GetMany               func(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]FileRecord, []string, error)
-	DuplicateExists       func(ctx context.Context, pool *pgxpool.Pool, parentID, fileHash string) (bool, error)
-	SoftDelete            func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error)
-	SoftDeleteTx          func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error)
-	RecordMainUploadAudit func(ctx context.Context, tx pgx.Tx, parentID string, payload MainUploadAuditPayload) error
+	Module                 string
+	AuditSource            string
+	AuditTableName         string
+	ParentIDField          string
+	FolderName             string
+	List                   func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]FileRecord, error)
+	Create                 func(ctx context.Context, tx pgx.Tx, input CreateInput) error
+	CreateReturning        func(ctx context.Context, tx pgx.Tx, input CreateInput) (string, error)
+	GetOne                 func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*FileRecord, error)
+	GetAnyFile             func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*FileRecord, error)
+	GetMany                func(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]FileRecord, []string, error)
+	DuplicateExists        func(ctx context.Context, pool *pgxpool.Pool, parentID, fileHash string) (bool, error)
+	SoftDelete             func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error)
+	SoftDeleteTx           func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error)
+	RecordMainUploadAudit  func(ctx context.Context, tx pgx.Tx, parentID string, payload MainUploadAuditPayload) error
+	RequireMainUploadAudit bool
 }
 
 type downloadRequest struct {
@@ -920,7 +921,7 @@ func recordMainUploadAuditSafely(ctx context.Context, tx pgx.Tx, cfg Config, par
 
 	if err := cfg.RecordMainUploadAudit(ctx, savepoint, parentID, payload); err != nil {
 		_ = savepoint.Rollback(ctx)
-		if isUndefinedTableError(err) || isCheckViolationError(err) {
+		if isUndefinedTableError(err) || (!cfg.RequireMainUploadAudit && isCheckViolationError(err)) {
 			return nil
 		}
 		return err
