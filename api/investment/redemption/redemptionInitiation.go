@@ -234,7 +234,7 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		correlationID := redemptionID
 		go func() {
-			payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, []string{redemptionID}, "CREATE", userEmail)
+			payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, []string{redemptionID}, constants.AuditActionCreate, userEmail)
 			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/create", correlationID, payload.ToMap())
 		}()
 
@@ -452,7 +452,7 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(createdIDs) > 0 {
 			go func() {
-				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, createdIDs, "CREATE", userEmail)
+				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, createdIDs, constants.AuditActionCreate, userEmail)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/create-bulk", createdIDs[0], payload.ToMap())
 			}()
 		}
@@ -816,15 +816,15 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
-			if ps == "APPROVED" {
+			if ps == constants.StatusApproved {
 				continue
 			}
-			if ps == "PENDING_DELETE_APPROVAL" {
+			if ps == constants.StatusPendingDeleteApproval {
 				toDeleteActionIDs = append(toDeleteActionIDs, aid)
 				deleteMasterIDs = append(deleteMasterIDs, rid)
 				continue
 			}
-			if ps == "PENDING_APPROVAL" || ps == "PENDING_EDIT_APPROVAL" {
+			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
 			}
 		}
@@ -978,13 +978,13 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(toApprove) > 0 {
 			approvedRedemptionIDs := req.RedemptionIDs
 			go func() {
-				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, approvedRedemptionIDs, "APPROVE", checkerBy)
+				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, approvedRedemptionIDs, constants.AuditActionApprove, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/approve", approvedRedemptionIDs[0], payload.ToMap())
 			}()
 		}
 		if len(deleteMasterIDs) > 0 {
 			go func() {
-				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, deleteMasterIDs, "DELETE", checkerBy)
+				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, deleteMasterIDs, constants.AuditActionDelete, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/approve", deleteMasterIDs[0], payload.ToMap())
 			}()
 		}
@@ -1047,7 +1047,7 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			found[rid] = true
-			if strings.ToUpper(strings.TrimSpace(ps)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusApproved {
 				cannotReject = append(cannotReject, rid)
 			} else {
 				actionIDs = append(actionIDs, aid)
@@ -1185,7 +1185,7 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(req.RedemptionIDs) > 0 {
 			go func() {
-				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, req.RedemptionIDs, "REJECT", checkerBy)
+				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, req.RedemptionIDs, constants.AuditActionReject, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/reject", req.RedemptionIDs[0], payload.ToMap())
 			}()
 		}

@@ -24,11 +24,14 @@ import (
 	statementstatus "CimplrCorpSaas/api/dash/statementstatus"
 	ticker "CimplrCorpSaas/api/dash/ticker"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/internal/dbutil"
+	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -36,23 +39,28 @@ import (
 )
 
 func StartDashService(db *sql.DB, port string) {
+	const serviceName = "dash"
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	sslMode := os.Getenv("DB_SSLMODE")
-	if sslMode == "" {
-		sslMode = "disable"
-	}
+	sslMode := dbutil.EffectiveSSLMode(host)
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		logger.LogError("failed to connect to pgxpool DB: %v", err)
+		return
 	}
+	defer pgxPool.Close()
 	investmentDashHandler := func(h http.HandlerFunc) http.Handler {
 		return middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.CacheDashboardHandler(h))
+	}
+	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := pgxPool.Ping(pingCtx); err != nil {
+		logger.LogError("Dash: failed to verify pgxpool DB connectivity at startup: %v", err)
 	}
 	// Statement Status Dashboard
 	mux.Handle("/dash/statement-status", middlewares.PreValidationMiddleware(pgxPool)(statementstatus.GetStatementStatusHandler(pgxPool)))
@@ -62,6 +70,7 @@ func StartDashService(db *sql.DB, port string) {
 	mux.HandleFunc("/dash/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Dashboard Service is active"))
 	})
+	mux.Handle("/dash/metrics", observability.MetricsHandler(serviceName))
 
 	// Real-time Balances KPI Route
 	mux.Handle("/dash/realtime-balances/kpi", middlewares.PreValidationMiddleware(pgxPool)(realtimebalances.GetKpiHandler(db)))
@@ -233,7 +242,7 @@ func StartDashService(db *sql.DB, port string) {
 	mux.Handle("/dash/notification/overview", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetOverview(pgxPool)))
 
 	logger.LogInfo("Dashboard Service started on :%s", port)
-	err = http.ListenAndServe(":"+port, mux)
+	err = http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {
 		logger.LogError("Dashboard Service failed: %v", err)
 	}

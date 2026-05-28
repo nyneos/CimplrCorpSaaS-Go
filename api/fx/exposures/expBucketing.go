@@ -27,6 +27,54 @@ import (
 // 	})
 // }
 
+// allowedExposureHeaderCols is the set of columns that callers may update on exposure_headers.
+var allowedExposureHeaderCols = map[string]bool{
+	"company_code": true, "entity": true, "entity1": true, "entity2": true, "entity3": true,
+	"exposure_type": true, "document_id": true, "document_date": true, "counterparty_type": true,
+	"counterparty_code": true, "counterparty_name": true, "currency": true,
+	"total_original_amount": true, "total_open_amount": true, "value_date": true,
+	"status": true, "approval_status": true, "approval_comment": true,
+	"approved_by": true, "approved_at": true, "rejected_by": true, "rejected_at": true,
+	"rejection_comment": true, "delete_comment": true, "requested_by": true,
+	"amount_in_local_currency": true, "posting_date": true, "text": true,
+	"gl_account": true, "reference": true, "additional_header_details": true,
+	"exposure_category": true, "updated_at": true,
+}
+
+// allowedExposureLineItemCols is the set of columns that callers may update on exposure_line_items.
+var allowedExposureLineItemCols = map[string]bool{
+	"line_number": true, "product_id": true, "product_description": true,
+	"quantity": true, "unit_of_measure": true, "unit_price": true,
+	"line_item_amount": true, "plant_code": true, "delivery_date": true,
+	"payment_terms": true, "inco_terms": true, "additional_line_details": true,
+}
+
+// allowedExposureBucketingCols is the set of columns that callers may update on exposure_bucketing.
+var allowedExposureBucketingCols = map[string]bool{
+	"status": true, "status_bucketing": true, "updated_by": true, "updated_at": true,
+	"comments": true, "month_1": true, "month_2": true, "month_3": true, "month_4": true,
+	"month_4_6": true, "month_6plus": true, "old_month1": true, "old_month2": true,
+	"old_month3": true, "old_month4": true, "old_month4to6": true, "old_month6plus": true,
+}
+
+// allowedHedgingProposalCols is the set of columns that callers may update on hedging_proposal.
+var allowedHedgingProposalCols = map[string]bool{
+	"status": true, "status_hedging": true, "updated_by": true, "updated_at": true, "comments": true,
+}
+
+// filterColumns returns a copy of fields containing only keys present in allowed.
+// Returns an error listing the first rejected key so callers can surface it.
+func filterColumns(fields map[string]interface{}, allowed map[string]bool) (map[string]interface{}, error) {
+	out := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		if !allowed[k] {
+			return nil, fmt.Errorf("column %q is not permitted for update", k)
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
 // Handler: Update exposure headers, line items, bucketing, hedging proposal
 func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -96,6 +144,12 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 
 		// Update exposure_headers
 		if len(req.HeaderFields) > 0 {
+			safeHeaderFields, err := filterColumns(req.HeaderFields, allowedExposureHeaderCols)
+			if err != nil {
+				respondWithError(w, http.StatusBadRequest, "headerFields: "+err.Error())
+				return
+			}
+			req.HeaderFields = safeHeaderFields
 			setParts := []string{}
 			values := []interface{}{}
 			i := 1
@@ -129,6 +183,12 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 
 		// Update exposure_line_items
 		if len(req.LineItemFields) > 0 {
+			safeLineItemFields, err := filterColumns(req.LineItemFields, allowedExposureLineItemCols)
+			if err != nil {
+				respondWithError(w, http.StatusBadRequest, "lineItemFields: "+err.Error())
+				return
+			}
+			req.LineItemFields = safeLineItemFields
 			setParts := []string{}
 			values := []interface{}{}
 			i := 1
@@ -169,6 +229,12 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		}
 
 		if len(req.BucketingFields) > 0 {
+			safeBucketingFields, err := filterColumns(req.BucketingFields, allowedExposureBucketingCols)
+			if err != nil {
+				respondWithError(w, http.StatusBadRequest, "bucketingFields: "+err.Error())
+				return
+			}
+			req.BucketingFields = safeBucketingFields
 			setParts := []string{}
 			values := []interface{}{}
 			i := 1
@@ -204,6 +270,12 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 
 		// Update hedging_proposal
 		if len(req.HedgingFields) > 0 {
+			safeHedgingFields, err := filterColumns(req.HedgingFields, allowedHedgingProposalCols)
+			if err != nil {
+				respondWithError(w, http.StatusBadRequest, "hedgingFields: "+err.Error())
+				return
+			}
+			req.HedgingFields = safeHedgingFields
 			setParts := []string{}
 			values := []interface{}{}
 			i := 1
@@ -249,14 +321,14 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			if bucketingRows, ok := updated["bucketing"]; ok {
 				newValues = bucketingRows
 			}
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: "PENDING_EDIT_APPROVAL", Reason: "", RequestedBy: actor, OldValues: oldBucketing, NewValues: newValues})
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: actor, OldValues: oldBucketing, NewValues: newValues})
 		}
 		if len(req.HedgingFields) > 0 {
 			newValues := any(req.HedgingFields)
 			if hedgingRows, ok := updated["hedging"]; ok {
 				newValues = hedgingRows
 			}
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableHedgeProposal, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: "PENDING_EDIT_APPROVAL", Reason: "", RequestedBy: actor, OldValues: oldHedging, NewValues: newValues})
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableHedgeProposal, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: actor, OldValues: oldHedging, NewValues: newValues})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -464,10 +536,10 @@ func DeleteBucketingStatus(db *sql.DB) http.HandlerFunc {
 					"comments":         oldComments,
 				}
 				newValues := map[string]interface{}{
-					"status_bucketing": "PENDING_DELETE_APPROVAL",
+					"status_bucketing": constants.StatusPendingDeleteApproval,
 					"comments":         deleteComment,
 				}
-				auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: "PENDING_DELETE_APPROVAL", Reason: deleteComment, RequestedBy: requestedBy, OldValues: oldValues, NewValues: newValues})
+				auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: deleteComment, RequestedBy: requestedBy, OldValues: oldValues, NewValues: newValues})
 			}
 		}
 		if len(deleted) == 0 {
@@ -531,7 +603,7 @@ func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
 		for statusRows.Next() {
 			var id, status string
 			if err := statusRows.Scan(&id, &status); err == nil {
-				if strings.EqualFold(status, "PENDING_DELETE_APPROVAL") {
+				if strings.EqualFold(status, constants.StatusPendingDeleteApproval) {
 					toDelete = append(toDelete, id)
 				} else {
 					toApprove = append(toApprove, id)
@@ -614,11 +686,11 @@ func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
 
 		for _, rowMap := range approved {
 			if id, ok := rowMap["exposure_header_id"]; ok {
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: "APPROVED", CheckerBy: updatedBy, Comment: req.Comments})
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: constants.StatusApproved, CheckerBy: updatedBy, Comment: req.Comments})
 			}
 		}
 		for _, id := range deleted {
-			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, Status: "APPROVED", CheckerBy: updatedBy, Comment: req.Comments})
+			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: updatedBy, Comment: req.Comments})
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -687,7 +759,7 @@ func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
 			}
 			rejected = append(rejected, rowMap)
 			if id, ok := rowMap["exposure_header_id"]; ok {
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: "REJECTED", CheckerBy: updatedBy, Comment: req.Comments})
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: constants.StatusRejected, CheckerBy: updatedBy, Comment: req.Comments})
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

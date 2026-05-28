@@ -133,12 +133,12 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 			total := activeAmt + pendingAmt
 			return map[string]interface{}{
-				"deployed":          fdRound(total, 2),
-				"deployment_count":  activeCnt + pendingCnt,
-				"active_amount":     fdRound(activeAmt, 2),
-				"active_count":      activeCnt,
-				"pending_amount":    fdRound(pendingAmt, 2),
-				"pending_count":     pendingCnt,
+				"deployed":         fdRound(total, 2),
+				"deployment_count": activeCnt + pendingCnt,
+				"active_amount":    fdRound(activeAmt, 2),
+				"active_count":     activeCnt,
+				"pending_amount":   fdRound(pendingAmt, 2),
+				"pending_count":    pendingCnt,
 			}, nil
 		})
 
@@ -615,27 +615,27 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			defer rows.Close()
 
 			type confRow struct {
-				BookingID          string  `json:"booking_id"`
-				Entity             string  `json:"entity"`
-				Bank               string  `json:"bank"`
-				Amount             float64 `json:"amount"`
-				SentAt             string  `json:"sent_at"`
-				Status             string  `json:"status"`              // raw booking_status
-				CreatedBy          string  `json:"created_by"`
-				ConfirmationState  string  `json:"confirmation_state"`  // human-readable lifecycle stage
-				ConfirmationStage  int     `json:"confirmation_stage"`  // 1..6 (Maker..Activated)
-				FDID               string  `json:"fd_id,omitempty"`
-				FDStatus           string  `json:"fd_status,omitempty"`
-				ActivationDate     string  `json:"activation_date,omitempty"`
-				ApprovalStatus     string  `json:"approval_status,omitempty"`
-				ApprovalsReceived  int     `json:"approvals_received"`
-				ApprovalsRequired  int     `json:"approvals_required"`
-				ApprovalProgress   string  `json:"approval_progress"`
-				LastActor          string  `json:"last_actor,omitempty"`
-				LastActionAt       string  `json:"last_action_at,omitempty"`
-				ElapsedHours       float64 `json:"elapsed_hours"`
-				SLAHours           float64 `json:"sla_hours"`
-				SLAStatus          string  `json:"sla_status"`
+				BookingID         string  `json:"booking_id"`
+				Entity            string  `json:"entity"`
+				Bank              string  `json:"bank"`
+				Amount            float64 `json:"amount"`
+				SentAt            string  `json:"sent_at"`
+				Status            string  `json:"status"` // raw booking_status
+				CreatedBy         string  `json:"created_by"`
+				ConfirmationState string  `json:"confirmation_state"` // human-readable lifecycle stage
+				ConfirmationStage int     `json:"confirmation_stage"` // 1..6 (Maker..Activated)
+				FDID              string  `json:"fd_id,omitempty"`
+				FDStatus          string  `json:"fd_status,omitempty"`
+				ActivationDate    string  `json:"activation_date,omitempty"`
+				ApprovalStatus    string  `json:"approval_status,omitempty"`
+				ApprovalsReceived int     `json:"approvals_received"`
+				ApprovalsRequired int     `json:"approvals_required"`
+				ApprovalProgress  string  `json:"approval_progress"`
+				LastActor         string  `json:"last_actor,omitempty"`
+				LastActionAt      string  `json:"last_action_at,omitempty"`
+				ElapsedHours      float64 `json:"elapsed_hours"`
+				SLAHours          float64 `json:"sla_hours"`
+				SLAStatus         string  `json:"sla_status"`
 			}
 			out := []confRow{}
 			confirmed, pendingApproval, sentToBank, drafts := 0, 0, 0, 0
@@ -659,7 +659,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					cr.SLAHours = 120
 				case "APPROVAL_PENDING":
 					cr.SLAHours = 72
-				case "APPROVED":
+				case constants.StatusApproved:
 					cr.SLAHours = 72
 				case "SENT_TO_BANK":
 					cr.SLAHours = 336
@@ -672,7 +672,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 				// Derive a clear confirmation lifecycle state.
 				switch {
-				case cr.FDStatus == "ACTIVE":
+				case cr.FDStatus == constants.StatusActive:
 					cr.ConfirmationState = "Activated"
 					cr.ConfirmationStage = 6
 				case cr.FDID != "":
@@ -682,7 +682,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					cr.ConfirmationState = "Sent to Bank — Awaiting Confirmation"
 					cr.ConfirmationStage = 4
 					sentToBank++
-				case cr.Status == "APPROVED":
+				case cr.Status == constants.StatusApproved:
 					cr.ConfirmationState = "Approved — Ready to Send"
 					cr.ConfirmationStage = 3
 				case cr.Status == "APPROVAL_PENDING":
@@ -1326,13 +1326,13 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					w.ProgressPct = int(float64(w.ApprovalsReceived) / float64(w.ApprovalsRequired) * 100)
 				}
 				switch w.InstanceStatus {
-				case "PENDING", "ACTIVE", "SUBMITTED":
+				case "PENDING", constants.StatusActive, "SUBMITTED":
 					pending++
 					w.StatusLabel = "In Progress"
-				case "APPROVED", "RESOLVED", "COMPLETED":
+				case constants.StatusApproved, "RESOLVED", "COMPLETED":
 					approved++
 					w.StatusLabel = "Approved"
-				case "REJECTED", "DECLINED":
+				case constants.StatusRejected, "DECLINED":
 					rejected++
 					w.StatusLabel = "Rejected"
 				default:
@@ -1513,9 +1513,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"pending_confirmations":   get("pending_confirmations"),
 			"confirmed_confirmations": get("confirmed_confirmations"),
 			"rollover_pending":        get("rollover_pending"),
-			"approval_workflow": get("approval_workflow"),
-			"lifecycle_summary": get("lifecycle_summary"),
-			"period_start":      periodBounds.StartStr,
+			"approval_workflow":       get("approval_workflow"),
+			"lifecycle_summary":       get("lifecycle_summary"),
+			"period_start":            periodBounds.StartStr,
 		}
 
 		api.RespondWithPayload(w, true, "", payload)

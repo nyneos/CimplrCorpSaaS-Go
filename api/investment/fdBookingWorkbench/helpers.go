@@ -611,8 +611,8 @@ func validateBookingFields(req map[string]interface{}) string {
 	// booking_status
 	if v, ok := req["booking_status"].(string); ok && v != "" {
 		valid := map[string]bool{
-			"DRAFT": true, "PENDING_APPROVAL": true,
-			"APPROVED": true, "REJECTED": true, "SENT_TO_BANK": true,
+			"DRAFT": true, constants.StatusPendingApproval: true,
+			constants.StatusApproved: true, constants.StatusRejected: true, "SENT_TO_BANK": true,
 		}
 		if !valid[v] {
 			return fmt.Sprintf("Invalid booking_status '%s'.", v)
@@ -1091,6 +1091,16 @@ func backfillOpenVarianceLogFromDetails(ctx context.Context, pool *pgxpool.Pool,
 	return fetchOpenVarianceIDs(ctx, pool, bookingID, confirmationID)
 }
 
+// normalizePrincipalValueType normalizes UI principal value-type labels.
+func normalizePrincipalValueType(v string) string {
+	switch strings.TrimSpace(v) {
+	case "Thousand", "Lakh", "Crore", "Actual":
+		return strings.TrimSpace(v)
+	default:
+		return "Actual"
+	}
+}
+
 // buildEditConfirmationFieldMap maps JSON field keys from the UI to fd_confirmation column names.
 // Only columns present in the live schema are included (except core columns always assumed present).
 func buildEditConfirmationFieldMap(confCols map[string]bool) map[string]string {
@@ -1132,6 +1142,7 @@ func buildEditConfirmationFieldMap(confCols map[string]bool) map[string]string {
 		"confirmation_notes":           "confirmation_notes",
 		"notes":                        "confirmation_notes",
 		"confirmation_mode":            "confirmation_mode",
+		"value_type":                   "value_type",
 	}
 	out := make(map[string]string, len(candidates))
 	for clientKey, dbCol := range candidates {
@@ -1171,6 +1182,7 @@ func fdConfirmationDetailExtraSelect(confCols map[string]bool) string {
 		textCol("reset_type", "reset_type"),
 		textCol("reset_type", "confirmed_reset_type"),
 		textCol("payout_frequency_id", "payout_frequency_id"),
+		textCol("value_type", "value_type"),
 		jsonCol("payout_dates", "payout_dates"),
 		jsonCol("compounding_dates", "compounding_dates"),
 	}
@@ -1189,6 +1201,10 @@ func editConfirmationCoerceFieldValue(clientKey, dbCol string, v interface{}) in
 	case "bank_fd_ref_no", "bank_reference_number", "premature_closure_terms", "confirmation_notes", "notes":
 		if sv, ok := v.(string); ok {
 			return strings.TrimSpace(sv)
+		}
+	case "value_type":
+		if sv, ok := v.(string); ok {
+			return normalizePrincipalValueType(sv)
 		}
 	case "payout_dates", "compounding_dates":
 		b, err := json.Marshal(v)

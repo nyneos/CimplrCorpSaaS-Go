@@ -525,7 +525,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"retry_backoff_secs": newBackoff,
 					"priority_level":     newPriority,
 					"requested_by":       editor,
-					"processing_status":  "PENDING_EDIT_APPROVAL",
+					"processing_status":  constants.StatusPendingEditApproval,
 				},
 			})
 		}

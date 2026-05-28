@@ -187,7 +187,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		approvedDPs, _ := ctx.Value("ApprovedDPs").([]map[string]string)
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
@@ -489,7 +489,7 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Validate bank account
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 		accountFound := false
 		for _, acc := range approvedBankAccounts {
 			if acc["account_number"] == req.DefaultSettlementAccount || acc["account_id"] == req.DefaultSettlementAccount {
@@ -594,7 +594,7 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
 		approvedDPs, _ := ctx.Value("ApprovedDPs").([]map[string]string)
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 
 		results := make([]map[string]interface{}, 0, len(req.Rows))
 
@@ -1067,15 +1067,15 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
-			if ps == "APPROVED" {
+			if ps == constants.StatusApproved {
 				continue
 			}
-			if ps == "PENDING_DELETE_APPROVAL" {
+			if ps == constants.StatusPendingDeleteApproval {
 				toDeleteActionIDs = append(toDeleteActionIDs, aid)
 				deleteMasterIDs = append(deleteMasterIDs, did)
 				continue
 			}
-			if ps == "PENDING_APPROVAL" || ps == "PENDING_EDIT_APPROVAL" {
+			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
 			}
 		}
@@ -1187,7 +1187,7 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			found[sid] = true
-			if strings.ToUpper(strings.TrimSpace(ps)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusApproved {
 				cannotReject = append(cannotReject, sid)
 			} else {
 				actionIDs = append(actionIDs, aid)
@@ -1250,7 +1250,7 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 		accountNumbers := make([]string, 0, len(approvedBankAccounts))
 		for _, acc := range approvedBankAccounts {
 			if acc["account_number"] != "" {
@@ -1388,7 +1388,7 @@ func GetApprovedActiveDemats(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 		accountNumbers := make([]string, 0, len(approvedBankAccounts))
 		for _, acc := range approvedBankAccounts {
 			if acc["account_number"] != "" {

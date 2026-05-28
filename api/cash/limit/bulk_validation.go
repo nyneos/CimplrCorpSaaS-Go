@@ -10,27 +10,27 @@ import (
 
 // BulkValidationResult contains validation results for bulk operations
 type BulkValidationResult struct {
-	Index          int    `json:"index"`
-	IsValid        bool   `json:"is_valid"`
-	Error          string `json:"error,omitempty"`
-	LimitID        string `json:"limit_id,omitempty"`
-	EntityName     string `json:"entity_name,omitempty"`
-	BankName       string `json:"bank_name,omitempty"`
+	Index          int     `json:"index"`
+	IsValid        bool    `json:"is_valid"`
+	Error          string  `json:"error,omitempty"`
+	LimitID        string  `json:"limit_id,omitempty"`
+	EntityName     string  `json:"entity_name,omitempty"`
+	BankName       string  `json:"bank_name,omitempty"`
 	UtilizedAmount float64 `json:"utilized_amount,omitempty"`
 }
 
 // validateBulkLimitUniqueness validates uniqueness for multiple limit records in a single query
 // Time Complexity: O(1) database call + O(n*m) memory processing where n=input records, m=existing records
 func validateBulkLimitUniqueness(ctx context.Context, pgxPool *pgxpool.Pool, limits []struct {
-	Index          int
-	EntityName     string
-	BankName       string
-	CoreLimitType  string
-	LimitType      string
-	LimitSubType   string
-	CurrencyCode   string
+	Index         int
+	EntityName    string
+	BankName      string
+	CoreLimitType string
+	LimitType     string
+	LimitSubType  string
+	CurrencyCode  string
 }) ([]BulkValidationResult, error) {
-	
+
 	if len(limits) == 0 {
 		return []BulkValidationResult{}, nil
 	}
@@ -38,12 +38,12 @@ func validateBulkLimitUniqueness(ctx context.Context, pgxPool *pgxpool.Pool, lim
 	// Build a single query to check all combinations at once
 	placeholders := make([]string, len(limits))
 	args := make([]interface{}, 0, len(limits)*6)
-	
+
 	for i, limit := range limits {
-		placeholderGroup := fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d)", 
+		placeholderGroup := fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d)",
 			i*6+1, i*6+2, i*6+3, i*6+4, i*6+5, i*6+6)
 		placeholders[i] = placeholderGroup
-		
+
 		args = append(args, limit.EntityName, limit.BankName, limit.CoreLimitType,
 			limit.LimitType, limit.LimitSubType, strings.ToUpper(limit.CurrencyCode))
 	}
@@ -80,10 +80,10 @@ func validateBulkLimitUniqueness(ctx context.Context, pgxPool *pgxpool.Pool, lim
 	// Validate each input record
 	results := make([]BulkValidationResult, len(limits))
 	for i, limit := range limits {
-		key := fmt.Sprintf("%s|%s|%s|%s|%s|%s", 
+		key := fmt.Sprintf("%s|%s|%s|%s|%s|%s",
 			limit.EntityName, limit.BankName, limit.CoreLimitType,
 			limit.LimitType, limit.LimitSubType, strings.ToUpper(limit.CurrencyCode))
-		
+
 		if existing[key] {
 			results[i] = BulkValidationResult{
 				Index:   limit.Index,
@@ -108,15 +108,15 @@ func validateBulkUtilizationLimits(ctx context.Context, pgxPool *pgxpool.Pool, u
 	LimitID        string
 	UtilizedAmount float64
 }) ([]BulkValidationResult, error) {
-	
+
 	if len(utilizations) == 0 {
 		return []BulkValidationResult{}, nil
 	}
 
 	// Group utilizations by limit_id to batch validation
-	limitGroups := make(map[string][]int) // limit_id -> []utilization_indices
+	limitGroups := make(map[string][]int)    // limit_id -> []utilization_indices
 	limitAmounts := make(map[string]float64) // limit_id -> total_new_amount
-	
+
 	for i, util := range utilizations {
 		limitGroups[util.LimitID] = append(limitGroups[util.LimitID], i)
 		limitAmounts[util.LimitID] += util.UtilizedAmount
@@ -183,30 +183,30 @@ func validateBulkUtilizationLimits(ctx context.Context, pgxPool *pgxpool.Pool, u
 
 	// Store limit information
 	limitInfo := make(map[string]struct {
-		SanctionedAmount       float64
-		InitialUtilization     float64
+		SanctionedAmount         float64
+		InitialUtilization       float64
 		TotalApprovedUtilization float64
-		EntityName             string
-		BankName               string
-		CoreLimitType          string
+		EntityName               string
+		BankName                 string
+		CoreLimitType            string
 	})
 
 	for rows.Next() {
 		var limitID, entityName, bankName, coreLimitType string
 		var sanctionedAmount, initialUtilization, totalApprovedUtilization float64
-		
-		if err := rows.Scan(&limitID, &sanctionedAmount, &initialUtilization, 
+
+		if err := rows.Scan(&limitID, &sanctionedAmount, &initialUtilization,
 			&totalApprovedUtilization, &entityName, &bankName, &coreLimitType); err != nil {
 			continue
 		}
-		
+
 		limitInfo[limitID] = struct {
-			SanctionedAmount       float64
-			InitialUtilization     float64
+			SanctionedAmount         float64
+			InitialUtilization       float64
 			TotalApprovedUtilization float64
-			EntityName             string
-			BankName               string
-			CoreLimitType          string
+			EntityName               string
+			BankName                 string
+			CoreLimitType            string
 		}{sanctionedAmount, initialUtilization, totalApprovedUtilization, entityName, bankName, coreLimitType}
 	}
 
@@ -216,17 +216,17 @@ func validateBulkUtilizationLimits(ctx context.Context, pgxPool *pgxpool.Pool, u
 		info, exists := limitInfo[util.LimitID]
 		if !exists {
 			results[i] = BulkValidationResult{
-				Index:     util.Index,
-				IsValid:   false,
-				Error:     fmt.Sprintf("limit not found or not approved: %s", util.LimitID),
-				LimitID:   util.LimitID,
+				Index:   util.Index,
+				IsValid: false,
+				Error:   fmt.Sprintf("limit not found or not approved: %s", util.LimitID),
+				LimitID: util.LimitID,
 			}
 			continue
 		}
 
 		// Calculate if this utilization would exceed the limit
 		currentUtilization := info.InitialUtilization + info.TotalApprovedUtilization
-		
+
 		// For bulk operations, we need to consider the cumulative effect of all utilizations for this limit
 		totalNewAmount := limitAmounts[util.LimitID]
 		totalUtilization := currentUtilization + totalNewAmount
@@ -234,9 +234,9 @@ func validateBulkUtilizationLimits(ctx context.Context, pgxPool *pgxpool.Pool, u
 		if totalUtilization > info.SanctionedAmount {
 			exceededBy := totalUtilization - info.SanctionedAmount
 			results[i] = BulkValidationResult{
-				Index:          util.Index,
-				IsValid:        false,
-				Error:          fmt.Sprintf("limit exceeded: batch would exceed sanctioned limit by %.2f. Current utilization: %.2f, Batch total: %.2f, Sanctioned limit: %.2f (Entity: %s, Bank: %s, Limit Type: %s)",
+				Index:   util.Index,
+				IsValid: false,
+				Error: fmt.Sprintf("limit exceeded: batch would exceed sanctioned limit by %.2f. Current utilization: %.2f, Batch total: %.2f, Sanctioned limit: %.2f (Entity: %s, Bank: %s, Limit Type: %s)",
 					exceededBy, currentUtilization, totalNewAmount, info.SanctionedAmount, info.EntityName, info.BankName, info.CoreLimitType),
 				LimitID:        util.LimitID,
 				EntityName:     info.EntityName,

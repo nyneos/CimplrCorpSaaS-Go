@@ -1,6 +1,7 @@
 package fdReceipt
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"errors"
 
@@ -107,11 +108,11 @@ func varianceAllowedActions(workflowStatus string, checkerApproved bool) []strin
 func mapHeaderProcessingStatus(exceptionStatus string) string {
 	switch exceptionStatus {
 	case "OPEN", "IN_REVIEW":
-		return "PENDING_APPROVAL"
+		return constants.StatusPendingApproval
 	case "CLOSE":
-		return "APPROVED"
+		return constants.StatusApproved
 	default:
-		return "PENDING_APPROVAL"
+		return constants.StatusPendingApproval
 	}
 }
 
@@ -175,7 +176,7 @@ func hasVarianceCheckerApproval(ctx context.Context, pool *pgxpool.Pool, excepti
 	if err != nil || latest == nil {
 		return false
 	}
-	return latest.ProcessingStatus == "APPROVED"
+	return latest.ProcessingStatus == constants.StatusApproved
 }
 
 func loadVarianceCase(ctx context.Context, pool *pgxpool.Pool, exceptionID string) (*varianceCaseHeader, error) {

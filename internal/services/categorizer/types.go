@@ -6,14 +6,14 @@ import "time"
 // Waterfall step labels — written to classification_audit_log
 // ─────────────────────────────────────────────────────────────
 const (
-	StepRule            = "RULE"
-	StepCounterparty    = "COUNTERPARTY"
-	StepGL              = "GL"
-	StepCorrection      = "CORRECTION"
-	StepSimilarity      = "SIMILARITY"
-	StepAccountDefault  = "ACCOUNT_DEFAULT" // account-level inflow/outflow/charges/interest defaults
-	StepAIInference     = "AI_INFERENCE"    // LLM-based intelligent inference (Step 9)
-	StepUnallocated     = "UNALLOCATED"
+	StepRule           = "RULE"
+	StepCounterparty   = "COUNTERPARTY"
+	StepGL             = "GL"
+	StepCorrection     = "CORRECTION"
+	StepSimilarity     = "SIMILARITY"
+	StepAccountDefault = "ACCOUNT_DEFAULT" // account-level inflow/outflow/charges/interest defaults
+	StepAIInference    = "AI_INFERENCE"    // LLM-based intelligent inference (Step 9)
+	StepUnallocated    = "UNALLOCATED"
 
 	// MinConfidenceForActuals: below this → review queue, category NOT set.
 	MinConfidenceForActuals = 0.70

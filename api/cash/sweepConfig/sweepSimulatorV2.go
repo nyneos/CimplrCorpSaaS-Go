@@ -15,7 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // ===================================================================================
 // SWEEP SIMULATION & ANALYSIS SYSTEM V2
@@ -1375,7 +1376,7 @@ func runSweepSimulation(sweeps []map[string]interface{}, balances []AccountBalan
 		}
 
 		validatedAmount := requestedAmount
-		status := "APPROVED"
+		status := constants.StatusApproved
 		stepViolations := []string{}
 
 		// This is the planned amount (what SHOULD transfer if no violations)
@@ -1401,8 +1402,8 @@ func runSweepSimulation(sweeps []map[string]interface{}, balances []AccountBalan
 			status = "PARTIAL"
 		}
 
-		if status == "APPROVED" || status == "PARTIAL" {
-			if status == "APPROVED" {
+		if status == constants.StatusApproved || status == "PARTIAL" {
+			if status == constants.StatusApproved {
 				successCount++
 			}
 			actualTransferred += validatedAmount
@@ -1715,7 +1716,7 @@ func extractCriticalPath(steps []SweepExecutionStep) []string {
 	// Simple implementation: return sweep IDs in execution order
 	criticalPath := []string{}
 	for _, step := range steps {
-		if step.ExecutionStatus == "APPROVED" {
+		if step.ExecutionStatus == constants.StatusApproved {
 			criticalPath = append(criticalPath, step.SweepID)
 		}
 	}

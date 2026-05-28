@@ -145,23 +145,33 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				primaryField = "''"
 			}
 
-			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref  FROM (
-				SELECT 
-					r.due_date as dt, 
-					'inflow' as direction, 
-					r.currency_code as currency, 
-					` + primaryField + ` as primary_name, 
-					r.invoice_amount as amount,
-					'Generic' as costprofit_center,
-					r.receivable_id::text as source_ref
-				FROM tr_receivables r
-				LEFT JOIN mastercounterparty m ON m.counterparty_name = r.counterparty_name
-				WHERE EXISTS (
-					SELECT 1 FROM auditactionreceivable a WHERE a.receivable_id::text = r.receivable_id::text AND a.processing_status = 'APPROVED'
-				)
-				AND r.due_date >= $` + fmt.Sprint(argI) + ` 
-				AND r.due_date <= $` + fmt.Sprint(argI+1)
-
+			q := fmt.Sprintf(`
+	SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref
+	FROM (
+		SELECT 
+			r.due_date as dt, 
+			'inflow' as direction, 
+			r.currency_code as currency, 
+			%s as primary_name, 
+			r.invoice_amount as amount,
+			'Generic' as costprofit_center,
+			r.receivable_id::text as source_ref
+		FROM tr_receivables r
+		LEFT JOIN mastercounterparty m 
+			ON m.counterparty_name = r.counterparty_name
+		WHERE EXISTS (
+			SELECT 1 
+			FROM auditactionreceivable a 
+			WHERE a.receivable_id::text = r.receivable_id::text 
+			AND a.processing_status = 'APPROVED'
+		)
+		AND r.due_date >= $%d
+		AND r.due_date <= $%d
+	`,
+				primaryField,
+				argI,
+				argI+1,
+			)
 			args = append(args, now, endDate)
 			argI += 2
 
@@ -1585,7 +1595,7 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
-			"data":               result,
+			"data":                 result,
 		})
 	}
 }

@@ -26,10 +26,10 @@ const (
 	fileAuditDeleteAction   = "DELETE"
 
 	fileAuditCompletedStatus       = "COMPLETED"
-	fileAuditApprovedStatus        = "APPROVED"
-	fileAuditRejectedStatus        = "REJECTED"
-	fileAuditPendingDeleteApproval = "PENDING_DELETE_APPROVAL"
-	fileAuditActiveStatus          = "ACTIVE"
+	fileAuditApprovedStatus        = constants.StatusApproved
+	fileAuditRejectedStatus        = constants.StatusRejected
+	fileAuditPendingDeleteApproval = constants.StatusPendingDeleteApproval
+	fileAuditActiveStatus          = constants.StatusActive
 	defaultFileAuditTableName      = "cimplrcorpsaas.cash_additional_file_audit"
 )
 

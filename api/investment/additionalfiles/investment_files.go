@@ -286,7 +286,7 @@ func recordDynamicInvestmentMainUploadAudit(ctx context.Context, tx pgx.Tx, tabl
 		values[actionColumn] = "UPLOAD_FILE"
 	}
 	if _, ok := columns["processing_status"]; ok {
-		values["processing_status"] = "APPROVED"
+		values["processing_status"] = constants.StatusApproved
 	}
 	if reasonColumn := firstInvestmentAuditColumn(columns, "reason", "action_reason"); reasonColumn != "" {
 		values[reasonColumn] = reason
@@ -502,7 +502,7 @@ func recordFDInterestReceiptMainUploadAudit(ctx context.Context, tx pgx.Tx, rece
 		) VALUES ($1, $2, $3, $4, $5, $6)`,
 		receiptID,
 		"EDIT",
-		"APPROVED",
+		constants.StatusApproved,
 		reason,
 		payload.UploadedBy,
 		payload.UploadedAt,
@@ -527,7 +527,7 @@ func recordFDTDSReceiptMainUploadAudit(ctx context.Context, tx pgx.Tx, tdsID str
 		) VALUES ($1, $2, $3, $4, $5, $6)`,
 		tdsID,
 		"EDIT",
-		"APPROVED",
+		constants.StatusApproved,
 		reason,
 		payload.UploadedBy,
 		payload.UploadedAt,

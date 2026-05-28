@@ -10,7 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // Currency conversion rates to USD
 var rates = map[string]float64{
@@ -74,8 +75,8 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			End   time.Time
 		}{
 			{"Next 30 Days", today, today.AddDate(0, 0, 30)},
-			{"Next 60 Days", today, today.AddDate(0, 30, 60)},
-			{"This Quarter", qStart, today.AddDate(0, 60, 90)},
+			{"Next 60 Days", today, today.AddDate(0, 0, 60)},
+			{"This Quarter", qStart, today.AddDate(0, 0, 90)},
 		}
 		out := make([]PlannedInflowOutflowData, 0, len(ranges))
 		for _, dr := range ranges {

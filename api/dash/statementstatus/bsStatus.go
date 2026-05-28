@@ -17,9 +17,9 @@ import (
 
 // UploadStatus values
 const (
-	UploadStatusApproved    = "APPROVED"
+	UploadStatusApproved    = constants.StatusApproved
 	UploadStatusPending     = "PENDING"
-	UploadStatusRejected    = "REJECTED"
+	UploadStatusRejected    = constants.StatusRejected
 	UploadStatusNotUploaded = "NOT_UPLOADED"
 )
 
@@ -77,7 +77,7 @@ type StatementStatusResponse struct {
 }
 
 func ctxApprovedAccountNumbers(ctx context.Context) []string {
-	v := ctx.Value("ApprovedBankAccounts")
+	v := ctx.Value(api.ApprovedBankAccountsKey)
 	if v == nil {
 		return nil
 	}

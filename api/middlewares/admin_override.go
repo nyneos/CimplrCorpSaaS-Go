@@ -211,12 +211,12 @@ func LoadEverythingIntoContext(ctx context.Context, db *pgxpool.Pool) (map[strin
 	}
 	result["ApprovedDPs"] = dps
 
-	bankAccounts, err := loadApprovedBankAccounts(ctx, db)
-	if err != nil {
-		errs = append(errs, "loadApprovedBankAccounts: "+err.Error())
-		bankAccounts = []map[string]string{}
-	}
-	result["ApprovedBankAccounts"] = bankAccounts
+    bankAccounts, err := loadApprovedBankAccounts(ctx, db)
+    if err != nil {
+        errs = append(errs, "loadApprovedBankAccounts: "+err.Error())
+        bankAccounts = []map[string]string{}
+    }
+    result[approvedBankAccountsKey] = bankAccounts // key defined in prevalidation.go
 
 	folios, err := loadApprovedFolios(ctx, db)
 	if err != nil {

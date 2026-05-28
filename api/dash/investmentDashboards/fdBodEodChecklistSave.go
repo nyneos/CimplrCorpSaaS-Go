@@ -1,17 +1,20 @@
 // Package investmentdashboards — FD BOD/EOD Checklist persistence APIs
 //
 // POST /dash/investment/fd/bod-eod-checklist/save
-//   Persists the user-toggled state for one or many EOD checklist items.
-//   Items already auto-derived by the dashboard (e.g. unmatched-receipts count)
-//   can be explicitly overridden by the operator with a sign-off + comment.
+//
+//	Persists the user-toggled state for one or many EOD checklist items.
+//	Items already auto-derived by the dashboard (e.g. unmatched-receipts count)
+//	can be explicitly overridden by the operator with a sign-off + comment.
 //
 // POST /dash/investment/fd/bod-eod-checklist/signoff
-//   Marks the entire EOD as signed off for an entity/date — recording who
-//   signed it off, when, the role, and any remaining critical items.
+//
+//	Marks the entire EOD as signed off for an entity/date — recording who
+//	signed it off, when, the role, and any remaining critical items.
 //
 // Tables expected (created via the SQL block shipped with this feature):
-//   investment.fd_eod_checklist_item_status — per-item user override
-//   investment.fd_eod_checklist_signoff     — header-level sign-off audit
+//
+//	investment.fd_eod_checklist_item_status — per-item user override
+//	investment.fd_eod_checklist_signoff     — header-level sign-off audit
 package investmentdashboards
 
 import (
@@ -40,14 +43,14 @@ type checklistItemPayload struct {
 }
 
 type checklistSavePayload struct {
-	UserID     string                 `json:"user_id"`
-	EntityID   string                 `json:"entity_id"`
-	Currency   string                 `json:"currency"`
-	AsOfDate   string                 `json:"as_of_date"` // YYYY-MM-DD; defaults to today
-	Mode       string                 `json:"mode"`       // BOD | EOD (defaults EOD)
-	Items      []checklistItemPayload `json:"items"`
-	SignedOff  bool                   `json:"signed_off"`
-	SignOffNote string                `json:"signoff_note"`
+	UserID      string                 `json:"user_id"`
+	EntityID    string                 `json:"entity_id"`
+	Currency    string                 `json:"currency"`
+	AsOfDate    string                 `json:"as_of_date"` // YYYY-MM-DD; defaults to today
+	Mode        string                 `json:"mode"`       // BOD | EOD (defaults EOD)
+	Items       []checklistItemPayload `json:"items"`
+	SignedOff   bool                   `json:"signed_off"`
+	SignOffNote string                 `json:"signoff_note"`
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────

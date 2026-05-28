@@ -54,7 +54,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.DefaultRunMode = "SIMULATION"
 		}
 		if req.DefaultFDStatusFilter == "" {
-			req.DefaultFDStatusFilter = "ACTIVE"
+			req.DefaultFDStatusFilter = constants.StatusActive
 		}
 		if req.AcrualGranularity == "" {
 			req.AcrualGranularity = "MONTHLY"
@@ -154,7 +154,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"run_time":           req.RunTime,
 			"next_run_at":        nextRun,
 			"is_active":          false,
-			"processing_status":  "PENDING_APPROVAL",
+			"processing_status":  constants.StatusPendingApproval,
 		})
 		go func(cfgID, entID, uID, email string) {
 			defer func() { recover() }() //nolint:errcheck
@@ -314,7 +314,7 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"config_id":         req.ConfigID,
 			"updated":           true,
-			"processing_status": "PENDING_EDIT_APPROVAL",
+			"processing_status": constants.StatusPendingEditApproval,
 		})
 		go func(cfgID, entID, uID, email string) {
 			defer func() { recover() }() //nolint:errcheck
@@ -734,9 +734,9 @@ func finalizeScheduleConfigAudits(
 	checkerEmail, comment string,
 	approve bool,
 ) (approved []string, deleted []string, err error) {
-	targetStatus := "REJECTED"
+	targetStatus := constants.StatusRejected
 	if approve {
-		targetStatus = "APPROVED"
+		targetStatus = constants.StatusApproved
 	}
 
 	rows, err := tx.Query(ctx, `
@@ -922,7 +922,7 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"config_id":         req.ConfigID,
-			"processing_status": "PENDING_DELETE_APPROVAL",
+			"processing_status": constants.StatusPendingDeleteApproval,
 		})
 		go func(cfgID, entID, uID, email string) {
 			defer func() { recover() }() //nolint:errcheck
@@ -1267,7 +1267,7 @@ func fireScheduledRun(
 		if sErr := submitAccrualRunForApproval(ctx, pool, runID, "SCHEDULER"); sErr != nil {
 			api.LogError("[FDAccrual] Scheduler submit run=%s: %v", runID, sErr)
 		} else {
-			finalStatus = "PENDING_APPROVAL"
+			finalStatus = constants.StatusPendingApproval
 		}
 	}
 

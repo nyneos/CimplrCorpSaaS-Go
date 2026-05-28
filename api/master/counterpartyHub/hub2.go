@@ -451,7 +451,7 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errs = append(errs, cpID+": not found")
 				continue
 			}
-			if currentStatus == "ACTIVE" {
+			if currentStatus == constants.StatusActive {
 				errs = append(errs, cpID+": already ACTIVE — skipped")
 				continue
 			}
@@ -476,7 +476,7 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				engineActed++
 
 				// Check if instance is now fully APPROVED → flip status
-				if actionRes.InstanceStatus == "APPROVED" {
+				if actionRes.InstanceStatus == constants.StatusApproved {
 					activateCounterparty(ctx, pgxPool, cpID, cpType, userEmail, req.Comment)
 				}
 			} else {
@@ -1035,7 +1035,7 @@ func UpdateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if _, changing := req.Fields["counterparty_code"]; changing && oldStatus == "ACTIVE" {
+		if _, changing := req.Fields["counterparty_code"]; changing && oldStatus == constants.StatusActive {
 			api.RespondWithError(w, http.StatusBadRequest, "counterparty_code cannot be changed after ACTIVE")
 			return
 		}

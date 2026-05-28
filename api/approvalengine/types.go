@@ -1,14 +1,17 @@
 package approvalengine
 
-import "time"
+import (
+	"CimplrCorpSaas/api/constants"
+	"time"
+)
 
 // ─── Status / Action constants ────────────────────────────────────────────────
 
 // Instance statuses
 const (
 	InstStatusPending   = "PENDING"
-	InstStatusApproved  = "APPROVED"
-	InstStatusRejected  = "REJECTED"
+	InstStatusApproved  = constants.StatusApproved
+	InstStatusRejected  = constants.StatusRejected
 	InstStatusCancelled = "CANCELLED"
 	InstStatusExpired   = "EXPIRED"
 )
@@ -16,17 +19,17 @@ const (
 // Eye statuses
 const (
 	EyeStatusWaiting   = "WAITING"
-	EyeStatusActive    = "ACTIVE"
-	EyeStatusApproved  = "APPROVED"
-	EyeStatusRejected  = "REJECTED"
+	EyeStatusActive    = constants.StatusActive
+	EyeStatusApproved  = constants.StatusApproved
+	EyeStatusRejected  = constants.StatusRejected
 	EyeStatusEscalated = "ESCALATED"
 	EyeStatusSkipped   = "SKIPPED"
 )
 
 // Action types recorded in approval_instance_action
 const (
-	ActionApproved      = "APPROVED"
-	ActionRejected      = "REJECTED"
+	ActionApproved      = constants.StatusApproved
+	ActionRejected      = constants.StatusRejected
 	ActionEscalated     = "ESCALATED"
 	ActionAutoEscalated = "AUTO_ESCALATED"
 	ActionRecalled      = "RECALLED"
@@ -46,12 +49,12 @@ type InstanceRequest struct {
 	EntityCode       string
 	TransactionType  string
 	RecordID         string
-	RecordTable      string  // e.g. "investment.fd_tds_plan_master"
-	AuditTable       string  // e.g. "investment.fd_audit_tds_plan"
-	AuditIDColumn    string  // PK col in BOTH master and audit table, e.g. "tds_plan_id"
-	ActionType       string  // CREATE / EDIT / DELETE
+	RecordTable      string // e.g. "investment.fd_tds_plan_master"
+	AuditTable       string // e.g. "investment.fd_audit_tds_plan"
+	AuditIDColumn    string // PK col in BOTH master and audit table, e.g. "tds_plan_id"
+	ActionType       string // CREATE / EDIT / DELETE
 	Amount           float64
-	SubmittedBy      string  // public.users.id
+	SubmittedBy      string // public.users.id
 	SubmittedByEmail string
 }
 
@@ -166,50 +169,50 @@ type ApproverInfo struct {
 	RoleID         string `json:"role_id,omitempty"`
 	RoleName       string `json:"role_name,omitempty"`
 	// Action taken by this approver on this eye (empty if not yet acted).
-	ActionTaken  string     `json:"action_taken,omitempty"`  // APPROVED | REJECTED | ESCALATED | ...
-	ActionAt     *time.Time `json:"action_at,omitempty"`
-	ActionComment string    `json:"action_comment,omitempty"`
+	ActionTaken   string     `json:"action_taken,omitempty"` // APPROVED | REJECTED | ESCALATED | ...
+	ActionAt      *time.Time `json:"action_at,omitempty"`
+	ActionComment string     `json:"action_comment,omitempty"`
 }
 
 // RichEyeDetail is an eye enriched with numbered approver details.
 type RichEyeDetail struct {
-	InstanceEyeID     string                 `json:"instance_eye_id"`
-	Position          int                    `json:"position"`
-	EyeCount          int                    `json:"eye_count"`
-	ApprovalsRequired int                    `json:"approvals_required"`
-	ApprovalsReceived int                    `json:"approvals_received"`
-	Status            string                 `json:"status"`
-	ActivatedAt       *time.Time             `json:"activated_at,omitempty"`
-	SlaDeadline       *time.Time             `json:"sla_deadline,omitempty"`
-	ResolvedAt        *time.Time             `json:"resolved_at,omitempty"`
-	IsEscalated       bool                   `json:"is_escalated"`
-	EscalatedAt       *time.Time             `json:"escalated_at,omitempty"`
+	InstanceEyeID     string     `json:"instance_eye_id"`
+	Position          int        `json:"position"`
+	EyeCount          int        `json:"eye_count"`
+	ApprovalsRequired int        `json:"approvals_required"`
+	ApprovalsReceived int        `json:"approvals_received"`
+	Status            string     `json:"status"`
+	ActivatedAt       *time.Time `json:"activated_at,omitempty"`
+	SlaDeadline       *time.Time `json:"sla_deadline,omitempty"`
+	ResolvedAt        *time.Time `json:"resolved_at,omitempty"`
+	IsEscalated       bool       `json:"is_escalated"`
+	EscalatedAt       *time.Time `json:"escalated_at,omitempty"`
 	// Approvers: dynamically keyed "approver_1", "approver_2", ...
-	Approvers         map[string]ApproverInfo `json:"approvers"`
+	Approvers map[string]ApproverInfo `json:"approvers"`
 	// Full action log for this eye (all actions, including system).
-	ActionLog         []EyeActionDetail       `json:"action_log"`
+	ActionLog []EyeActionDetail `json:"action_log"`
 }
 
 // RichInstanceDetail is GetInstanceDetail enriched with per-eye approver identities.
 type RichInstanceDetail struct {
-	InstanceID         string          `json:"instance_id"`
-	MatrixID           string          `json:"matrix_id"`
-	ModuleCode         string          `json:"module_code"`
-	EntityCode         string          `json:"entity_code"`
-	TransactionType    string          `json:"transaction_type"`
-	RecordID           string          `json:"record_id"`
-	RecordTable        string          `json:"record_table"`
-	ActionType         string          `json:"action_type"`
-	Status             string          `json:"status"`
-	SubmittedByEmail   string          `json:"submitted_by_email"`
-	SubmittedAt        time.Time       `json:"submitted_at"`
-	OverallSlaHours    *int            `json:"overall_sla_hours,omitempty"`
-	OverallSlaDeadline *time.Time      `json:"overall_sla_deadline,omitempty"`
-	ResolvedAt         *time.Time      `json:"resolved_at,omitempty"`
-	ResolvedByEmail    string          `json:"resolved_by_email,omitempty"`
+	InstanceID         string     `json:"instance_id"`
+	MatrixID           string     `json:"matrix_id"`
+	ModuleCode         string     `json:"module_code"`
+	EntityCode         string     `json:"entity_code"`
+	TransactionType    string     `json:"transaction_type"`
+	RecordID           string     `json:"record_id"`
+	RecordTable        string     `json:"record_table"`
+	ActionType         string     `json:"action_type"`
+	Status             string     `json:"status"`
+	SubmittedByEmail   string     `json:"submitted_by_email"`
+	SubmittedAt        time.Time  `json:"submitted_at"`
+	OverallSlaHours    *int       `json:"overall_sla_hours,omitempty"`
+	OverallSlaDeadline *time.Time `json:"overall_sla_deadline,omitempty"`
+	ResolvedAt         *time.Time `json:"resolved_at,omitempty"`
+	ResolvedByEmail    string     `json:"resolved_by_email,omitempty"`
 	// ViewerCanAct is true when the viewing user has an active eye they can act on.
-	ViewerCanAct       bool            `json:"viewer_can_act"`
+	ViewerCanAct bool `json:"viewer_can_act"`
 	// ViewerActiveEyeID is the instance_eye_id the viewer should act on, if any.
-	ViewerActiveEyeID  string          `json:"viewer_active_eye_id,omitempty"`
-	Eyes               []RichEyeDetail `json:"eyes"`
+	ViewerActiveEyeID string          `json:"viewer_active_eye_id,omitempty"`
+	Eyes              []RichEyeDetail `json:"eyes"`
 }

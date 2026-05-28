@@ -18,6 +18,7 @@ import (
 	onboard "CimplrCorpSaas/api/investment/onboarding"
 	portfolio "CimplrCorpSaas/api/investment/portfolio"
 	redemption "CimplrCorpSaas/api/investment/redemption"
+	"CimplrCorpSaas/internal/observability"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -25,11 +26,13 @@ import (
 )
 
 func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
+	const serviceName = "investment"
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/investment/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Investment Service is active"))
 	})
+	mux.Handle("/investment/metrics", observability.MetricsHandler(serviceName))
 
 	// // Onboarding workbench (protected by BusinessUnitMiddleware)
 	// mux.Handle("/investment/onboard/workbench", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.OnboardPortfolioWorkbench(pool))))
@@ -380,7 +383,7 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	// mux.HandleFunc("/investment/schemes", schemesHandler)
 
 	logger.LogInfo("Investment Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
+	err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {
 		logger.LogError("Investment service failed: %v", err)
 	}

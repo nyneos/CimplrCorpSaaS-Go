@@ -6,7 +6,6 @@ import (
 	"fmt"
 )
 
-
 type DashService struct {
 	config map[string]interface{}
 	db     *sql.DB

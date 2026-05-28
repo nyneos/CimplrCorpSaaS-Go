@@ -8,7 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // StartAutoRenewalWorker runs daily and processes FDs with auto_renewal=true
 // whose maturity_date has passed. It creates a ROLLOVER closure request (type
@@ -116,7 +117,7 @@ func runAutoRenewal(db *pgxpool.Pool) {
 		}
 
 		if processErr := processAutoRenewalFD(ctx, AutoRenewalFDParams{
-			DB: db,
+			DB:   db,
 			FDID: fd.FDID, BookingID: fd.BookingID, ConfirmationID: fd.ConfirmationID,
 			EntityID: fd.EntityID, EntityName: fd.EntityName,
 			PrincipalAmount: fd.PrincipalAmount, AccruedInterest: fd.AccruedInterest,

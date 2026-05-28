@@ -1,6 +1,5 @@
 package exposures
 
-
 // type CanonicalRow struct {
 // 	Source           string                   `json:"Source"`
 // 	CompanyCode      string                   `json:"CompanyCode"`

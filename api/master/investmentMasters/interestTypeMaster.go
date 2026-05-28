@@ -985,7 +985,7 @@ func UpdateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Insert audit record with old values
 		auditCols := []string{"interest_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-		auditVals := []interface{}{req.InterestID, "EDIT", "PENDING_EDIT_APPROVAL", req.Reason, userEmail}
+		auditVals := []interface{}{req.InterestID, "EDIT", constants.StatusPendingEditApproval, req.Reason, userEmail}
 		auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 		paramPos := 6
 
@@ -1223,7 +1223,7 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Build audit record
 			auditCols := []string{"interest_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-			auditVals := []interface{}{update.InterestID, "EDIT", "PENDING_EDIT_APPROVAL", update.Reason, userEmail}
+			auditVals := []interface{}{update.InterestID, "EDIT", constants.StatusPendingEditApproval, update.Reason, userEmail}
 			auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 			paramPos := 6
 

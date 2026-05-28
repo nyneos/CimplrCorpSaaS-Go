@@ -775,7 +775,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			found[bid] = true
 			actionIDs = append(actionIDs, aid)
 			actionTypeBy[bid] = atype
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == "APPROVED" || strings.ToUpper(strings.TrimSpace(pstatus)) == "REJECTED" {
+			if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved || strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusRejected {
 				cannotApprove = append(cannotApprove, bid)
 			}
 		}
@@ -925,7 +925,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			found[bid] = true
 			actionIDs = append(actionIDs, aid)
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == "APPROVED" || strings.ToUpper(strings.TrimSpace(pstatus)) == "REJECTED" {
+			if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved || strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusRejected {
 				cannotReject = append(cannotReject, bid)
 			}
 		}
@@ -1048,7 +1048,7 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
-			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == constants.StatusPendingDeleteApproval {
 				tx.Rollback(ctx)
 				api.RespondWithPayload(w, false, "delete request already pending for bankstatement_id: "+id, nil)
 				return

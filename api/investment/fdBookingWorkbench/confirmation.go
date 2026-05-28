@@ -26,6 +26,7 @@ type fdConfirmationCaptureRequest struct {
 	UserID                   string           `json:"user_id"`
 	BookingID                string           `json:"booking_id"`
 	ConfirmedPrincipalAmount float64          `json:"confirmed_principal_amount"`
+	ValueType                string           `json:"value_type"`
 	ConfirmedInterestRate    float64          `json:"confirmed_interest_rate"`
 	ConfirmedTenorDays       int              `json:"confirmed_tenor_days"`
 	ConfirmedTenorMonths     int              `json:"confirmed_tenor_months"`
@@ -82,6 +83,7 @@ func fdConfirmationCaptureRequestFromForm(r *http.Request) fdConfirmationCapture
 		UserID:                   strings.TrimSpace(r.FormValue("user_id")),
 		BookingID:                strings.TrimSpace(r.FormValue("booking_id")),
 		ConfirmedPrincipalAmount: fdFormFloat(r, "confirmed_principal_amount"),
+		ValueType:                strings.TrimSpace(r.FormValue("value_type")),
 		ConfirmedInterestRate:    fdFormFloat(r, "confirmed_interest_rate"),
 		ConfirmedTenorDays:       fdFormInt(r, "confirmed_tenor_days"),
 		ConfirmedTenorMonths:     fdFormInt(r, "confirmed_tenor_months"),
@@ -185,7 +187,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var bookedPrincipal, bookedRate float64
 		var bookedTenorDays, bookedTenorMonths, bookedTenorYears int
 		var bookedValueDate, bookedMaturityDate, bookedInterestTypeCode, bookedFrequencyID, bookedTenorType, entityID, bookingStatus string
-		var bookedAccrualFreqCode, bookedResetType, bookedPayoutFreqID string
+		var bookedAccrualFreqCode, bookedResetType, bookedPayoutFreqID, bookedValueType string
 		err := pgxPool.QueryRow(ctx, `
 			SELECT
 				COALESCE(principal_amount,0),
@@ -202,14 +204,15 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(booking_status,''),
 				COALESCE(accrual_frequency_code,''),
 				COALESCE(reset_type,''),
-				COALESCE(NULLIF(payout_frequency_id,''), frequency_id, '')
+				COALESCE(NULLIF(payout_frequency_id,''), frequency_id, ''),
+				COALESCE(NULLIF(value_type,''),'Actual')
 			FROM investment.fd_booking_request
 			WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false`,
 			req.BookingID,
 		).Scan(&bookedPrincipal, &bookedRate, &bookedTenorDays, &bookedTenorMonths, &bookedTenorYears,
 			&bookedValueDate, &bookedMaturityDate, &bookedInterestTypeCode, &bookedFrequencyID, &bookedTenorType,
 			&entityID, &bookingStatus,
-			&bookedAccrualFreqCode, &bookedResetType, &bookedPayoutFreqID)
+			&bookedAccrualFreqCode, &bookedResetType, &bookedPayoutFreqID, &bookedValueType)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				api.RespondWithError(w, http.StatusBadRequest,
@@ -233,6 +236,10 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.PayoutFrequencyID == "" {
 			req.PayoutFrequencyID = bookedPayoutFreqID
 		}
+		if strings.TrimSpace(req.ValueType) == "" {
+			req.ValueType = bookedValueType
+		}
+		req.ValueType = normalizePrincipalValueType(req.ValueType)
 
 		bankFDRef := strings.TrimSpace(req.BankFDReference)
 		if bankFDRef == "" {
@@ -375,6 +382,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					bank_reference_number     = NULLIF($23,''),
 					premature_closure_terms   = NULLIF($24,''),
 					payout_frequency_id       = NULLIF($25,''),
+					value_type                = $26,
 					upload_s3_key             = COALESCE(NULLIF($20,''), upload_s3_key),
 					updated_by                = $16,
 					updated_at                = now()
@@ -396,6 +404,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				nullIfEmpty(req.BankReferenceNumber),
 				nullIfEmpty(req.PrematureClosureTerms),
 				nullIfEmpty(req.PayoutFrequencyID),
+				req.ValueType,
 			); err != nil {
 				cleanupUpload()
 				msg, status := getUserFriendlyFDError(err, constants.ErrUpdateConfirmationFailed)
@@ -425,6 +434,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					bank_reference_number,
 					premature_closure_terms,
 					payout_frequency_id,
+					value_type,
 					upload_s3_key,
 					created_by
 				) VALUES (
@@ -447,6 +457,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					NULLIF($23,''),
 					NULLIF($24,''),
 					NULLIF($25,''),
+					$26,
 					NULLIF($20,''),
 					$17
 				) RETURNING confirmation_id`,
@@ -468,6 +479,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				nullIfEmpty(req.BankReferenceNumber),
 				nullIfEmpty(req.PrematureClosureTerms),
 				nullIfEmpty(req.PayoutFrequencyID),
+				req.ValueType,
 			).Scan(&confirmationID)
 			if err != nil {
 				cleanupUpload()
@@ -529,7 +541,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"confirmation_id":     confirmationID,
 			"booking_id":          req.BookingID,
-			"confirmation_status": "PENDING_APPROVAL",
+			"confirmation_status": constants.StatusPendingApproval,
 			"has_variance":        false,
 			"captured_by":         userEmail,
 		})
@@ -730,7 +742,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = pgxPool.QueryRow(ctx,
 				`SELECT confirmation_status FROM investment.fd_confirmation WHERE confirmation_id=$1`,
 				confirmationID).Scan(&currentConfStatus)
-			if currentConfStatus == "APPROVED" {
+			if currentConfStatus == constants.StatusApproved {
 				api.RespondWithError(w, http.StatusBadRequest,
 					"Cannot resolve variance on an APPROVED confirmation — the FD is live and immutable")
 				return
@@ -841,7 +853,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		confStatus := "VARIANCE_PENDING"
 		if !hasVariance {
-			confStatus = "PENDING_APPROVAL"
+			confStatus = constants.StatusPendingApproval
 		}
 
 		// Build variance_details JSON from items
@@ -1199,7 +1211,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// ── Final-state guard — confirmed/live records are immutable here ─────
-		if currentStatus == "CONFIRMED" || currentStatus == "APPROVED" {
+		if currentStatus == "CONFIRMED" || currentStatus == constants.StatusApproved {
 			api.RespondWithError(w, http.StatusBadRequest,
 				"Cannot edit a "+currentStatus+" confirmation — create a new change request or reopen through the allowed workflow")
 			return
@@ -1417,14 +1429,14 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if hasVariance {
 			// Any edit that re-introduces variance re-opens the variance workflow
 			newConfStatus = "VARIANCE_PENDING"
-		} else if currentStatus == "VARIANCE_PENDING" || currentStatus == "REJECTED" {
+		} else if currentStatus == "VARIANCE_PENDING" || currentStatus == constants.StatusRejected {
 			// No more variance and it was previously dirty — promote to PENDING_APPROVAL
-			newConfStatus = "PENDING_APPROVAL"
+			newConfStatus = constants.StatusPendingApproval
 		}
 		// VARIANCE_ACCEPTED with no new variance: keep VARIANCE_ACCEPTED (ready for /approve)
 		// If caller explicitly overrides confirmation_status, allow it (unless APPROVED)
 		if sv, ok := req.Fields["confirmation_status"]; ok {
-			if svStr, ok2 := sv.(string); ok2 && svStr != "APPROVED" {
+			if svStr, ok2 := sv.(string); ok2 && svStr != constants.StatusApproved {
 				newConfStatus = svStr
 			}
 		}
@@ -1636,7 +1648,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Fetch confirmation failed: "+err.Error())
 			return
 		}
-		if currentStatus == "APPROVED" {
+		if currentStatus == constants.StatusApproved {
 			api.RespondWithError(w, http.StatusBadRequest,
 				"Cannot accept variance exception on an APPROVED confirmation — the FD is live and immutable")
 			return
@@ -1652,8 +1664,8 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			return
 		}
-		if currentStatus != "VARIANCE_PENDING" && currentStatus != "REJECTED" &&
-			currentStatus != "PENDING_APPROVAL" && currentStatus != "PENDING_EDIT_APPROVAL" &&
+		if currentStatus != "VARIANCE_PENDING" && currentStatus != constants.StatusRejected &&
+			currentStatus != constants.StatusPendingApproval && currentStatus != constants.StatusPendingEditApproval &&
 			currentStatus != "CONFIRMED" {
 			api.RespondWithError(w, http.StatusBadRequest,
 				fmt.Sprintf("variance-exception not allowed on confirmations with status %s — use /edit to change values or /reject to reject", currentStatus))
@@ -1817,7 +1829,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Scan(&confStatus)
 
 			// ── APPROVED guard — already approved, skip silently ─────────────────
-			if confStatus == "APPROVED" {
+			if confStatus == constants.StatusApproved {
 				errors = append(errors, cID+": already APPROVED — skipped")
 				continue
 			}
@@ -1848,7 +1860,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if actionRes.Acted {
 				engineActed++
 				// If the instance is now fully APPROVED, flip statuses.
-				if actionRes.InstanceStatus == "APPROVED" {
+				if actionRes.InstanceStatus == constants.StatusApproved {
 					if _, execErr := pgxPool.Exec(ctx,
 						`UPDATE investment.fd_confirmation
 						 SET confirmation_status = 'CONFIRMED'
@@ -2039,7 +2051,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = pgxPool.QueryRow(ctx,
 				`SELECT confirmation_status FROM investment.fd_confirmation WHERE confirmation_id=$1`, cID).
 				Scan(&rejectConfStatus)
-			if rejectConfStatus == "APPROVED" {
+			if rejectConfStatus == constants.StatusApproved {
 				errors = append(errors, cID+": already APPROVED — cannot reject")
 				continue
 			}
@@ -2218,6 +2230,8 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.accrual_frequency_code,'')                                  AS confirmed_accrual_frequency_code,
 				COALESCE(c.reset_type,'')                                              AS confirmed_reset_type,
 				COALESCE(b.principal_amount,0)                                         AS principal_amount,
+				COALESCE(NULLIF(b.value_type,''),'Actual')                             AS booking_value_type,
+				COALESCE(NULLIF(c.value_type,''), NULLIF(b.value_type,''), 'Actual')  AS value_type,
 				COALESCE(b.interest_rate,0)                                            AS interest_rate,
 				COALESCE(b.interest_type_code,'')                                      AS interest_type,
 				COALESCE(b.tenure_days,0)                                              AS tenor_days,
@@ -2727,6 +2741,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					%s                                                             AS bank_account_number,
 					%s                                                             AS bank_config_id,
 					%s                                                             AS principal_amount,
+					%s                                                             AS value_type,
 					%s                                                             AS interest_rate,
 					%s                                                             AS interest_type,
 					%s                                                             AS interest_type_id,
@@ -2762,6 +2777,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				bookingAccountNumberExprBk,
 				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "bank_config_id"),
 				fdNumericExpr(bookingCols, "m", "0", "principal_amount"),
+				fdTextExpr(bookingCols, "m", "'Actual'", "value_type"),
 				fdNumericExpr(bookingCols, "m", "0", "interest_rate"),
 				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "interest_type_code", "interest_type"),
 				fdTextExpr(bookingCols, "m", constants.ErrEmptyString, "interest_type_id"),
@@ -3164,6 +3180,7 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(br.source_account_id,'')                            AS bank_account_id,
 				COALESCE(br.source_account_number,'')                        AS bank_account_number,
 				COALESCE(br.principal_amount,0)                              AS principal_amount,
+				COALESCE(NULLIF(br.value_type,''),'Actual')                  AS value_type,
 				COALESCE(br.interest_rate,0)                                 AS interest_rate,
 				COALESCE(br.interest_type_code,'')                           AS interest_type,
 				COALESCE(br.tenure_days,0)                                   AS tenure_days,

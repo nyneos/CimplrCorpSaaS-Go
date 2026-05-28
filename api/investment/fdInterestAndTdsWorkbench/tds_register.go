@@ -472,9 +472,9 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				variance := item.ActualAmount - item.ExpectedAmount
 				newStatus := "CAPTURED"
 				if item.ReconciliationAction == "ACCEPT" {
-					newStatus = "APPROVED"
+					newStatus = constants.StatusApproved
 				} else if item.ReconciliationAction == "REJECT" {
-					newStatus = "REJECTED"
+					newStatus = constants.StatusRejected
 				}
 
 				_, err = tx.Exec(ctx, `
@@ -649,7 +649,7 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, "TDS entry not found")
 			return
 		}
-		if currentStatus == "APPROVED" || currentStatus == "POSTED" {
+		if currentStatus == constants.StatusApproved || currentStatus == "POSTED" {
 			api.RespondWithError(w, http.StatusBadRequest, "approved/posted entries cannot be edited")
 			return
 		}

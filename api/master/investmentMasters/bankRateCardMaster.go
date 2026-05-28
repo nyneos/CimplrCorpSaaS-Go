@@ -872,7 +872,7 @@ func UpdateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Build audit with old values
 		auditCols := []string{"rate_card_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-		auditVals := []interface{}{req.RateCardID, "EDIT", "PENDING_EDIT_APPROVAL", req.Reason, userEmail}
+		auditVals := []interface{}{req.RateCardID, "EDIT", constants.StatusPendingEditApproval, req.Reason, userEmail}
 		auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 		paramPos := 6
 
@@ -1073,7 +1073,7 @@ func UpdateBankRateCardBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Build audit
 			auditCols := []string{"rate_card_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-			auditVals := []interface{}{update.RateCardID, "EDIT", "PENDING_EDIT_APPROVAL", update.Reason, userEmail}
+			auditVals := []interface{}{update.RateCardID, "EDIT", constants.StatusPendingEditApproval, update.Reason, userEmail}
 			auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 			paramPos := 6
 			for k := range update.Fields {

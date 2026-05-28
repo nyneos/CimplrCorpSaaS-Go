@@ -729,7 +729,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			typeIDs = append(typeIDs, categoryID)
 
-			if isDeleted && strings.ToUpper(ifaceToString(processingStatusI)) == "APPROVED" {
+			if isDeleted && strings.ToUpper(ifaceToString(processingStatusI)) == constants.StatusApproved {
 				hideIds[categoryID] = true
 			}
 		}
@@ -998,7 +998,7 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var isDeleted bool
 			var processingStatus interface{}
 			if err := rows.Scan(&id, &name, &ctype, &isDeleted, &processingStatus); err == nil {
-				if !isDeleted && strings.ToUpper(ifaceToString(processingStatus)) == "APPROVED" {
+				if !isDeleted && strings.ToUpper(ifaceToString(processingStatus)) == constants.StatusApproved {
 					out = append(out, map[string]interface{}{"category_id": ifaceToString(id), "category_name": ifaceToString(name), "category_type": ifaceToString(ctype)})
 				}
 			}
@@ -1265,7 +1265,7 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditQuery := `INSERT INTO auditactioncashflowcategory (
 					category_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
-				if _, err := tx.Exec(ctx, auditQuery, updatedCategoryID, "EDIT", "PENDING_EDIT_APPROVAL", cat.Reason, updatedBy); err != nil {
+				if _, err := tx.Exec(ctx, auditQuery, updatedCategoryID, "EDIT", constants.StatusPendingEditApproval, cat.Reason, updatedBy); err != nil {
 					errMsg, _ := getUserFriendlyCashFlowCategoryError(err, "Category updated but audit log failed")
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "category_id": updatedCategoryID})
 					return

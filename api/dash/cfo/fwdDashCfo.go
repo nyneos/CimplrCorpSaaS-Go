@@ -14,7 +14,8 @@ import (
 
 	"github.com/lib/pq"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	logger.LogError("%s", errMsg)
@@ -221,7 +222,7 @@ func GetActiveForwardsCount(db *sql.DB) http.HandlerFunc {
 		}
 		now := time.Now().Format(constants.DateFormat)
 		var count int
-		err := db.QueryRow("SELECT COUNT(*) FROM forward_bookings WHERE maturity_date > $1 AND entity_level_0 = ANY($2)  AND (processing_status = 'Approved' OR processing_status = 'approved')", now, pq.Array(buNames)).Scan(&count)
+		err := db.QueryRow("SELECT COUNT(*) FROM forward_bookings WHERE maturity_date > $1 AND entity_level_0 = ANY($2) AND LOWER(processing_status) = 'approved'", now, pq.Array(buNames)).Scan(&count)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Error fetching active forwards count")
 			return
@@ -777,7 +778,7 @@ func GetRolloverCountsByCurrency(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		rows, err := db.Query(`SELECT fb.quote_currency, COUNT(fr.rollover_id) AS rollover_count FROM forward_bookings fb LEFT JOIN forward_rollovers fr ON fr.booking_id = fb.system_transaction_id WHERE fb.entity_level_0 = ANY($1)  AND (fb.processing_status = 'Approved' OR fb.processing_status = 'approved') GROUP BY fb.quote_currency`, pq.Array(buNames))
+		rows, err := db.Query(`SELECT fb.quote_currency, COUNT(fr.rollover_id) AS rollover_count FROM forward_bookings fb LEFT JOIN forward_rollovers fr ON fr.booking_id = fb.system_transaction_id WHERE fb.entity_level_0 = ANY($1)  AND LOWER(fb.processing_status) = 'approved' GROUP BY fb.quote_currency`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Error fetching rollover counts")
 			return
@@ -1035,7 +1036,13 @@ func GetTotalBankMarginFromForwardBookings(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		rows, err := db.Query(`SELECT bank_margin, quote_currency FROM forward_bookings WHERE entity_level_0 = ANY($1) AND bank_margin IS NOT NULL AND (processing_status = 'Approved' OR processing_status = 'approved')`, pq.Array(buNames))
+		rows, err := db.Query(`
+	SELECT bank_margin, quote_currency 
+	FROM forward_bookings 
+	WHERE entity_level_0 = ANY($1) 
+	AND bank_margin IS NOT NULL 
+	AND LOWER(processing_status) = 'approved'
+`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return

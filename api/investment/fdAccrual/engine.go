@@ -323,19 +323,19 @@ func buildAccrualPeriod(t time.Time) string {
 func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunParams) ([]AccrualInput, error) {
 	fdStatus := strings.ToUpper(strings.TrimSpace(params.FDStatusFilter))
 	if fdStatus == "" {
-		fdStatus = "ACTIVE"
+		fdStatus = constants.StatusActive
 	}
 
 	// Build the fd_status IN (...) filter. Keep this aligned with the user's
 	// selected scope; validation should not pull closed FDs into an ACTIVE run.
 	var statusValues []string
 	switch fdStatus {
-	case "ACTIVE":
-		statusValues = []string{"ACTIVE"}
+	case constants.StatusActive:
+		statusValues = []string{constants.StatusActive}
 	case "ACTIVE_MATURED":
-		statusValues = []string{"ACTIVE", "MATURED", "PREMATURELY_CLOSED", "ROLLED_OVER"}
+		statusValues = []string{constants.StatusActive, "MATURED", "PREMATURELY_CLOSED", "ROLLED_OVER"}
 	case "ALL":
-		statusValues = []string{"ACTIVE", "MATURED", "PREMATURELY_CLOSED", "ROLLED_OVER"}
+		statusValues = []string{constants.StatusActive, "MATURED", "PREMATURELY_CLOSED", "ROLLED_OVER"}
 	default:
 		statusValues = []string{fdStatus}
 	}
@@ -859,9 +859,9 @@ func isValidPeriodCoverage(p string) bool {
 // accrualRunApprovalListStatuses — /run/all shows only submitted approval-queue runs
 // (excludes DRAFT, VALIDATED, COMPUTED, IN_PROGRESS, VALIDATION_FAILED, FAILED, etc.).
 var accrualRunApprovalListStatuses = map[string]bool{
-	"PENDING_APPROVAL": true,
-	"APPROVED":         true,
-	"REJECTED":         true,
+	constants.StatusPendingApproval: true,
+	constants.StatusApproved:         true,
+	constants.StatusRejected:         true,
 	"POSTED":           true,
 	"POSTED_TO_GL":     true,
 	"LOCKED":           true,
