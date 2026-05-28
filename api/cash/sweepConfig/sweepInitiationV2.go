@@ -1326,14 +1326,15 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		for _, id := range req.InitiationIDs {
-			var latestActionType, latestStatus string
+			var sweepID, latestActionType, latestStatus string
 			latestErr := tx.QueryRow(ctx, `
-				SELECT actiontype, processing_status
-				FROM cimplrcorpsaas.auditactionsweepinitiation
-				WHERE initiation_id = $1
-				ORDER BY requested_at DESC, action_id DESC
+				SELECT si.sweep_id, asi.actiontype, asi.processing_status
+				FROM cimplrcorpsaas.sweep_initiation si
+				JOIN cimplrcorpsaas.auditactionsweepinitiation asi ON asi.initiation_id = si.initiation_id
+				WHERE si.initiation_id = $1
+				ORDER BY asi.requested_at DESC, asi.action_id DESC
 				LIMIT 1
-			`, id).Scan(&latestActionType, &latestStatus)
+			`, id).Scan(&sweepID, &latestActionType, &latestStatus)
 			if latestErr != nil {
 				api.RespondWithResult(w, false, constants.ErrMissingLatestAuditForInitiation+id)
 				return
@@ -1344,9 +1345,9 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO cimplrcorpsaas.auditactionsweepinitiation
-					(initiation_id, actiontype, processing_status, reason, requested_by, requested_at)
-				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())
-			`, id, nullifyEmpty(req.Reason), requestedBy); err != nil {
+					(initiation_id, sweep_id, actiontype, processing_status, reason, requested_by, requested_at)
+				VALUES ($1, $2, 'DELETE', 'PENDING_DELETE_APPROVAL', $3, $4, now())
+			`, id, sweepID, nullifyEmpty(req.Reason), requestedBy); err != nil {
 				api.RespondWithResult(w, false, "failed to create delete request: "+err.Error())
 				return
 			}

@@ -34,7 +34,7 @@ type fxAuditQueryAttempt struct {
 func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			writeFXAuditError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
