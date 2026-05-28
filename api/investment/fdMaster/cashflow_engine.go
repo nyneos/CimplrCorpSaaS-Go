@@ -484,9 +484,9 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 					InterestAccrued:   gross,
 					ClosingPrincipal:  Frnd,
 					TDSAmount:         provTDS,
-    				NetCashFlow:       0,
-    				NetAmount:         gross - provTDS,
-    				DayCountCode:      dcCode,
+					NetCashFlow:       0,
+					NetAmount:         gross - provTDS,
+					DayCountCode:      dcCode,
 					Divisor:           periodDivisor,
 					FormulaUsed:       engFormula("[CO ACCRUAL]", engFormulaParams{Principal: Frnd, Rate: r, Days: periodDays, Divisor: periodDivisor, Raw: rawGross, Rounded: gross, Rnd: rnd}),
 					AccrualRatePerDay: r / float64(periodDivisor),
@@ -586,6 +586,8 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 					Divisor:           payoutDivisor,
 					FormulaUsed:       engFormula("[CO MATURITY]", engFormulaParams{Principal: P, Rate: r, Days: payoutDays, Divisor: payoutDivisor, Raw: payoutRaw, Rounded: payoutGross, Rnd: rnd}),
 					AccrualRatePerDay: r / float64(payoutDivisor),
+					OpeningPrincipal:  P,
+					ClosingPrincipal:  capJRnd,
 				})
 				rows = append(rows, CashflowRow{
 					EventType:        "PRINCIPAL_RETURN",
@@ -620,6 +622,8 @@ func engCOSchedule(p CashflowScheduleParams) []CashflowRow {
 					Divisor:           payoutDivisor,
 					FormulaUsed:       engFormula("[CO PAYOUT]", engFormulaParams{Principal: P, Rate: r, Days: payoutDays, Divisor: payoutDivisor, Raw: payoutRaw, Rounded: payoutGross, Rnd: rnd}),
 					AccrualRatePerDay: r / float64(payoutDivisor),
+					OpeningPrincipal:  P,
+					ClosingPrincipal:  capJRnd,
 				})
 				lastPayoutDate = cd
 				if resetType == "AT_EACH_PAYOUT" {
