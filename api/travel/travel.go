@@ -6,7 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // CreatePackageHandler accepts a JSON body for a travel package and
 // inserts it into the `travel.packages` table. If a package with the same
@@ -166,4 +167,3 @@ func DeletePackageHandler(db *sql.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]any{"deleted": true, "id": id})
 	}
 }
-

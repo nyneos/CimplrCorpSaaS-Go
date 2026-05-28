@@ -18,6 +18,7 @@ import (
 	onboard "CimplrCorpSaas/api/investment/onboarding"
 	portfolio "CimplrCorpSaas/api/investment/portfolio"
 	redemption "CimplrCorpSaas/api/investment/redemption"
+	"CimplrCorpSaas/internal/observability"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -25,11 +26,13 @@ import (
 )
 
 func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
+	const serviceName = "investment"
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/investment/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Investment Service is active"))
 	})
+	mux.Handle("/investment/metrics", observability.MetricsHandler(serviceName))
 
 	// // Onboarding workbench (protected by BusinessUnitMiddleware)
 	// mux.Handle("/investment/onboard/workbench", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.OnboardPortfolioWorkbench(pool))))
@@ -255,6 +258,7 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux.Handle("/investment/fd/receipt/additional-files/delete/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.RejectDeleteFDInterestReceiptAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListFDTDSReceiptAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadFDTDSReceiptAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/fd/tds-reconciliation/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadFDTDSReceiptAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadFDTDSReceiptAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadSelectedFDTDSReceiptAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DeleteFDTDSReceiptAdditionalFileHandler(pool))))
@@ -277,8 +281,24 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux.Handle("/investment/fd/exception/additional-files/audit", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.AuditFDReceiptExceptionAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/exception/additional-files/delete/approve", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ApproveDeleteFDReceiptExceptionAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/exception/additional-files/delete/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.RejectDeleteFDReceiptExceptionAdditionalFileHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListVarianceExceptionAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadVarianceExceptionAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadVarianceExceptionAdditionalFileHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadSelectedVarianceExceptionAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DeleteVarianceExceptionAdditionalFileHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/audit", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.AuditVarianceExceptionAdditionalFileHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/delete/approve", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ApproveDeleteVarianceExceptionAdditionalFileHandler(pool))))
+	mux.Handle("/investment/variance-exception/additional-files/delete/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.RejectDeleteVarianceExceptionAdditionalFileHandler(pool))))
 
 	// FD Accrual & Accounting additional files
+	mux.Handle("/investment/fd/accrual/schedule/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListFDAccrualScheduleConfigAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/fd/accrual/schedule/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadFDAccrualScheduleConfigAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/fd/accrual/schedule/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadFDAccrualScheduleConfigAdditionalFileHandler(pool))))
+	mux.Handle("/investment/fd/accrual/schedule/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadSelectedFDAccrualScheduleConfigAdditionalFilesHandler(pool))))
+	mux.Handle("/investment/fd/accrual/schedule/additional-files/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DeleteFDAccrualScheduleConfigAdditionalFileHandler(pool))))
+	mux.Handle("/investment/fd/accrual/schedule/additional-files/audit", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.AuditFDAccrualScheduleConfigAdditionalFileHandler(pool))))
+	mux.Handle("/investment/fd/accrual/schedule/additional-files/delete/approve", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ApproveDeleteFDAccrualScheduleConfigAdditionalFileHandler(pool))))
+	mux.Handle("/investment/fd/accrual/schedule/additional-files/delete/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.RejectDeleteFDAccrualScheduleConfigAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/accrual/run/additional-files/list", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.ListFDAccrualRunAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/accrual/run/additional-files/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.UploadFDAccrualRunAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/accrual/run/additional-files/download", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadFDAccrualRunAdditionalFileHandler(pool))))
@@ -363,7 +383,7 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	// mux.HandleFunc("/investment/schemes", schemesHandler)
 
 	logger.LogInfo("Investment Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
+	err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {
 		logger.LogError("Investment service failed: %v", err)
 	}

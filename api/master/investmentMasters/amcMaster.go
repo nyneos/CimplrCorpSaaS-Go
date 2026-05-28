@@ -1062,7 +1062,7 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var aid, cid, ps string
 			_ = rows.Scan(&aid, &cid, &ps)
-			if strings.ToUpper(ps) != "APPROVED" {
+			if strings.ToUpper(ps) != constants.StatusApproved {
 				actionIDs = append(actionIDs, aid)
 			}
 		}
@@ -1147,11 +1147,11 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// actionUpper := strings.ToUpper(actionType)
 
 			switch statusUpper {
-			case "PENDING_DELETE_APPROVAL":
+			case constants.StatusPendingDeleteApproval:
 				//  Mark as DELETED in audit + is_deleted in master
 				markDeletedActionIDs = append(markDeletedActionIDs, actionID)
 				deleteIDs = append(deleteIDs, amcID)
-			case "PENDING_APPROVAL", "PENDING_EDIT_APPROVAL":
+			case constants.StatusPendingApproval, constants.StatusPendingEditApproval:
 				// Normal approve → set APPROVED
 				actionIDs = append(actionIDs, actionID)
 			default:

@@ -82,7 +82,7 @@ package fdNotifications
 // Lists   :
 //   Receipts        — []map  — receipt_id, fd_id, fd_ref_no, entity_name,
 //                              bank_name, receipt_date, period_start, period_end,
-//                              gross_interest_received, tds_amount_deducted, 
+//                              gross_interest_received, tds_amount_deducted,
 //                              other_charges, net_amount_received, receipt_status,
 //                              reconcile_status, bank_reference_no, narration
 //   ByEntityKPIs    — []map{group_name, count, total_gross_interest}
@@ -205,15 +205,15 @@ func computeKPIs(rows []map[string]interface{}, groupField, amountField string) 
 
 // BookingNotifPayload is the rich notification payload for FD booking events.
 type BookingNotifPayload struct {
-	Action         string           `json:"Action"`
-	ActorEmail     string           `json:"ActorEmail"`
-	Count          int              `json:"Count"`
-	TotalPrincipal float64          `json:"TotalPrincipal"`
-	ActionAt       string           `json:"ActionAt"`
+	Action         string                   `json:"Action"`
+	ActorEmail     string                   `json:"ActorEmail"`
+	Count          int                      `json:"Count"`
+	TotalPrincipal float64                  `json:"TotalPrincipal"`
+	ActionAt       string                   `json:"ActionAt"`
 	Bookings       []map[string]interface{} `json:"Bookings"`
-	BookingIDs     []string         `json:"BookingIDs"`
-	ByEntityKPIs   []FDKPIRow       `json:"ByEntityKPIs"`
-	ByBankKPIs     []FDKPIRow       `json:"ByBankKPIs"`
+	BookingIDs     []string                 `json:"BookingIDs"`
+	ByEntityKPIs   []FDKPIRow               `json:"ByEntityKPIs"`
+	ByBankKPIs     []FDKPIRow               `json:"ByBankKPIs"`
 }
 
 // ToMap converts BookingNotifPayload to map[string]interface{} for TriggerNotification.
@@ -826,12 +826,12 @@ func BuildAccrualNotifPayload(
 	actorEmail string,
 ) *AccrualNotifPayload {
 	p := &AccrualNotifPayload{
-		Action:     "ACCRUAL_RUN",
-		ActorEmail: actorEmail,
-		Count:      len(fdIDs),
-		RunDate:    runDate,
-		ActionAt:   time.Now().Format(time.RFC3339),
-		Accruals:   []map[string]interface{}{},
+		Action:       "ACCRUAL_RUN",
+		ActorEmail:   actorEmail,
+		Count:        len(fdIDs),
+		RunDate:      runDate,
+		ActionAt:     time.Now().Format(time.RFC3339),
+		Accruals:     []map[string]interface{}{},
 		ByEntityKPIs: []FDKPIRow{},
 		ByBankKPIs:   []FDKPIRow{},
 	}

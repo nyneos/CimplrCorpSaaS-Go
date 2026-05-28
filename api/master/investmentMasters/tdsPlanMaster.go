@@ -1538,7 +1538,7 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		auditCols := []string{"tds_plan_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-		auditVals := []interface{}{req.TdsID, "EDIT", "PENDING_EDIT_APPROVAL", req.Reason, userEmail}
+		auditVals := []interface{}{req.TdsID, "EDIT", constants.StatusPendingEditApproval, req.Reason, userEmail}
 		auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 
 		// Append old_* columns for every field actually being updated
@@ -1752,7 +1752,7 @@ func UpdateTDSPlanBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			auditCols := []string{"tds_plan_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-			auditVals := []interface{}{up.TdsID, "EDIT", "PENDING_EDIT_APPROVAL", up.Reason, userEmail}
+			auditVals := []interface{}{up.TdsID, "EDIT", constants.StatusPendingEditApproval, up.Reason, userEmail}
 			auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 			paramPos := 6
 

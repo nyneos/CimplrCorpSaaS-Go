@@ -10,12 +10,12 @@ import (
 
 // LimitUniqueKey groups parameters for uniqueness checks to keep signatures small
 type LimitUniqueKey struct {
-	EntityName   string
-	BankName     string
-	CoreLimitType string
-	LimitType    string
-	LimitSubType string
-	CurrencyCode string
+	EntityName     string
+	BankName       string
+	CoreLimitType  string
+	LimitType      string
+	LimitSubType   string
+	CurrencyCode   string
 	ExcludeLimitID string
 }
 

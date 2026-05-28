@@ -176,9 +176,8 @@ func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Constant-time-ish response: always return success even if email unknown
 		var userID, employeeName string
-		err := db.QueryRow(`SELECT id, COALESCE(employee_name, '') FROM users WHERE LOWER(email) = $1`, email).Scan(&userID, &employeeName)
+		err := db.QueryRow(`SELECT id, COALESCE(employee_name, '') FROM users WHERE LOWER(email) = $1 AND COALESCE(is_deleted, false) = false LIMIT 1`, email).Scan(&userID, &employeeName)
 		if err != nil {
 			LogSecurityEvent(db, "", "forgot_password_unknown", email, clientIP)
 			writeResetJSON(w, http.StatusOK, true, "If the email is registered, a reset link has been sent.")

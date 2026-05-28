@@ -178,12 +178,28 @@ var (
 		ParentTable:   "investment.fd_receipt_exception",
 		ParentFilter:  constants.FormatDeletedFilter,
 	}
+	varianceExceptionFilesDefinition = investmentFileDefinition{
+		Module:        "investment-variance-exception-additional",
+		ParentIDField: "exception_id",
+		TableName:     "investment.fd_receipt_exception_files",
+		ParentColumn:  "exception_id",
+		ParentTable:   "investment.fd_receipt_exception",
+		ParentFilter:  constants.FormatDeletedFilter,
+	}
 	fdAccrualRunFilesDefinition = investmentFileDefinition{
 		Module:        "fd-accrual-run-additional",
 		ParentIDField: "run_id",
 		TableName:     "investment.fd_accrual_run_files",
 		ParentColumn:  "run_id",
 		ParentTable:   "investment.fd_accrual_run",
+	}
+	fdAccrualScheduleConfigFilesDefinition = investmentFileDefinition{
+		Module:        "fd-accrual-schedule-config-additional",
+		ParentIDField: "config_id",
+		TableName:     "investment.fd_accrual_schedule_config_files",
+		ParentColumn:  "config_id",
+		ParentTable:   "investment.fd_accrual_schedule_config",
+		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdAccrualLedgerFilesDefinition = investmentFileDefinition{
 		Module:        "fd-accrual-ledger-additional",
@@ -270,7 +286,7 @@ func recordDynamicInvestmentMainUploadAudit(ctx context.Context, tx pgx.Tx, tabl
 		values[actionColumn] = "UPLOAD_FILE"
 	}
 	if _, ok := columns["processing_status"]; ok {
-		values["processing_status"] = "APPROVED"
+		values["processing_status"] = constants.StatusApproved
 	}
 	if reasonColumn := firstInvestmentAuditColumn(columns, "reason", "action_reason"); reasonColumn != "" {
 		values[reasonColumn] = reason
@@ -486,7 +502,7 @@ func recordFDInterestReceiptMainUploadAudit(ctx context.Context, tx pgx.Tx, rece
 		) VALUES ($1, $2, $3, $4, $5, $6)`,
 		receiptID,
 		"EDIT",
-		"APPROVED",
+		constants.StatusApproved,
 		reason,
 		payload.UploadedBy,
 		payload.UploadedAt,
@@ -511,7 +527,7 @@ func recordFDTDSReceiptMainUploadAudit(ctx context.Context, tx pgx.Tx, tdsID str
 		) VALUES ($1, $2, $3, $4, $5, $6)`,
 		tdsID,
 		"EDIT",
-		"APPROVED",
+		constants.StatusApproved,
 		reason,
 		payload.UploadedBy,
 		payload.UploadedAt,
@@ -524,11 +540,36 @@ func recordFDReconcileResultMainUploadAudit(ctx context.Context, tx pgx.Tx, resu
 }
 
 func recordFDReceiptExceptionMainUploadAudit(ctx context.Context, tx pgx.Tx, exceptionID string, payload cashfiles.MainUploadAuditPayload) error {
-	return recordDynamicInvestmentMainUploadAudit(ctx, tx, "investment.fd_receipt_exception_audit", []string{"exception_id"}, exceptionID, payload, nil)
+	reason, err := cashfiles.MainUploadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO investment.fd_receipt_exception_audit (
+			exception_id,
+			action_type,
+			processing_status,
+			reason,
+			requested_by,
+			requested_at
+		) VALUES ($1, $2, $3, $4, $5, $6)`,
+		exceptionID,
+		"UPLOAD_FILE",
+		"APPROVED",
+		reason,
+		payload.UploadedBy,
+		payload.UploadedAt,
+	)
+	return err
 }
 
 func recordFDAccrualRunMainUploadAudit(ctx context.Context, tx pgx.Tx, runID string, payload cashfiles.MainUploadAuditPayload) error {
 	return recordDynamicInvestmentMainUploadAudit(ctx, tx, "investment.fd_accrual_run_audit", []string{"run_id"}, runID, payload, nil)
+}
+
+func recordFDAccrualScheduleConfigMainUploadAudit(ctx context.Context, tx pgx.Tx, configID string, payload cashfiles.MainUploadAuditPayload) error {
+	return recordDynamicInvestmentMainUploadAudit(ctx, tx, "investment.fd_accrual_schedule_config_audit", []string{"config_id"}, configID, payload, nil)
 }
 
 func recordFDAccrualLedgerMainUploadAudit(ctx context.Context, tx pgx.Tx, ledgerID string, payload cashfiles.MainUploadAuditPayload) error {
@@ -1095,6 +1136,38 @@ func RejectDeleteFDReceiptExceptionAdditionalFileHandler(pool *pgxpool.Pool) htt
 	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdReceiptExceptionFilesDefinition))
 }
 
+func ListVarianceExceptionAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(varianceExceptionFilesDefinition))
+}
+
+func UploadVarianceExceptionAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(varianceExceptionFilesDefinition))
+}
+
+func DownloadVarianceExceptionAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(varianceExceptionFilesDefinition))
+}
+
+func DownloadSelectedVarianceExceptionAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(varianceExceptionFilesDefinition))
+}
+
+func DeleteVarianceExceptionAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(varianceExceptionFilesDefinition))
+}
+
+func AuditVarianceExceptionAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(varianceExceptionFilesDefinition))
+}
+
+func ApproveDeleteVarianceExceptionAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(varianceExceptionFilesDefinition))
+}
+
+func RejectDeleteVarianceExceptionAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(varianceExceptionFilesDefinition))
+}
+
 func ListFDAccrualRunAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdAccrualRunFilesDefinition))
 }
@@ -1125,6 +1198,38 @@ func ApproveDeleteFDAccrualRunAdditionalFileHandler(pool *pgxpool.Pool) http.Han
 
 func RejectDeleteFDAccrualRunAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccrualRunFilesDefinition))
+}
+
+func ListFDAccrualScheduleConfigAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdAccrualScheduleConfigFilesDefinition))
+}
+
+func UploadFDAccrualScheduleConfigAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdAccrualScheduleConfigFilesDefinition))
+}
+
+func DownloadFDAccrualScheduleConfigAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdAccrualScheduleConfigFilesDefinition))
+}
+
+func DownloadSelectedFDAccrualScheduleConfigAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdAccrualScheduleConfigFilesDefinition))
+}
+
+func DeleteFDAccrualScheduleConfigAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccrualScheduleConfigFilesDefinition))
+}
+
+func AuditFDAccrualScheduleConfigAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdAccrualScheduleConfigFilesDefinition))
+}
+
+func ApproveDeleteFDAccrualScheduleConfigAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccrualScheduleConfigFilesDefinition))
+}
+
+func RejectDeleteFDAccrualScheduleConfigAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccrualScheduleConfigFilesDefinition))
 }
 
 func ListFDAccrualLedgerAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -1257,8 +1362,13 @@ func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Con
 		cfg.RecordMainUploadAudit = recordFDReconcileResultMainUploadAudit
 	case fdReceiptExceptionFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDReceiptExceptionMainUploadAudit
+	case varianceExceptionFilesDefinition.Module:
+		cfg.RecordMainUploadAudit = recordFDReceiptExceptionMainUploadAudit
+		cfg.RequireMainUploadAudit = true
 	case fdAccrualRunFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDAccrualRunMainUploadAudit
+	case fdAccrualScheduleConfigFilesDefinition.Module:
+		cfg.RecordMainUploadAudit = recordFDAccrualScheduleConfigMainUploadAudit
 	case fdAccrualLedgerFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDAccrualLedgerMainUploadAudit
 	case fdAccountingJournalFilesDefinition.Module:

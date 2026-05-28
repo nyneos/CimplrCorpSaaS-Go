@@ -15,7 +15,8 @@ import (
 
 	"github.com/lib/pq"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // Request structure for FX Ops Dashboard
 type FXOpsDashboardRequest struct {

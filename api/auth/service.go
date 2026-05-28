@@ -1,10 +1,13 @@
 package auth
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/dashboard"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/serviceiface"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -103,7 +106,7 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 
 	logger.LogInfo("[AUTH DEBUG] querying users row by email username=%q", strings.TrimSpace(username))
 	err := a.db.QueryRow(
-		`SELECT id, employee_name, email, password, status FROM users WHERE email = $1`, username,
+		`SELECT id, employee_name, email, password, status FROM users WHERE email = $1 AND COALESCE(is_deleted, false) = false LIMIT 1`, username,
 	).Scan(&dbUserID, &dbName, &dbEmail, &dbPassword, &dbStatus)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -115,6 +118,14 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		return nil, false, errors.New("internal error")
 	}
 	logger.LogInfo("[AUTH DEBUG] users row loaded user_id=%s email=%q status_valid=%v status=%q pass_present=%v", dbUserID, dbEmail, dbStatus.Valid, dbStatus.String, dbPassword.Valid && dbPassword.String != "")
+
+	// Reject disabled/non-approved accounts before any password check
+	if dbStatus.Valid && !strings.EqualFold(dbStatus.String, constants.UserStatusApproved) &&
+		!strings.EqualFold(dbStatus.String, constants.UserStatusPending) {
+		logger.LogInfo("[AUTH DEBUG] login blocked: account status=%q user_id=%s", dbStatus.String, dbUserID)
+		LogSecurityEvent(a.db, dbUserID, "login_failed", "account not active: "+dbStatus.String, clientIP)
+		return nil, false, errors.New("Account is not active")
+	}
 
 	// Account lock check
 	if a.MaxLoginAttempts > 0 {
@@ -205,7 +216,11 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	).Scan(&roleName, &roleCode)
 	logger.LogInfo("[AUTH DEBUG] role lookup user_id=%s role=%q role_code=%q", dbUserID, roleName.String, roleCode.String)
 
-	sessionID := generateSessionID()
+	sessionID, err := generateSessionID()
+	if err != nil {
+		logger.LogError("[AUTH DEBUG] session ID generation failed user_id=%s err=%v", dbUserID, err)
+		return nil, false, errors.New("internal error")
+	}
 	session := &UserSession{
 		SessionID:       sessionID,
 		UserID:          dbUserID,
@@ -520,8 +535,13 @@ func (a *AuthService) sessionCleaner() {
 	}
 }
 
-func generateSessionID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+func generateSessionID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		logger.LogError("[auth] failed to generate secure session ID: %v", err)
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func (a *AuthService) LogDifferentIPRequest(userID string, clientIP string) {

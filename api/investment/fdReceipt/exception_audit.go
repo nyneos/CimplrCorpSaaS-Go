@@ -1,6 +1,7 @@
 package fdReceipt
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"errors"
 
@@ -107,11 +108,11 @@ func varianceAllowedActions(workflowStatus string, checkerApproved bool) []strin
 func mapHeaderProcessingStatus(exceptionStatus string) string {
 	switch exceptionStatus {
 	case "OPEN", "IN_REVIEW":
-		return "PENDING_APPROVAL"
+		return constants.StatusPendingApproval
 	case "CLOSE":
-		return "APPROVED"
+		return constants.StatusApproved
 	default:
-		return "PENDING_APPROVAL"
+		return constants.StatusPendingApproval
 	}
 }
 
@@ -131,9 +132,9 @@ func loadLatestVarianceAudit(ctx context.Context, pool *pgxpool.Pool, exceptionI
 			action_type,
 			processing_status,
 			COALESCE(reason,''),
-			requested_by,
+			COALESCE(NULLIF(req_user.employee_name, ''), requested_by),
 			requested_at::text,
-			COALESCE(checker_by,''),
+			COALESCE(NULLIF(check_user.employee_name, ''), checker_by, ''),
 			COALESCE(checker_at::text,''),
 			COALESCE(checker_comment,''),
 			COALESCE(old_exception_status,''),
@@ -144,6 +145,12 @@ func loadLatestVarianceAudit(ctx context.Context, pool *pgxpool.Pool, exceptionI
 			COALESCE(old_case_type,''),
 			COALESCE(old_variance_outcome,'')
 		FROM investment.fd_receipt_exception_audit
+		LEFT JOIN users req_user
+			ON LOWER(req_user.email) = LOWER(requested_by)
+			OR req_user.id::text = requested_by
+		LEFT JOIN users check_user
+			ON LOWER(check_user.email) = LOWER(checker_by)
+			OR check_user.id::text = checker_by
 		WHERE exception_id=$1
 		ORDER BY requested_at DESC, audit_id DESC
 		LIMIT 1`,
@@ -169,7 +176,7 @@ func hasVarianceCheckerApproval(ctx context.Context, pool *pgxpool.Pool, excepti
 	if err != nil || latest == nil {
 		return false
 	}
-	return latest.ProcessingStatus == "APPROVED"
+	return latest.ProcessingStatus == constants.StatusApproved
 }
 
 func loadVarianceCase(ctx context.Context, pool *pgxpool.Pool, exceptionID string) (*varianceCaseHeader, error) {
@@ -235,9 +242,9 @@ func loadVarianceAuditTrail(ctx context.Context, pool *pgxpool.Pool, exceptionID
 			action_type,
 			processing_status,
 			COALESCE(reason,''),
-			requested_by,
+			COALESCE(NULLIF(req_user.employee_name, ''), requested_by),
 			requested_at::text,
-			COALESCE(checker_by,''),
+			COALESCE(NULLIF(check_user.employee_name, ''), checker_by, ''),
 			COALESCE(checker_at::text,''),
 			COALESCE(checker_comment,''),
 			COALESCE(old_exception_status,''),
@@ -248,6 +255,12 @@ func loadVarianceAuditTrail(ctx context.Context, pool *pgxpool.Pool, exceptionID
 			COALESCE(old_case_type,''),
 			COALESCE(old_variance_outcome,'')
 		FROM investment.fd_receipt_exception_audit
+		LEFT JOIN users req_user
+			ON LOWER(req_user.email) = LOWER(requested_by)
+			OR req_user.id::text = requested_by
+		LEFT JOIN users check_user
+			ON LOWER(check_user.email) = LOWER(checker_by)
+			OR check_user.id::text = checker_by
 		WHERE exception_id=$1
 		ORDER BY requested_at DESC, audit_id DESC`,
 		exceptionID,

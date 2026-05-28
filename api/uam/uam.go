@@ -3,13 +3,16 @@ package uam
 import (
 	middlewares "CimplrCorpSaas/api/middlewares"
 	approvalMatrix "CimplrCorpSaas/api/uam/approvalMatrix"
-	"CimplrCorpSaas/api/uam/permissions"
-	"CimplrCorpSaas/api/uam/role"
-	"CimplrCorpSaas/api/uam/user"
+	"CimplrCorpSaas/api/uam/permissions" // <-- Import permissions
+	"CimplrCorpSaas/api/uam/role"        // <-- Import role
+	"CimplrCorpSaas/api/uam/user"        // <-- Import user
+	"CimplrCorpSaas/internal/observability"
 	"CimplrCorpSaas/internal/dbutil"
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
+	"log"
 	"net/http"
 	"os"
 
@@ -19,6 +22,7 @@ import (
 )
 
 func StartUAMService(db *sql.DB, port string) {
+	const serviceName = "uam"
 	mux := http.NewServeMux()
 
 	// Build pgx pool for approval matrix handlers (PreValidationMiddleware pattern)
@@ -33,13 +37,23 @@ func StartUAMService(db *sql.DB, port string) {
 		pool, err := pgxpool.New(context.Background(), dsn)
 		if err != nil {
 			logger.LogError("UAM: failed to connect to pgxpool DB: %v", err)
+			return nil
+		}
+		pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := pool.Ping(pingCtx); err != nil {
+			log.Fatalf("UAM: failed to verify pgxpool DB connectivity at startup: %v", err)
 		}
 		return pool
 	}()
+	if pgxPool == nil {
+		return
+	}
 	defer pgxPool.Close()
 	mux.HandleFunc("/uam/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("UAM Service is active"))
 	})
+	mux.Handle("/uam/metrics", observability.MetricsHandler(serviceName))
 
 	prevalidate := middlewares.PreValidationMiddleware(pgxPool)
 
@@ -97,7 +111,7 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.Handle("/uam/permissions/requests/role-summary", prevalidate(http.HandlerFunc(permissions.GetRolePermissionAuditTable(db))))
 
 	logger.LogInfo("UAM Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
+	err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {
 		logger.LogError("UAM Service failed: %v", err)
 	}

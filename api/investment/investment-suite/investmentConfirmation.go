@@ -272,7 +272,7 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(cID, uID, uEmail string) {
-			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, []string{cID}, "CREATE", uEmail)
+			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, []string{cID}, constants.AuditActionCreate, uEmail)
 			catalog.TriggerNotification(
 				context.Background(), pgxPool,
 				"/investment/confirmation/create",
@@ -448,7 +448,7 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := userEmail
 			go func() {
-				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "CREATE", uEmail)
+				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionCreate, uEmail)
 				catalog.TriggerNotification(
 					context.Background(), pgxPool,
 					"/investment/confirmation/bulk-create",
@@ -846,15 +846,15 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
-			if ps == "APPROVED" {
+			if ps == constants.StatusApproved {
 				continue
 			}
-			if ps == "PENDING_DELETE_APPROVAL" {
+			if ps == constants.StatusPendingDeleteApproval {
 				toDeleteActionIDs = append(toDeleteActionIDs, aid)
 				deleteMasterIDs = append(deleteMasterIDs, cid)
 				continue
 			}
-			if ps == "PENDING_APPROVAL" || ps == "PENDING_EDIT_APPROVAL" {
+			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
 				toApproveConfirmations = append(toApproveConfirmations, cid)
 			}
@@ -941,7 +941,7 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := checkerBy
 			go func() {
-				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "APPROVE", uEmail)
+				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionApprove, uEmail)
 				catalog.TriggerNotification(
 					context.Background(), pgxPool,
 					"/investment/confirmation/approve",
@@ -955,7 +955,7 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := checkerBy
 			go func() {
-				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "DELETE", uEmail)
+				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionDelete, uEmail)
 				catalog.TriggerNotification(
 					context.Background(), pgxPool,
 					"/investment/confirmation/delete",
@@ -1029,7 +1029,7 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			found[cid] = true
-			if strings.ToUpper(strings.TrimSpace(ps)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusApproved {
 				cannotReject = append(cannotReject, cid)
 			} else {
 				actionIDs = append(actionIDs, aid)
@@ -1069,7 +1069,7 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(ids []string, uID, uEmail string) {
-			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "REJECT", uEmail)
+			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionReject, uEmail)
 			catalog.TriggerNotification(
 				context.Background(), pgxPool,
 				"/investment/confirmation/reject",

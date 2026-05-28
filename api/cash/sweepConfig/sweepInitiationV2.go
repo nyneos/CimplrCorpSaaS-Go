@@ -303,7 +303,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithPayload(w, true, "Sweep auto-created and initiation created successfully, pending approval", map[string]interface{}{
 				"initiation_id":      initiationID,
 				"sweep_id":           sweepID,
-				"processing_status":  "PENDING_APPROVAL",
+				"processing_status":  constants.StatusPendingApproval,
 				"actiontype":         "CREATE",
 				"auto_created_sweep": true,
 			})
@@ -382,7 +382,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LIMIT 1
 		`, req.SweepID).Scan(&processingStatus)
 
-		if err != nil || processingStatus != "APPROVED" {
+		if err != nil || processingStatus != constants.StatusApproved {
 			api.RespondWithResult(w, false, "Sweep must be approved before creating initiation")
 			return
 		}
@@ -477,7 +477,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "Sweep initiation created successfully, pending approval", map[string]interface{}{
 			"initiation_id":     initiationID,
 			"sweep_id":          req.SweepID,
-			"processing_status": "PENDING_APPROVAL",
+			"processing_status": constants.StatusPendingApproval,
 			"actiontype":        "CREATE",
 		})
 	}
@@ -1097,7 +1097,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			found[id] = true
-			if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+			if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, "cannot approve non-pending initiation: "+id)
 				return
 			}
@@ -1230,7 +1230,7 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			found[id] = true
-			if status != "PENDING_APPROVAL" && status != "PENDING_EDIT_APPROVAL" && status != "PENDING_DELETE_APPROVAL" {
+			if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, "cannot reject non-pending initiation: "+id)
 				return
 			}
@@ -1338,7 +1338,7 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithResult(w, false, constants.ErrMissingLatestAuditForInitiation+id)
 				return
 			}
-			if latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+			if latestActionType == "DELETE" && latestStatus == constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, "delete request already pending for initiation: "+id)
 				return
 			}
@@ -1588,7 +1588,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					LIMIT 1
 				`, sweepID).Scan(&processingStatus)
 
-				if err != nil || processingStatus != "APPROVED" {
+				if err != nil || processingStatus != constants.StatusApproved {
 					tx.Rollback(ctx)
 					api.RespondWithResult(w, false, "sweep must be approved before creating initiation: "+sweepID)
 					return
@@ -1715,7 +1715,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			createdInitiations = append(createdInitiations, map[string]interface{}{
 				"initiation_id":      initiationID,
 				"sweep_id":           sweepID,
-				"processing_status":  "PENDING_APPROVAL",
+				"processing_status":  constants.StatusPendingApproval,
 				"auto_created_sweep": init.SweepID == nil || *init.SweepID == "",
 			})
 		}
@@ -2509,7 +2509,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				`, sweepID).Scan(&currentStatus)
 
 				if err != nil {
-					currentStatus = "PENDING_APPROVAL" // Default if no audit found
+					currentStatus = constants.StatusPendingApproval // Default if no audit found
 				}
 
 				reason := req.Reason
@@ -2538,7 +2538,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "Initiation and sweep config updated successfully", map[string]interface{}{
 			"initiation_id":       req.InitiationID,
 			"sweep_id":            sweepID,
-			"initiation_status":   "PENDING_EDIT_APPROVAL",
+			"initiation_status":   constants.StatusPendingEditApproval,
 			"sweep_config_status": "unchanged (keeps existing status)",
 		})
 		// Notify: pass FULL initiation data for rich templates

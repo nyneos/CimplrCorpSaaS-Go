@@ -83,7 +83,7 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err = insertVarianceAudit(ctx, tx, req.ExceptionID, varianceAuditInsert{
-			ActionType: "EDIT", ProcessingStatus: "PENDING_EDIT_APPROVAL",
+			ActionType: "EDIT", ProcessingStatus: constants.StatusPendingEditApproval,
 			Reason: req.Comment, RequestedBy: userEmail, Old: auditOld,
 		}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
@@ -100,7 +100,7 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 			"exception_id":      req.ExceptionID,
 			"workflow_status":   hdr.WorkflowStatus,
 			"exception_status":  hdr.WorkflowStatus,
-			"processing_status": "PENDING_EDIT_APPROVAL",
+			"processing_status": constants.StatusPendingEditApproval,
 		})
 	}
 }
@@ -169,7 +169,7 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err = insertVarianceAudit(ctx, tx, req.ExceptionID, varianceAuditInsert{
-			ActionType: "EDIT", ProcessingStatus: "PENDING_APPROVAL",
+			ActionType: "EDIT", ProcessingStatus: constants.StatusPendingApproval,
 			Reason: req.ResolutionRemarks, RequestedBy: userEmail, Old: auditOld,
 		}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
@@ -186,7 +186,7 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			"exception_id":      req.ExceptionID,
 			"workflow_status":   "IN_REVIEW",
 			"exception_status":  "IN_REVIEW",
-			"processing_status": "PENDING_APPROVAL",
+			"processing_status": constants.StatusPendingApproval,
 			"case_type":         "VARIANCE",
 		})
 	}
@@ -245,7 +245,7 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if err = insertVarianceAudit(ctx, tx, eid, varianceAuditInsert{
-				ActionType: "EDIT", ProcessingStatus: "APPROVED", Reason: req.Comment,
+				ActionType: "EDIT", ProcessingStatus: constants.StatusApproved, Reason: req.Comment,
 				RequestedBy: userEmail, CheckerBy: userEmail, CheckerComment: req.Comment,
 				Old: varianceAuditOld{ExceptionStatus: strPtr("IN_REVIEW")},
 			}); err != nil {
@@ -262,7 +262,7 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			approved++
 			res["success"] = true
 			res["exception_status"] = "IN_REVIEW"
-			res["processing_status"] = "APPROVED"
+			res["processing_status"] = constants.StatusApproved
 			res["checker_approved"] = true
 			res["awaiting_close"] = true
 			res["allowed_actions"] = []string{"close", "reject"}
@@ -332,7 +332,7 @@ func closeOneVariance(ctx context.Context, pool *pgxpool.Pool, exceptionID, user
 	}
 	auditOld := auditOldFromHeader(hdr)
 	if err = insertVarianceAudit(ctx, tx, exceptionID, varianceAuditInsert{
-		ActionType: "EDIT", ProcessingStatus: "APPROVED", Reason: comment, RequestedBy: userEmail,
+		ActionType: "EDIT", ProcessingStatus: constants.StatusApproved, Reason: comment, RequestedBy: userEmail,
 		Old: auditOld,
 	}); err != nil {
 		tx.Rollback(ctx) //nolint:errcheck
@@ -354,7 +354,7 @@ func closeOneVariance(ctx context.Context, pool *pgxpool.Pool, exceptionID, user
 	res["success"] = true
 	res["exception_status"] = "CLOSE"
 	res["workflow_status"] = "CLOSE"
-	res["processing_status"] = "APPROVED"
+	res["processing_status"] = constants.StatusApproved
 	res["case_type"] = caseType
 	res["variance_outcome"] = outcome
 	res["proposed_resolution"] = canonRes
@@ -486,7 +486,7 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if err = insertVarianceAudit(ctx, tx, eid, varianceAuditInsert{
-				ActionType: "EDIT", ProcessingStatus: "REJECTED", Reason: req.Reason,
+				ActionType: "EDIT", ProcessingStatus: constants.StatusRejected, Reason: req.Reason,
 				RequestedBy: userEmail, CheckerBy: userEmail, CheckerComment: req.Reason, Old: auditOld,
 			}); err != nil {
 				tx.Rollback(ctx) //nolint:errcheck
@@ -504,7 +504,7 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			rejected++
 			res["success"] = true
 			res["exception_status"] = "OPEN"
-			res["processing_status"] = "REJECTED"
+			res["processing_status"] = constants.StatusRejected
 			results = append(results, res)
 		}
 

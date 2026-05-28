@@ -50,7 +50,7 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			BatchID string `json:"batch_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if api.GetSessionFromCtx(r.Context()) == nil {

@@ -40,8 +40,18 @@ type investmentFilesHandlers struct {
 
 // newInvestmentFilesHandlers builds all five handlers for an investment master
 // module with no entity-level access scoping.
-func newInvestmentFilesHandlers(pool *pgxpool.Pool, moduleKey, parentField, parentTable, parentCol, filesTable, auditTable, actionCol string) investmentFilesHandlers {
-	cfg := buildInvestmentFilesConfig(moduleKey, parentField, parentTable, parentCol, filesTable, auditTable, actionCol)
+type InvestmentFilesConfigArgs struct {
+	ModuleKey   string
+	ParentField string
+	ParentTable string
+	ParentCol   string
+	FilesTable  string
+	AuditTable  string
+	ActionCol   string
+}
+
+func newInvestmentFilesHandlers(pool *pgxpool.Pool, args InvestmentFilesConfigArgs) investmentFilesHandlers {
+	cfg := buildInvestmentFilesConfig(args.ModuleKey, args.ParentField, args.ParentTable, args.ParentCol, args.FilesTable, args.AuditTable, args.ActionCol)
 	return investmentFilesHandlers{
 		List:          additionalfiles.NewListHandler(pool, cfg),
 		Upload:        additionalfiles.NewUploadHandler(pool, cfg),
@@ -149,55 +159,159 @@ func deleteInvestmentAdditionalFile(ctx context.Context, exec investmentFileExec
 // ── investmentMasters handler sets ──────────────────────────────────────────
 
 func AMCMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-amc", "amc_id", "investment.masteramc", "amc_id", "cimplrcorpsaas.master_amc_files", "investment.auditactionamc", "actiontype")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-amc",
+		ParentField: "amc_id",
+		ParentTable: "investment.masteramc",
+		ParentCol:   "amc_id",
+		FilesTable:  "cimplrcorpsaas.master_amc_files",
+		AuditTable:  "investment.auditactionamc",
+		ActionCol:   "actiontype",
+	})
 }
 
 func SchemeMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-scheme", "scheme_id", "investment.masterscheme", "scheme_id", "cimplrcorpsaas.master_scheme_files", "investment.auditactionscheme", "actiontype")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-scheme",
+		ParentField: "scheme_id",
+		ParentTable: "investment.masterscheme",
+		ParentCol:   "scheme_id",
+		FilesTable:  "cimplrcorpsaas.master_scheme_files",
+		AuditTable:  "investment.auditactionscheme",
+		ActionCol:   "actiontype",
+	})
 }
 
 func DPMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-dp", "dp_id", "investment.masterdepositoryparticipant", "dp_id", "cimplrcorpsaas.master_dp_files", "investment.auditactiondp", "actiontype")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-dp",
+		ParentField: "dp_id",
+		ParentTable: "investment.masterdepositoryparticipant",
+		ParentCol:   "dp_id",
+		FilesTable:  "cimplrcorpsaas.master_dp_files",
+		AuditTable:  "investment.auditactiondp",
+		ActionCol:   "actiontype",
+	})
 }
 
 func DematMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-demat", "demat_id", "investment.masterdemataccount", "demat_id", "cimplrcorpsaas.master_demat_files", "investment.auditactiondemat", "actiontype")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-demat",
+		ParentField: "demat_id",
+		ParentTable: "investment.masterdemataccount",
+		ParentCol:   "demat_id",
+		FilesTable:  "cimplrcorpsaas.master_demat_files",
+		AuditTable:  "investment.auditactiondemat",
+		ActionCol:   "actiontype",
+	})
 }
 
 func FolioMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-folio", "folio_id", "investment.masterfolio", "folio_id", "cimplrcorpsaas.master_folio_files", "investment.auditactionfolio", "actiontype")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-folio",
+		ParentField: "folio_id",
+		ParentTable: "investment.masterfolio",
+		ParentCol:   "folio_id",
+		FilesTable:  "cimplrcorpsaas.master_folio_files",
+		AuditTable:  "investment.auditactionfolio",
+		ActionCol:   "actiontype",
+	})
 }
 
 func InterestTypeMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-interest-type", "interest_id", "investment.fd_interest_type_master", "interest_id", "cimplrcorpsaas.master_interest_type_files", "investment.fd_audit_interest_type", "action_type")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-interest-type",
+		ParentField: "interest_id",
+		ParentTable: "investment.fd_interest_type_master",
+		ParentCol:   "interest_id",
+		FilesTable:  "cimplrcorpsaas.master_interest_type_files",
+		AuditTable:  "investment.fd_audit_interest_type",
+		ActionCol:   "action_type",
+	})
 }
 
 func PenaltyStructureMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-penalty-structure", "penalty_id", "investment.fd_penalty_structure_master", "penalty_id", "cimplrcorpsaas.master_penalty_structure_files", "investment.fd_audit_penalty_structure", "action_type")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-penalty-structure",
+		ParentField: "penalty_id",
+		ParentTable: "investment.fd_penalty_structure_master",
+		ParentCol:   "penalty_id",
+		FilesTable:  "cimplrcorpsaas.master_penalty_structure_files",
+		AuditTable:  "investment.fd_audit_penalty_structure",
+		ActionCol:   "action_type",
+	})
 }
 
 func CompoundingFrequencyMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-compounding-frequency", "frequency_id", "investment.fd_compounding_frequency_master", "frequency_id", "cimplrcorpsaas.master_compounding_frequency_files", "investment.fd_audit_compounding_frequency", "action_type")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-compounding-frequency",
+		ParentField: "frequency_id",
+		ParentTable: "investment.fd_compounding_frequency_master",
+		ParentCol:   "frequency_id",
+		FilesTable:  "cimplrcorpsaas.master_compounding_frequency_files",
+		AuditTable:  "investment.fd_audit_compounding_frequency",
+		ActionCol:   "action_type",
+	})
 }
 
 func TDSPlanMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-tds-plan", "tds_plan_id", "investment.fd_tds_plan_master", "tds_plan_id", "cimplrcorpsaas.master_tds_plan_files", "investment.fd_audit_tds_plan", "action_type")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-tds-plan",
+		ParentField: "tds_plan_id",
+		ParentTable: "investment.fd_tds_plan_master",
+		ParentCol:   "tds_plan_id",
+		FilesTable:  "cimplrcorpsaas.master_tds_plan_files",
+		AuditTable:  "investment.fd_audit_tds_plan",
+		ActionCol:   "action_type",
+	})
 }
 
 func CalendarMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-calendar", "calendar_id", "investment.mastercalendar", "calendar_id", "cimplrcorpsaas.master_calendar_files", "investment.auditactioncalendar", "actiontype")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-calendar",
+		ParentField: "calendar_id",
+		ParentTable: "investment.mastercalendar",
+		ParentCol:   "calendar_id",
+		FilesTable:  "cimplrcorpsaas.master_calendar_files",
+		AuditTable:  "investment.auditactioncalendar",
+		ActionCol:   "actiontype",
+	})
 }
 
 func DayCountConventionMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-day-count-convention", "day_count_code", "investment.fd_day_count_convention_master", "day_count_code", "cimplrcorpsaas.master_day_count_convention_files", "investment.fd_audit_day_count_convention", "action_type")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-day-count-convention",
+		ParentField: "day_count_code",
+		ParentTable: "investment.fd_day_count_convention_master",
+		ParentCol:   "day_count_code",
+		FilesTable:  "cimplrcorpsaas.master_day_count_convention_files",
+		AuditTable:  "investment.fd_audit_day_count_convention",
+		ActionCol:   "action_type",
+	})
 }
 
 func BankConfigMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-bank-config", "config_id", "investment.fd_bank_config_master", "config_id", "cimplrcorpsaas.master_bank_config_files", "investment.fd_audit_bank_config", "action_type")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-bank-config",
+		ParentField: "config_id",
+		ParentTable: "investment.fd_bank_config_master",
+		ParentCol:   "config_id",
+		FilesTable:  "cimplrcorpsaas.master_bank_config_files",
+		AuditTable:  "investment.fd_audit_bank_config",
+		ActionCol:   "action_type",
+	})
 }
 
 func BankRateCardMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
-	return newInvestmentFilesHandlers(pool, "master-bank-rate-card", "rate_card_id", "investment.fd_bank_rate_card_master", "rate_card_id", "cimplrcorpsaas.master_bank_rate_card_files", "investment.fd_audit_bank_rate_card", "action_type")
+	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
+		ModuleKey:   "master-bank-rate-card",
+		ParentField: "rate_card_id",
+		ParentTable: "investment.fd_bank_rate_card_master",
+		ParentCol:   "rate_card_id",
+		FilesTable:  "cimplrcorpsaas.master_bank_rate_card_files",
+		AuditTable:  "investment.fd_audit_bank_rate_card",
+		ActionCol:   "action_type",
+	})
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

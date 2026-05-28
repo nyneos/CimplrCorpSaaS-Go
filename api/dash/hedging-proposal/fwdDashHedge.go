@@ -13,23 +13,21 @@ import (
 	"CimplrCorpSaas/api"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/dash/ticker"
 
 	"github.com/lib/pq"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
-var rates = map[string]float64{
-	"USD": 1.0,
-	"AUD": 0.68,
-	"CAD": 0.75,
-	"CHF": 1.1,
-	"CNY": 0.14,
-	"RMB": 0.14,
-	"EUR": 1.09,
-	"GBP": 1.28,
-	"JPY": 0.0067,
-	"SEK": 0.095,
-	"INR": 0.0117,
+// toUSD returns how many USD equal 1 unit of cur, using live rates from rate.json.
+// Falls back to 1.0 if the currency is unavailable.
+func toUSD(cur string) float64 {
+	rate, err := ticker.RateBetween(cur, "USD")
+	if err != nil || rate == 0 {
+		return 1.0
+	}
+	return rate
 }
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
@@ -162,10 +160,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			if !api.CtxHasApprovedCurrency(r.Context(), currency) {
 				continue
 			}
-			rate := rates[currency]
-			if rate == 0 {
-				rate = 1.0
-			}
+			rate := toUSD(currency)
 
 			usdAmount := math.Abs(amount) * rate
 			bucketKey := normalizeDeliveryPeriod(deliveryPeriod)

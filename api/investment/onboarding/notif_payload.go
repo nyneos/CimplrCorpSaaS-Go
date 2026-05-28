@@ -8,7 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // BuildOnboardUploadNotifPayload constructs and fires a notification after a bulk upload.
 // It calls fetchBatchInfo to get the full entity breakdown for the batch.

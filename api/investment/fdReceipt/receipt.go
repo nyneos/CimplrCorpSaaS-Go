@@ -220,7 +220,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "FD lookup failed: "+err.Error())
 			return
 		}
-		if fdStatus != "ACTIVE" && fdStatus != "MATURED" {
+		if fdStatus != constants.StatusActive && fdStatus != "MATURED" {
 			api.RespondWithError(w, http.StatusBadRequest, "FD must be ACTIVE or MATURED")
 			return
 		}
@@ -450,7 +450,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, constants.ReceiptNotFound)
 			return
 		}
-		if currentStatus != "CAPTURED" && currentStatus != "REJECTED" {
+		if currentStatus != "CAPTURED" && currentStatus != constants.StatusRejected {
 			api.RespondWithError(w, http.StatusBadRequest, "Receipt can only be edited in CAPTURED or REJECTED status")
 			return
 		}
@@ -699,7 +699,7 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "not found"})
 				continue
 			}
-			if status != "CAPTURED" && status != "REJECTED" {
+			if status != "CAPTURED" && status != constants.StatusRejected {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "Cannot delete receipt in status " + status})
 				continue
 			}
@@ -3372,7 +3372,7 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "not found"})
 				continue
 			}
-			if rec.ReceiptStatus != "APPROVED" {
+			if rec.ReceiptStatus != constants.StatusApproved {
 				skipped++
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "receipt_status is not APPROVED"})
 				continue

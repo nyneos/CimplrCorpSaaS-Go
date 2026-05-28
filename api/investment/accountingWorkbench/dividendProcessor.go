@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // ProcessDividendReinvestment creates buy transaction when dividend is reinvested
 // Called during approval for REINVEST type dividends

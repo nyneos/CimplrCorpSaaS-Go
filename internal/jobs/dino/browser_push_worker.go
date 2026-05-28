@@ -45,7 +45,8 @@ import (
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Payload types (serialised and sent to sw.js)

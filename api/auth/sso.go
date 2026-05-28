@@ -425,7 +425,7 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 	var dbStatus sql.NullString
 
 	err := a.db.QueryRow(
-		`SELECT id, employee_name, email, status FROM users WHERE LOWER(email) = LOWER($1)`,
+		`SELECT id, employee_name, email, status FROM users WHERE LOWER(email) = LOWER($1) AND COALESCE(is_deleted, false) = false LIMIT 1`,
 		email,
 	).Scan(&dbUserID, &dbName, &dbEmail, &dbStatus)
 	if err != nil {
@@ -435,9 +435,9 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 		return nil, false, errors.New("internal error")
 	}
 
-	if dbStatus.Valid && !strings.EqualFold(dbStatus.String, "Approved") &&
-		!strings.EqualFold(dbStatus.String, "pending") {
-		return nil, false, fmt.Errorf("account status is %s", dbStatus.String)
+	if dbStatus.Valid && !strings.EqualFold(dbStatus.String, constants.UserStatusApproved) &&
+		!strings.EqualFold(dbStatus.String, constants.UserStatusPending) {
+		return nil, false, errors.New("Account is not active")
 	}
 
 	a.forceLogoutUser(dbUserID)
@@ -446,24 +446,37 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 		return nil, false, errors.New("maximum concurrent users reached")
 	}
 
-	var roleName, roleCode sql.NullString
-	_ = a.db.QueryRow(
-		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 LIMIT 1`,
+	var primaryRole, primaryRoleCode string
+	if roleRows, err := a.db.Query(
+		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 ORDER BY ur.id ASC LIMIT 1`,
 		dbUserID,
-	).Scan(&roleName, &roleCode)
+	); err == nil {
+		defer roleRows.Close()
+		if roleRows.Next() {
+			var rn, rc sql.NullString
+			if roleRows.Scan(&rn, &rc) == nil {
+				primaryRole = rn.String
+				primaryRoleCode = rc.String
+			}
+		}
+	}
 
-	sessionID := generateSessionID()
+	sessionID, err := generateSessionID()
+	if err != nil {
+		logger.LogError("[AUTH DEBUG] SSO session ID generation failed user_id=%s err=%v", dbUserID, err)
+		return nil, false, errors.New("internal error")
+	}
 	session := &UserSession{
 		SessionID:       sessionID,
 		UserID:          dbUserID,
 		Name:            dbName,
 		Email:           dbEmail,
-		Role:            roleName.String,
-		RoleCode:        roleCode.String,
+		Role:            primaryRole,
+		RoleCode:        primaryRoleCode,
 		LastLoginTime:   time.Now().Format(time.RFC3339),
 		ClientIP:        clientIP,
 		IsLoggedIn:      true,
-		CreatedEntities: a.loadCreatedEntities(dbUserID, roleName.String, roleCode.String),
+		CreatedEntities: a.loadCreatedEntities(dbUserID, primaryRole, primaryRoleCode),
 	}
 
 	// Check MFA — only pending if BOTH enabled AND secret is configured

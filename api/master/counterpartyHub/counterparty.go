@@ -517,7 +517,7 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Reject counterparty_code change once ACTIVE
-		if _, changing := req.Fields["counterparty_code"]; changing && oldStatus == "ACTIVE" {
+		if _, changing := req.Fields["counterparty_code"]; changing && oldStatus == constants.StatusActive {
 			api.RespondWithError(w, http.StatusBadRequest, "Counterparty code cannot be changed after activation")
 			return
 		}

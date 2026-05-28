@@ -15,7 +15,7 @@ import (
 )
 
 func ctxApprovedAccountNumbers(ctx context.Context) []string {
-	v := ctx.Value("ApprovedBankAccounts")
+	v := ctx.Value(api.ApprovedBankAccountsKey)
 	if v == nil {
 		return nil
 	}
