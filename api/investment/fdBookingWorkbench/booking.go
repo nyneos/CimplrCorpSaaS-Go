@@ -28,6 +28,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SourceAccountNumber  string  `json:"source_account_number"`
 			BankConfigID         string  `json:"bank_config_id"`
 			PrincipalAmount      float64 `json:"principal_amount"`
+			ValueType            string  `json:"value_type"`
 			InterestRate         float64 `json:"interest_rate"`
 			TenorDays            int     `json:"tenor_days"`   // → tenure_days
 			TenorMonths          int     `json:"tenor_months"` // → tenure_months
@@ -150,6 +151,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"source_account_number":  nullIfEmpty(req.SourceAccountNumber),
 			"bank_config_id":         nullIfEmpty(req.BankConfigID),
 			"principal_amount":       req.PrincipalAmount,
+			"value_type":             normalizePrincipalValueType(req.ValueType),
 			"interest_rate":          req.InterestRate,
 			"tenure_days":            computedTenorDays,
 			"tenure_months":          req.TenorMonths,
@@ -176,7 +178,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		preferredCols := []string{
 			"entity_id", "entity_name", "bank_id", "bank_name", accountColumn,
 			"source_account_number", "bank_config_id",
-			"principal_amount", "interest_rate", "tenure_days", "tenure_months",
+			"principal_amount", "value_type", "interest_rate", "tenure_days", "tenure_months",
 			"tenor_type", "tenure_years",
 			"interest_type_code", "interest_type_id", "expected_start_date", "expected_maturity_date", "value_date",
 			"frequency_id", "day_count_code", "tds_plan_id", "product_code",
@@ -300,6 +302,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SourceAccountNumber string  `json:"source_account_number"`
 				BankConfigID        string  `json:"bank_config_id"`
 				PrincipalAmount     float64 `json:"principal_amount"`
+				ValueType           string  `json:"value_type"`
 				InterestRate        float64 `json:"interest_rate"`
 				TenorDays           int     `json:"tenor_days"`   // → tenure_days
 				TenorMonths         int     `json:"tenor_months"` // → tenure_months
@@ -430,6 +433,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"source_account_number":  nullIfEmpty(row.SourceAccountNumber),
 				"bank_config_id":         nullIfEmpty(row.BankConfigID),
 				"principal_amount":       row.PrincipalAmount,
+				"value_type":             normalizePrincipalValueType(row.ValueType),
 				"interest_rate":          row.InterestRate,
 				"tenure_days":            computedTenorDays,
 				"tenure_months":          row.TenorMonths,
@@ -452,7 +456,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bulkPreferredCols := []string{
 				"entity_id", "entity_name", "bank_id", "bank_name", accountColumn,
 				"source_account_number", "bank_config_id",
-				"principal_amount", "interest_rate", "tenure_days", "tenure_months",
+				"principal_amount", "value_type", "interest_rate", "tenure_days", "tenure_months",
 				"tenor_type", "tenure_years",
 				"interest_type_code", "interest_type_id", "expected_start_date", "expected_maturity_date", "value_date",
 				"frequency_id", "day_count_code", "tds_plan_id", "product_code",
@@ -664,6 +668,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// underlying column so we must de-duplicate them when building the SET clause.
 		allowedFields := map[string]string{
 			"principal_amount":       "principal_amount",
+			"value_type":             "value_type",
 			"interest_rate":          "interest_rate",
 			"tenure_days":            "tenure_days",
 			"value_date":             "value_date",
@@ -707,6 +712,11 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			usedColumns[colName] = true
 			if k == "value_date" || k == "expected_maturity_date" || k == "offer_valid_till" {
 				v = coerceDateValue(v)
+			}
+			if k == "value_type" {
+				if sv, ok := v.(string); ok {
+					v = normalizePrincipalValueType(sv)
+				}
 			}
 			setClauses = append(setClauses, fmt.Sprintf("%s = $%d", colName, argIdx))
 			setArgs = append(setArgs, v)
@@ -1539,6 +1549,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.source_account_number,'')                                AS source_account_number,
 				COALESCE(m.bank_config_id,'')                                       AS bank_config_id,
 				COALESCE(m.principal_amount,0)                                      AS principal_amount,
+				COALESCE(NULLIF(m.value_type,''),'Actual')                          AS value_type,
 				COALESCE(m.interest_rate,0)                                         AS interest_rate,
 				COALESCE(m.interest_type_code,'')                                   AS interest_type,
 				COALESCE(m.interest_type_id,'')                                     AS interest_type_id,
@@ -1719,6 +1730,7 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(source_account_number,'')                             AS source_account_number,
 					COALESCE(bank_config_id,'')                                    AS bank_config_id,
 					COALESCE(principal_amount,0)                                   AS principal_amount,
+					COALESCE(NULLIF(value_type,''),'Actual')                         AS value_type,
 					COALESCE(interest_rate,0)                                      AS interest_rate,
 					COALESCE(interest_type_code,'')                                AS interest_type,
 					COALESCE(interest_type_id,'')                                  AS interest_type_id,
@@ -2025,6 +2037,7 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.source_account_id,'')                               AS bank_account_id,
 				COALESCE(m.source_account_number,'')                           AS bank_account_number,
 				COALESCE(m.principal_amount,0)                                 AS principal_amount,
+				COALESCE(NULLIF(m.value_type,''),'Actual')                     AS value_type,
 				COALESCE(m.interest_rate,0)                                    AS interest_rate,
 				COALESCE(m.interest_type_code,'')                              AS interest_type,
 				COALESCE(m.interest_type_id,'')                                AS interest_type_id,
