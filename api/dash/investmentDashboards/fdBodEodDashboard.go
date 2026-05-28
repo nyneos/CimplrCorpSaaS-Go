@@ -484,9 +484,9 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				}, nil
 			}
 			return map[string]interface{}{
-				"total_interest":  fdRound(total, 2),
-				"fd_count":        fdCount,
-				"cashflow_count":  cfCount,
+				"total_interest": fdRound(total, 2),
+				"fd_count":       fdCount,
+				"cashflow_count": cfCount,
 			}, nil
 		})
 
@@ -889,16 +889,16 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// Roles equal to "ADMIN", "MANAGER", "CFO", or "" (empty) see all items.
 		run("eod_checklist", func(ctx context.Context) (interface{}, error) {
 			type checkItem struct {
-				ID                string `json:"id"`
-				Label             string `json:"label"`
-				Done              bool   `json:"done"`
-				Critical          bool   `json:"critical"`
-				DetailValue       string `json:"detail_value,omitempty"`
-				OwnerRole         string `json:"owner_role"`
-				PersistedDone     bool   `json:"persisted_done"`
-				PersistedComment  string `json:"persisted_comment,omitempty"`
-				LastUpdatedBy     string `json:"last_updated_by,omitempty"`
-				LastUpdatedAt     string `json:"last_updated_at,omitempty"`
+				ID               string `json:"id"`
+				Label            string `json:"label"`
+				Done             bool   `json:"done"`
+				Critical         bool   `json:"critical"`
+				DetailValue      string `json:"detail_value,omitempty"`
+				OwnerRole        string `json:"owner_role"`
+				PersistedDone    bool   `json:"persisted_done"`
+				PersistedComment string `json:"persisted_comment,omitempty"`
+				LastUpdatedBy    string `json:"last_updated_by,omitempty"`
+				LastUpdatedAt    string `json:"last_updated_at,omitempty"`
 			}
 
 			// C1: statement ingestion done (no unmatched today)
@@ -1225,22 +1225,22 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"gl_postings_failed":     getNestedInt64(get("posting_today"), "failed"),
 			},
 			// ── Detail tables ─────────────────────────────────────────────────
-			"maturities_today":     get("maturities_today"),
-			"maturities_3days":     get("maturities_3days"),
-			"confirmations_due":    get("confirmations_due"),
-			"accrual_scheduled":    get("accrual_scheduled"),
-			"expected_interest":    get("expected_interest"),
-			"action_list":          get("action_list"),
-			"sla_breach_yesterday": get("sla_breach_yesterday"),
-			"bookings_today":       get("bookings_today"),
-			"confirmations_today":  get("confirmations_today"),
-			"receipts_today":       get("receipts_today"),
-			"exceptions_today":     get("exceptions_today"),
-			"posting_today":        get("posting_today"),
-			"accrual_run_latest":        get("accrual_run_latest"),
-			"eod_checklist":             get("eod_checklist"),
-			"bank_concentration":        get("bank_concentration"),
-			"active_interest_pipeline":  get("active_interest_pipeline"),
+			"maturities_today":         get("maturities_today"),
+			"maturities_3days":         get("maturities_3days"),
+			"confirmations_due":        get("confirmations_due"),
+			"accrual_scheduled":        get("accrual_scheduled"),
+			"expected_interest":        get("expected_interest"),
+			"action_list":              get("action_list"),
+			"sla_breach_yesterday":     get("sla_breach_yesterday"),
+			"bookings_today":           get("bookings_today"),
+			"confirmations_today":      get("confirmations_today"),
+			"receipts_today":           get("receipts_today"),
+			"exceptions_today":         get("exceptions_today"),
+			"posting_today":            get("posting_today"),
+			"accrual_run_latest":       get("accrual_run_latest"),
+			"eod_checklist":            get("eod_checklist"),
+			"bank_concentration":       get("bank_concentration"),
+			"active_interest_pipeline": get("active_interest_pipeline"),
 		}
 
 		api.RespondWithPayload(w, true, "", payload)

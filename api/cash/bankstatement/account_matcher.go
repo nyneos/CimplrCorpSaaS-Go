@@ -8,7 +8,8 @@ import (
 	"regexp"
 	"strings"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // accountMatchScore represents a scored match between a file and an account
 type accountMatchScore struct {

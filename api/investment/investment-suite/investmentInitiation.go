@@ -154,7 +154,7 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(iID, uID, uEmail string) {
-			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, []string{iID}, "CREATE", uEmail)
+			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, []string{iID}, constants.AuditActionCreate, uEmail)
 			catalog.TriggerNotification(
 				context.Background(), pgxPool,
 				"/investment/initiation/create",
@@ -319,7 +319,7 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := userEmail
 			go func() {
-				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "CREATE", uEmail)
+				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionCreate, uEmail)
 				catalog.TriggerNotification(
 					context.Background(), pgxPool,
 					"/investment/initiation/bulk-create",
@@ -702,15 +702,15 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
-			if ps == "APPROVED" {
+			if ps == constants.StatusApproved {
 				continue
 			}
-			if ps == "PENDING_DELETE_APPROVAL" {
+			if ps == constants.StatusPendingDeleteApproval {
 				toDeleteActionIDs = append(toDeleteActionIDs, aid)
 				deleteMasterIDs = append(deleteMasterIDs, iid)
 				continue
 			}
-			if ps == "PENDING_APPROVAL" || ps == "PENDING_EDIT_APPROVAL" {
+			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
 				toApproveInitiations = append(toApproveInitiations, iid)
 			}
@@ -772,7 +772,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := checkerBy
 			go func() {
-				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "APPROVE", uEmail)
+				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionApprove, uEmail)
 				catalog.TriggerNotification(
 					context.Background(), pgxPool,
 					"/investment/initiation/approve",
@@ -786,7 +786,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := checkerBy
 			go func() {
-				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "DELETE", uEmail)
+				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionDelete, uEmail)
 				catalog.TriggerNotification(
 					context.Background(), pgxPool,
 					"/investment/initiation/delete",
@@ -855,7 +855,7 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			found[iid] = true
-			if strings.ToUpper(strings.TrimSpace(ps)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusApproved {
 				cannotReject = append(cannotReject, iid)
 			} else {
 				actionIDs = append(actionIDs, aid)
@@ -895,7 +895,7 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(ids []string, uID, uEmail string) {
-			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "REJECT", uEmail)
+			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionReject, uEmail)
 			catalog.TriggerNotification(
 				context.Background(), pgxPool,
 				"/investment/initiation/reject",

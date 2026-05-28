@@ -2,6 +2,7 @@ package approvalengine
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 
@@ -37,9 +38,9 @@ func finalizeRecord(
 	}
 
 	// Step 1: Map final status to legacy processing_status string.
-	processingStatus := "APPROVED"
+	processingStatus := constants.StatusApproved
 	if p.FinalStatus == InstStatusRejected {
-		processingStatus = "REJECTED"
+		processingStatus = constants.StatusRejected
 	}
 
 	// Step 2: UPDATE the legacy audit table.

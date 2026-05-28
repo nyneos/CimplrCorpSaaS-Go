@@ -36,7 +36,7 @@ type InsertFDAuditParams struct {
 
 // cashflowAuditStatusPending must match investment.fd_audit_cashflow_schedule
 // check constraint fd_audit_cashflow_status_chk (not fd_master PENDING_ACTIVATION).
-const cashflowAuditStatusPending = "PENDING_APPROVAL"
+const cashflowAuditStatusPending = constants.StatusPendingApproval
 
 type activateFDRequest struct {
 	UserID         string `json:"user_id"`
@@ -505,7 +505,7 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 }
 
 // updateFDMasterStatus sets fd_status for the given fd_ids.
-// When targetStatus is "ACTIVE", it also stamps activated_by and activated_at
+// When targetStatus is constants.StatusActive, it also stamps activated_by and activated_at
 // if those columns exist on the table.
 func updateFDMasterStatus(ctx context.Context, exec queryExecutor, fdIDs []string, targetStatus string) error {
 	return updateFDMasterStatusBy(ctx, exec, fdIDs, targetStatus, "")
@@ -529,7 +529,7 @@ func updateFDMasterStatusBy(ctx context.Context, exec queryExecutor, fdIDs []str
 	}
 
 	// When activating, also stamp activated_by / activated_at if the columns exist.
-	if targetStatus == "ACTIVE" && actorEmail != "" &&
+	if targetStatus == constants.StatusActive && actorEmail != "" &&
 		masterCols["activated_by"] && masterCols["activated_at"] {
 		query := fmt.Sprintf(
 			`UPDATE investment.fd_master
@@ -831,8 +831,8 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			AuditTable:       auditTable,
 			RefID:            fdID,
 			UserEmail:        userEmail,
-			ActionType:       "CREATE",
-			ProcessingStatus: "PENDING_APPROVAL",
+			ActionType:       constants.AuditActionCreate,
+			ProcessingStatus: constants.StatusPendingApproval,
 			Reason:           firstNonEmpty(req.Reason, req.Notes),
 		}); err != nil {
 			msg, status := getFDMasterError(err, constants.ErrAuditInsertFailed)
@@ -897,7 +897,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordTable:      constants.QuerryMaster,
 				AuditTable:       auditTableName,
 				AuditIDColumn:    auditIDColumn,
-				ActionType:       "CREATE",
+				ActionType:       constants.AuditActionCreate,
 				Amount:           amount,
 				SubmittedBy:      req.UserID,
 				SubmittedByEmail: email,
@@ -1000,7 +1000,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if actionRes.Acted {
 				// Check if fully approved (last eye) — if so, set ACTIVE and create journals.
-				if actionRes.InstanceStatus == "APPROVED" {
+				if actionRes.InstanceStatus == constants.StatusApproved {
 					tx, txErr := pgxPool.Begin(ctx)
 					if txErr != nil {
 						errors = append(errors, fdID+": post-approval tx begin failed")
@@ -1008,8 +1008,8 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						continue
 					}
 					auditTable := resolveFDAuditTable(ctx, tx)
-					_ = updateFDMasterStatusBy(ctx, tx, []string{fdID}, "ACTIVE", userEmail)
-					_ = updateFDAuditStatus(ctx, tx, auditTable, []string{fdID}, userEmail, "APPROVED", req.Comment)
+					_ = updateFDMasterStatusBy(ctx, tx, []string{fdID}, constants.StatusActive, userEmail)
+					_ = updateFDAuditStatus(ctx, tx, auditTable, []string{fdID}, userEmail, constants.StatusApproved, req.Comment)
 					markCashflowAuditApproved(ctx, tx, fdID, userEmail) // promote cashflow audit CREATE rows → APPROVED
 					rec, err := loadFDRecordByFDID(ctx, tx, fdID)
 					if err == nil {
@@ -1040,12 +1040,12 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				auditTable := resolveFDAuditTable(ctx, tx)
-				if err := updateFDAuditStatus(ctx, tx, auditTable, []string{fdID}, userEmail, "APPROVED", req.Comment); err != nil {
+				if err := updateFDAuditStatus(ctx, tx, auditTable, []string{fdID}, userEmail, constants.StatusApproved, req.Comment); err != nil {
 					_ = tx.Rollback(ctx)
 					errors = append(errors, fdID+": audit update failed")
 					continue
 				}
-				if err := updateFDMasterStatusBy(ctx, tx, []string{fdID}, "ACTIVE", userEmail); err != nil {
+				if err := updateFDMasterStatusBy(ctx, tx, []string{fdID}, constants.StatusActive, userEmail); err != nil {
 					_ = tx.Rollback(ctx)
 					errors = append(errors, fdID+": status update failed")
 					continue
@@ -1193,12 +1193,12 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				auditTable := resolveFDAuditTable(ctx, tx)
-				if err := updateFDAuditStatus(ctx, tx, auditTable, []string{fdID}, userEmail, "REJECTED", req.Comment); err != nil {
+				if err := updateFDAuditStatus(ctx, tx, auditTable, []string{fdID}, userEmail, constants.StatusRejected, req.Comment); err != nil {
 					_ = tx.Rollback(ctx)
 					errors = append(errors, fdID+": audit update failed")
 					continue
 				}
-				if err := updateFDMasterStatus(ctx, tx, []string{fdID}, "REJECTED"); err != nil {
+				if err := updateFDMasterStatus(ctx, tx, []string{fdID}, constants.StatusRejected); err != nil {
 					_ = tx.Rollback(ctx)
 					errors = append(errors, fdID+": status update failed")
 					continue
@@ -1339,7 +1339,7 @@ func GetFDMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						RecordTable:      constants.QuerryMaster,
 						AuditTable:       auditTable,
 						AuditIDColumn:    keyCol,
-						ActionType:       "CREATE",
+						ActionType:       constants.AuditActionCreate,
 						Amount:           amount,
 						SubmittedBy:      submittedBy,
 						SubmittedByEmail: submittedBy,
@@ -1548,7 +1548,7 @@ func GetActiveFDsInRange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Closed/terminated statuses to exclude
-		excludedStatuses := []string{"MATURED", "PREMATURELY_CLOSED", "ROLLED_OVER", "CANCELLED", "REJECTED"}
+		excludedStatuses := []string{"MATURED", "PREMATURELY_CLOSED", "ROLLED_OVER", "CANCELLED", constants.StatusRejected}
 
 		query := fmt.Sprintf(`
 			SELECT *
@@ -2080,7 +2080,7 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if actionRes.Acted {
-				if actionRes.InstanceStatus == "APPROVED" {
+				if actionRes.InstanceStatus == constants.StatusApproved {
 					if applyErr := applyApprovedCashflowEdit(ctx, pgxPool, auditID, userEmail); applyErr != nil {
 						errs = append(errs, cashflowID+": apply failed: "+applyErr.Error())
 						continue
@@ -2664,7 +2664,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					RecordTable:      "investment.fd_audit_cashflow_schedule",
 					AuditTable:       "investment.fd_audit_cashflow_schedule",
 					AuditIDColumn:    "audit_id",
-					ActionType:       "EDIT",
+					ActionType:       constants.AuditActionEdit,
 					Amount:           amount,
 					SubmittedBy:      userID,
 					SubmittedByEmail: email,
@@ -2694,7 +2694,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"fd_id":        req.FDID,
 			"cashflow_id":  req.CashflowID,
 			"audit_id":     auditID,
-			"status":       "PENDING_EDIT_APPROVAL",
+			"status":       constants.StatusPendingEditApproval,
 			"submitted_by": userEmail,
 			"message":      "Edit submitted for approval. It will be applied once approved.",
 		})
@@ -3043,7 +3043,7 @@ func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if actionRes.Acted {
 			// Engine path: record action
 			// Check if instance is now fully APPROVED
-			if actionRes.InstanceStatus == "APPROVED" {
+			if actionRes.InstanceStatus == constants.StatusApproved {
 				if applyErr := applyApprovedCashflowEdit(ctx, pgxPool, req.AuditID, userEmail); applyErr != nil {
 					api.LogError("[CashflowApprove] apply failed audit=%s: %v", req.AuditID, applyErr)
 					api.RespondWithError(w, http.StatusInternalServerError, "apply edit failed: "+applyErr.Error())
@@ -3066,7 +3066,7 @@ func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"audit_id": req.AuditID, "status": "APPROVED", "approved_by": userEmail,
+				"audit_id": req.AuditID, "status": constants.StatusApproved, "approved_by": userEmail,
 			})
 		}
 		api.LogInfo("[CashflowApprove] audit=%s cf=%s fd=%s by=%s", req.AuditID, cashflowID, fdID, userEmail)
@@ -3150,7 +3150,7 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		api.LogInfo("[CashflowReject] audit=%s cf=%s fd=%s by=%s", req.AuditID, cashflowID, fdID, userEmail)
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"audit_id": req.AuditID, "status": "REJECTED", "rejected_by": userEmail,
+			"audit_id": req.AuditID, "status": constants.StatusRejected, "rejected_by": userEmail,
 		})
 	}
 }
@@ -3323,7 +3323,7 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"fd_id":        req.FDID,
 			"cashflow_id":  req.CashflowID,
 			"audit_id":     auditID,
-			"status":       "PENDING_DELETE_APPROVAL",
+			"status":       constants.StatusPendingDeleteApproval,
 			"submitted_by": userEmail,
 			"message":      "Delete request submitted for approval.",
 		})

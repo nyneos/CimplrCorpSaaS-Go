@@ -498,7 +498,7 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, auditErr := pgxPool.Exec(ctx, auditQuery,
 				newEntityID,
 				"CREATE",
-				"PENDING_APPROVAL",
+				constants.StatusPendingApproval,
 				nil,
 				createdBy,
 			); auditErr != nil {
@@ -789,7 +789,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			entityMap[id.String] = node
 
 			// Only hide if deletion is fully approved
-			if isDel && strings.EqualFold(procStatus.String, "APPROVED") {
+			if isDel && strings.EqualFold(procStatus.String, constants.StatusApproved) {
 				hideIDs[id.String] = true
 			}
 		}
@@ -817,10 +817,10 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						case "CREATE":
 							ent.Data["created_by"] = rby.String
 							ent.Data["created_at"] = ts
-						case "EDIT":
+						case constants.AuditActionEdit:
 							ent.Data["edited_by"] = rby.String
 							ent.Data["edited_at"] = ts
-						case "DELETE":
+						case constants.AuditActionDelete:
 							ent.Data["deleted_by"] = rby.String
 							ent.Data["deleted_at"] = ts
 						}
@@ -1494,7 +1494,7 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditQuery := `INSERT INTO auditactionentity (
 					entity_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
-				if _, err := tx.Exec(ctx, auditQuery, updatedEntityID, "EDIT", "PENDING_EDIT_APPROVAL", entity.Reason, updatedBy); err != nil {
+				if _, err := tx.Exec(ctx, auditQuery, updatedEntityID, constants.AuditActionEdit, constants.StatusPendingEditApproval, entity.Reason, updatedBy); err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Entity updated but audit log failed: " + err.Error(), "entity_id": updatedEntityID})
 					return
 				}
@@ -1965,7 +1965,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				anyError = err
 				break
 			}
-			if status == "PENDING_DELETE_APPROVAL" {
+			if status == constants.StatusPendingDeleteApproval {
 				// Mark all descendants as deleted (do not approve them)
 				descendants, derr := cashEntityIDsWithDescendants(ctx, tx, parentMap, []string{eid})
 				if derr != nil {
@@ -3465,7 +3465,7 @@ ON CONFLICT (parent_entity_name, child_entity_name) DO UPDATE
 				auditRows = append(auditRows, auditRow{
 					EntityID:         entityID,
 					ActionType:       "CREATE",
-					ProcessingStatus: "PENDING_APPROVAL",
+					ProcessingStatus: constants.StatusPendingApproval,
 					Reason:           nil,
 				})
 			} else {
@@ -3478,8 +3478,8 @@ ON CONFLICT (parent_entity_name, child_entity_name) DO UPDATE
 				})
 				auditRows = append(auditRows, auditRow{
 					EntityID:         entityID,
-					ActionType:       "EDIT",
-					ProcessingStatus: "PENDING_EDIT_APPROVAL",
+					ActionType:       constants.AuditActionEdit,
+					ProcessingStatus: constants.StatusPendingEditApproval,
 					Reason:           string(oldJSON),
 				})
 			}

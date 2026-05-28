@@ -205,7 +205,7 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		auditErr := tx.QueryRow(ctx, auditQuery,
 			accountID,
 			"CREATE",
-			"PENDING_APPROVAL",
+			constants.StatusPendingApproval,
 			nil,
 			createdBy,
 		).Scan(&auditActionID)
@@ -672,7 +672,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					account_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now()) RETURNING action_id`
 				var auditActionID string
-				if err := tx.QueryRow(ctx, auditQuery, updatedAccountID, "EDIT", "PENDING_EDIT_APPROVAL", nil, updatedBy).Scan(&auditActionID); err != nil {
+				if err := tx.QueryRow(ctx, auditQuery, updatedAccountID, "EDIT", constants.StatusPendingEditApproval, nil, updatedBy).Scan(&auditActionID); err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Account updated but audit log failed: " + err.Error(), "account_id": updatedAccountID, "clearing_codes": clearingResults})
 					return
 				}

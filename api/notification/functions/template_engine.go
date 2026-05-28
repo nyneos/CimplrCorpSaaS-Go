@@ -17,7 +17,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // ExtractVariables returns a list of unique variable names found in the template
 // variables are of the form {{VarName}}

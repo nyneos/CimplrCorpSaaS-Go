@@ -61,12 +61,12 @@ func GetRoleAuditHistory(db *sql.DB) http.HandlerFunc {
 		defer rows.Close()
 
 		type auditRow struct {
-			EntityID          string  `json:"entity_id"`
-			Actiontype        string  `json:"actiontype"`
-			ProcessingStatus  string  `json:"processing_status"`
-			RequestedBy       string  `json:"requested_by"`
-			RequestedAt       *string `json:"requested_at"`
-			DisplayName       string  `json:"display_name"`
+			EntityID         string  `json:"entity_id"`
+			Actiontype       string  `json:"actiontype"`
+			ProcessingStatus string  `json:"processing_status"`
+			RequestedBy      string  `json:"requested_by"`
+			RequestedAt      *string `json:"requested_at"`
+			DisplayName      string  `json:"display_name"`
 		}
 
 		out := make([]auditRow, 0)

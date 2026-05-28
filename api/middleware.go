@@ -18,8 +18,9 @@ import (
 type contextKey string
 
 const (
-	BusinessUnitsKey contextKey = "businessUnits"
-	EntityIDsKey     contextKey = "entityIDs"
+	BusinessUnitsKey        contextKey = "businessUnits"
+	EntityIDsKey            contextKey = "entityIDs"
+	ApprovedBankAccountsKey            = "ApprovedBankAccounts"
 )
 
 // Helper functions for context retrieval (used by middlewares in subdirectory)
@@ -414,7 +415,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			// Fallback: legacy users.business_unit_name → single root entity lookup.
 			var rootEntityIds []string
 			{
-				mRows, mErr := db.Query(
+				mRows, mErr := db.QueryContext(r.Context(),
 					"SELECT entity_id::text FROM user_entity_mappings WHERE user_id = $1",
 					userID,
 				)
@@ -446,7 +447,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			var buEntityIDs []string
 
 			for _, rootEntityId := range rootEntityIds {
-				rows1, err1 := db.Query(`
+				rows1, err1 := db.QueryContext(r.Context(), `
 					WITH RECURSIVE descendants AS (
 						SELECT entity_id, entity_name
 						FROM masterentitycash
@@ -475,7 +476,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 					logger.LogError("[WARN] masterentitycash recursive query failed for root=%s: %v", rootEntityId, err1)
 				}
 
-				rows2, err2 := db.Query(`
+				rows2, err2 := db.QueryContext(r.Context(), `
 					WITH RECURSIVE descendants AS (
 						SELECT entity_id, entity_name
 						FROM masterEntity

@@ -11,7 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // SettingRequest represents a setting configuration
 type SettingRequest struct {

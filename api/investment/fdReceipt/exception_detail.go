@@ -120,8 +120,8 @@ func GetExceptionDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			"allowed_actions":   varianceAllowedActions(hdr.WorkflowStatus, checkerApproved),
 			"resolve_form":      exceptionResolveFormOptions(),
 			"can_post_journals": canPost,
-			"awaiting_close": checkerApproved && hdr.WorkflowStatus == "IN_REVIEW",
-			"is_locked":      hdr.WorkflowStatus == "CLOSE",
+			"awaiting_close":    checkerApproved && hdr.WorkflowStatus == "IN_REVIEW",
+			"is_locked":         hdr.WorkflowStatus == "CLOSE",
 			"workflow": map[string]string{
 				"statuses": "OPEN | IN_REVIEW | CLOSE",
 				"raised":   "CREATE + PENDING_APPROVAL",

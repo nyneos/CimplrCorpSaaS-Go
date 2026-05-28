@@ -825,10 +825,10 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						if atype == "CREATE" && createdBy == "" {
 							createdBy = auditInfo.CreatedBy
 							createdAt = auditInfo.CreatedAt
-						} else if atype == "EDIT" && editedBy == "" {
+						} else if atype == constants.AuditActionEdit && editedBy == "" {
 							editedBy = auditInfo.EditedBy
 							editedAt = auditInfo.EditedAt
-						} else if atype == "DELETE" && deletedBy == "" {
+						} else if atype == constants.AuditActionDelete && deletedBy == "" {
 							deletedBy = auditInfo.DeletedBy
 							deletedAt = auditInfo.DeletedAt
 						}
@@ -989,12 +989,12 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			found[sweepID] = true
-			if procStatus != "PENDING_APPROVAL" && procStatus != "PENDING_EDIT_APPROVAL" && procStatus != "PENDING_DELETE_APPROVAL" {
+			if procStatus != constants.StatusPendingApproval && procStatus != constants.StatusPendingEditApproval && procStatus != constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, "cannot approve non-pending sweep: "+sweepID)
 				return
 			}
 			actionIDs = append(actionIDs, actionID)
-			if actionType == "DELETE" {
+			if actionType == constants.AuditActionDelete {
 				deleteSweepIDs = append(deleteSweepIDs, sweepID)
 			}
 		}
@@ -1118,7 +1118,7 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			found[sweepID] = true
-			if procStatus != "PENDING_APPROVAL" && procStatus != "PENDING_EDIT_APPROVAL" && procStatus != "PENDING_DELETE_APPROVAL" {
+			if procStatus != constants.StatusPendingApproval && procStatus != constants.StatusPendingEditApproval && procStatus != constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, "cannot reject non-pending sweep: "+sweepID)
 				return
 			}
@@ -1223,7 +1223,7 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
-			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+			if latestErr == nil && latestActionType == constants.AuditActionDelete && latestStatus == constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, "delete request already pending for sweep: "+id)
 				return
 			}
@@ -1244,7 +1244,7 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 		capturedUser := req.UserID
 		capturedReason := req.Reason
 		notifyCtx := context.WithoutCancel(ctx)
-		payload := BuildSweepConfigNotifPayload(notifyCtx, pgxPool, capturedIDs, "DELETE", capturedUser)
+		payload := BuildSweepConfigNotifPayload(notifyCtx, pgxPool, capturedIDs, constants.AuditActionDelete, capturedUser)
 		payloadMap := payload.ToMap()
 		payloadMap["Reason"] = capturedReason
 		go catalog.TriggerNotification(

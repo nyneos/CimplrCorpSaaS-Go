@@ -261,7 +261,7 @@ func GetRichInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID, 
 	// ── Step 1: Fetch the instance row ─────────────────────────────────────
 	var d RichInstanceDetail
 	var matrixID string
-	var slaHours16 *int16  // DB column is smallint — pgx v5 returns int16
+	var slaHours16 *int16 // DB column is smallint — pgx v5 returns int16
 	err := pool.QueryRow(ctx, `
 		SELECT
 		  instance_id, matrix_id, module_code, entity_code, transaction_type,
@@ -321,20 +321,20 @@ func GetRichInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID, 
 		matrixEyeID string
 		status      string
 	}
-	eyeMetaMap := make(map[string]eyeMeta)   // instance_eye_id → meta
+	eyeMetaMap := make(map[string]eyeMeta) // instance_eye_id → meta
 	richEyeMap := make(map[string]*RichEyeDetail)
-	eyeOrder   := make([]string, 0)
+	eyeOrder := make([]string, 0)
 
 	for eyeRows.Next() {
 		var (
-			eyeID, matrixEyeID, eyeStatus string
-			position, eyeCount, appReq, appRcvd int
-			activatedAt, slaDeadline, resolvedAt, escalatedAt *time.Time
-			isEscalated bool
+			eyeID, matrixEyeID, eyeStatus                          string
+			position, eyeCount, appReq, appRcvd                    int
+			activatedAt, slaDeadline, resolvedAt, escalatedAt      *time.Time
+			isEscalated                                            bool
 			actionID, actorEmail, actorRoleID, actionType, comment string
-			actedAt *time.Time
-			isSystem bool
-			actorUserID string
+			actedAt                                                *time.Time
+			isSystem                                               bool
+			actorUserID                                            string
 		)
 		if err := eyeRows.Scan(
 			&eyeID, &matrixEyeID, &position, &eyeCount,
@@ -388,7 +388,7 @@ func GetRichInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID, 
 	// so we can annotate each approver with what they did.
 	for _, eyeID := range eyeOrder {
 		meta := eyeMetaMap[eyeID]
-		re   := richEyeMap[eyeID]
+		re := richEyeMap[eyeID]
 
 		// actionByEmail: last non-system action per actor email on this eye.
 		type actRecord struct {
@@ -434,9 +434,9 @@ func GetRichInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID, 
 		for mRows.Next() {
 			slot++
 			var (
-				slotOrder      int
-				memberType     string
-				assignType     string
+				slotOrder                   int
+				memberType                  string
+				assignType                  string
 				userID, userEmail, userName string
 				roleID, roleName            string
 			)
@@ -459,8 +459,8 @@ func GetRichInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID, 
 			// Annotate with action taken — match by user email.
 			if userEmail != "" {
 				if act, ok := actionByEmail[userEmail]; ok {
-					info.ActionTaken  = act.actionType
-					info.ActionAt     = &act.actedAt
+					info.ActionTaken = act.actionType
+					info.ActionAt = &act.actedAt
 					info.ActionComment = act.comment
 				}
 			}
@@ -498,7 +498,7 @@ func GetRichInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID, 
 				meta.matrixEyeID, viewerUserID,
 			).Scan(&cnt)
 			if cnt > 0 {
-				d.ViewerCanAct      = true
+				d.ViewerCanAct = true
 				d.ViewerActiveEyeID = eyeID
 				break
 			}

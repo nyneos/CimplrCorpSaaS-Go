@@ -455,7 +455,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 		if len(results) > 0 {
 			newValues = results[0]
 		}
-		auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: exposureHeaderID, ActionType: "EDIT", Status: "PENDING_EDIT_APPROVAL", Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValues, NewValues: newValues})
+		auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: exposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValues, NewValues: newValues})
 	}
 }
 
@@ -872,7 +872,7 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 			"message":              fmt.Sprintf("%d exposure_header(s) marked for delete approval", count),
 		})
 		for _, id := range req.ExposureHeaderIds {
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: "PENDING_DELETE_APPROVAL", Reason: deleteComment, RequestedBy: requestedBy, OldValues: nil, NewValues: nil})
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: deleteComment, RequestedBy: requestedBy, OldValues: nil, NewValues: nil})
 		}
 	}
 }
@@ -942,7 +942,7 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			}
 			rejected = append(rejected, rowMap)
 			if id, ok := rowMap["exposure_header_id"]; ok {
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: "REJECTED", CheckerBy: rejectedBy, Comment: req.RejectionComment})
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: constants.StatusRejected, CheckerBy: rejectedBy, Comment: req.RejectionComment})
 			}
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1229,10 +1229,10 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		for _, id := range toApprove {
-			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: "APPROVED", CheckerBy: approvedBy, Comment: req.ApprovalComment})
+			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: req.ApprovalComment})
 		}
 		for _, id := range toDelete {
-			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: "APPROVED", CheckerBy: approvedBy, Comment: req.ApprovalComment})
+			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: req.ApprovalComment})
 		}
 
 		json.NewEncoder(w).Encode(map[string]interface{}{

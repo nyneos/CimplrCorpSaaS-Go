@@ -823,17 +823,17 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
 			// at := strings.ToUpper(strings.TrimSpace(atype))
-			if ps == "APPROVED" {
+			if ps == constants.StatusApproved {
 				continue
 			}
-			if ps == "PENDING_DELETE_APPROVAL" {
+			if ps == constants.StatusPendingDeleteApproval {
 				// mark audit as DELETED, and soft-delete master
 				toDeleteActionIDs = append(toDeleteActionIDs, aid)
 				deleteMasterIDs = append(deleteMasterIDs, sid)
 				continue
 			}
 			// PENDING_APPROVAL / PENDING_EDIT_APPROVAL -> APPROVED
-			if ps == "PENDING_APPROVAL" || ps == "PENDING_EDIT_APPROVAL" {
+			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
 			}
 		}
@@ -950,7 +950,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			found[sid] = true
-			if strings.ToUpper(strings.TrimSpace(ps)) == "APPROVED" {
+			if strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusApproved {
 				cannotReject = append(cannotReject, sid)
 			} else {
 				actionIDs = append(actionIDs, aid)

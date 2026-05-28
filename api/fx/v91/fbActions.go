@@ -89,7 +89,7 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 
 			updated = append(updated, id)
 			newValues := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.exposure_headers", "exposure_header_id", id)
-			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "EDIT", Status: "PENDING_EDIT_APPROVAL", Reason: "", RequestedBy: requester, OldValues: oldValues, NewValues: newValues})
+			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: requester, OldValues: oldValues, NewValues: newValues})
 		}
 		api.RespondWithPayload(w, true, "value_date updated successfully", updated)
 	}
@@ -210,7 +210,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			var status *string
 			_ = rows.Scan(&id, &status)
-			if status != nil && (strings.EqualFold(*status, constants.StatusCodeDeleteApproval) || strings.EqualFold(*status, "PENDING_DELETE_APPROVAL")) {
+			if status != nil && (strings.EqualFold(*status, constants.StatusCodeDeleteApproval) || strings.EqualFold(*status, constants.StatusPendingDeleteApproval)) {
 				toDelete = append(toDelete, id)
 			} else {
 				toApprove = append(toApprove, id)
@@ -233,7 +233,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				var id string
 				if err := r2.Scan(&id); err == nil {
 					approvedIDs = append(approvedIDs, id)
-					auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: "APPROVED", CheckerBy: approver, Comment: req.Comment})
+					auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approver, Comment: req.Comment})
 				}
 			}
 		}
@@ -259,7 +259,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				var id string
 				if err := drows.Scan(&id); err == nil {
 					deletedIDs = append(deletedIDs, id)
-					auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: "APPROVED", CheckerBy: approver, Comment: req.Comment})
+					auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approver, Comment: req.Comment})
 				}
 			}
 			drows.Close()
@@ -316,7 +316,7 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			if err := rows.Scan(&id); err == nil {
 				updated = append(updated, id)
-				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: "REJECTED", CheckerBy: rejector, Comment: req.Comment})
+				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusRejected, CheckerBy: rejector, Comment: req.Comment})
 			}
 		}
 		api.RespondWithPayload(w, true, "", updated)
@@ -368,7 +368,7 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			if err := rows.Scan(&id); err == nil {
 				deleted = append(deleted, id)
-				auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: "PENDING_DELETE_APPROVAL", Reason: req.Comment, RequestedBy: deleter, OldValues: nil, NewValues: nil})
+				auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: req.Comment, RequestedBy: deleter, OldValues: nil, NewValues: nil})
 			}
 		}
 		api.RespondWithPayload(w, true, "", deleted)

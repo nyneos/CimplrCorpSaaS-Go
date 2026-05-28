@@ -616,7 +616,7 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LIMIT 1
 		`, req.SweepID).Scan(&processingStatus)
 
-		if err != nil || processingStatus != "APPROVED" {
+		if err != nil || processingStatus != constants.StatusApproved {
 			api.RespondWithResult(w, false, "Sweep must be approved before manual execution")
 			return
 		}
@@ -1015,7 +1015,7 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LIMIT 1
 		`, req.SweepID).Scan(&processingStatus)
 
-		if err != nil || processingStatus != "APPROVED" {
+		if err != nil || processingStatus != constants.StatusApproved {
 			api.RespondWithResult(w, false, "Sweep must be approved before manual execution")
 			return
 		}
@@ -1598,7 +1598,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 					LIMIT 1
 				`, sweepID).Scan(&processingStatus)
 
-				if err != nil || processingStatus != "APPROVED" {
+				if err != nil || processingStatus != constants.StatusApproved {
 					tx.Rollback(ctx)
 					result.Status = "failed"
 					result.Error = fmt.Sprintf("sweep[%d]: sweep must be approved before triggering", i)

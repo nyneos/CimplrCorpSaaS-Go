@@ -16,7 +16,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // V2 API handlers for new schema with base_currency_code, maturity_date, bank info
 // PERFORMANCE OPTIMIZED for bulk operations (10K-100K records)
@@ -154,7 +155,7 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, proposalID).Scan(&latestActionType, &latestStatus)
-			if latestErr == nil && latestActionType == "DELETE" && latestStatus == "PENDING_DELETE_APPROVAL" {
+			if latestErr == nil && latestActionType == "DELETE" && latestStatus == constants.StatusPendingDeleteApproval {
 				api.RespondWithError(w, http.StatusBadRequest, "delete request already pending for proposal: "+proposalID)
 				return
 			}
@@ -256,7 +257,7 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 				return
 			}
 			foundProposals[proposalID] = true
-			if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || status == "PENDING_DELETE_APPROVAL" {
+			if status == constants.StatusPendingApproval || status == constants.StatusPendingEditApproval || status == constants.StatusPendingDeleteApproval {
 				actionIDs = append(actionIDs, actionID)
 			} else {
 				cannotReject = append(cannotReject, proposalID)
@@ -402,7 +403,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 				return
 			}
 			foundProposals[proposalID] = true
-			if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || status == "PENDING_DELETE_APPROVAL" {
+			if status == constants.StatusPendingApproval || status == constants.StatusPendingEditApproval || status == constants.StatusPendingDeleteApproval {
 				actionIDs = append(actionIDs, actionID)
 				if actionType == "DELETE" {
 					deleteProposalIDs = append(deleteProposalIDs, proposalID)

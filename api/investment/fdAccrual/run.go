@@ -83,7 +83,7 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.PrecisionDecimals = 2
 		}
 		if req.FDStatusFilter == "" {
-			req.FDStatusFilter = "ACTIVE"
+			req.FDStatusFilter = constants.StatusActive
 		}
 		if req.AcrualGranularity == "" {
 			req.AcrualGranularity = "RUN"
@@ -1042,7 +1042,7 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"run_id": req.RunID,
-			"status": "PENDING_APPROVAL",
+			"status": constants.StatusPendingApproval,
 		})
 		api.LogInfo("[FDAccrual] SubmitForApproval: run_id=%s by=%s", req.RunID, userEmail)
 	}
@@ -1215,7 +1215,7 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				res["status"] = "POSTED"
 			} else {
-				res["status"] = "PENDING_APPROVAL"
+				res["status"] = constants.StatusPendingApproval
 			}
 
 			results = append(results, res)
@@ -1316,7 +1316,7 @@ func BulkRejectAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					`UPDATE investment.fd_accrual_run SET run_status='REJECTED', updated_at=now()
 					 WHERE run_id=$1 AND run_status='PENDING_APPROVAL'`, runID)
 				res[constants.ValueSuccess] = true
-				res["status"] = "REJECTED"
+				res["status"] = constants.StatusRejected
 				results = append(results, res)
 				continue
 			}
@@ -1325,7 +1325,7 @@ func BulkRejectAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				`UPDATE investment.fd_accrual_run SET run_status='REJECTED', updated_at=now() WHERE run_id=$1`,
 				runID)
 			res[constants.ValueSuccess] = true
-			res["status"] = "REJECTED"
+			res["status"] = constants.StatusRejected
 			results = append(results, res)
 		}
 
@@ -1395,7 +1395,7 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if !req.IncludeAll {
 			query += ` AND r.run_status = ANY($` + fmt.Sprint(argIdx) + `)`
 			args = append(args, []string{
-				"PENDING_APPROVAL", "APPROVED", "REJECTED",
+				constants.StatusPendingApproval, constants.StatusApproved, constants.StatusRejected,
 				"POSTED", "POSTED_TO_GL", "LOCKED",
 			})
 			argIdx++
@@ -1559,10 +1559,10 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				row["processing_status"] = latestStat
 			} else {
 				// Default fallback logic
-				if runStatus, _ := row["run_status"].(string); runStatus == "PENDING_APPROVAL" {
-					row["processing_status"] = "PENDING_APPROVAL"
-				} else if runStatus == "POSTED" || runStatus == "APPROVED" {
-					row["processing_status"] = "APPROVED"
+				if runStatus, _ := row["run_status"].(string); runStatus == constants.StatusPendingApproval {
+					row["processing_status"] = constants.StatusPendingApproval
+				} else if runStatus == "POSTED" || runStatus == constants.StatusApproved {
+					row["processing_status"] = constants.StatusApproved
 				} else {
 					row["processing_status"] = "SYSTEM"
 				}
@@ -2317,7 +2317,7 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"run_id":                  req.RunID,
 			"fd_id":                   req.FDID,
-			"override_status":         "APPROVED",
+			"override_status":         constants.StatusApproved,
 			"period_interest_accrued": curPeriodInterest,
 			"closing_accrued_balance": curClosingBal,
 			"net_interest_in_period":  curNetInterest,
@@ -2516,7 +2516,7 @@ func RejectOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"run_id":                   req.RunID,
 			"fd_id":                    req.FDID,
-			"override_status":          "REJECTED",
+			"override_status":          constants.StatusRejected,
 			"restored_period_interest": origPeriodInterest,
 			"restored_closing_balance": origClosingBal,
 		})
@@ -2574,7 +2574,7 @@ func loadRunParams(ctx context.Context, pool *pgxpool.Pool, runID string) (Accru
 func createAccrualRunInternal(ctx context.Context, pool *pgxpool.Pool, input CreateAccrualRunInput) (string, error) {
 	fdStatus := input.FDStatusFilter
 	if fdStatus == "" {
-		fdStatus = "ACTIVE"
+		fdStatus = constants.StatusActive
 	}
 	rounding := input.RoundingRule
 	if rounding == "" {
@@ -3731,7 +3731,7 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.PrecisionDecimals = 2
 		}
 		if req.FDStatusFilter == "" {
-			req.FDStatusFilter = "ACTIVE"
+			req.FDStatusFilter = constants.StatusActive
 		}
 		// SkipExisting defaults to true unless caller explicitly sets false
 		skipExisting := true

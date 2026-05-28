@@ -13,7 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger")
+	"CimplrCorpSaas/internal/logger"
+)
 
 // GetFundAvailability returns combined actuals and projections data
 // with flexible period aggregation (daily/weekly/monthly/quarterly/yearly)

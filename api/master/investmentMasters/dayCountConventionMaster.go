@@ -876,7 +876,7 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Build audit record
 		auditCols := []string{"day_count_code", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-		auditVals := []interface{}{req.DayCountCode, "EDIT", "PENDING_EDIT_APPROVAL", req.Reason, userEmail}
+		auditVals := []interface{}{req.DayCountCode, "EDIT", constants.StatusPendingEditApproval, req.Reason, userEmail}
 		auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 		paramPos := 6
 
@@ -1075,7 +1075,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Audit
 			auditCols := []string{"day_count_code", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-			auditVals := []interface{}{update.DayCountCode, "EDIT", "PENDING_EDIT_APPROVAL", update.Reason, userEmail}
+			auditVals := []interface{}{update.DayCountCode, "EDIT", constants.StatusPendingEditApproval, update.Reason, userEmail}
 			auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 			paramPos := 6
 			for k := range update.Fields {

@@ -19,7 +19,7 @@ import (
 //	{
 //	  "user_id":         "USR-...",
 //	  "instance_eye_id": "IEYE-...",
-//	  "action_type":     "APPROVED" | "REJECTED",
+//	  "action_type":     constants.StatusApproved | constants.StatusRejected,
 //	  "actor_role_id":   "optional-role-id",
 //	  "comment":         "optional comment"
 //	}
@@ -49,7 +49,7 @@ func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "instance_eye_id is required")
 			return
 		}
-		if req.ActionType != "APPROVED" && req.ActionType != "REJECTED" {
+		if req.ActionType != constants.StatusApproved && req.ActionType != constants.StatusRejected {
 			api.RespondWithError(w, http.StatusBadRequest, "action_type must be APPROVED or REJECTED")
 			return
 		}
@@ -177,7 +177,7 @@ func GetMySubmissions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 //	      "approver_1": {
 //	        "user_email": "cfo@acme.com",
 //	        "user_name":  "Alice",
-//	        "action_taken": "APPROVED",
+//	        "action_taken": constants.StatusApproved,
 //	        "action_at":    "2026-03-18T23:02:44Z",
 //	        "action_comment": "looks good"
 //	      },

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -23,6 +24,13 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 		"success": false,
 		"error":   errMsg,
 	})
+}
+
+// respondWithInternalError logs the real error internally and returns a generic
+// 500 message to the client so DB internals are never exposed.
+func respondWithInternalError(w http.ResponseWriter, err error) {
+	log.Println("[ERROR] role:", err)
+	respondWithError(w, http.StatusInternalServerError, "Internal server error")
 }
 
 // Handler: Create role
@@ -57,7 +65,7 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, fmt.Sprintf("role name '%s' already exists (id=%s)", req.Name, existingID))
 			return
 		} else if err != sql.ErrNoRows {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		// check role code uniqueness if supplied
@@ -66,7 +74,7 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 				respondWithError(w, http.StatusBadRequest, fmt.Sprintf("role code '%s' already exists (id=%s)", req.RoleCode, existingID))
 				return
 			} else if err != sql.ErrNoRows {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithInternalError(w, err)
 				return
 			}
 		}
@@ -82,13 +90,13 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 			createdBy,
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
 		cols, err := rows.Columns()
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		vals := make([]interface{}, len(cols))
@@ -99,7 +107,7 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 		var roleMap map[string]interface{} = map[string]interface{}{}
 		if rows.Next() {
 			if err := rows.Scan(valPtrs...); err != nil {
-				respondWithError(w, http.StatusBadRequest, err.Error())
+				respondWithInternalError(w, err)
 				return
 			}
 			for i, col := range cols {
@@ -214,7 +222,7 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 								 LIMIT $1 OFFSET $2`,
 			pagination.Limit, pagination.Offset)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -282,7 +290,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 			ApprovalComment string `json:"approval_comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.RoleIds) == 0 {
-			respondWithError(w, http.StatusBadRequest, "user_id, roleIds are required"+err.Error())
+			respondWithError(w, http.StatusBadRequest, "user_id and roleIds are required")
 			return
 		}
 		// Middleware: check business units
@@ -296,7 +304,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 		// Fetch current statuses
 		rows, err := db.Query(`SELECT id, status FROM roles WHERE id = ANY($1)`, pq.Array(req.RoleIds))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -402,7 +410,7 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 			editor, pq.Array(targetIds),
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -455,7 +463,7 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 			rejectedBy, req.RejectionComment, pq.Array(req.RoleIds),
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -535,7 +543,7 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 			rows, err = db.Query("SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND COALESCE(is_deleted, false) = false")
 		}
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -559,7 +567,7 @@ func GetJustRolesPERMISSIONapproved(db *sql.DB) http.HandlerFunc {
 
 		rows, err := db.Query("SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND (roles_permission_status = 'approved' OR roles_permission_status = 'Approved') AND COALESCE(is_deleted, false) = false")
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -633,7 +641,7 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 		// Fetch paginated pending roles
 		rows, err := db.Query("SELECT * FROM roles WHERE status IN ($1, $2, $3) AND COALESCE(is_deleted, false) = false ORDER BY id LIMIT $4 OFFSET $5", "pending", constants.StatusCodeAwaitingApproval, constants.StatusCodeDeleteApproval, pagination.Limit, pagination.Offset)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -776,7 +784,7 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 		// Execute query and fetch row(s)
 		rows, err := db.Query(query, values...)
 		if err != nil {
-			respondWithError(w, http.StatusBadRequest, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()

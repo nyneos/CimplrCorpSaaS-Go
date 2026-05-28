@@ -176,7 +176,7 @@ LIMIT 1;`
 		return nil, err
 	}
 	// Guards: latest audit APPROVED + status ACTIVE
-	if !strings.EqualFold(row.Status, "Active") || !strings.EqualFold(row.Processing, "APPROVED") {
+	if !strings.EqualFold(row.Status, "Active") || !strings.EqualFold(row.Processing, constants.StatusApproved) {
 		return nil, fmt.Errorf("calendar not active/approved")
 	}
 	return &row, nil

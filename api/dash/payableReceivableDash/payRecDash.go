@@ -249,7 +249,7 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			for _, r := range payRows {
-				if statusMap[r.ID] != "APPROVED" {
+				if statusMap[r.ID] != constants.StatusApproved {
 					continue
 				}
 				// add this payable to all cumulative ranges that include its due date
@@ -325,7 +325,7 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			for _, r := range recRows {
-				if statusMap[r.ID] != "APPROVED" {
+				if statusMap[r.ID] != constants.StatusApproved {
 					continue
 				}
 				// add this receivable to all cumulative ranges that include its due date

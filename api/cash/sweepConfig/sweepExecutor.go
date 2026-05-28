@@ -445,7 +445,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LIMIT 1
 		`, req.SweepID).Scan(&processingStatus)
 
-		if err != nil || processingStatus != "APPROVED" {
+		if err != nil || processingStatus != constants.StatusApproved {
 			api.RespondWithResult(w, false, "Sweep must be approved before manual execution")
 			return
 		}

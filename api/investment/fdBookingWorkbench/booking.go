@@ -656,7 +656,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, status, msg)
 			return
 		}
-		if currentStatus != "DRAFT" && currentStatus != "REJECTED" {
+		if currentStatus != "DRAFT" && currentStatus != constants.StatusRejected {
 			api.RespondWithError(w, http.StatusBadRequest,
 				fmt.Sprintf("Cannot update booking in status '%s'. Only DRAFT or REJECTED bookings can be updated.", currentStatus))
 			return
@@ -1116,7 +1116,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // 					WHERE ie.instance_eye_id = $1
 // 				`, instanceEyeID).Scan(&instStatus)
 
-// 				if instStatus == "APPROVED" {
+// 				if instStatus == constants.StatusApproved {
 
 // 					// ✅ FINAL STATUS CHANGE (UPDATED)
 // 					_, _ = pgxPool.Exec(ctx, `
@@ -1279,7 +1279,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Engine path: RecordAction handles audit stamp + status flip for final eye.
 				engineActed++
 				// If the engine fully approved (last eye done), flip booking status.
-				if actionRes.InstanceStatus == "APPROVED" {
+				if actionRes.InstanceStatus == constants.StatusApproved {
 					if _, execErr := pgxPool.Exec(ctx,
 						`UPDATE investment.fd_booking_request
 						 SET booking_status = 'SENT_TO_BANK'

@@ -107,7 +107,7 @@ func mtmApprovalStatusExpr(ctx context.Context, db *sql.DB) string {
 }
 
 func mtmPendingStatuses() []string {
-	return []string{"PENDING", "PENDING_APPROVAL", "PENDING_EDIT_APPROVAL", "PENDING_DELETE_APPROVAL"}
+	return []string{"PENDING", constants.StatusPendingApproval, constants.StatusPendingEditApproval, constants.StatusPendingDeleteApproval}
 }
 
 func mtmActiveFilterClause(ctx context.Context, db *sql.DB, tableAlias string) string {
@@ -512,7 +512,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 				valueArgs = append(valueArgs, row...)
 				valueArgs = append(valueArgs, s3Key)
 				if hasProcessingStatus {
-					valueArgs = append(valueArgs, "PENDING_APPROVAL")
+					valueArgs = append(valueArgs, constants.StatusPendingApproval)
 				}
 			}
 			insertCols := "mtm_id, booking_id, deal_date, maturity_date, currency_pair, buy_sell, notional_amount, contract_rate, mtm_rate, mtm_value, days_to_maturity, status, internal_reference_id, entity, upload_s3_key"
@@ -555,7 +555,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 		})
 		for _, row := range validRows {
 			if len(row) > 0 {
-				auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: fmt.Sprint(row[0]), ActionType: "CREATE", Status: "PENDING_APPROVAL", Reason: "Imported via uploader", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": s3Key}})
+				auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: fmt.Sprint(row[0]), ActionType: "CREATE", Status: constants.StatusPendingApproval, Reason: "Imported via uploader", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": s3Key}})
 			}
 		}
 	}
@@ -906,7 +906,7 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 			if !containsString(buNames, entity) {
 				continue
 			}
-			if strings.EqualFold(strings.TrimSpace(approvalStatus), "PENDING_DELETE_APPROVAL") {
+			if strings.EqualFold(strings.TrimSpace(approvalStatus), constants.StatusPendingDeleteApproval) {
 				continue
 			}
 			eligibleIDs = append(eligibleIDs, mtmID)
@@ -957,7 +957,7 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 			if mtmID == "" || mtmID == "<nil>" {
 				continue
 			}
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: mtmID, ActionType: "DELETE", Status: "PENDING_DELETE_APPROVAL", Reason: req.Reason, RequestedBy: requestedBy, OldValues: oldSnapshots[mtmID], NewValues: rowMap,})
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: mtmID, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: req.Reason, RequestedBy: requestedBy, OldValues: oldSnapshots[mtmID], NewValues: rowMap})
 		}
 		resultRows.Close()
 
@@ -1023,9 +1023,9 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB) http.HandlerFunc {
 			}
 			normalizedStatus := strings.ToUpper(strings.TrimSpace(approvalStatus))
 			switch normalizedStatus {
-			case "PENDING_DELETE_APPROVAL":
+			case constants.StatusPendingDeleteApproval:
 				deletePendingIDs = append(deletePendingIDs, mtmID)
-			case "PENDING", "PENDING_APPROVAL", "PENDING_EDIT_APPROVAL":
+			case "PENDING", constants.StatusPendingApproval, constants.StatusPendingEditApproval:
 				regularPendingIDs = append(regularPendingIDs, mtmID)
 			}
 		}

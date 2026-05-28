@@ -281,7 +281,7 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				
+
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
@@ -295,7 +295,7 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 	WHERE t.transaction_id = ANY($1) AND t.bank_statement_id IS NOT NULL
 	`, pq.Array(body.TransactionIDs))
 		if err != nil {
-			
+
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
@@ -371,7 +371,7 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 		for _, bsID := range bsIDs {
 			_, err = tx.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
 			if err != nil {
-				
+
 				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
@@ -420,7 +420,7 @@ func CategorizeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				
+
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
@@ -443,7 +443,7 @@ WHERE t.category_id IS NULL
 	AND bs.entity_id = ANY($1);
 `, pq.Array(entityIDs))
 		if err != nil {
-			
+
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
@@ -476,7 +476,7 @@ WHERE t.category_id IS NULL
 			}
 		}
 		if err := rows.Err(); err != nil {
-			
+
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -532,7 +532,7 @@ WHERE t.category_id IS NULL
 		for bsID := range bsSet {
 			_, err = tx.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
 			if err != nil {
-				
+
 				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
@@ -577,7 +577,7 @@ func RecomputeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				
+
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
@@ -600,7 +600,7 @@ WHERE t.category_id IS NULL
 	AND bs.entity_id = ANY($1);
 `, pq.Array(entityIDs))
 		if err != nil {
-			
+
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
@@ -626,7 +626,7 @@ WHERE t.category_id IS NULL
 			}
 		}
 		if err := rows.Err(); err != nil {
-			
+
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -713,7 +713,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				
+
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
@@ -721,12 +721,12 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		// Safety check: abort if any transactions currently reference these categories
 		var txnCount int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs)).Scan(&txnCount); err != nil {
-			
+
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if txnCount > 0 {
-			
+
 			http.Error(w, "Cannot delete rules: some transactions currently reference these categories. Unassign transactions first.", http.StatusBadRequest)
 			return
 		}
@@ -734,7 +734,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		// 1. Get all rules and scope_ids for these categories
 		ruleRows, err := tx.Query(`SELECT rule_id, scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
 		if err != nil {
-			
+
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -754,11 +754,11 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
 			if err != nil {
 				if isFKViolation(err) {
-					
+
 					writeFKConflict(w)
 					return
 				}
-				
+
 				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -768,11 +768,11 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
 		if err != nil {
 			if isFKViolation(err) {
-				
+
 				writeFKConflict(w)
 				return
 			}
-			
+
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1126,7 +1126,7 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 			}
 			defer func() {
 				if p := recover(); p != nil {
-					
+
 					http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 				}
 			}()
@@ -1150,7 +1150,7 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 				query := "INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES " + strings.Join(placeholders, ",") + " RETURNING component_id"
 				rows, err := tx.Query(query, args...)
 				if err != nil {
-					
+
 					if pqErr, ok := err.(*pq.Error); ok {
 						if strings.EqualFold(pqErr.Constraint, "uniq_active_components_per_rule") {
 							http.Error(w, "One or more active components in the request duplicate an existing active component for the same rule. Please remove duplicates and try again.", http.StatusBadRequest)
@@ -1164,7 +1164,7 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 					var id int64
 					if err := rows.Scan(&id); err != nil {
 						rows.Close()
-						
+
 						http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 						return
 					}
@@ -1172,7 +1172,7 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 				}
 				if err := rows.Err(); err != nil {
 					rows.Close()
-					
+
 					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 					return
 				}
@@ -1277,7 +1277,7 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				
+
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
@@ -1286,7 +1286,7 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 		var scopeID int64
 		err = tx.QueryRowContext(r.Context(), `INSERT INTO cimplrcorpsaas.rule_scope (scope_type, entity_id, bank_code, account_number, currency) VALUES ($1,$2,$3,$4,$5) RETURNING scope_id`, body.Scope.ScopeType, body.Scope.EntityID, body.Scope.BankCode, body.Scope.AccountNumber, body.Scope.Currency).Scan(&scopeID)
 		if err != nil {
-			
+
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
@@ -1300,7 +1300,7 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 		if body.Rule.EffectiveDate != nil && strings.TrimSpace(*body.Rule.EffectiveDate) != "" {
 			t, err := parseDate(*body.Rule.EffectiveDate)
 			if err != nil {
-				
+
 				http.Error(w, "invalid effective_date format", http.StatusBadRequest)
 				return
 			}
@@ -1310,7 +1310,7 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 		var ruleID int64
 		err = tx.QueryRowContext(r.Context(), `INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active, effective_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING rule_id`, body.Rule.RuleName, body.Rule.CategoryID, scopeID, body.Rule.Priority, isActive, eff).Scan(&ruleID)
 		if err != nil {
-			
+
 			if pqErr, ok := err.(*pq.Error); ok {
 				if strings.EqualFold(pqErr.Constraint, "uniq_rule_name_per_category") {
 					http.Error(w, fmt.Sprintf("A rule named '%s' already exists for this category. Please choose a different rule name.", body.Rule.RuleName), http.StatusBadRequest)
@@ -1341,7 +1341,7 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 				query := "INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES " + strings.Join(placeholders, ",") + " RETURNING component_id"
 				rows, err := tx.QueryContext(r.Context(), query, args...)
 				if err != nil {
-					
+
 					if pqErr, ok := err.(*pq.Error); ok {
 						if strings.EqualFold(pqErr.Constraint, "uniq_active_components_per_rule") {
 							http.Error(w, "One or more active components duplicate an existing active component for this rule. Please remove duplicates and try again.", http.StatusBadRequest)
@@ -1355,7 +1355,7 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 					var cid int64
 					if err := rows.Scan(&cid); err != nil {
 						rows.Close()
-						
+
 						http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 						return
 					}
@@ -1363,7 +1363,7 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 				}
 				if err := rows.Err(); err != nil {
 					rows.Close()
-					
+
 					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 					return
 				}
@@ -1410,7 +1410,7 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				
+
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
@@ -1418,7 +1418,7 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		// 1. Get all rules for this category
 		ruleRows, err := tx.Query(`SELECT rule_id, scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
-			
+
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1438,11 +1438,11 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
 			if err != nil {
 				if isFKViolation(err) {
-					
+
 					http.Error(w, constants.ErrBankStatementAlreadyExists, http.StatusBadRequest)
 					return
 				}
-				
+
 				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -1452,11 +1452,11 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
 			if isFKViolation(err) {
-				
+
 				http.Error(w, constants.ErrBankStatementAlreadyExists, http.StatusBadRequest)
 				return
 			}
-			
+
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1474,11 +1474,11 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		_, err = tx.Exec(`DELETE FROM public.mastercashflowcategory WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
 			if isFKViolation(err) {
-				
+
 				http.Error(w, constants.ErrBankStatementAlreadyExists, http.StatusBadRequest)
 				return
 			}
-			
+
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
