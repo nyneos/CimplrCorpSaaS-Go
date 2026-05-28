@@ -97,18 +97,17 @@ func sweepPlanningAdditionalFilesConfig() additionalfiles.Config {
 
 func sweepInitiationAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:                "sweep-initiation",
-		AuditSource:           "SWEEP_INITIATION",
-		ParentIDField:         "initiation_id",
-		FolderName:            additionalfiles.AdditionalFilesFolder(),
-		List:                  listSweepInitiationAdditionalFiles,
-		CreateReturning:       createSweepInitiationAdditionalFile,
-		GetOne:                getSweepInitiationAdditionalFile,
-		GetAnyFile:            getAnySweepInitiationAdditionalFile,
-		GetMany:               getSweepInitiationAdditionalFiles,
-		SoftDelete:            deleteSweepInitiationAdditionalFile,
-		SoftDeleteTx:          deleteSweepInitiationAdditionalFileTx,
-		RecordMainUploadAudit: recordSweepInitiationMainUploadAudit,
+		Module:          "sweep-initiation",
+		AuditSource:     "SWEEP_INITIATION",
+		ParentIDField:   "initiation_id",
+		FolderName:      additionalfiles.AdditionalFilesFolder(),
+		List:            listSweepInitiationAdditionalFiles,
+		CreateReturning: createSweepInitiationAdditionalFile,
+		GetOne:          getSweepInitiationAdditionalFile,
+		GetAnyFile:      getAnySweepInitiationAdditionalFile,
+		GetMany:         getSweepInitiationAdditionalFiles,
+		SoftDelete:      deleteSweepInitiationAdditionalFile,
+		SoftDeleteTx:    deleteSweepInitiationAdditionalFileTx,
 	}
 }
 
@@ -117,7 +116,33 @@ func recordSweepPlanningMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID
 }
 
 func recordSweepInitiationMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
-	return additionalfiles.InsertMainUploadAudit(ctx, tx, "cimplrcorpsaas.auditactionsweepinitiation", "initiation_id", "actiontype", parentID, payload)
+	reason, err := additionalfiles.MainUploadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
+			initiation_id,
+			sweep_id,
+			actiontype,
+			processing_status,
+			reason,
+			requested_by,
+			requested_at
+		)
+		SELECT
+			si.initiation_id,
+			si.sweep_id,
+			'UPLOAD_FILE',
+			'APPROVED',
+			$2,
+			$3,
+			$4
+		FROM cimplrcorpsaas.sweep_initiation si
+		WHERE si.initiation_id = $1
+	`, parentID, reason, payload.UploadedBy, payload.UploadedAt)
+	return err
 }
 
 func listSweepPlanningAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

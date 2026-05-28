@@ -131,6 +131,7 @@ func GetSweepInitiationAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				reason
 			FROM cimplrcorpsaas.auditactionsweepinitiation
 			WHERE initiation_id = $1
+			  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
 			ORDER BY requested_at ASC, action_id ASC
 		`, strings.TrimSpace(req.InitiationID))
 		if err != nil {
@@ -211,7 +212,8 @@ type sweepAuditScanner interface {
 }
 
 func scanSweepAuditRow(row sweepAuditScanner) (map[string]interface{}, error) {
-	var auditID, entityID string
+	var auditID interface{}
+	var entityID string
 	var action, status, requestedBy, checkerBy, checkerComment, reason sql.NullString
 	var requestedAt, checkerAt sql.NullTime
 
@@ -220,7 +222,7 @@ func scanSweepAuditRow(row sweepAuditScanner) (map[string]interface{}, error) {
 	}
 
 	return map[string]interface{}{
-		"audit_id":          auditID,
+		"audit_id":          sweepAuditID(auditID),
 		"entity_id":         entityID,
 		"action_type":       sweepAuditString(action),
 		"processing_status": sweepAuditString(status),
@@ -234,7 +236,7 @@ func scanSweepAuditRow(row sweepAuditScanner) (map[string]interface{}, error) {
 	}, nil
 }
 
-func appendSweepAdditionalFileAudit(ctx context.Context, pgxPool *pgxpool.Pool, payload []map[string]interface{}, moduleKey, parentID string) ([]map[string]interface{}, error) {
+func appendSweepAdditionalFileAudit(ctx context.Context, pgxPool *pgxpool.Pool, payload []map[string]interface{}, moduleKey, parentID string, excludedActions ...string) ([]map[string]interface{}, error) {
 	rows, err := pgxPool.Query(ctx, `
 		SELECT
 			audit_id,
@@ -258,11 +260,22 @@ func appendSweepAdditionalFileAudit(ctx context.Context, pgxPool *pgxpool.Pool, 
 	}
 	defer rows.Close()
 
+	excluded := make(map[string]struct{}, len(excludedActions))
+	for _, action := range excludedActions {
+		if normalized := strings.ToUpper(strings.TrimSpace(action)); normalized != "" {
+			excluded[normalized] = struct{}{}
+		}
+	}
+
 	for rows.Next() {
 		entry, err := scanSweepAdditionalFileAuditRow(rows, moduleKey)
 		if err != nil {
 			return nil, err
 		}
+		if _, skip := excluded[strings.ToUpper(strings.TrimSpace(fmt.Sprint(entry["raw_action_type"])))]; skip {
+			continue
+		}
+		delete(entry, "raw_action_type")
 		payload = append(payload, entry)
 	}
 	if err := rows.Err(); err != nil {
@@ -300,6 +313,7 @@ func scanSweepAdditionalFileAuditRow(row sweepAuditScanner, moduleKey string) (m
 		"checker_comment":   sweepAuditString(checkerComment),
 		"reason":            sweepAuditString(reason),
 		"source":            sweepAuditSourceAdditionalFile,
+		"raw_action_type":   sweepAuditString(action),
 	}, nil
 }
 
@@ -354,4 +368,11 @@ func sweepAuditTime(value sql.NullTime) interface{} {
 		return nil
 	}
 	return value.Time
+}
+
+func sweepAuditID(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
 }
