@@ -1,20 +1,27 @@
 package fdMaster
 
 import (
-	"CimplrCorpSaas/api"
-	"database/sql"
 	"net/http"
+
+	middlewares "CimplrCorpSaas/api/middlewares"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func RegisterFDMasterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB) {
-	mid := api.BusinessUnitMiddleware(db)
+func RegisterFDMasterRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
+	mid := func(h http.Handler) http.Handler {
+		return middlewares.SessionMiddleware(pool)(
+			middlewares.GlobalIndependentMiddleware(pool)(
+				middlewares.GlobalDependentMiddleware(pool)(
+					middlewares.InvestmentFDMiddleware(pool)(h),
+				),
+			),
+		)
+	}
 
 	mux.Handle("/investment/fd/master/activate", mid(http.HandlerFunc(ActivateFD(pool))))
 	mux.Handle("/investment/fd/master/approve", mid(http.HandlerFunc(BulkApproveActivation(pool))))
 	mux.Handle("/investment/fd/master/reject", mid(http.HandlerFunc(BulkRejectActivation(pool))))
-	// Activation-scoped aliases (clearer naming for UI/notifications)
 	mux.Handle("/investment/fd/activation/activate", mid(http.HandlerFunc(ActivateFD(pool))))
 	mux.Handle("/investment/fd/activation/approve", mid(http.HandlerFunc(BulkApproveActivation(pool))))
 	mux.Handle("/investment/fd/activation/reject", mid(http.HandlerFunc(BulkRejectActivation(pool))))
@@ -36,10 +43,6 @@ func RegisterFDMasterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB) 
 	mux.Handle("/investment/fd/master/journals", mid(http.HandlerFunc(GetFDJournalEntries(pool))))
 
 	// ── Cashflow Simulator (no persistence) ────────────────────────────────
-	// POST /investment/fd/simulator/cashflow           — full what-if cashflow run
-	// POST /investment/fd/simulator/cashflow/diff      — booking vs confirmation diff
-	// GET|POST /investment/fd/simulator/holidays       — range list (or single-date check)
-	// POST /investment/fd/simulator/maturity-date      — maturity date with holiday adjustment
 	mux.Handle("/investment/fd/simulator/cashflow", mid(http.HandlerFunc(SimulateCashflowHandler(pool))))
 	mux.Handle("/investment/fd/simulator/cashflow/diff", mid(http.HandlerFunc(SimulateDiffHandler(pool))))
 	mux.Handle("/investment/fd/simulator/holidays", mid(http.HandlerFunc(GetHolidayListHandler(pool))))

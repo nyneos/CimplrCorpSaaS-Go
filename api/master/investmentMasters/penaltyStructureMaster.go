@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1223,10 +1224,20 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var success []map[string]interface{}
 		var errorsList []map[string]interface{}
+		var blockedItems []map[string]interface{}
 
 		for _, a := range audits {
-			// If this is a DELETE request, mark master row as deleted
+			// If this is a DELETE request, check dependencies before soft-deleting
 			if strings.ToUpper(a.ActionType) == "DELETE" {
+				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_penalty_structure_master", a.PenaltyID)
+				if len(blockers) > 0 {
+					blockedItems = append(blockedItems, map[string]interface{}{
+						"penalty_id": a.PenaltyID,
+						"audit_id":   a.AuditID,
+						"blocked_by": dependency.BlockersSummary(blockers),
+					})
+					continue
+				}
 				if _, err := tx.Exec(ctx, `UPDATE investment.fd_penalty_structure_master SET is_deleted = true WHERE penalty_id = $1`, a.PenaltyID); err != nil {
 					errorsList = append(errorsList, map[string]interface{}{"penalty_id": a.PenaltyID, "audit_id": a.AuditID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
 					continue
@@ -1249,9 +1260,12 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		allResults := append(success, errorsList...)
-		api.RespondWithPayload(w, len(success) > 0, "", allResults)
-		api.LogInfo("Bulk approve completed: %d approved, %d errors", len(success), len(errorsList))
+		api.RespondWithPayload(w, len(success) > 0, "", map[string]interface{}{
+			"approved": success,
+			"errors":   errorsList,
+			"blocked":  blockedItems,
+		})
+		api.LogInfo("Bulk approve completed: %d approved, %d errors, %d blocked", len(success), len(errorsList), len(blockedItems))
 	}
 }
 

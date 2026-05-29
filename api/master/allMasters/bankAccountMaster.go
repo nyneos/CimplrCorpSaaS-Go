@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/api/constants"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,8 +16,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-
-	"CimplrCorpSaas/api/constants"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -801,10 +801,23 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		// Soft-delete associated master account records (mark is_deleted = true)
-		if len(accountIDsToDelete) > 0 {
-			// mark accounts as deleted; keep clearing codes for historical record
-			_, _ = pgxPool.Exec(r.Context(), `UPDATE masterbankaccount SET is_deleted = true WHERE account_id = ANY($1)`, pq.Array(accountIDsToDelete))
+		// Filter: block accounts that still have active FD bookings, bank statements, or cash transactions.
+		var canDeleteAccountIDs []string
+		var blockedAccounts []map[string]interface{}
+		for _, accountID := range accountIDsToDelete {
+			blockers, _ := dependency.HasCoreBelow(r.Context(), pgxPool, "masterbankaccount", accountID)
+			if len(blockers) > 0 {
+				blockedAccounts = append(blockedAccounts, map[string]interface{}{
+					"account_id": accountID,
+					"blocked_by": dependency.BlockersSummary(blockers),
+				})
+			} else {
+				_ = dependency.CascadeDelete(r.Context(), pgxPool, "masterbankaccount", accountID, checkerBy)
+				canDeleteAccountIDs = append(canDeleteAccountIDs, accountID)
+			}
+		}
+		if len(canDeleteAccountIDs) > 0 {
+			_, _ = pgxPool.Exec(r.Context(), `UPDATE masterbankaccount SET is_deleted = true WHERE account_id = ANY($1)`, pq.Array(canDeleteAccountIDs))
 		}
 
 		// Approve remaining audit actions (exclude those that were pending delete)
@@ -828,6 +841,7 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			constants.ValueSuccess: true,
 			"updated":              updated,
 			"deleted":              deleted,
+			"blocked":              blockedAccounts,
 		})
 	}
 }

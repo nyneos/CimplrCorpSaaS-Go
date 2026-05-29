@@ -177,6 +177,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/entitycash/assigned-names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetAssignedCashEntityNamesWithID(pgxPool)))
 	mux.Handle("/master/entitycash/all-names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCashEntityNamesWithID(pgxPool)))
 
+	//Amc Master routes
 	mux.Handle("/master/amc/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateAMCsingle(pgxPool)))
 	mux.Handle("/master/amc/bulk-create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateAMC(pgxPool)))
 	mux.Handle("/master/amc/bulk-update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateAMCBulk(pgxPool)))

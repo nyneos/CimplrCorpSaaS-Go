@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1326,17 +1327,39 @@ func BulkApproveTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Handle DELETE approvals - set is_deleted=true for DELETE actions
+		// Dependency check: revert DELETE approval for TDS plans referenced by live FD bookings.
+		var blockedItems []map[string]interface{}
+		{
+			checkRows, _ := tx.Query(ctx, `SELECT DISTINCT tds_plan_id FROM investment.fd_audit_tds_plan WHERE tds_plan_id = ANY($1::text[]) AND action_type='DELETE' AND processing_status='APPROVED'`, req.TdsIDs)
+			var deleteApprovedIDs []string
+			if checkRows != nil {
+				for checkRows.Next() {
+					var id string
+					if checkRows.Scan(&id) == nil {
+						deleteApprovedIDs = append(deleteApprovedIDs, id)
+					}
+				}
+				checkRows.Close()
+			}
+			for _, id := range deleteApprovedIDs {
+				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_tds_plan_master", id)
+				if len(blockers) > 0 {
+					_, _ = tx.Exec(ctx, `UPDATE investment.fd_audit_tds_plan SET processing_status='PENDING_DELETE_APPROVAL', checker_by=NULL, checker_at=NULL, checker_comment=NULL WHERE tds_plan_id=$1 AND action_type='DELETE' AND processing_status='APPROVED'`, id)
+					blockedItems = append(blockedItems, map[string]interface{}{"tds_plan_id": id, "blocked_by": dependency.BlockersSummary(blockers)})
+				}
+			}
+		}
+
+		// Handle DELETE approvals - set is_deleted=true (blocked ones were reverted above)
 		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_tds_plan_master 
-			SET is_deleted = true 
+			UPDATE investment.fd_tds_plan_master
+			SET is_deleted = true
 			WHERE tds_plan_id IN (
-				SELECT DISTINCT a.tds_plan_id 
-				FROM investment.fd_audit_tds_plan a 
-				WHERE a.tds_plan_id = ANY($1::text[]) 
-				  AND a.action_type = 'DELETE' 
+				SELECT DISTINCT a.tds_plan_id
+				FROM investment.fd_audit_tds_plan a
+				WHERE a.tds_plan_id = ANY($1::text[])
+				  AND a.action_type = 'DELETE'
 				  AND a.processing_status = 'APPROVED'
-				  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			)
 		`, req.TdsIDs)
 
@@ -1356,6 +1379,7 @@ func BulkApproveTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			constants.ValueSuccess: true,
 			"approved_count":       len(req.TdsIDs),
 			"checker":              userEmail,
+			"blocked":              blockedItems,
 		}
 		api.RespondWithPayload(w, true, "", response)
 		api.LogInfo("Bulk approval completed: %d tds plan IDs approved by %s", len(req.TdsIDs), userEmail)

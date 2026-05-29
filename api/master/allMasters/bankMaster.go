@@ -4,6 +4,8 @@ import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/api/constants"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,8 +14,6 @@ import (
 	// "mime/multipart"
 	"net/http"
 	"strings"
-
-	"CimplrCorpSaas/api/constants"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -1239,10 +1239,23 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				bankIDsToDelete = append(bankIDsToDelete, bankID)
 			}
 		}
-		// Delete corresponding banks from masterbank
-		if len(bankIDsToDelete) > 0 {
-			// soft-delete: mark rows as deleted instead of physical delete
-			_, _ = pgxPool.Exec(r.Context(), `UPDATE masterbank SET is_deleted = true WHERE bank_id = ANY($1)`, pq.Array(bankIDsToDelete))
+		// Filter: block banks that still have active children (bank accounts, FD configs, etc.)
+		var canDeleteBankIDs []string
+		var blockedBanks []map[string]interface{}
+		for _, bankID := range bankIDsToDelete {
+			blockers, _ := dependency.HasCoreBelow(r.Context(), pgxPool, "masterbank", bankID)
+			if len(blockers) > 0 {
+				blockedBanks = append(blockedBanks, map[string]interface{}{
+					"bank_id":    bankID,
+					"blocked_by": dependency.BlockersSummary(blockers),
+				})
+			} else {
+				_ = dependency.CascadeDelete(r.Context(), pgxPool, "masterbank", bankID, checkerBy)
+				canDeleteBankIDs = append(canDeleteBankIDs, bankID)
+			}
+		}
+		if len(canDeleteBankIDs) > 0 {
+			_, _ = pgxPool.Exec(r.Context(), `UPDATE masterbank SET is_deleted = true WHERE bank_id = ANY($1)`, pq.Array(canDeleteBankIDs))
 		}
 
 		// Then, approve the rest by bank_ids
@@ -1265,6 +1278,7 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			constants.ValueSuccess: true,
 			"updated":              updated,
 			"deleted":              deleted,
+			"blocked":              blockedBanks,
 		})
 	}
 }

@@ -371,12 +371,12 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux.HandleFunc("/investment/amfi/get-schemes", amfisync.GetSchemeDataHandler(pool))
 
 	// FD Booking Workbench (booking + confirmation)
-	fdBooking.RegisterFDBookingRoutes(mux, pool, db)
-	fdMaster.RegisterFDMasterRoutes(mux, pool, db)
-	fdAccrual.RegisterFDAccrualRoutes(mux, pool, db)
-	fdReceipt.RegisterFDReceiptRoutes(mux, pool, db)
-	fdInterestWorkbench.RegisterFDInterestWorkbenchRoutes(mux, pool, db)
-	fdMaturityAndRollover.RegisterFDMaturityRoutes(mux, pool, db)
+	fdBooking.RegisterFDBookingRoutes(mux, pool)
+	fdMaster.RegisterFDMasterRoutes(mux, pool)
+	fdAccrual.RegisterFDAccrualRoutes(mux, pool)
+	fdReceipt.RegisterFDReceiptRoutes(mux, pool)
+	fdInterestWorkbench.RegisterFDInterestWorkbenchRoutes(mux, pool)
+	fdMaturityAndRollover.RegisterFDMaturityRoutes(mux, pool)
 
 	// Example routes for future implementation:
 	// mux.HandleFunc("/investment/portfolio", portfolioHandler)

@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1266,7 +1267,30 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Handle DELETE approvals - set is_deleted=true (bank_map cascade handled by FK)
+		// Dependency check: revert DELETE approval for day counts referenced by live FD bookings.
+		var blockedItems []map[string]interface{}
+		{
+			checkRows, _ := tx.Query(ctx, `SELECT DISTINCT day_count_code FROM investment.fd_audit_day_count_convention WHERE day_count_code = ANY($1::text[]) AND action_type='DELETE' AND processing_status='APPROVED'`, req.DayCountCodes)
+			var deleteApprovedCodes []string
+			if checkRows != nil {
+				for checkRows.Next() {
+					var code string
+					if checkRows.Scan(&code) == nil {
+						deleteApprovedCodes = append(deleteApprovedCodes, code)
+					}
+				}
+				checkRows.Close()
+			}
+			for _, code := range deleteApprovedCodes {
+				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_day_count_convention_master", code)
+				if len(blockers) > 0 {
+					_, _ = tx.Exec(ctx, `UPDATE investment.fd_audit_day_count_convention SET processing_status='PENDING_DELETE_APPROVAL', checker_by=NULL, checker_at=NULL, checker_comment=NULL WHERE day_count_code=$1 AND action_type='DELETE' AND processing_status='APPROVED'`, code)
+					blockedItems = append(blockedItems, map[string]interface{}{"day_count_code": code, "blocked_by": dependency.BlockersSummary(blockers)})
+				}
+			}
+		}
+
+		// Handle DELETE approvals - set is_deleted=true (blocked ones were reverted above)
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_day_count_convention_master
 			SET is_deleted=true
@@ -1276,7 +1300,6 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE a.day_count_code = ANY($1::text[])
 				  AND a.action_type='DELETE'
 				  AND a.processing_status='APPROVED'
-				  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			)
 		`, req.DayCountCodes)
 		if err != nil {
@@ -1295,6 +1318,7 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			constants.ValueSuccess: true,
 			"approved_count":       len(req.DayCountCodes),
 			"checker":              userEmail,
+			"blocked":              blockedItems,
 		})
 		api.LogInfo("DayCount bulk approve: %d approved by %s", len(req.DayCountCodes), userEmail)
 	}

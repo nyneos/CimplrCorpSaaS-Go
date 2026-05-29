@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"bufio"
 	"bytes"
 	"encoding/csv"
@@ -1179,22 +1180,36 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if len(markDeletedActionIDs) > 0 {
+		// Dependency check: block AMCs that still have active child schemes.
+		var blockedAMCs []map[string]interface{}
+		var canDeleteAMCIDs []string
+		var canDeleteActionIDs []string
+		for i, amcID := range deleteIDs {
+			blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masteramc", amcID)
+			if len(blockers) > 0 {
+				blockedAMCs = append(blockedAMCs, map[string]interface{}{"amc_id": amcID, "blocked_by": dependency.BlockersSummary(blockers)})
+			} else {
+				canDeleteAMCIDs = append(canDeleteAMCIDs, amcID)
+				canDeleteActionIDs = append(canDeleteActionIDs, markDeletedActionIDs[i])
+			}
+		}
+
+		if len(canDeleteActionIDs) > 0 {
 			updDel := `
 				UPDATE investment.auditactionamc
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
 				WHERE action_id = ANY($3)`
-			if _, err := tx.Exec(ctx, updDel, checkerBy, req.Comment, markDeletedActionIDs); err != nil {
+			if _, err := tx.Exec(ctx, updDel, checkerBy, req.Comment, canDeleteActionIDs); err != nil {
 				msg, status := getUserFriendlyAMCError(err, "Delete approve update failed")
 				api.RespondWithError(w, status, msg)
 				return
 			}
 
 			del := `
-				UPDATE investment.masteramc 
+				UPDATE investment.masteramc
 				SET is_deleted=true, status='Inactive'
 				WHERE amc_id = ANY($1)`
-			if _, err := tx.Exec(ctx, del, deleteIDs); err != nil {
+			if _, err := tx.Exec(ctx, del, canDeleteAMCIDs); err != nil {
 				msg, status := getUserFriendlyAMCError(err, "Master soft delete failed")
 				api.RespondWithError(w, status, msg)
 				return
@@ -1209,7 +1224,8 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"approved_action_ids": actionIDs,
-			"deleted_amcs":        deleteIDs,
+			"deleted_amcs":        canDeleteAMCIDs,
+			"blocked_amcs":        blockedAMCs,
 		})
 	}
 }

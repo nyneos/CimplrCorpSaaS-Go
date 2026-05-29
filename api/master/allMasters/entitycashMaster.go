@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"compress/gzip"
 	"context"
 	"database/sql"
@@ -1972,6 +1973,24 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					anyError = derr
 					break
 				}
+
+				// Block deletion if any descendant entity has core records (FDs, bank statements, etc.)
+				var entityBlockSummary []string
+				for _, desc := range descendants {
+					blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterentitycash", desc)
+					if len(blockers) > 0 {
+						entityBlockSummary = append(entityBlockSummary, desc+": "+dependency.BlockersSummary(blockers))
+					}
+				}
+				if len(entityBlockSummary) > 0 {
+					allUpdated = append(allUpdated, map[string]interface{}{
+						"entity_id":         eid,
+						constants.KeyStatus: "Blocked",
+						"blocked_by":        strings.Join(entityBlockSummary, "; "),
+					})
+					continue
+				}
+
 				rows, err := tx.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, descendants)
 				if err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to mark entities as deleted")
