@@ -74,6 +74,7 @@ func AiBulkSuggestHandler(pool *pgxpool.Pool) http.Handler {
 				JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
 				WHERE q.status = 'PENDING'
 				  AND q.step = 'UNALLOCATED'
+				  AND COALESCE(bs.is_deleted, false) = false
 				  AND bs.entity_id = $1
 				ORDER BY t.narration_clean`
 			args = []interface{}{req.EntityID}
@@ -87,6 +88,7 @@ func AiBulkSuggestHandler(pool *pgxpool.Pool) http.Handler {
 				JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
 				WHERE q.status = 'PENDING'
 				  AND q.step = 'UNALLOCATED'
+				  AND COALESCE(bs.is_deleted, false) = false
 				ORDER BY t.narration_clean`
 		}
 
