@@ -34,10 +34,17 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		for bid, amtCancelled := range req.BookingAmounts {
-			// Only approve if status is currently Pending Cancellation
-			var currentStatus string
-			err := db.QueryRow(`SELECT status FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&currentStatus)
-			if err != nil || currentStatus != "Pending Cancellation" {
+			var hasPendingCancellation bool
+			err := db.QueryRow(`
+				SELECT EXISTS (
+					SELECT 1
+					FROM forward_cancellations
+					WHERE booking_id = $1
+					  AND cancellation_date = $2
+					  AND status = 'Pending'
+				)
+			`, bid, req.CancellationDate).Scan(&hasPendingCancellation)
+			if err != nil || !hasPendingCancellation {
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Booking not in pending cancellation state"})
 				return
