@@ -763,7 +763,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted = false
 				  AND ($1::text = '' OR COALESCE(m.entity_id,b.entity_id) = $1)
-				  AND ($2::text = '' OR m.fd_status = $2)
+				  AND m.fd_status = COALESCE(NULLIF($2::text, ''), 'ACTIVE')
 				  AND NOT ` + sqlAnyClosureProcessed
 			var value float64
 			var count int64
@@ -796,7 +796,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				`SELECT COALESCE(SUM(m.principal_amount),0)
 				 FROM investment.fd_master m
 				 LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				 WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
+				 WHERE m.is_deleted=false AND m.fd_status = 'ACTIVE'
 				   AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
 				entityFilter).Scan(&totalAmt)
 
@@ -817,7 +817,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    AND COALESCE(bc.is_deleted, false) = false
 				    AND COALESCE(bc.effective_to, '9999-12-31'::date) >= CURRENT_DATE
 				) lim ON true
-				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
+				WHERE m.is_deleted=false AND m.fd_status = 'ACTIVE'
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				GROUP BY COALESCE(m.bank_name, m.bank_id, ''), lim.bank_cap
 				ORDER BY exposure DESC`
@@ -896,7 +896,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COUNT(CASE  WHEN m.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE+30  THEN 1 END) AS cnt30
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
+				WHERE m.is_deleted=false AND m.fd_status = 'ACTIVE'
 				  AND NOT ` + sqlAnyClosureProcessed + `
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`
 			var a7, a15, a30 float64
@@ -1591,10 +1591,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE m.is_deleted=false
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				  AND ($2::text='' OR COALESCE(m.bank_name, m.bank_id,'')=$2)
-				  AND (
-				        ($3::text='' AND m.fd_status IN ('ACTIVE','MATURED','ROLLED_OVER','PREMATURELY_CLOSED'))
-				    OR  ($3::text<>'' AND m.fd_status=$3)
-				  )
+				  AND m.fd_status = COALESCE(NULLIF($3::text, ''), 'ACTIVE')
 				  AND ($4::boolean=false OR (m.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE+30))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code,'')=$5)
 				  AND ($6::text='' OR COALESCE(m.frequency_id,'')=$6)
