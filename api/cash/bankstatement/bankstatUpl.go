@@ -755,7 +755,18 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 			}
 		}()
-		sel := `SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, actiontype, processing_status FROM auditactionbankstatement WHERE bankstatementid = ANY($1) ORDER BY bankstatementid, requested_at DESC, action_id DESC`
+		sel := `
+			SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, actiontype, processing_status
+			FROM auditactionbankstatement
+			WHERE bankstatementid = ANY($1)
+			ORDER BY bankstatementid,
+				CASE
+					WHEN actiontype = 'RECAT' AND processing_status = 'PENDING_EDIT_APPROVAL' THEN 0
+					ELSE 1
+				END,
+				requested_at DESC,
+				action_id DESC
+		`
 		rows, err := tx.Query(ctx, sel, req.BankStatementIDs)
 		if err != nil {
 			api.RespondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
@@ -833,6 +844,15 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithPayload(w, false, "failed to soft-delete bank_statement rows: "+err.Error(), nil)
 				return
 			}
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE bank_statement
+			SET status = 'APPROVED'
+			WHERE bankstatementid = ANY($1)
+			  AND COALESCE(is_deleted, false) = false
+		`, req.BankStatementIDs); err != nil {
+			api.RespondWithPayload(w, false, "failed to update bank_statement status: "+err.Error(), nil)
+			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
