@@ -275,6 +275,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			ID     string                 `json:"id"` // exposure_header_id
 			Fields map[string]interface{} `json:"fields"`
 			UserID string                 `json:"user_id"`
+			Reason string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, "Invalid request: "+err.Error())
@@ -351,6 +352,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			headerFields["value_date"] = val
 			delete(headerFields, "document_date")
 		}
+		oldValues := auditutil.FetchRowSnapshot(r.Context(), db, "public.exposure_headers", "exposure_header_id", exposureHeaderID)
 		// Update header if needed
 		if len(headerFields) > 0 {
 			setParts := []string{}
@@ -412,7 +414,6 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 		}
 		defer rows.Close()
 
-		oldValues := auditutil.FetchRowSnapshot(r.Context(), db, "public.exposure_headers", "exposure_header_id", exposureHeaderID)
 		cols, _ := rows.Columns()
 		results := []map[string]interface{}{}
 		for rows.Next() {
@@ -455,7 +456,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 		if len(results) > 0 {
 			newValues = results[0]
 		}
-		auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: exposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValues, NewValues: newValues})
+		auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: exposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: strings.TrimSpace(req.Reason), RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValues, NewValues: newValues})
 	}
 }
 
@@ -884,6 +885,7 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			UserID            string   `json:"user_id"`
 			ExposureHeaderIds []string `json:"exposureHeaderIds"`
 			RejectionComment  string   `json:"rejection_comment"`
+			Comments          string   `json:"comments"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.UserID == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrExposureHeaderIDsUserID)
@@ -903,6 +905,15 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
+		rejectionComment := strings.TrimSpace(req.RejectionComment)
+		if rejectionComment == "" {
+			rejectionComment = strings.TrimSpace(req.Comments)
+		}
+
+		oldValuesByID := make(map[string]map[string]interface{}, len(req.ExposureHeaderIds))
+		for _, id := range req.ExposureHeaderIds {
+			oldValuesByID[id] = auditutil.FetchRowSnapshot(r.Context(), db, "public.exposure_headers", "exposure_header_id", id)
+		}
 
 		rows, err := db.Query(
 			`UPDATE exposure_headers
@@ -917,7 +928,7 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			   AND COALESCE(is_deleted, false) = false
 			 RETURNING *`,
 			rejectedBy,
-			req.RejectionComment,
+			rejectionComment,
 			pq.Array(req.ExposureHeaderIds),
 		)
 		if err != nil {
@@ -942,7 +953,9 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			}
 			rejected = append(rejected, rowMap)
 			if id, ok := rowMap["exposure_header_id"]; ok {
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: constants.StatusRejected, CheckerBy: rejectedBy, Comment: req.RejectionComment})
+				parentID := fmt.Sprint(id)
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: parentID, Status: constants.StatusRejected, CheckerBy: rejectedBy, Comment: rejectionComment})
+				auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: parentID, ActionType: "REJECT", Status: constants.StatusRejected, Reason: rejectionComment, RequestedBy: rejectedBy, OldValues: oldValuesByID[parentID], NewValues: rowMap})
 			}
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -977,6 +990,12 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		if approvedBy == "" {
 			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		approvalComment := strings.TrimSpace(req.ApprovalComment)
+
+		oldValuesByID := make(map[string]map[string]interface{}, len(req.ExposureHeaderIds))
+		for _, id := range req.ExposureHeaderIds {
+			oldValuesByID[id] = auditutil.FetchRowSnapshot(r.Context(), db, "public.exposure_headers", "exposure_header_id", id)
 		}
 
 		tx, err := db.Begin()
@@ -1054,7 +1073,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 				WHERE exposure_header_id = ANY($3::uuid[])
 				  AND COALESCE(is_deleted, false) = false
 				RETURNING *
-			`, approvedBy, req.ApprovalComment, pq.Array(toDelete))
+			`, approvedBy, approvalComment, pq.Array(toDelete))
 			deletedHeaders := []map[string]interface{}{}
 			if errDel != nil {
 				approvalErr = errDel
@@ -1132,7 +1151,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 
 		// Approve remaining headers
 		if len(toApprove) > 0 {
-			appRows, err := tx.Query(`UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approval_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
+			appRows, err := tx.Query(`UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approval_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, approvalComment, pq.Array(toApprove))
 			if err != nil {
 				logger.LogError("[WARN] approving exposure headers failed: %v", err)
 				approvalErr = err
@@ -1228,11 +1247,15 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		for _, id := range toApprove {
-			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: req.ApprovalComment})
+		for _, row := range results["approved"].([]map[string]interface{}) {
+			id := fmt.Sprint(row["exposure_header_id"])
+			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "APPROVE", Status: constants.StatusApproved, Reason: approvalComment, RequestedBy: approvedBy, OldValues: oldValuesByID[id], NewValues: row})
 		}
-		for _, id := range toDelete {
-			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: req.ApprovalComment})
+		for _, row := range results["deleted"].([]map[string]interface{}) {
+			id := fmt.Sprint(row["exposure_header_id"])
+			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "APPROVE", Status: constants.StatusApproved, Reason: approvalComment, RequestedBy: approvedBy, OldValues: oldValuesByID[id], NewValues: row})
 		}
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1748,6 +1771,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 
 				uploadBatchId := uuid.New().String()
 				insertedRows := 0
+				createdExposureIDs := []string{}
 				for i, row := range dataArr {
 					row["upload_batch_id"] = uploadBatchId
 					row["row_number"] = i + 1
@@ -2165,6 +2189,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: absorptionErrors[len(absorptionErrors)-1]})
 						return
 					}
+					createdExposureIDs = append(createdExposureIDs, exposureHeaderId)
 				}
 
 				logger.LogError("[FX-STAGING] FINAL RESULT: filename=%s, insertedRows=%d, insertedFinalRows=%d, absorptionErrors=%v", filename, insertedRows, insertedFinalRows, absorptionErrors)
@@ -2185,6 +2210,20 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 				}
 				logger.LogInfo("[FX-STAGING] COMMIT SUCCESS for filename=%s", filename)
 				txCommitted = true
+				for _, exposureHeaderID := range createdExposureIDs {
+					newValues := auditutil.FetchRowSnapshot(ctx, db, "public.exposure_headers", "exposure_header_id", exposureHeaderID)
+					auditutil.RecordAction(ctx, db, auditutil.ActionParams{
+						TableName:    auditutil.TableExposure,
+						ParentColumn: "exposure_header_id",
+						ParentID:     exposureHeaderID,
+						ActionType:   "CREATE",
+						Status:       constants.StatusPendingApproval,
+						Reason:       "Uploaded file: " + filename,
+						RequestedBy:  uploadedBy,
+						OldValues:    nil,
+						NewValues:    newValues,
+					})
+				}
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: success,
 					"filename":             filename,

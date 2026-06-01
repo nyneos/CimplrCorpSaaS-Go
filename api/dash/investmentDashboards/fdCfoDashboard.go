@@ -369,6 +369,69 @@ func govSumPrincipal(items []govFDItem) float64 {
 	return fdRound(s, 2)
 }
 
+// govFetchAccrualRunItems returns accrual runs awaiting CFO approval.
+// Mirrors GetAccrualRuns (/run/all): run_status must be PENDING_APPROVAL and the
+// latest fd_accrual_run_audit.processing_status must not be APPROVED or REJECTED.
+func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilter string) []govFDItem {
+	sql := `
+		WITH latest_audit AS (
+		  SELECT DISTINCT ON (run_id)
+		    run_id,
+		    COALESCE(processing_status,'') AS processing_status,
+		    COALESCE(requested_by,'')       AS requested_by,
+		    requested_at
+		  FROM investment.fd_accrual_run_audit
+		  ORDER BY run_id, requested_at DESC
+		)
+		SELECT
+		  '', COALESCE(r.run_id,''),
+		  COALESCE(r.entity_name, r.entity_id,''), COALESCE(r.entity_id,''),
+		  COALESCE(r.bank_id_filter,''),
+		  COALESCE(r.total_interest_accrued,0), 0,
+		  COALESCE(TO_CHAR(r.accrual_period_end,'YYYY-MM-DD'), ''),
+		  COALESCE(r.run_status,''),
+		  COALESCE(la.requested_by, r.submitted_by, r.created_by,''),
+		  COALESCE(TO_CHAR(COALESCE(la.requested_at, r.submitted_at, r.created_at),'YYYY-MM-DD HH24:MI:SS'), ''),
+		  COALESCE(NULLIF(la.processing_status,''), 'PENDING_APPROVAL') AS processing_status
+		FROM investment.fd_accrual_run r
+		LEFT JOIN latest_audit la ON la.run_id = r.run_id
+		WHERE COALESCE(r.is_deleted,false)=false
+		  AND UPPER(COALESCE(r.run_status,'')) = 'PENDING_APPROVAL'
+		  AND UPPER(COALESCE(NULLIF(la.processing_status,''), 'PENDING_APPROVAL'))
+		      NOT IN ('APPROVED','REJECTED')
+		  AND ($1::text='' OR r.entity_id=$1)
+		ORDER BY r.created_at DESC
+		LIMIT 200`
+	rows, err := pool.Query(ctx, sql, entityFilter)
+	if err != nil {
+		api.LogError("[CfoDash] governance accrual_run query error: %v", err)
+		return []govFDItem{}
+	}
+	defer rows.Close()
+	out := []govFDItem{}
+	for rows.Next() {
+		var f govFDItem
+		var procStatus string
+		if scanErr := rows.Scan(
+			&f.BookingID, &f.FDID, &f.Entity, &f.EntityID, &f.Bank,
+			&f.Principal, &f.Rate, &f.MaturityDate, &f.Status,
+			&f.RequestedBy, &f.RequestedAt, &procStatus,
+		); scanErr != nil {
+			continue
+		}
+		f.Principal = fdRound(f.Principal, 2)
+		f.Rate = fdRound(f.Rate, 4)
+		f.BookingStatus = f.Status
+		f.ProcessingStatus = procStatus
+		f.Action = procStatus
+		f.Source = "Accrual Engine"
+		f.SourcePage = "fd-accrual-engine"
+		f.Currency = "INR"
+		out = append(out, f)
+	}
+	return out
+}
+
 func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter string, periodStart time.Time) map[string]interface{} {
 	// Approvals Pending widget shows every row that is *not* finalised.
 	// "Finalised" = APPROVED / REJECTED (and CLOSED on booking). Everything
@@ -527,12 +590,8 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 	activationItems := govFetchItems(ctx, pool, entityFilter, pendingActivationSQL, "PENDING_ACTIVATION_APPROVAL", constants.FDActivationLabel, constants.FDActivation)
 	maturityItems := govFetchItems(ctx, pool, entityFilter, pendingClosureSQL, "PENDING_CLOSURE_APPROVAL", constants.FDMaturity, constants.FdmaturityLabel)
 
-	var accrualRunCount int64
-	_ = pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM investment.fd_accrual_run
-		WHERE COALESCE(is_deleted,false)=false
-		  AND UPPER(COALESCE(run_status,'')) NOT IN ('APPROVED','REJECTED','POSTED','COMPLETED','CANCELLED')
-		  AND ($1::text='' OR entity_id=$1)`, entityFilter).Scan(&accrualRunCount)
+	accrualItems := govFetchAccrualRunItems(ctx, pool, entityFilter)
+	accrualRunCount := int64(len(accrualItems))
 
 	var latestRunStatus string
 	_ = pool.QueryRow(ctx, `
@@ -583,8 +642,8 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 			Priority: "High", Items: maturityItems},
 		{Type: constants.AccrualRun, Category: constants.AccrualRun, Status: constants.StatusPendingApproval,
 			Source: "Accrual Engine", SourcePage: "fd-accrual-engine",
-			Count: int(accrualRunCount), Value: 0,
-			Priority: "Medium", Items: []govFDItem{}},
+			Count: len(accrualItems), Value: govSumPrincipal(accrualItems),
+			Priority: "Medium", Items: accrualItems},
 	}
 
 	maturityPending := len(maturityItems) + int(unprocessedMaturities)
@@ -1108,21 +1167,26 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			// per-FD items (HIGH first) — joined through closure/booking so the
 			// drill-down drawer can populate real FDs instead of an empty list.
 			type vrItem struct {
-				FDID         string  `json:"fd_id"`
-				BookingID    string  `json:"booking_id"`
-				Bank         string  `json:"bank"`
-				Entity       string  `json:"entity"`
-				EntityID     string  `json:"entity_id"`
-				Principal    float64 `json:"principal"`
-				Rate         float64 `json:"rate"`
-				MaturityDate string  `json:"maturity_date"`
-				FieldName    string  `json:"field_name"`
-				VarianceType string  `json:"variance_type"`
-				Priority     string  `json:"priority"`
-				Delta        float64 `json:"delta"`
-				IsException  bool    `json:"is_exception"`
-				ModuleCode   string  `json:"module_code"`
-				Status       string  `json:"status"`
+				VarianceID    string  `json:"variance_id"`
+				RecordID      string  `json:"record_id"`
+				FDID          string  `json:"fd_id"`
+				BookingID     string  `json:"booking_id"`
+				Bank          string  `json:"bank"`
+				Entity        string  `json:"entity"`
+				EntityID      string  `json:"entity_id"`
+				Principal     float64 `json:"principal"`
+				Rate          float64 `json:"rate"`
+				MaturityDate  string  `json:"maturity_date"`
+				FieldName     string  `json:"field_name"`
+				VarianceType  string  `json:"variance_type"`
+				Priority      string  `json:"priority"`
+				Delta         float64 `json:"delta"`
+				ExpectedValue string  `json:"expected_value"`
+				ActualValue   string  `json:"actual_value"`
+				SystemComment string  `json:"system_comment"`
+				IsException   bool    `json:"is_exception"`
+				ModuleCode    string  `json:"module_code"`
+				Status        string  `json:"status"`
 			}
 			items := []vrItem{}
 			// Resolve fd_id back to fd_master through every workflow source the
@@ -1134,6 +1198,8 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			//   • investment.fd_booking_request        (record_id = booking_id)
 			itemsSQL := `
 				SELECT
+				  COALESCE(vl.variance_id,'')                                     AS variance_id,
+				  COALESCE(vl.record_id,'')                                       AS record_id,
 				  COALESCE(m.fd_id, ci.fd_id, cc.fd_id, '')                       AS fd_id,
 				  COALESCE(b.booking_id, m.booking_id, ci.booking_id, cc.booking_id, '') AS booking_id,
 				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,
@@ -1154,6 +1220,9 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(vl.variance_type,'')                                   AS variance_type,
 				  COALESCE(vl.priority,'')                                        AS priority,
 				  COALESCE(ABS(vl.variance_delta),0)                              AS delta,
+				  COALESCE(vl.expected_value,'')                                  AS expected_value,
+				  COALESCE(vl.actual_value,'')                                    AS actual_value,
+				  COALESCE(vl.system_comment,'')                                  AS system_comment,
 				  COALESCE(vl.is_exception,false)                                 AS is_exception,
 				  COALESCE(vl.module_code,'')                                     AS module_code,
 				  COALESCE(vl.status,'')                                          AS status
@@ -1183,10 +1252,12 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				for itRows.Next() {
 					var it vrItem
 					if scanErr := itRows.Scan(
+						&it.VarianceID, &it.RecordID,
 						&it.FDID, &it.BookingID, &it.Bank, &it.Entity, &it.EntityID,
 						&it.Principal, &it.Rate, &it.MaturityDate,
 						&it.FieldName, &it.VarianceType, &it.Priority,
-						&it.Delta, &it.IsException, &it.ModuleCode, &it.Status,
+						&it.Delta, &it.ExpectedValue, &it.ActualValue, &it.SystemComment,
+						&it.IsException, &it.ModuleCode, &it.Status,
 					); scanErr != nil {
 						api.LogError("[CfoDash] variance_impact items scan: %v", scanErr)
 						continue

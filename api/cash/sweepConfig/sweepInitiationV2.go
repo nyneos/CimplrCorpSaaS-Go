@@ -557,6 +557,7 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT actiontype, processing_status, requested_by, checker_by, checker_comment
 				FROM cimplrcorpsaas.auditactionsweepinitiation
 				WHERE initiation_id = i.initiation_id
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON true
@@ -873,6 +874,7 @@ func GetApprovedActiveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT actiontype, processing_status
 				FROM cimplrcorpsaas.auditactionsweepinitiation
 				WHERE initiation_id = i.initiation_id
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON true
@@ -1011,6 +1013,9 @@ func isDuplicateInitiation(ctx context.Context, pgxPool *pgxpool.Pool, key Initi
 		  AND COALESCE(sc.execution_time::text, '') = $6
 		  AND COALESCE(sc.buffer_amount::double precision,0) = COALESCE($7::double precision,0)
 		  AND COALESCE(sc.sweep_amount::double precision,0) = COALESCE($8::double precision,0)
+		  AND COALESCE(si.is_deleted, false) = false
+		  AND COALESCE(sc.is_deleted, false) = false
+		  AND asi.actiontype IN ('CREATE', 'EDIT', 'DELETE')
 		  AND COALESCE(asi.processing_status, '') IN ('PENDING_APPROVAL','APPROVED')
 	`
 
@@ -1078,6 +1083,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				action_id, initiation_id, actiontype, processing_status
 			FROM cimplrcorpsaas.auditactionsweepinitiation
 			WHERE initiation_id = ANY($1)
+			  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
 			ORDER BY initiation_id, requested_at DESC, action_id DESC
 		`, req.InitiationIDs)
 		if err != nil {
@@ -1103,7 +1109,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			actionIDs = append(actionIDs, actionID)
 			approvedIDs = append(approvedIDs, id)
-			if actionType == "DELETE" {
+			if actionType == constants.AuditActionDelete || status == constants.StatusPendingDeleteApproval {
 				deleteIDs = append(deleteIDs, id)
 			}
 		}
@@ -1212,6 +1218,7 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				action_id, initiation_id, processing_status
 			FROM cimplrcorpsaas.auditactionsweepinitiation
 			WHERE initiation_id = ANY($1)
+			  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
 			ORDER BY initiation_id, requested_at DESC, action_id DESC
 		`, req.InitiationIDs)
 		if err != nil {
@@ -1326,27 +1333,30 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		for _, id := range req.InitiationIDs {
-			var latestActionType, latestStatus string
+			var sweepID, latestActionType, latestStatus string
 			latestErr := tx.QueryRow(ctx, `
-				SELECT actiontype, processing_status
-				FROM cimplrcorpsaas.auditactionsweepinitiation
-				WHERE initiation_id = $1
-				ORDER BY requested_at DESC, action_id DESC
+				SELECT si.sweep_id, asi.actiontype, asi.processing_status
+				FROM cimplrcorpsaas.sweep_initiation si
+				JOIN cimplrcorpsaas.auditactionsweepinitiation asi ON asi.initiation_id = si.initiation_id
+				WHERE si.initiation_id = $1
+				  AND COALESCE(si.is_deleted, false) = false
+				  AND asi.actiontype IN ('CREATE', 'EDIT', 'DELETE')
+				ORDER BY asi.requested_at DESC, asi.action_id DESC
 				LIMIT 1
-			`, id).Scan(&latestActionType, &latestStatus)
+			`, id).Scan(&sweepID, &latestActionType, &latestStatus)
 			if latestErr != nil {
 				api.RespondWithResult(w, false, constants.ErrMissingLatestAuditForInitiation+id)
 				return
 			}
-			if latestActionType == "DELETE" && latestStatus == constants.StatusPendingDeleteApproval {
+			if latestActionType == constants.AuditActionDelete && latestStatus == constants.StatusPendingDeleteApproval {
 				api.RespondWithResult(w, false, "delete request already pending for initiation: "+id)
 				return
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO cimplrcorpsaas.auditactionsweepinitiation
-					(initiation_id, actiontype, processing_status, reason, requested_by, requested_at)
-				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())
-			`, id, nullifyEmpty(req.Reason), requestedBy); err != nil {
+					(initiation_id, sweep_id, actiontype, processing_status, reason, requested_by, requested_at)
+				VALUES ($1, $2, 'DELETE', 'PENDING_DELETE_APPROVAL', $3, $4, now())
+			`, id, sweepID, nullifyEmpty(req.Reason), requestedBy); err != nil {
 				api.RespondWithResult(w, false, "failed to create delete request: "+err.Error())
 				return
 			}
@@ -1841,6 +1851,7 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT actiontype, processing_status, requested_by, checker_by, checker_comment
 				FROM cimplrcorpsaas.auditactionsweepinitiation
 				WHERE initiation_id = i.initiation_id
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) a ON true
@@ -1852,6 +1863,7 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) sca ON true
 			WHERE COALESCE(c.is_deleted, false) = false
+			  AND COALESCE(i.is_deleted, false) = false
 		`
 
 		args := []interface{}{}
