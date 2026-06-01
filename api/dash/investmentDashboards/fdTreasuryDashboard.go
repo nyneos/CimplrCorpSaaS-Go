@@ -39,6 +39,7 @@ type fdTreasuryDashRequest struct {
 	Period    string `json:"period"`     // MTD | QTD | YTD | CUSTOM
 	StartDate string `json:"start_date"` // YYYY-MM-DD when Period==CUSTOM
 	EndDate   string `json:"end_date"`   // YYYY-MM-DD when Period==CUSTOM
+	AsOnDate  string `json:"as_on_date"`
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
