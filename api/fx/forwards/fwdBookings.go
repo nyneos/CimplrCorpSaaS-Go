@@ -723,7 +723,7 @@ func recordForwardUploadAudit(ctx context.Context, db *sql.DB, uploadS3Key, uplo
 	for rows.Next() {
 		var systemTransactionID string
 		if err := rows.Scan(&systemTransactionID); err == nil {
-			auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "Imported via uploader", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": uploadS3Key}})
+			auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": uploadS3Key}})
 		}
 	}
 }
@@ -1017,7 +1017,7 @@ func recordForwardConfirmationUploadAudit(ctx context.Context, db *sql.DB, uploa
 	for rows.Next() {
 		var systemTransactionID string
 		if err := rows.Scan(&systemTransactionID); err == nil {
-			auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionConfirm, Status: constants.StatusPendingEditApproval, Reason: "Imported via confirmation uploader", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": uploadS3Key}})
+			auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": uploadS3Key}})
 		}
 	}
 }

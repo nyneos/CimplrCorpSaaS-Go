@@ -917,10 +917,7 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 
 		rows, err := db.Query(
 			`UPDATE exposure_headers
-			 SET approval_status = CASE
-			     	WHEN approval_status = 'PENDING_DELETE_APPROVAL' THEN 'APPROVED'
-			     	ELSE 'REJECTED'
-			     END,
+			 SET approval_status = 'REJECTED',
 			     rejected_by = $1,
 			     rejection_comment = $2,
 			     rejected_at = NOW()

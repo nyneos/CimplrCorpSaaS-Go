@@ -744,10 +744,7 @@ func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
 
 		rows, err := db.Query(
 			`UPDATE exposure_bucketing
-             SET status_bucketing = CASE
-				WHEN UPPER(COALESCE(status_bucketing, '')) = 'PENDING_DELETE_APPROVAL' THEN 'Approved'
-				ELSE 'Rejected'
-		     END,
+             SET status_bucketing = 'Rejected',
 		     updated_by = $2, comments = $3, updated_at = NOW()
              WHERE exposure_header_id = ANY($1::uuid[])
              RETURNING *`,

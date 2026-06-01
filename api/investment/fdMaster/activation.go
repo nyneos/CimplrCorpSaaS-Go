@@ -992,7 +992,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: fdID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: firstNonEmpty(req.Comment, "Bulk approved FD activation")})
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: fdID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDMaster] RecordAction approve failed for fd %s: %v", fdID, actionErr)
 				errors = append(errors, fdID+": "+actionErr.Error())
@@ -2074,7 +2074,7 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				skipped++
 				continue
 			}
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: auditID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: firstNonEmpty(req.Comment, "Bulk cashflow edit approved")})
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: auditID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				errs = append(errs, cashflowID+": "+actionErr.Error())
 				continue
@@ -3035,7 +3035,7 @@ func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: req.AuditID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: firstNonEmpty(req.Comment, "Cashflow edit approved")})
+		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: req.AuditID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 		if actionErr != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "approval engine error: "+actionErr.Error())
 			return

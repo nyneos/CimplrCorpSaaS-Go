@@ -297,10 +297,7 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		// rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), rejector, req.ExposureIDs)
 		q := `
 			UPDATE public.exposure_headers
-			SET exposure_creation_status = CASE
-					WHEN exposure_creation_status = 'PENDING_DELETE_APPROVAL' THEN 'Approved'
-					ELSE 'Rejected'
-				END,
+			SET exposure_creation_status = 'Rejected',
 			    updated_at = now()
 			WHERE exposure_header_id = ANY($1)
 			RETURNING exposure_header_id
