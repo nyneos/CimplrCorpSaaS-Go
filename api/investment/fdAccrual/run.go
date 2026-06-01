@@ -388,6 +388,11 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"Accrual execution failed: "+friendlyAccrualError(err, "accrual execution"))
 			return
 		}
+		_, _ = pgxPool.Exec(ctx, `
+			INSERT INTO investment.fd_accrual_run_audit (
+				run_id, action_type, processing_status, requested_by, requested_at
+			) VALUES ($1, 'EXECUTE', 'COMPUTED', $2, now())`,
+			req.RunID, userEmail)
 		if calculated == 0 && failed == 0 {
 			api.RespondWithError(w, http.StatusBadRequest,
 				fmt.Sprintf(
