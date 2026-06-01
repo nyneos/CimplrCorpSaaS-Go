@@ -36,8 +36,8 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -110,8 +110,8 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -215,8 +215,8 @@ func GetActiveForwardsCount(db *sql.DB) http.HandlerFunc {
 			return
 			// Route: dash/cfo/fwd/bu-maturity-currency-summary
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -243,8 +243,8 @@ func GetRecentTradesDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -394,8 +394,8 @@ func GetTotalUsdSumDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -459,8 +459,8 @@ func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -567,8 +567,8 @@ func GetTotalUsdSumByCurrencyDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -642,8 +642,8 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -773,8 +773,8 @@ func GetRolloverCountsByCurrency(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -823,8 +823,8 @@ func GetBankTradesData(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -923,8 +923,8 @@ func GetBankTradesData(db *sql.DB) http.HandlerFunc {
 
 func GetMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -1031,8 +1031,8 @@ func GetMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 // Handler: GetTotalBankMarginFromForwardBookings
 func GetTotalBankMarginFromForwardBookings(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -1075,8 +1075,8 @@ func GetTotalBankMarginFromForwardBookings(db *sql.DB) http.HandlerFunc {
 // Handler: GetOpenAmountToBookingRatioSimple
 func GetOpenAmountToBookingRatioSimple(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}

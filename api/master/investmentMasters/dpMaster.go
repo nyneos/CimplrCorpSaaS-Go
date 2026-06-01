@@ -869,6 +869,13 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Cascade-delete non-core children (demat accounts) for every deleted DP.
+		for _, dpID := range canDeleteDPIDs {
+			if err := dependency.CascadeDelete(ctx, pgxPool, "masterdepositoryparticipant", dpID, checkerBy); err != nil {
+				api.LogError("[DP] cascade failed for %s: %v", dpID, err)
+			}
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"approved_action_ids": toApprove,
 			"deleted_dps":         canDeleteDPIDs,

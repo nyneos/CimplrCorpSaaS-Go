@@ -25,8 +25,8 @@ func GetBuMaturityCurrencySummaryJoinedFromHeaders(db *sql.DB) http.HandlerFunc 
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
@@ -133,8 +133,8 @@ func GetExposureRowsDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return

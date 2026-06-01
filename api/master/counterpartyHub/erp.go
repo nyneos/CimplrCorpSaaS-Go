@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/dependency"
 	"context"
 	"encoding/json"
 	"errors"
@@ -495,6 +496,23 @@ func BulkApproveERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE approvals only
+		pendingDel := dependency.GetPendingDeleteIDs(r.Context(), pgxPool, "apibox.audit_erp_system", "erp_id", req.ERPSystemIDs)
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "mastererpsystem", pendingDel)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.ERPSystemIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.ERPSystemIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 		if len(req.ERPSystemIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoErpSystemIDsProvided)
 			return
@@ -623,6 +641,22 @@ func BulkDeleteERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "mastererpsystem", req.ERPSystemIDs)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.ERPSystemIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.ERPSystemIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 		if len(req.ERPSystemIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoErpSystemIDsProvided)
 			return

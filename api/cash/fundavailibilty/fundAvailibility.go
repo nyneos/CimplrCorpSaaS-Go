@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -93,7 +94,7 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get middleware context filters
-		entityIDs := api.GetEntityIDsFromCtx(ctx)
+		entityIDs := ctxutil.FromContext(ctx).EntityIDs
 		bankNames := api.GetBankNamesFromCtx(ctx)
 
 		// Fetch actuals from bank statements

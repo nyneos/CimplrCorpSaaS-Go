@@ -76,8 +76,8 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusInternalServerError, "Business units not found in context")
 			return
 		}

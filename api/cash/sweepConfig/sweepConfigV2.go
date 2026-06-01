@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -52,7 +53,7 @@ func CreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate entity / banks / accounts against middleware-provided context
 		if strings.TrimSpace(req.EntityName) != "" {
-			if !api.IsEntityAllowed(ctx, req.EntityName) {
+			if !ctxutil.FromContext(ctx).HasEntityAccess(req.EntityName) {
 				api.RespondWithResult(w, false, "unauthorized entity")
 				return
 			}
@@ -227,7 +228,7 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for i, cfg := range req.Configs {
 			// Validate entity / banks / accounts against middleware-provided context
 			if strings.TrimSpace(cfg.EntityName) != "" {
-				if !api.IsEntityAllowed(ctx, cfg.EntityName) {
+				if !ctxutil.FromContext(ctx).HasEntityAccess(cfg.EntityName) {
 					api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized entity %s", i, cfg.EntityName))
 					return
 				}
@@ -488,7 +489,7 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			switch k {
 			case "entity_name":
 				if s := fmt.Sprint(v); strings.TrimSpace(s) != "" {
-					if !api.IsEntityAllowed(ctx, s) {
+					if !ctxutil.FromContext(ctx).HasEntityAccess(s) {
 						api.RespondWithResult(w, false, "unauthorized entity")
 						return
 					}
@@ -853,12 +854,12 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			if sourceAccountStr != "" {
-				if !ctxHasApprovedBankAccount(ctx, sourceAccountStr) {
+				if !ctxutil.FromContext(ctx).HasApprovedBankAccount(sourceAccountStr) {
 					continue
 				}
 			}
 			if targetAccountStr != "" {
-				if !ctxHasApprovedBankAccount(ctx, targetAccountStr) {
+				if !ctxutil.FromContext(ctx).HasApprovedBankAccount(targetAccountStr) {
 					continue
 				}
 			}

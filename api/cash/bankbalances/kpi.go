@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -96,7 +97,7 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get middleware context filters (default) but allow request overrides
-		entityIDs := api.GetEntityIDsFromCtx(ctx) // Use entity IDs by default
+		entityIDs := ctxutil.FromContext(ctx).EntityIDs // Use entity IDs by default
 		bankNames := api.GetBankNamesFromCtx(ctx)
 		// If request provided explicit filters, prefer them
 		if len(req.EntityIDs) > 0 {

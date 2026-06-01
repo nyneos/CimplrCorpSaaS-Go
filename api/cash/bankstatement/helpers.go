@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/lib/pq"
@@ -75,26 +74,6 @@ func pqUserFriendlyMessage(err error) string {
 	}
 }
 
-func ctxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
-	if strings.TrimSpace(accountNumber) == "" {
-		return false
-	}
-	v := ctx.Value(api.ApprovedBankAccountsKey)
-	if v == nil {
-		return true
-	}
-	accounts, ok := v.([]map[string]string)
-	if !ok {
-		return true
-	}
-	for _, a := range accounts {
-		if strings.EqualFold(strings.TrimSpace(a["account_number"]), strings.TrimSpace(accountNumber)) {
-			return true
-		}
-	}
-	return false
-}
-
 // ctxApprovedCurrencies returns list of allowed currency codes from context (case-insensitive stored as upper)
 func ctxApprovedCurrencies(ctx context.Context) []string {
 	v := ctx.Value("CurrencyInfo")
@@ -121,23 +100,6 @@ func ctxApprovedCurrencies(ctx context.Context) []string {
 }
 
 // ctxHasApprovedCurrency returns true when no currency restriction is present or currency is allowed
-func ctxHasApprovedCurrency(ctx context.Context, currency string) bool {
-	currency = strings.TrimSpace(currency)
-	if currency == "" {
-		return true
-	}
-	codes := ctxApprovedCurrencies(ctx)
-	if len(codes) == 0 {
-		return true
-	}
-	up := strings.ToUpper(currency)
-	for _, c := range codes {
-		if strings.ToUpper(c) == up {
-			return true
-		}
-	}
-	return false
-}
 
 // normalizeCell trims, removes non-breaking spaces and collapses whitespace
 func normalizeCell(s string) string {

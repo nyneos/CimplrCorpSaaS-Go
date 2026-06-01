@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/validation"
 	"bufio"
 	"bytes"
 	"context"
@@ -92,6 +93,16 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{
+			"entity_name": req.EntityName,
+			"scheme_id":   req.SchemeID,
+			"folio_id":    req.FolioID,
+			"demat_id":    req.DematID,
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -240,6 +251,19 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if strings.ToUpper(source) == "PROPOSAL" && proposalID == "" {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, constants.ValueError: "proposal_id is required when source is 'Proposal'",
+				})
+				continue
+			}
+
+			// Entity scope + MF master validation per row
+			if errMsg := validation.ValidateMFMasterReferences(ctx, map[string]interface{}{
+				"entity_name": entityName,
+				"scheme_id":   schemeID,
+				"folio_id":    row.FolioID,
+				"demat_id":    row.DematID,
+			}); errMsg != "" {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false, constants.ValueError: errMsg,
 				})
 				continue
 			}

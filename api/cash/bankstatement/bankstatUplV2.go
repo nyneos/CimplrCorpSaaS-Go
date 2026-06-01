@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/ctxutil"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	"CimplrCorpSaas/internal/logger"
 	"archive/zip"
@@ -610,20 +611,20 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	}
 
 	// Context validations (entity scope + approved bank/account lists)
-	if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
-		if !apictx.IsEntityAllowed(ctx, entityID) {
+	if ids := ctxutil.FromContext(ctx).EntityIDs; len(ids) > 0 {
+		if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 			return nil, errors.New("no access to this entity")
 		}
 	}
 	if bankName != "" {
 		if names := apictx.GetBankNamesFromCtx(ctx); len(names) > 0 {
-			if !apictx.IsBankAllowed(ctx, bankName) {
+			if !ctxutil.FromContext(ctx).HasApprovedBank(bankName) {
 				return nil, errors.New(constants.ErrBankNotAllowed)
 			}
 		}
 	}
-	if ctx.Value(apictx.ApprovedBankAccountsKey) != nil {
-		if !ctxHasApprovedBankAccount(ctx, accountNumber) {
+	if len(ctxutil.FromContext(ctx).BankAccounts) > 0 {
+		if !ctxutil.FromContext(ctx).HasApprovedBankAccount(accountNumber) {
 			return nil, errors.New("bank account not approved")
 		}
 	}
@@ -633,7 +634,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	if curCodes := ctxApprovedCurrencies(ctx); len(curCodes) > 0 {
 		_ = db.QueryRowContext(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
 		if acctCurrency.Valid && strings.TrimSpace(acctCurrency.String) != "" {
-			if !ctxHasApprovedCurrency(ctx, acctCurrency.String) {
+			if !ctxutil.FromContext(ctx).HasApprovedCurrency(acctCurrency.String) {
 				return nil, errors.New(constants.ErrCurrencyNotAllowed)
 			}
 		}

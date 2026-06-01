@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/dependency"
 	"context"
 	"encoding/json"
 	"errors"
@@ -353,6 +354,23 @@ func BulkApproveDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE approvals only
+		pendingDel := dependency.GetPendingDeleteIDs(r.Context(), pgxPool, "apibox.audit_data_provider", "provider_id", req.ProviderIDs)
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "masterdataprovider", pendingDel)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.ProviderIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.ProviderIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 		if len(req.ProviderIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoProviderIDsProvided)
 			return
@@ -489,6 +507,22 @@ func BulkDeleteDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "masterdataprovider", req.ProviderIDs)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.ProviderIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.ProviderIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 		if len(req.ProviderIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoProviderIDsProvided)
 			return

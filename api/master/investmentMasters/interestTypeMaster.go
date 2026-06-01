@@ -1341,6 +1341,28 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			validIDs = append(validIDs, id)
 		}
 
+		// Block delete request if any interest type is referenced by live FD bookings
+		var deleteBlockers []map[string]interface{}
+		for _, id := range validIDs {
+			blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_interest_type_master", id)
+			if len(blockers) > 0 {
+				deleteBlockers = append(deleteBlockers, map[string]interface{}{
+					"interest_id": id,
+					"blocked_by":  dependency.BlockersSummary(blockers),
+				})
+			}
+		}
+		if len(deleteBlockers) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Cannot request deletion: one or more items are referenced by live FD bookings.",
+				"blocked": deleteBlockers,
+			})
+			return
+		}
+
 		// BATCH AUDIT INSERT - ALL audit records in ONE query
 		if len(validIDs) > 0 {
 			auditValues := make([]string, len(validIDs))
@@ -1353,7 +1375,7 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			auditQuery := fmt.Sprintf(`
-                INSERT INTO investment.fd_audit_interest_type 
+                INSERT INTO investment.fd_audit_interest_type
                     (interest_id, action_type, processing_status, requested_by, reason, requested_at)
                 VALUES %s
             `, strings.Join(auditValues, ","))
@@ -1414,7 +1436,6 @@ func BulkApproveInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-
 		if len(req.InterestIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoInterestIDsProvided)
 			return
@@ -1504,12 +1525,12 @@ func BulkApproveInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		response := map[string]interface{}{
 			constants.ValueSuccess: true,
-			"approved_count":       len(req.InterestIDs),
+			"approved_count":       len(req.InterestIDs) - len(blockedItems),
 			"checker":              userEmail,
 			"blocked":              blockedItems,
 		}
 		api.RespondWithPayload(w, true, "", response)
-		api.LogInfo("Bulk approval completed: %d audit IDs approved by %s", len(req.InterestIDs), userEmail)
+		api.LogInfo("Bulk approval completed: %d audit IDs approved by %s", len(req.InterestIDs)-len(blockedItems), userEmail)
 	}
 }
 

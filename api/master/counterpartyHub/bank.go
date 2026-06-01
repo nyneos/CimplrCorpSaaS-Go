@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/dependency"
 	"context"
 	"encoding/json"
 	"errors"
@@ -361,6 +362,23 @@ func BulkApproveBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE approvals only
+		pendingDel := dependency.GetPendingDeleteIDs(r.Context(), pgxPool, "apibox.audit_bank_master", "bank_id", req.BankIDs)
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "masterbank", pendingDel)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.BankIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.BankIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 		if len(req.BankIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoBankIDsProvided)
 			return
@@ -489,6 +507,22 @@ func BulkDeleteBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "masterbank", req.BankIDs)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.BankIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.BankIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 		if len(req.BankIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoBankIDsProvided)
 			return

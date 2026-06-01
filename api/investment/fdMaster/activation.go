@@ -12,6 +12,8 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/validation"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -774,6 +776,25 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			msg, status := getFDMasterError(err, "Load confirmation failed")
 			api.RespondWithError(w, status, msg)
+			return
+		}
+
+		scope := ctxutil.FromContext(r.Context())
+		if !scope.HasEntityAccess(rec.EntityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", rec.EntityID))
+			return
+		}
+		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
+			"bank_id":         rec.BankID,
+			"bank_account_id": rec.BankAccountID,
+			"interest_type":   rec.InterestTypeCode,
+			"frequency_id":    rec.FrequencyID,
+			"day_count_code":  rec.DayCountConvention,
+			"tds_plan_id":     rec.TDSPlanID,
+			"bank_config_id":  rec.BankConfigID,
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 

@@ -8,6 +8,8 @@ import (
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
+	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/validation"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -220,6 +222,20 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			api.RespondWithError(w, http.StatusInternalServerError, "Fetch booking failed: "+err.Error())
+			return
+		}
+
+		scope := ctxutil.FromContext(r.Context())
+		if !scope.HasEntityAccess(entityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return
+		}
+		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
+			"interest_type": bookedInterestTypeCode,
+			"frequency_id":  bookedFrequencyID,
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -781,6 +797,20 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		varResolveScope := ctxutil.FromContext(r.Context())
+		if !varResolveScope.HasEntityAccess(entityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return
+		}
+		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
+			"interest_type": req.ConfirmedInterestType,
+			"frequency_id":  req.ConfirmedFrequencyID,
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+
 		tenorType := strings.ToUpper(strings.TrimSpace(req.ConfirmedTenorType))
 		if tenorType == "" {
 			tenorType = bookedTenorType
@@ -1207,6 +1237,20 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.LogError("[EditConfirmation] linkage query failed confirmation_id=%s: %v", req.ConfirmationID, err)
 			msg, status := getUserFriendlyFDError(err, "Fetch confirmation linkage failed")
 			api.RespondWithError(w, status, msg)
+			return
+		}
+
+		editScope := ctxutil.FromContext(r.Context())
+		if !editScope.HasEntityAccess(entityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return
+		}
+		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
+			"interest_type": req.Fields["confirmed_interest_type_code"],
+			"frequency_id":  req.Fields["confirmed_frequency_id"],
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 

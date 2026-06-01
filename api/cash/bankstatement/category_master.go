@@ -1,9 +1,9 @@
 package bankstatement
 
 import (
-	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -127,7 +127,7 @@ func validateScopeAccess(ctx context.Context, scopeType string, entityID, bankCo
 		if entityID == nil || strings.TrimSpace(*entityID) == "" {
 			return http.StatusBadRequest, "Missing entity_id"
 		}
-		ids := apictx.GetEntityIDsFromCtx(ctx)
+		ids := ctxutil.FromContext(ctx).EntityIDs
 		if len(ids) == 0 {
 			return http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest
 		}
@@ -141,7 +141,7 @@ func validateScopeAccess(ctx context.Context, scopeType string, entityID, bankCo
 		if accountNumber == nil || strings.TrimSpace(*accountNumber) == "" {
 			return http.StatusBadRequest, "Missing account_number"
 		}
-		if !ctxHasApprovedBankAccount(ctx, *accountNumber) {
+		if !ctxutil.FromContext(ctx).HasApprovedBankAccount(*accountNumber) {
 			return http.StatusForbidden, constants.ErrInvalidAccount
 		}
 		return 0, ""
@@ -157,7 +157,7 @@ func validateScopeAccess(ctx context.Context, scopeType string, entityID, bankCo
 		if currency == nil || strings.TrimSpace(*currency) == "" {
 			return http.StatusBadRequest, "Missing currency"
 		}
-		if !ctxHasApprovedCurrency(ctx, *currency) {
+		if !ctxutil.FromContext(ctx).HasApprovedCurrency(*currency) {
 			return http.StatusForbidden, constants.ErrCurrencyNotAllowed
 		}
 		return 0, ""
@@ -268,7 +268,7 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 		}
 
 		ctx := r.Context()
-		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
+		entityIDs := ctxutil.FromContext(ctx).EntityIDs
 		if len(entityIDs) == 0 {
 			http.Error(w, constants.ErrNoAccessibleEntitiesForRequest, http.StatusForbidden)
 			return
@@ -319,14 +319,14 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 				unauthorizedEntity = true
 				break
 			}
-			if !ctxHasApprovedBankAccount(ctx, a) {
+			if !ctxutil.FromContext(ctx).HasApprovedBankAccount(a) {
 				unauthorizedAccount = true
 				break
 			}
 
 			// Enforce currency: ensure account's currency is approved in context (use currency fetched in query)
 			if acctCurrency.Valid && strings.TrimSpace(acctCurrency.String) != "" {
-				if !ctxHasApprovedCurrency(ctx, acctCurrency.String) {
+				if !ctxutil.FromContext(ctx).HasApprovedCurrency(acctCurrency.String) {
 					unauthorizedCurrency = true
 					break
 				}
@@ -408,7 +408,7 @@ func CategorizeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		}
 
 		ctx := r.Context()
-		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
+		entityIDs := ctxutil.FromContext(ctx).EntityIDs
 		if len(entityIDs) == 0 {
 			http.Error(w, constants.ErrNoAccessibleEntitiesForRequest, http.StatusForbidden)
 			return
@@ -467,7 +467,7 @@ WHERE t.category_id IS NULL
 			if err := rows.Scan(&tr.id, &tr.bsID, &tr.acct, &tr.entity, &tr.desc, &tr.wd, &tr.dep, &tr.valueDate, &tr.currency); err == nil {
 				// Skip transactions whose account currency is not approved (enforce currency after account)
 				if tr.currency.Valid && strings.TrimSpace(tr.currency.String) != "" {
-					if !ctxHasApprovedCurrency(ctx, tr.currency.String) {
+					if !ctxutil.FromContext(ctx).HasApprovedCurrency(tr.currency.String) {
 						// skip this txn
 						continue
 					}
@@ -486,12 +486,12 @@ WHERE t.category_id IS NULL
 		matchedByCategory := make(map[string][]int64)
 
 		for _, tr := range txns {
-			if !ctxHasApprovedBankAccount(ctx, tr.acct) {
+			if !ctxutil.FromContext(ctx).HasApprovedBankAccount(tr.acct) {
 				continue
 			}
 			// Skip transactions whose account currency is not approved (we already fetched currency)
 			if tr.currency.Valid && strings.TrimSpace(tr.currency.String) != "" {
-				if !ctxHasApprovedCurrency(ctx, tr.currency.String) {
+				if !ctxutil.FromContext(ctx).HasApprovedCurrency(tr.currency.String) {
 					continue
 				}
 			}
@@ -565,7 +565,7 @@ func RecomputeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 
 		ctx := r.Context()
-		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
+		entityIDs := ctxutil.FromContext(ctx).EntityIDs
 		if len(entityIDs) == 0 {
 			http.Error(w, constants.ErrNoAccessibleEntitiesForRequest, http.StatusForbidden)
 			return
@@ -636,12 +636,12 @@ WHERE t.category_id IS NULL
 		updated := 0
 
 		for _, tr := range txns {
-			if !ctxHasApprovedBankAccount(ctx, tr.acct) {
+			if !ctxutil.FromContext(ctx).HasApprovedBankAccount(tr.acct) {
 				continue
 			}
 			// skip if account currency not allowed
 			if tr.currency.Valid && strings.TrimSpace(tr.currency.String) != "" {
-				if !ctxHasApprovedCurrency(ctx, tr.currency.String) {
+				if !ctxutil.FromContext(ctx).HasApprovedCurrency(tr.currency.String) {
 					continue
 				}
 			}
@@ -1112,7 +1112,7 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 					return
 				}
 				if comp.CurrencyCode != nil && strings.TrimSpace(*comp.CurrencyCode) != "" {
-					if !ctxHasApprovedCurrency(r.Context(), *comp.CurrencyCode) {
+					if !ctxutil.FromContext(r.Context()).HasApprovedCurrency(*comp.CurrencyCode) {
 						http.Error(w, constants.ErrCurrencyNotAllowed+" in component at index "+fmt.Sprint(i), http.StatusForbidden)
 						return
 					}
@@ -1196,7 +1196,7 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 			return
 		}
 		if requestBody.CurrencyCode != nil && strings.TrimSpace(*requestBody.CurrencyCode) != "" {
-			if !ctxHasApprovedCurrency(r.Context(), *requestBody.CurrencyCode) {
+			if !ctxutil.FromContext(r.Context()).HasApprovedCurrency(*requestBody.CurrencyCode) {
 				http.Error(w, constants.ErrCurrencyNotAllowed+" in component", http.StatusForbidden)
 				return
 			}
@@ -1263,7 +1263,7 @@ func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
 		// Validate component currencies early
 		for i, comp := range body.Components {
 			if comp.CurrencyCode != nil && strings.TrimSpace(*comp.CurrencyCode) != "" {
-				if !ctxHasApprovedCurrency(r.Context(), *comp.CurrencyCode) {
+				if !ctxutil.FromContext(r.Context()).HasApprovedCurrency(*comp.CurrencyCode) {
 					http.Error(w, constants.ErrCurrencyNotAllowed+" in component at index "+fmt.Sprint(i), http.StatusForbidden)
 					return
 				}

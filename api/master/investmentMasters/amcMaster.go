@@ -1103,7 +1103,6 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-
 		// 🔍 Identify the checker
 		checkerBy := api.GetUserEmailFromCtx(r.Context())
 		if checkerBy == "" {
@@ -1220,6 +1219,14 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrCommitFailedCapitalized)
 			api.RespondWithError(w, status, msg)
 			return
+		}
+
+		// Cascade-delete non-core children (schemes) for every deleted AMC.
+		// Done after commit so the AMC row is already soft-deleted.
+		for _, amcID := range canDeleteAMCIDs {
+			if err := dependency.CascadeDelete(ctx, pgxPool, "masteramc", amcID, checkerBy); err != nil {
+				api.LogError("[AMC] cascade failed for %s: %v", amcID, err)
+			}
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]any{

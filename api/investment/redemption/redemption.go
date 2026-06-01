@@ -2,6 +2,7 @@ package redemption
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/internal/validation"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -142,7 +143,10 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if strings.TrimSpace(req.EntityName) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrEntityNameRequired)
+			if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{"entity_name": req.EntityName}); errMsg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
+			}
 			return
 		}
 
@@ -585,7 +589,10 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate required fields
 		if strings.TrimSpace(req.EntityName) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrEntityNameRequired)
+			if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{"entity_name": req.EntityName}); errMsg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
+			}
 			return
 		}
 		if strings.TrimSpace(req.SchemeID) == "" {

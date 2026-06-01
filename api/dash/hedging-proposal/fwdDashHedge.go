@@ -68,8 +68,8 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -193,8 +193,8 @@ func format2f(x float64) string {
 // Handler: GetForwardBookingsDashboard
 func GetForwardBookingsDashboard(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}

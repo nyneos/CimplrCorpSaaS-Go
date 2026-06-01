@@ -1,12 +1,12 @@
 package bankstatement
 
 import (
-	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/ctxutil"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -74,7 +74,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 			return
 		}
 		ctx := r.Context()
-		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
+		entityIDs := ctxutil.FromContext(ctx).EntityIDs
 		if len(entityIDs) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusUnauthorized)
 			return
@@ -179,7 +179,7 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 		}
 
 		ctx := r.Context()
-		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
+		entityIDs := ctxutil.FromContext(ctx).EntityIDs
 		if len(entityIDs) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusUnauthorized)
 			return
@@ -803,8 +803,8 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 		for _, bsid := range body.BankStatementIDs {
 			var entityID string
 			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
-				if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
-					if !apictx.IsEntityAllowed(ctx, entityID) {
+				if ids := ctxutil.FromContext(ctx).EntityIDs; len(ids) > 0 {
+					if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
@@ -965,8 +965,8 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					continue
 				}
 
-				if names := apictx.GetBankNamesFromCtx(ctx); len(names) > 0 {
-					if bankName != "" && !apictx.IsBankAllowed(ctx, bankName) {
+				if true {
+					if bankName != "" && !ctxutil.FromContext(ctx).HasApprovedBank(bankName) {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
@@ -975,8 +975,8 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 						continue
 					}
 				}
-				if ctx.Value(apictx.ApprovedBankAccountsKey) != nil {
-					if !ctxHasApprovedBankAccount(ctx, accountNumber) {
+				if len(ctxutil.FromContext(ctx).BankAccounts) > 0 {
+					if !ctxutil.FromContext(ctx).HasApprovedBankAccount(accountNumber) {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
@@ -985,7 +985,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 						continue
 					}
 				}
-				if !ctxHasApprovedCurrency(ctx, currencyCode) {
+				if !ctxutil.FromContext(ctx).HasApprovedCurrency(currencyCode) {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
 						"success":           false,
@@ -1182,8 +1182,8 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 		for _, bsid := range body.BankStatementIDs {
 			var entityID string
 			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
-				if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
-					if !apictx.IsEntityAllowed(ctx, entityID) {
+				if ids := ctxutil.FromContext(ctx).EntityIDs; len(ids) > 0 {
+					if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
@@ -1292,8 +1292,8 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 		for _, bsid := range body.BankStatementIDs {
 			var entityID string
 			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
-				if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
-					if !apictx.IsEntityAllowed(ctx, entityID) {
+				if ids := ctxutil.FromContext(ctx).EntityIDs; len(ids) > 0 {
+					if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,

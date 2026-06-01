@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -679,7 +680,6 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
-
 		// --- Step 2: Get pre-validated context values ---
 		// session := middlewares.GetSessionFromContext(r.Context())
 		// if session == nil {
@@ -785,6 +785,22 @@ func BulkDeleteCurrencyAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "mastercurrency", req.CurrencyIDs)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.CurrencyIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.CurrencyIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 
 		// Get pre-validated context values
 		// session := middlewares.GetSessionFromContext(r.Context())

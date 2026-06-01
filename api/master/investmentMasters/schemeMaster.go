@@ -900,6 +900,14 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// folioschememapping has no is_deleted column and PK is `id` (not scheme_id),
+		// so the registry cannot cascade it. Delete the mapping rows directly.
+		if len(canDeleteSchemeIDs) > 0 {
+			_, _ = pgxPool.Exec(ctx, `
+				DELETE FROM investment.folioschememapping
+				WHERE scheme_id = ANY($1)`, canDeleteSchemeIDs)
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"approved_action_ids": toApprove,
 			"deleted_schemes":     canDeleteSchemeIDs,

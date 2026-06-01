@@ -1,6 +1,7 @@
 package bankbalances
 
 import (
+	"CimplrCorpSaas/internal/ctxutil"
 	"bytes"
 	"context"
 	"errors"
@@ -322,12 +323,12 @@ func UploadBankBalancesProcess(
 			if currency != nil {
 				fmt.Println("CURRENCY:", *currency)
 			}
-			if bankName != nil && strings.TrimSpace(*bankName) != "" && !ctxHasApprovedBankName(ctx, *bankName) {
+			if bankName != nil && strings.TrimSpace(*bankName) != "" && !ctxutil.FromContext(ctx).HasApprovedBank(*bankName) {
 				vrows.Close()
 				return "", fmt.Errorf("invalid or inactive bank")
 			}
 			if accountNo != nil && strings.TrimSpace(*accountNo) != "" {
-				if !ctxHasApprovedBankAccount(ctx, *accountNo) {
+				if !ctxutil.FromContext(ctx).HasApprovedBankAccount(*accountNo) {
 					vrows.Close()
 					return "", fmt.Errorf("invalid account")
 				}
@@ -388,7 +389,7 @@ func UploadBankBalancesProcess(
 				// 	}
 				// }
 			}
-			if currency != nil && strings.TrimSpace(*currency) != "" && !ctxHasApprovedCurrency(ctx, *currency) {
+			if currency != nil && strings.TrimSpace(*currency) != "" && !ctxutil.FromContext(ctx).HasApprovedCurrency(*currency) {
 				vrows.Close()
 				return "", fmt.Errorf("invalid currency")
 			}

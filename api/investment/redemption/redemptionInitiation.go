@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1695,8 +1696,9 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Ensure we have an entity *name* for downstream SQL and account resolution.
 		entityNameScoped := strings.TrimSpace(resolvedEntity)
-		approvedNames := api.GetEntityNamesFromCtx(ctx)
-		approvedIDs := api.GetEntityIDsFromCtx(ctx)
+		scope := ctxutil.FromContext(ctx)
+		approvedNames := scope.EntityNames
+		approvedIDs := scope.EntityIDs
 		idToName := map[string]string{}
 		minLen := len(approvedIDs)
 		if len(approvedNames) < minLen {
@@ -1737,11 +1739,11 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Scope check (critical): must be within entities granted by middleware.
 		// NOTE: middleware provides BOTH entity names and entity IDs; some tables may store entity_id in `entity_name`.
 		allowed := false
-		if strings.TrimSpace(entityNameScoped) != "" && api.IsEntityAllowed(ctx, entityNameScoped) {
+		if strings.TrimSpace(entityNameScoped) != "" && (scope.HasEntityNameAccess(entityNameScoped) || scope.HasEntityAccess(entityNameScoped)) {
 			allowed = true
-		} else if strings.TrimSpace(resolvedEntity) != "" && api.IsEntityAllowed(ctx, resolvedEntity) {
+		} else if strings.TrimSpace(resolvedEntity) != "" && (scope.HasEntityNameAccess(resolvedEntity) || scope.HasEntityAccess(resolvedEntity)) {
 			allowed = true
-		} else if strings.TrimSpace(req.EntityName) != "" && api.IsEntityAllowed(ctx, req.EntityName) {
+		} else if strings.TrimSpace(req.EntityName) != "" && (scope.HasEntityNameAccess(req.EntityName) || scope.HasEntityAccess(req.EntityName)) {
 			allowed = true
 		}
 		if !allowed {

@@ -50,8 +50,8 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *sql.DB) http.HandlerFunc {
 		//     http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		//     return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
@@ -94,8 +94,8 @@ func GetPayablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		// 	return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
@@ -141,8 +141,8 @@ func GetReceivablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		// 	return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
@@ -188,8 +188,8 @@ func GetAmountByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		// 	return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
@@ -235,8 +235,8 @@ func GetBusinessUnitCurrencySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		// 	return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
@@ -304,8 +304,8 @@ func GetMaturityExpirySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		// 	return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
@@ -382,8 +382,8 @@ func GetAvgExposureMaturity(db *sql.DB) http.HandlerFunc {
 		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		// 	return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
@@ -427,8 +427,8 @@ func GetAvgExposureMaturity(db *sql.DB) http.HandlerFunc {
 // Endpoint: Maturity Expiry Count for Next 7 Days
 func GetMaturityExpiryCount7DaysFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}

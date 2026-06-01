@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -49,7 +50,7 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Validate entity access
-		if !api.IsEntityAllowed(ctx, req.EntityName) {
+		if !ctxutil.FromContext(ctx).HasEntityAccess(req.EntityName) {
 			api.RespondWithResult(w, false, "unauthorized entity")
 			return
 		}
@@ -216,7 +217,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			result := map[string]interface{}{"index": i}
 
 			// Validate entity
-			if !api.IsEntityAllowed(ctx, lim.EntityName) {
+			if !ctxutil.FromContext(ctx).HasEntityAccess(lim.EntityName) {
 				result["success"] = false
 				result["error"] = "unauthorized entity: " + lim.EntityName
 				results = append(results, result)

@@ -94,13 +94,16 @@ func LogAudit(msg string, args ...interface{}) {
 type LoggerService struct {
 	Config        map[string]interface{}
 	file          *os.File
+	dbFile        *os.File
 	mu            sync.Mutex
 	stopCh        chan struct{}
 	wg            sync.WaitGroup
 	currentLog    string
+	currentDBLog  string
 	maxFileBytes  int64
 	retentionDays int
 	folderPath    string
+	dbLogger      *log.Logger
 }
 
 func NewLoggerService(config map[string]interface{}) *LoggerService {
@@ -146,13 +149,20 @@ func (l *LoggerService) Start() error {
 	if err != nil {
 		return err
 	}
+	dbLogFile := l.nextDBLogFileName()
+	dbFile, err := os.OpenFile(dbLogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		_ = file.Close()
+		return err
+	}
 	l.file = file
+	l.dbFile = dbFile
 	l.currentLog = logFile
-
-	// Set output to both file and terminal
-	multiWriter := io.MultiWriter(file, os.Stdout)
-	log.SetOutput(multiWriter)
-	log.Println("[LoggerService] Started, writing to", logFile, "and Terminal")
+	l.currentDBLog = dbLogFile
+	l.dbLogger = log.New(dbFile, "", log.LstdFlags)
+	log.SetOutput(file)
+	log.Println("[LoggerService] Started, writing to", logFile)
+	l.dbLogger.Println("[DBLogger] Started, writing to", dbLogFile)
 
 	// background goroutine for rotation and retention
 	l.wg.Add(1)
@@ -168,7 +178,10 @@ func (l *LoggerService) Stop() error {
 	defer l.mu.Unlock()
 	if l.file != nil {
 		log.Println("[LoggerService] Stopping")
-		return l.file.Close()
+		_ = l.file.Close()
+	}
+	if l.dbFile != nil {
+		_ = l.dbFile.Close()
 	}
 	return nil
 }
@@ -176,6 +189,11 @@ func (l *LoggerService) Stop() error {
 func (l *LoggerService) nextLogFileName() string {
 	timestamp := time.Now().Format("20060102_150405")
 	return filepath.Join(l.folderPath, fmt.Sprintf("app_%s.log", timestamp))
+}
+
+func (l *LoggerService) nextDBLogFileName() string {
+	timestamp := time.Now().Format("20060102_150405")
+	return filepath.Join(l.folderPath, fmt.Sprintf("db_%s.log", timestamp))
 }
 
 func (l *LoggerService) rotateIfNeeded() error {
@@ -274,10 +292,28 @@ func (l *LoggerService) LogAudit(msg string) {
 	LogAudit("%s", msg)
 }
 
+func (l *LoggerService) LogDBf(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.dbLogger != nil {
+		l.dbLogger.Printf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
+
 var GlobalLogger *LoggerService
 
 func SetGlobalLogger(l *LoggerService) {
 	GlobalLogger = l
+}
+
+func DBLogf(format string, args ...interface{}) {
+	if GlobalLogger != nil {
+		GlobalLogger.LogDBf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
 }
 
 // Example usage in any method:

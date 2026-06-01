@@ -3,6 +3,7 @@ package bankstatement
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -341,14 +342,14 @@ func validateBankStatementAuditAccess(ctx context.Context, db *sql.DB, bankState
 		}
 		return http.StatusInternalServerError, pqUserFriendlyMessage(err)
 	}
-	if ids := api.GetEntityIDsFromCtx(ctx); len(ids) > 0 && !api.IsEntityAllowed(ctx, entityID) {
+	if ids := ctxutil.FromContext(ctx).EntityIDs; len(ids) > 0 && !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 		return http.StatusForbidden, constants.ErrNoAccessToBankStatement
 	}
 	return 0, ""
 }
 
 func validateEntityAuditAccess(ctx context.Context, db *sql.DB, entityName string) (int, string) {
-	entityIDs := api.GetEntityIDsFromCtx(ctx)
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	if len(entityIDs) == 0 {
 		return http.StatusUnauthorized, constants.ErrNoAccessibleBusinessUnit
 	}
@@ -365,7 +366,7 @@ func validateEntityAuditAccess(ctx context.Context, db *sql.DB, entityName strin
 		}
 		return http.StatusInternalServerError, pqUserFriendlyMessage(err)
 	}
-	if !api.IsEntityAllowed(ctx, entityID) {
+	if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 		return http.StatusForbidden, constants.ErrNoAccessToBankStatement
 	}
 	return 0, ""

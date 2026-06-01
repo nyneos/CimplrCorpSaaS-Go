@@ -1,6 +1,9 @@
 package dependency
 
 import (
+	"encoding/json"
+	"net/http"
+
 	"context"
 	"fmt"
 	"strings"
@@ -34,16 +37,13 @@ var DependencyGraph = map[string][]ChildCheck{
 
 	// ── Global: Bank ────────────────────────────────────────────────────────
 	"masterbank": {
-		// Master children (cascade-deletable when no core below)
+		// Bank accounts reference bank by bank_id UUID — cascade-deletable.
 		{Table: "masterbankaccount", FKCol: "bank_id", Label: "Bank Accounts",
 			IsCore: false, AuditTable: "auditactionbankaccount", AuditFKCol: "account_id"},
-		// FD sub-masters that reference bank by bank_code — cascade-deletable
-		{Schema: "investment", Table: "fd_bank_config_master", FKCol: "bank_code", Label: "FD Bank Configs",
-			IsCore: false, AuditTable: "investment.fd_audit_bank_config", AuditFKCol: "config_id"},
-		{Schema: "investment", Table: "fd_bank_rate_card_master", FKCol: "bank_code", Label: "FD Rate Cards",
-			IsCore: false, AuditTable: "investment.fd_audit_bank_rate_card", AuditFKCol: "rate_card_id"},
-		{Schema: "investment", Table: "fd_penalty_structure_master", FKCol: "bank_code", Label: "Penalty Structures",
-			IsCore: false, AuditTable: "investment.fd_audit_penalty_structure", AuditFKCol: "penalty_id"},
+		// NOTE: fd_bank_config_master, fd_bank_rate_card_master, and
+		// fd_penalty_structure_master reference banks via bank_code (a short name),
+		// NOT by bank_id UUID. The registry cannot resolve this natural-key FK.
+		// These are checked and deleted directly in the bank approve handler.
 	},
 
 	// ── Global: Currency ────────────────────────────────────────────────────
@@ -62,20 +62,15 @@ var DependencyGraph = map[string][]ChildCheck{
 	},
 
 	// ── Bank Account ────────────────────────────────────────────────────────
-	// Bank account is referenced by FD booking (core) and bank statements (core).
+	// FD bookings reference bank account by UUID (source_account_id) — correct FK.
+	// Bank statements reference by account_number (natural key, not UUID) — checked
+	// directly in the approve handler via a subquery, not via the registry.
+	// cash_transactions table does not exist in the current schema.
+	// bank_balances_manual references by account_no (natural key) — same pattern.
 	"masterbankaccount": {
-		// FD booking is CORE — blocks deletion
+		// FD booking is CORE — blocks deletion (correct UUID FK)
 		{Schema: "investment", Table: "fd_booking_request", FKCol: "source_account_id",
 			Label: "Fixed Deposit Bookings", IsCore: true},
-		// Bank statements are CORE
-		{Table: "bank_statements", FKCol: "bank_account_id",
-			Label: "Bank Statements", IsCore: true},
-		// Cash transactions are CORE
-		{Table: "cash_transactions", FKCol: "bank_account_id",
-			Label: "Cash Transactions", IsCore: true},
-		// Bank balances — cascade-deletable
-		{Table: "bank_balances", FKCol: "bank_account_id", Label: "Bank Balances",
-			IsCore: false, AuditTable: "bank_balance_audit", AuditFKCol: "balance_id"},
 	},
 
 	// ── GL Account ──────────────────────────────────────────────────────────
@@ -83,7 +78,7 @@ var DependencyGraph = map[string][]ChildCheck{
 	"masterglaccount": {
 		{Schema: "investment", Table: "accounting_journal_entry", FKCol: "gl_account_id",
 			Label: "Journal Entries", IsCore: true},
-		{Table: "cash_gl_postings", FKCol: "gl_account_id",
+		{Schema: "cimplrcorpsaas", Table: "cash_gl_postings", FKCol: "gl_account_id",
 			Label: "Cash GL Postings", IsCore: true},
 	},
 
@@ -95,9 +90,9 @@ var DependencyGraph = map[string][]ChildCheck{
 
 	// ── Investment MF: Scheme ───────────────────────────────────────────────
 	"masterscheme": {
-		{Schema: "investment", Table: "folioschememapping", FKCol: "scheme_id", Label: "Folio Mappings",
-			IsCore: false, AuditTable: "investment.auditactionfolio", AuditFKCol: "folio_id"},
-		// MF transactions are CORE
+		// NOTE: folioschememapping has no is_deleted column and PK is `id` not `folio_id`.
+		// Cannot use registry cascade — the scheme approve handler deletes mappings directly.
+		// MF transactions are CORE — block deletion
 		{Schema: "investment", Table: "investment_initiation", FKCol: "scheme_id",
 			Label: "MF Initiation Records", IsCore: true},
 		{Schema: "investment", Table: "investment_confirmation", FKCol: "scheme_id",
@@ -166,22 +161,22 @@ var DependencyGraph = map[string][]ChildCheck{
 
 	// ── Cash: CashFlow Category ─────────────────────────────────────────────
 	"mastercashflowcategory": {
-		{Table: "cash_transactions", FKCol: "category_id", Label: "Cash Transactions", IsCore: true},
+		{Schema: "cimplrcorpsaas", Table: "cash_transactions", FKCol: "category_id", Label: "Cash Transactions", IsCore: true},
 	},
 
 	// ── Cash: Counterparty ──────────────────────────────────────────────────
 	"mastercounterparty": {
-		{Table: "cash_transactions", FKCol: "counterparty_id", Label: "Cash Transactions", IsCore: true},
+		{Schema: "cimplrcorpsaas", Table: "cash_transactions", FKCol: "counterparty_id", Label: "Cash Transactions", IsCore: true},
 	},
 
 	// ── Cash: Payable/Receivable Type ───────────────────────────────────────
 	"masterpayablereceivabletype": {
-		{Table: "cash_transactions", FKCol: "type_id", Label: "Cash Transactions", IsCore: true},
+		{Schema: "cimplrcorpsaas", Table: "cash_transactions", FKCol: "type_id", Label: "Cash Transactions", IsCore: true},
 	},
 
 	// ── Cash: Cost/Profit Center ────────────────────────────────────────────
 	"mastercostprofitcenter": {
-		{Table: "cash_transactions", FKCol: "centre_id", Label: "Cash Transactions", IsCore: true},
+		{Schema: "cimplrcorpsaas", Table: "cash_transactions", FKCol: "centre_id", Label: "Cash Transactions", IsCore: true},
 	},
 
 	// ── Investment: Holiday Calendar ────────────────────────────────────────
@@ -327,4 +322,98 @@ func writeAuditRow(ctx context.Context, db *pgxpool.Pool, auditTable, fkCol, rec
 		auditTable, fkCol,
 	)
 	_, _ = db.Exec(ctx, q, recordID, deletedBy)
+}
+
+// CheckBulkBlockers verifies if a list of IDs have core blockers.
+func CheckBulkBlockers(ctx context.Context, db *pgxpool.Pool, resourceType string, ids []string) []map[string]interface{} {
+	var blocked []map[string]interface{}
+	for _, id := range ids {
+		blockers, _ := HasCoreBelow(ctx, db, resourceType, id)
+		if len(blockers) > 0 {
+			blocked = append(blocked, map[string]interface{}{
+				"id":         id,
+				"blocked_by": BlockersSummary(blockers),
+			})
+		}
+	}
+	return blocked
+}
+
+// GetPendingDeleteIDs filters requested IDs to only those pending delete.
+func GetPendingDeleteIDs(ctx context.Context, db *pgxpool.Pool, auditTable, idCol string, reqIDs []string) []string {
+	if len(reqIDs) == 0 {
+		return nil
+	}
+	q := fmt.Sprintf(`SELECT DISTINCT %s::text FROM %s WHERE %s::text = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL'`, idCol, auditTable, idCol)
+	rows, err := db.Query(ctx, q, reqIDs)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+type BulkInterceptor struct {
+	http.ResponseWriter
+	blocked []map[string]interface{}
+	status  int
+}
+
+func NewBulkResponseInterceptor(w http.ResponseWriter, blocked []map[string]interface{}) *BulkInterceptor {
+	return &BulkInterceptor{ResponseWriter: w, blocked: blocked, status: http.StatusOK}
+}
+
+func (i *BulkInterceptor) WriteHeader(status int) {
+	i.status = status
+	// Defer writing header until Write is called so we can change status if needed
+}
+
+func (i *BulkInterceptor) Write(b []byte) (int, error) {
+	if len(i.blocked) > 0 && len(b) > 0 && b[0] == '{' {
+		var resp map[string]interface{}
+		if err := json.Unmarshal(b, &resp); err == nil {
+			resp["blocked"] = i.blocked
+			resp["error"] = "One or more records were skipped due to existing dependencies."
+
+			// If nothing was created, updated, or deleted, consider it a failure
+			hasSuccess := false
+			if v, ok := resp["created"]; ok {
+				if arr, ok := v.([]interface{}); ok && len(arr) > 0 {
+					hasSuccess = true
+				}
+			}
+			if v, ok := resp["updated"]; ok {
+				if arr, ok := v.([]interface{}); ok && len(arr) > 0 {
+					hasSuccess = true
+				}
+			}
+			if v, ok := resp["deleted"]; ok {
+				if arr, ok := v.([]interface{}); ok && len(arr) > 0 {
+					hasSuccess = true
+				}
+			}
+			if v, ok := resp["results"]; ok {
+				if arr, ok := v.([]interface{}); ok && len(arr) > 0 {
+					hasSuccess = true
+				}
+			}
+
+			if !hasSuccess {
+				resp["success"] = false
+			}
+
+			newBytes, _ := json.Marshal(resp)
+			i.ResponseWriter.WriteHeader(http.StatusOK) // Always return 200 to avoid UI network error toast
+			return i.ResponseWriter.Write(newBytes)
+		}
+	}
+	i.ResponseWriter.WriteHeader(i.status)
+	return i.ResponseWriter.Write(b)
 }

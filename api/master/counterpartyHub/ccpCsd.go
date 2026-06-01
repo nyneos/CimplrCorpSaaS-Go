@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/dependency"
 	"context"
 	"encoding/json"
 	"errors"
@@ -346,6 +347,23 @@ func BulkApproveCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE approvals only
+		pendingDel := dependency.GetPendingDeleteIDs(r.Context(), pgxPool, "apibox.audit_ccp_csd", "ccp_csd_id", req.CcpCsdIDs)
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "masterccpcsd", pendingDel)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.CcpCsdIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.CcpCsdIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 		if len(req.CcpCsdIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCCPCSDIDsProvided)
 			return
@@ -474,6 +492,22 @@ func BulkDeleteCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "masterccpcsd", req.CcpCsdIDs)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.CcpCsdIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.CcpCsdIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 		if len(req.CcpCsdIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCCPCSDIDsProvided)
 			return

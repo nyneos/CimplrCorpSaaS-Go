@@ -1,9 +1,9 @@
 package forwards
 
 import (
-	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
+	"CimplrCorpSaas/internal/ctxutil"
 	"bytes"
 	"context"
 	"database/sql"
@@ -242,8 +242,9 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// We no longer enforce a strict magnitude limit here; DB has unlimited numeric precision.
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
@@ -348,8 +349,9 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
@@ -429,8 +431,9 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoFilesUploaded})
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
@@ -744,8 +747,9 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoFilesUploaded})
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return

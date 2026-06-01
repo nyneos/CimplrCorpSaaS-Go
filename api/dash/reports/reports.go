@@ -64,8 +64,8 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// User verification via middleware
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
@@ -354,8 +354,8 @@ func GetLinkedSummaryByCategory(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Authorized business units from middleware
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, `{constants.ValueError:constants.ErrNoAccessibleBusinessUnit}`, http.StatusForbidden)
 			return
 		}

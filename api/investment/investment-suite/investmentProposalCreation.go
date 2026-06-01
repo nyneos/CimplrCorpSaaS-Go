@@ -3,6 +3,7 @@ package investmentsuite
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1222,7 +1223,10 @@ func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 
 		entityName := strings.TrimSpace(req.EntityName)
 		if entityName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrEntityNameRequired)
+			if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{"entity_name": req.EntityName}); errMsg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
+			}
 			return
 		}
 

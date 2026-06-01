@@ -1099,6 +1099,28 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			found[id] = true
 		}
 
+		// Block delete request if any penalty structure is referenced by live FD bookings
+		var deleteBlockers []map[string]interface{}
+		for pid := range found {
+			blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_penalty_structure_master", pid)
+			if len(blockers) > 0 {
+				deleteBlockers = append(deleteBlockers, map[string]interface{}{
+					"penalty_id": pid,
+					"blocked_by": dependency.BlockersSummary(blockers),
+				})
+			}
+		}
+		if len(deleteBlockers) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Cannot request deletion: one or more items are referenced by live FD bookings.",
+				"blocked": deleteBlockers,
+			})
+			return
+		}
+
 		var auditValues []string
 		var auditArgs []interface{}
 		var errorsList []map[string]interface{}

@@ -44,8 +44,8 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 // Endpoint: Top Currencies from Headers
 func GetTopCurrenciesFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
@@ -102,8 +102,8 @@ func GetTopCurrenciesFromHeaders(db *sql.DB) http.HandlerFunc {
 // Endpoint: Count of Forward Bookings Maturing Today
 func GetForwardBookingsMaturingTodayCount(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
@@ -125,8 +125,8 @@ func GetForwardBookingsMaturingTodayCount(db *sql.DB) http.HandlerFunc {
 
 func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
@@ -204,8 +204,8 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 
 func GetMaturityBucketsByCurrencyPair(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}

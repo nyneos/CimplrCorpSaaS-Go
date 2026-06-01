@@ -50,7 +50,7 @@ func callerContext(ctx context.Context) (buNames []string, isAdmin bool) {
 	if v, ok := ctx.Value("is_admin_override").(bool); ok && v {
 		isAdmin = true
 	}
-	if names, ok := ctx.Value(api.BusinessUnitsKey).([]string); ok {
+	if names := api.GetEntityNamesFromCtx(ctx); len(names) > 0 {
 		buNames = names
 	}
 	return

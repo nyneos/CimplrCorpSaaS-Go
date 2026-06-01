@@ -1176,6 +1176,28 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		verifyRows.Close()
 
+		// Block delete request if any day count convention is referenced by live FD bookings
+		var deleteBlockers []map[string]interface{}
+		for _, code := range validCodes {
+			blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_day_count_convention_master", code)
+			if len(blockers) > 0 {
+				deleteBlockers = append(deleteBlockers, map[string]interface{}{
+					"day_count_code": code,
+					"blocked_by":     dependency.BlockersSummary(blockers),
+				})
+			}
+		}
+		if len(deleteBlockers) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Cannot request deletion: one or more items are referenced by live FD bookings.",
+				"blocked": deleteBlockers,
+			})
+			return
+		}
+
 		if len(validCodes) > 0 {
 			auditValues := make([]string, len(validCodes))
 			auditArgs := make([]interface{}, 0, len(validCodes)*3)
@@ -1316,11 +1338,11 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			constants.ValueSuccess: true,
-			"approved_count":       len(req.DayCountCodes),
+			"approved_count":       len(req.DayCountCodes) - len(blockedItems),
 			"checker":              userEmail,
 			"blocked":              blockedItems,
 		})
-		api.LogInfo("DayCount bulk approve: %d approved by %s", len(req.DayCountCodes), userEmail)
+		api.LogInfo("DayCount bulk approve: %d approved by %s", len(req.DayCountCodes)-len(blockedItems), userEmail)
 	}
 }
 

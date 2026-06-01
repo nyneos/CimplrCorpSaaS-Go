@@ -12,6 +12,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -222,6 +223,13 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if fdStatus != constants.StatusActive && fdStatus != "MATURED" {
 			api.RespondWithError(w, http.StatusBadRequest, "FD must be ACTIVE or MATURED")
+			return
+		}
+
+		receiptScope := ctxutil.FromContext(r.Context())
+		if !receiptScope.HasEntityAccess(entityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
 			return
 		}
 		if errMsg := checkFDDates(fdStart, fdMaturity,
@@ -465,6 +473,13 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			req.ReceiptID).Scan(&entityID, &fdIDForReceipt, &currentReceiptDate, &currentPeriodStart, &currentPeriodEnd)
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, constants.ReceiptNotFound)
+			return
+		}
+
+		updateReceiptScope := ctxutil.FromContext(r.Context())
+		if !updateReceiptScope.HasEntityAccess(entityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
 			return
 		}
 

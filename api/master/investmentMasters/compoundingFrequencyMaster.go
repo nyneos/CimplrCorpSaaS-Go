@@ -1105,6 +1105,28 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			validIDs = append(validIDs, id)
 		}
 
+		// Block delete request if any compounding frequency is referenced by live FD bookings
+		var deleteBlockers []map[string]interface{}
+		for _, id := range validIDs {
+			blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_compounding_frequency_master", id)
+			if len(blockers) > 0 {
+				deleteBlockers = append(deleteBlockers, map[string]interface{}{
+					"frequency_id": id,
+					"blocked_by":   dependency.BlockersSummary(blockers),
+				})
+			}
+		}
+		if len(deleteBlockers) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Cannot request deletion: one or more items are referenced by live FD bookings.",
+				"blocked": deleteBlockers,
+			})
+			return
+		}
+
 		if len(validIDs) > 0 {
 			auditValues := make([]string, len(validIDs))
 			auditArgs := make([]interface{}, 0, len(validIDs)*3)
@@ -1260,12 +1282,12 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		response := map[string]interface{}{
 			constants.ValueSuccess: true,
-			"approved_count":       len(req.FrequencyIDs),
+			"approved_count":       len(req.FrequencyIDs) - len(blockedItems),
 			"checker":              userEmail,
 			"blocked":              blockedItems,
 		}
 		api.RespondWithPayload(w, true, "", response)
-		api.LogInfo("Bulk approval completed: %d frequency IDs approved by %s", len(req.FrequencyIDs), userEmail)
+		api.LogInfo("Bulk approval completed: %d frequency IDs approved by %s", len(req.FrequencyIDs)-len(blockedItems), userEmail)
 	}
 }
 

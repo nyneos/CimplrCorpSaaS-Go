@@ -2,9 +2,9 @@ package allMaster
 
 import (
 	api "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
-	"CimplrCorpSaas/api/constants"
 	dependency "CimplrCorpSaas/internal/dependency"
 	"encoding/json"
 	"fmt"
@@ -1109,6 +1109,22 @@ func BulkDeleteBankAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "masterbank", req.BankIDs)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.BankIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.BankIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 
 		// Get pre-validated context values
 		// session := middlewares.GetSessionFromContext(r.Context())
@@ -1208,7 +1224,6 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
-
 		// Get pre-validated context values
 		// logger.LogInfo("Approving bank audit actions for user: %s, bank_ids: %v", session.Name, req.BankIDs)
 		// if session == nil {
@@ -1225,7 +1240,7 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if checkerBy == "" {
 			checkerBy = session.Name
 		}
-		// First, handle records with processing_status = 'PENDING_DELETE_APPROVAL' (Soft Delete)
+		// Handle records with PENDING_DELETE_APPROVAL — blockers were enforced at delete-request time.
 		delQuery := `UPDATE auditactionbank SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2 WHERE bank_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, bank_id`
 		delRows, delErr := pgxPool.Query(r.Context(), delQuery, checkerBy, req.Comment, pq.Array(req.BankIDs))
 		var deleted []string
@@ -1239,23 +1254,11 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				bankIDsToDelete = append(bankIDsToDelete, bankID)
 			}
 		}
-		// Filter: block banks that still have active children (bank accounts, FD configs, etc.)
-		var canDeleteBankIDs []string
-		var blockedBanks []map[string]interface{}
 		for _, bankID := range bankIDsToDelete {
-			blockers, _ := dependency.HasCoreBelow(r.Context(), pgxPool, "masterbank", bankID)
-			if len(blockers) > 0 {
-				blockedBanks = append(blockedBanks, map[string]interface{}{
-					"bank_id":    bankID,
-					"blocked_by": dependency.BlockersSummary(blockers),
-				})
-			} else {
-				_ = dependency.CascadeDelete(r.Context(), pgxPool, "masterbank", bankID, checkerBy)
-				canDeleteBankIDs = append(canDeleteBankIDs, bankID)
-			}
+			_ = dependency.CascadeDelete(r.Context(), pgxPool, "masterbank", bankID, checkerBy)
 		}
-		if len(canDeleteBankIDs) > 0 {
-			_, _ = pgxPool.Exec(r.Context(), `UPDATE masterbank SET is_deleted = true WHERE bank_id = ANY($1)`, pq.Array(canDeleteBankIDs))
+		if len(bankIDsToDelete) > 0 {
+			_, _ = pgxPool.Exec(r.Context(), `UPDATE masterbank SET is_deleted = true WHERE bank_id = ANY($1)`, pq.Array(bankIDsToDelete))
 		}
 
 		// Then, approve the rest by bank_ids
@@ -1278,7 +1281,6 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			constants.ValueSuccess: true,
 			"updated":              updated,
 			"deleted":              deleted,
-			"blocked":              blockedBanks,
 		})
 	}
 }

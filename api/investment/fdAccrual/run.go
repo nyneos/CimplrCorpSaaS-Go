@@ -13,6 +13,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -102,6 +103,13 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		scope := ctxutil.FromContext(r.Context())
+		if !scope.HasEntityAccess(req.EntityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
 			return
 		}
 

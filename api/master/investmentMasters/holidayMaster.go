@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	dependency "CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
 )
 
@@ -1525,6 +1526,23 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, 400, constants.ErrInvalidJSONShort)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE approvals only
+		pendingDel := dependency.GetPendingDeleteIDs(r.Context(), pgxPool, "investment.auditactioncalendar", "calendar_id", req.CalendarIDs)
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "mastercalendar", pendingDel)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.CalendarIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.CalendarIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 
 		checkerBy := ""
 		for _, s := range auth.GetActiveSessions() {

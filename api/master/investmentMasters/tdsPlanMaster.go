@@ -1197,6 +1197,28 @@ func DeleteTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			validIDs = append(validIDs, id)
 		}
 
+		// Block delete request if any TDS plan is referenced by live FD bookings
+		var deleteBlockers []map[string]interface{}
+		for _, id := range validIDs {
+			blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_tds_plan_master", id)
+			if len(blockers) > 0 {
+				deleteBlockers = append(deleteBlockers, map[string]interface{}{
+					"tds_plan_id": id,
+					"blocked_by":  dependency.BlockersSummary(blockers),
+				})
+			}
+		}
+		if len(deleteBlockers) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Cannot request deletion: one or more items are referenced by live FD bookings.",
+				"blocked": deleteBlockers,
+			})
+			return
+		}
+
 		if len(validIDs) > 0 {
 			auditValues := make([]string, len(validIDs))
 			auditArgs := make([]interface{}, 0, len(validIDs)*3)
@@ -1377,12 +1399,12 @@ func BulkApproveTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		response := map[string]interface{}{
 			constants.ValueSuccess: true,
-			"approved_count":       len(req.TdsIDs),
+			"approved_count":       len(req.TdsIDs) - len(blockedItems),
 			"checker":              userEmail,
 			"blocked":              blockedItems,
 		}
 		api.RespondWithPayload(w, true, "", response)
-		api.LogInfo("Bulk approval completed: %d tds plan IDs approved by %s", len(req.TdsIDs), userEmail)
+		api.LogInfo("Bulk approval completed: %d tds plan IDs approved by %s", len(req.TdsIDs)-len(blockedItems), userEmail)
 	}
 }
 

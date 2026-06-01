@@ -139,7 +139,7 @@ func getOverviewAUMCache(key string) ([]InvestmentDetail, bool) {
 	overviewDataCache.Lock()
 	defer overviewDataCache.Unlock()
 	entry, ok := overviewDataCache.aum[key]
-	if !ok || time.Now().After(entry.expires) {
+	if time.Now().After(entry.expires) {
 		if ok {
 			delete(overviewDataCache.aum, key)
 		}
@@ -162,7 +162,7 @@ func getOverviewTransactionCache(key string) ([]TransactionDetail, bool) {
 	overviewDataCache.Lock()
 	defer overviewDataCache.Unlock()
 	entry, ok := overviewDataCache.tx[key]
-	if !ok || time.Now().After(entry.expires) {
+	if time.Now().After(entry.expires) {
 		if ok {
 			delete(overviewDataCache.tx, key)
 		}

@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -158,7 +159,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Validate entity scope
-			if !api.IsEntityAllowed(ctx, req.EntityName) {
+			if !ctxutil.FromContext(ctx).HasEntityAccess(req.EntityName) {
 				api.RespondWithResult(w, false, "unauthorized entity: "+req.EntityName)
 				return
 			}
@@ -328,7 +329,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate sweep scope against prevalidation context
 		if strings.TrimSpace(entityName) != "" {
-			if !api.IsEntityAllowed(ctx, entityName) {
+			if !ctxutil.FromContext(ctx).HasEntityAccess(entityName) {
 				api.RespondWithResult(w, false, "unauthorized entity")
 				return
 			}
@@ -624,10 +625,10 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if targetBank != "" && !api.IsBankAllowed(ctx, targetBank) {
 				continue
 			}
-			if sourceAccount != "" && !ctxHasApprovedBankAccount(ctx, sourceAccount) {
+			if sourceAccount != "" && !ctxutil.FromContext(ctx).HasApprovedBankAccount(sourceAccount) {
 				continue
 			}
-			if targetAccount != "" && !ctxHasApprovedBankAccount(ctx, targetAccount) {
+			if targetAccount != "" && !ctxutil.FromContext(ctx).HasApprovedBankAccount(targetAccount) {
 				continue
 			}
 
@@ -1482,7 +1483,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				// Validate entity scope
-				if !api.IsEntityAllowed(ctx, init.EntityName) {
+				if !ctxutil.FromContext(ctx).HasEntityAccess(init.EntityName) {
 					tx.Rollback(ctx)
 					api.RespondWithResult(w, false, "unauthorized entity: "+init.EntityName)
 					return
@@ -1582,7 +1583,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				// Validate entity scope
-				if !api.IsEntityAllowed(ctx, entityName.String) {
+				if !ctxutil.FromContext(ctx).HasEntityAccess(entityName.String) {
 					tx.Rollback(ctx)
 					api.RespondWithResult(w, false, "unauthorized entity for sweep: "+sweepID)
 					return

@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/utils"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	crand "crypto/rand"
 	"database/sql"
@@ -142,7 +143,7 @@ func entityIDSet(entityIDs []string) map[string]bool {
 }
 
 func prevalidationEntityScope(ctx context.Context) ([]string, bool) {
-	entityIDs := api.GetEntityIDsFromCtx(ctx)
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	isAdminOverride, _ := ctx.Value("is_admin_override").(bool)
 	return entityIDs, isAdminOverride
 }
@@ -202,7 +203,7 @@ func upsertActiveUserRole(exec sqlExecutor, userID, roleName string) error {
 		return err
 	}
 
-	// 1. Clean up any soft-deleted roles for this user first. 
+	// 1. Clean up any soft-deleted roles for this user first.
 	// This prevents the unique constraint error when updating the active row to a role_id that was previously soft-deleted.
 	if _, err := exec.Exec(`DELETE FROM user_roles WHERE user_id = $1 AND is_deleted = true`, userID); err != nil {
 		return err
