@@ -490,6 +490,90 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
+		// ── BOD: 5c. Active FD list with upcoming interest (per-FD detail) ──────
+		// Powers the "Expected Interest" drilldown — returns one row per active
+		// FD with the sum of all upcoming (uncleared) interest cashflows.
+		run("active_fd_list", func(ctx context.Context) (interface{}, error) {
+			rows, err := pool.Query(ctx, `
+				SELECT
+				  m.fd_id,
+				  COALESCE(m.bank_name, m.bank_id, '')              AS bank_name,
+				  COALESCE(m.entity_name, '')                        AS entity_name,
+				  COALESCE(m.entity_id, '')                          AS entity_id,
+				  COALESCE(m.principal_amount, 0)                    AS principal,
+				  COALESCE(m.interest_rate, 0)                       AS interest_rate,
+				  COALESCE(TO_CHAR(m.start_date,'YYYY-MM-DD'),'')    AS start_date,
+				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'') AS maturity_date,
+				  COALESCE(m.fd_status,'')                           AS fd_status,
+				  COALESCE((
+				    SELECT SUM(
+				      CASE
+				        WHEN cf2.event_type = 'INTEREST_RECEIPT' THEN COALESCE(cf2.net_cash_flow, cf2.interest_accrued, 0)
+				        WHEN cf2.event_type = 'MATURITY'         THEN COALESCE(cf2.interest_accrued, 0)
+				        ELSE 0
+				      END
+				    )
+				    FROM investment.fd_cashflow_schedule cf2
+				    WHERE cf2.fd_id = m.fd_id
+				      AND cf2.is_deleted = false
+				      AND cf2.event_date >= CURRENT_DATE
+				      AND cf2.event_type IN ('INTEREST_RECEIPT','MATURITY')
+				      AND COALESCE(cf2.receipt_cleared, false) = false
+				      AND COALESCE(cf2.posting_status,'') <> 'POSTED'
+				  ), 0)                                               AS upcoming_interest,
+				  COALESCE((
+				    SELECT COUNT(*)
+				    FROM investment.fd_cashflow_schedule cf3
+				    WHERE cf3.fd_id = m.fd_id
+				      AND cf3.is_deleted = false
+				      AND cf3.event_date >= CURRENT_DATE
+				      AND cf3.event_type IN ('INTEREST_RECEIPT','MATURITY')
+				      AND COALESCE(cf3.receipt_cleared, false) = false
+				  ), 0)::int                                          AS cashflow_events
+				FROM investment.fd_master m
+				WHERE m.is_deleted = false
+				  AND m.fd_status = 'ACTIVE'
+				  AND ($1::text='' OR m.entity_id=$1)
+				ORDER BY m.principal_amount DESC NULLS LAST
+				LIMIT 200`, entityFilter)
+			if err != nil {
+				api.LogError("[BodEodDash] active_fd_list query error: %v", err)
+				return []interface{}{}, nil
+			}
+			defer rows.Close()
+
+			type fdRow struct {
+				FDID             string  `json:"fd_id"`
+				BankName         string  `json:"bank_name"`
+				EntityName       string  `json:"entity_name"`
+				EntityID         string  `json:"entity_id"`
+				Principal        float64 `json:"principal"`
+				InterestRate     float64 `json:"interest_rate"`
+				StartDate        string  `json:"start_date"`
+				MaturityDate     string  `json:"maturity_date"`
+				FDStatus         string  `json:"fd_status"`
+				UpcomingInterest float64 `json:"upcoming_interest"`
+				CashflowEvents   int     `json:"cashflow_events"`
+			}
+			out := []fdRow{}
+			for rows.Next() {
+				var r fdRow
+				if err2 := rows.Scan(
+					&r.FDID, &r.BankName, &r.EntityName, &r.EntityID,
+					&r.Principal, &r.InterestRate, &r.StartDate, &r.MaturityDate,
+					&r.FDStatus, &r.UpcomingInterest, &r.CashflowEvents,
+				); err2 != nil {
+					api.LogError("[BodEodDash] active_fd_list scan error: %v", err2)
+					continue
+				}
+				r.Principal = fdRound(r.Principal, 2)
+				r.InterestRate = fdRound(r.InterestRate, 4)
+				r.UpcomingInterest = fdRound(r.UpcomingInterest, 2)
+				out = append(out, r)
+			}
+			return out, nil
+		})
+
 		// ── BOD: 6. Today's action list (booking + closure tasks) ─────────────
 		run("action_list", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
@@ -1241,6 +1325,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"eod_checklist":            get("eod_checklist"),
 			"bank_concentration":       get("bank_concentration"),
 			"active_interest_pipeline": get("active_interest_pipeline"),
+			"active_fd_list":           get("active_fd_list"),
 		}
 
 		api.RespondWithPayload(w, true, "", payload)
