@@ -141,7 +141,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND m.maturity_date = $1::date
 				  AND ($2::text='' OR m.entity_id=$2)
 				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
-				  AND ($4::text='' OR UPPER(COALESCE(m.fd_type,''))=UPPER($4))
+				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))
 				  AND ($5::text='' OR UPPER(COALESCE(m.frequency_id,''))=UPPER($5))
 				ORDER BY m.principal_amount DESC NULLS LAST
 				LIMIT 200`, today, entityFilter, bankFilter, fdTypeFilter, interestFreqFilter)
@@ -210,7 +210,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND m.maturity_date <= $2::date
 				  AND ($3::text='' OR m.entity_id=$3)
 				  AND ($4::text='' OR m.bank_id=$4 OR m.bank_name=$4)
-				  AND ($5::text='' OR UPPER(COALESCE(m.fd_type,''))=UPPER($5))
+				  AND ($5::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($5))
 				  AND ($6::text='' OR UPPER(COALESCE(m.frequency_id,''))=UPPER($6))
 				ORDER BY m.maturity_date ASC, m.principal_amount DESC NULLS LAST
 				LIMIT 200`, today, threeDaysOut, entityFilter, bankFilter, fdTypeFilter, interestFreqFilter)
@@ -552,7 +552,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND m.fd_status = 'ACTIVE'
 				  AND ($1::text='' OR m.entity_id=$1)
 				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)
-				  AND ($3::text='' OR UPPER(COALESCE(m.fd_type,''))=UPPER($3))
+				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($3))
 				  AND ($4::text='' OR UPPER(COALESCE(m.frequency_id,''))=UPPER($4))
 				ORDER BY m.principal_amount DESC NULLS LAST
 				LIMIT 200`, entityFilter, bankFilter, fdTypeFilter, interestFreqFilter)
@@ -1149,7 +1149,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND m.fd_status IN ('ACTIVE','PENDING_ACTIVATION')
 				  AND ($1::text='' OR m.entity_id=$1)
 				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)
-				  AND ($3::text='' OR UPPER(COALESCE(m.fd_type,''))=UPPER($3))
+				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($3))
 				  AND ($4::text='' OR UPPER(COALESCE(m.frequency_id,''))=UPPER($4))
 				GROUP BY m.bank_name, m.bank_id
 				ORDER BY total_principal DESC
