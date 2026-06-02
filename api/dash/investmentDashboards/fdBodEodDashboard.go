@@ -546,7 +546,8 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				      AND cf3.event_date >= CURRENT_DATE
 				      AND cf3.event_type IN ('INTEREST_RECEIPT','MATURITY')
 				      AND COALESCE(cf3.receipt_cleared, false) = false
-				  ), 0)::int                                          AS cashflow_events
+				  ), 0)::int                                          AS cashflow_events,
+				  COALESCE(m.tenure_days, 0)                         AS tenure_days
 				FROM investment.fd_master m
 				WHERE m.is_deleted = false
 				  AND m.fd_status = 'ACTIVE'
@@ -574,6 +575,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FDStatus         string  `json:"fd_status"`
 				UpcomingInterest float64 `json:"upcoming_interest"`
 				CashflowEvents   int     `json:"cashflow_events"`
+				TenureDays       int     `json:"tenure_days"`
 			}
 			out := []fdRow{}
 			for rows.Next() {
@@ -581,7 +583,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				if err2 := rows.Scan(
 					&r.FDID, &r.BankName, &r.EntityName, &r.EntityID,
 					&r.Principal, &r.InterestRate, &r.StartDate, &r.MaturityDate,
-					&r.FDStatus, &r.UpcomingInterest, &r.CashflowEvents,
+					&r.FDStatus, &r.UpcomingInterest, &r.CashflowEvents, &r.TenureDays,
 				); err2 != nil {
 					api.LogError("[BodEodDash] active_fd_list scan error: %v", err2)
 					continue

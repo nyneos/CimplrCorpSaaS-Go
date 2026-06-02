@@ -1,4 +1,4 @@
-// Package investmentdashboards — FD CFO Dashboard
+// Package investmentdashboards - FD CFO Dashboard
 //
 // POST /dash/investment/fd/cfo-dashboard
 //
@@ -10,10 +10,10 @@
 // Request:
 //
 //	{
-//	  "user_id":   "...",          // optional — for session scoping
+//	  "user_id":   "...",          // optional - for session scoping
 //	  "entity_id": "",             // "" = all entities
 //	  "currency":  "INR",         // default INR
-//	  "period":    "MTD"          // MTD | QTD | YTD — controls interest roll-up
+//	  "period":    "MTD"          // MTD | QTD | YTD - controls interest roll-up
 //	}
 //
 // Response shape mirrors the spec exactly:
@@ -52,14 +52,14 @@ type fdCfoDashRequest struct {
 	EntityID          string `json:"entity_id"`
 	Currency          string `json:"currency"`
 	Period            string `json:"period"`     // MTD | QTD | YTD | CUSTOM
-	StartDate         string `json:"start_date"` // YYYY-MM-DD — used when Period=="CUSTOM"
-	EndDate           string `json:"end_date"`   // YYYY-MM-DD — used when Period=="CUSTOM"
+	StartDate         string `json:"start_date"` // YYYY-MM-DD - used when Period=="CUSTOM"
+	EndDate           string `json:"end_date"`   // YYYY-MM-DD - used when Period=="CUSTOM"
 	AsOnDate          string `json:"as_on_date"` // optional snapshot date (default = today)
 	Bank              string `json:"bank"`
 	FDStatus          string `json:"fd_status"`          // ACTIVE | NEAR_MATURITY | MATURED | ROLLED_OVER | PREMATURELY_CLOSED
 	FDType            string `json:"fd_type"`            // SIMPLE | COMPOUNDING
 	InterestFrequency string `json:"interest_frequency"` // PAYOUT | COMPOUNDING
-	LadderView        string `json:"ladder_view"`        // WEEK | MONTH | YEAR — Maturity Ladder bucket size (default WEEK)
+	LadderView        string `json:"ladder_view"`        // WEEK | MONTH | YEAR - Maturity Ladder bucket size (default WEEK)
 }
 
 // roundN rounds v to n decimal places.
@@ -720,7 +720,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Build optional entity filter SQL fragment (used across many queries)
 		entityFilter := req.EntityID
-		// Surface the fd_status filter early — `total_exposure` (and other
+		// Surface the fd_status filter early - `total_exposure` (and other
 		// early-registered widgets) need access to it via closure.
 		fdStatusFilter := req.FDStatus
 
@@ -746,7 +746,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 1. total_exposure ─────────────────────────────────────────────────
 		// Sum principal across every non-deleted FD in scope. We deliberately
-		// do *not* filter by fd_status here — the FD register tile shows
+		// do *not* filter by fd_status here - the FD register tile shows
 		// "X instruments in scope" using the same population, and any
 		// status-narrowing the user wants is already applied through the
 		// dedicated fd_status filter ($2). Keeping these consistent prevents
@@ -972,7 +972,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 5. exceptions (Policy Exceptions Summary — TC-74) ─────────────────
+		// ── 5. exceptions (Policy Exceptions Summary - TC-74) ─────────────────
 		// Aggregates two real exception sources so the CFO sees a true "policy
 		// exception" picture (count + value at risk):
 		//
@@ -981,7 +981,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		//
 		//   b) Policy variance exceptions raised by the variance engine
 		//      (public.variance_log, module_code LIKE 'FD_%' AND status='OPEN')
-		//      — these capture rate / amount / tenor / date breaches the user
+		//      - these capture rate / amount / tenor / date breaches the user
 		//      hasn't yet resolved.
 		//
 		// "value" = principal at risk across distinct FDs that have at least
@@ -1176,7 +1176,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				brRows.Close()
 			}
 
-			// per-FD items (HIGH first) — joined through closure/booking so the
+			// per-FD items (HIGH first) - joined through closure/booking so the
 			// drill-down drawer can populate real FDs instead of an empty list.
 			type vrItem struct {
 				VarianceID    string  `json:"variance_id"`
@@ -1393,7 +1393,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 7. interest_trend (daily / monthly / yearly — cashflow schedule + ledger fallback)
+		// ── 7. interest_trend (daily / monthly / yearly - cashflow schedule + ledger fallback)
 		run("interest_trend", func(ctx context.Context) (interface{}, error) {
 			daily, dErr := buildInterestTrendSeries(ctx, pool, entityFilter, "DAY")
 			if dErr != nil {
@@ -1416,7 +1416,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		// ── 8b. yield_nature (closure profile chart) ────────────────────────────
-		// Count posted closures by fd_master.fd_status — matches:
+		// Count posted closures by fd_master.fd_status - matches:
 		//   MATURED → Maturity, ROLLED_OVER → Rollover, PREMATURELY_CLOSED → Premature
 		// Only rows with approval_status POSTED (posted cimplr/legacy closure).
 		run("yield_nature", func(ctx context.Context) (interface{}, error) {
@@ -1520,7 +1520,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return out, nil
 		})
 
-		// ── 9. governance — approvals + period closing (5 categories) ─────────
+		// ── 9. governance - approvals + period closing (5 categories) ─────────
 		run("governance", func(ctx context.Context) (interface{}, error) {
 			return buildGovernanceBundle(ctx, pool, entityFilter, periodStart), nil
 		})
@@ -1546,7 +1546,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		case "PREMATURELY_CLOSED":
 			dbStatusFilter = "PREMATURELY_CLOSED"
 		case "CLOSED":
-			// Legacy UI alias — treat as prematurely closed
+			// Legacy UI alias - treat as prematurely closed
 			dbStatusFilter = "PREMATURELY_CLOSED"
 		}
 
@@ -1662,7 +1662,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				interestFreqFilter,
 			)
 			if err != nil {
-				// Log loudly — `run()` swallows the error and a silent failure
+				// Log loudly - `run()` swallows the error and a silent failure
 				// shows up on the frontend as a mysterious `"fd_list": null`.
 				api.LogError("[CfoDash] fd_list query error: %v", err)
 				return nil, err
