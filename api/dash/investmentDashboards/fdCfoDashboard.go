@@ -928,11 +928,23 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				            WHERE ir.is_deleted=false
 				              AND ir.receipt_date >= $2::date
 				              AND ($1::text='' OR ir.entity_id=$1)),0) AS received
-				FROM investment.fd_accrual_ledger al
+				FROM (
+				  SELECT al_inner.*
+				  FROM investment.fd_accrual_ledger al_inner
+				  INNER JOIN (
+				    SELECT DISTINCT fd_id, (
+				      SELECT run_id FROM investment.fd_accrual_ledger al2
+				      WHERE al2.fd_id = al1.fd_id AND COALESCE(al2.is_deleted,false)=false
+				      ORDER BY created_at DESC LIMIT 1
+				    ) as latest_run_id
+				    FROM investment.fd_accrual_ledger al1
+				    WHERE COALESCE(al1.is_deleted,false)=false
+				  ) latest ON al_inner.fd_id = latest.fd_id AND al_inner.run_id = latest.latest_run_id
+				  WHERE COALESCE(al_inner.is_deleted,false)=false
+				) al
 				LEFT JOIN investment.fd_master m ON m.fd_id = al.fd_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE COALESCE(al.is_deleted,false)=false
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`
+				WHERE ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`
 
 			fyStart := periodStartDate("YTD", now)
 			qtdStart := periodStartDate("QTD", now)
@@ -1563,6 +1575,8 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(m.tenure_years, 0) AS tenure_years,
 				  TO_CHAR(m.maturity_date,'YYYY-MM-DD') AS maturity_date,
 				  COALESCE(al.total_interest_accrued, 0) AS interest_accrued,
+				  COALESCE(ep.earned_in_period, 0) AS interest_earned_in_period,
+				  COALESCE(cfs.total_interest, 0) AS total_interest,
 				  m.fd_status AS status,
 				  COALESCE(b.booking_id,'') AS booking_id,
 				  COALESCE(b.booking_status,'') AS booking_status,
@@ -1576,10 +1590,49 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				LEFT JOIN LATERAL (
-				  SELECT COALESCE(SUM(period_interest_accrued),0) AS total_interest_accrued
-				  FROM investment.fd_accrual_ledger
-				  WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
+				  -- interest_accrued: gross total interest over the full tenor from cashflow schedule.
+				  -- CO: sum of CAPITALIZATION rows (gross compound interest before TDS).
+				  -- SI: sum of INTEREST_RECEIPT + MATURITY rows (gross simple interest).
+				  SELECT COALESCE(SUM(cfs_ia.interest_accrued), 0) AS total_interest_accrued
+				  FROM investment.fd_cashflow_schedule cfs_ia
+				  WHERE cfs_ia.fd_id = m.fd_id
+				    AND COALESCE(cfs_ia.is_deleted, false) = false
+				    AND (
+				      (UPPER(COALESCE(m.interest_type_code, '')) = 'COMPOUND' AND cfs_ia.event_type = 'CAPITALIZATION')
+				      OR
+				      (UPPER(COALESCE(m.interest_type_code, '')) != 'COMPOUND' AND cfs_ia.event_type IN ('INTEREST_RECEIPT', 'MATURITY'))
+				    )
 				) al ON true
+				LEFT JOIN LATERAL (
+				  -- interest_earned_in_period: pro-rate each ACCRUAL row by how many days
+				  -- of its period overlap the dashboard window [start, end].
+				  SELECT COALESCE(SUM(
+				    cfs_ep.interest_accrued *
+				    CASE
+				      WHEN ('` + periodBounds.StartStr + `' != '' AND '` + periodBounds.EndStr + `' != '') THEN
+				        GREATEST(0.0,
+				          LEAST(cfs_ep.period_end_date::date, '` + periodBounds.EndStr + `'::date)
+				          - GREATEST(cfs_ep.period_start_date::date, '` + periodBounds.StartStr + `'::date)
+				        )::float / GREATEST(1.0, (cfs_ep.period_end_date::date - cfs_ep.period_start_date::date)::float)
+				      ELSE 1.0
+				    END
+				  ), 0) AS earned_in_period
+				  FROM investment.fd_cashflow_schedule cfs_ep
+				  WHERE cfs_ep.fd_id = m.fd_id
+				    AND COALESCE(cfs_ep.is_deleted, false) = false
+				    AND cfs_ep.event_type = 'ACCRUAL'
+				    AND cfs_ep.period_start_date IS NOT NULL
+				    AND cfs_ep.period_end_date IS NOT NULL
+				    AND ('` + periodBounds.StartStr + `' = '' OR cfs_ep.period_end_date >= '` + periodBounds.StartStr + `'::date)
+				    AND ('` + periodBounds.EndStr + `' = '' OR cfs_ep.period_start_date <= '` + periodBounds.EndStr + `'::date)
+				) ep ON true
+				LEFT JOIN LATERAL (
+				  SELECT COALESCE(SUM(interest_accrued), 0) AS total_interest
+				  FROM investment.fd_cashflow_schedule cfs_inner
+				  WHERE cfs_inner.fd_id = m.fd_id 
+				    AND COALESCE(cfs_inner.is_deleted, false) = false
+				    AND cfs_inner.event_type IN ('INTEREST_RECEIPT', 'MATURITY')
+				) cfs ON true
 				` + sqlLatestCimplrInitiate + `
 				` + sqlLatestCimplrConfirm + `
 				LEFT JOIN LATERAL (
@@ -1591,7 +1644,10 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE m.is_deleted=false
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				  AND ($2::text='' OR COALESCE(m.bank_name, m.bank_id,'')=$2)
-				  AND m.fd_status = COALESCE(NULLIF($3::text, ''), 'ACTIVE')
+				  AND (
+				    ($3::text <> '' AND m.fd_status = $3) OR
+				    ($3::text = '' AND m.fd_status NOT IN ('DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED', 'CLOSED_IN_SYSTEM'))
+				  )
 				  AND ($4::boolean=false OR (m.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE+30))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code,'')=$5)
 				  AND ($6::text='' OR COALESCE(m.frequency_id,'')=$6)
@@ -1628,6 +1684,8 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				TenureYears        int     `json:"tenure_years"`
 				MaturityDate       string  `json:"maturity_date"`
 				InterestAccrued    float64 `json:"interest_accrued"`
+				InterestEarned     float64 `json:"interest_earned_in_period"`
+				TotalInterest      float64 `json:"interest_receivable_at_maturity"`
 				Status             string  `json:"status"`
 				BookingID          string  `json:"booking_id"`
 				BookingStatus      string  `json:"booking_status"`
@@ -1644,7 +1702,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&fr.Principal, &fr.Rate, &fr.InterestTypeCode, &fr.FrequencyID,
 					&fr.StartDate, &fr.TenureDays, &fr.TenureMonths, &fr.TenureYears,
 					&fr.MaturityDate,
-					&fr.InterestAccrued, &fr.Status,
+					&fr.InterestAccrued, &fr.InterestEarned, &fr.TotalInterest, &fr.Status,
 					&fr.BookingID, &fr.BookingStatus,
 					&fr.ApprovalStatus,
 					&fr.ClosureType, &fr.ClosureStatus,
@@ -1654,6 +1712,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				fr.Principal = fdRound(fr.Principal, 2)
 				fr.InterestAccrued = fdRound(fr.InterestAccrued, 2)
+				fr.InterestEarned = fdRound(fr.InterestEarned, 2)
 				fr.Rate = fdRound(fr.Rate, 4)
 				out = append(out, fr)
 			}

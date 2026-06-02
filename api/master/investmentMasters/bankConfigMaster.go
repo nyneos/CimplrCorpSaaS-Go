@@ -461,6 +461,7 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			summary := fmt.Sprintf("BankConfig upload aborted: row %d failed validation: %s", row, msg)
 			api.RespondWithPayload(w, false, summary, nil)
 		}
+		seenKeysInFile := make(map[string]int)
 
 		for i, row := range data[1:] {
 			if len(row) == 0 {
@@ -578,6 +579,30 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// uniqueness pre-check (fail-fast)
+			
+			// in-file duplicate check
+			ptVal := "null"
+			if input.ProductType != nil { ptVal = *input.ProductType }
+			minAmtVal := "null"
+			if input.MinimumAmount != nil { minAmtVal = fmt.Sprintf("%v", *input.MinimumAmount) }
+			maxAmtVal := "null"
+			if input.MaximumAmount != nil { maxAmtVal = fmt.Sprintf("%v", *input.MaximumAmount) }
+			efToVal := "null"
+			if input.EffectiveTo != nil { efToVal = *input.EffectiveTo }
+
+			key := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
+				input.BankCode, ptVal, minAmtVal, maxAmtVal, input.DayCountCode, input.CapitalizationScheduleType,
+				input.CapitalizationDateAdjustment, input.AccrualStartConvention, input.AccrualEndConvention,
+				input.PeriodBoundaryDefinition, input.HolidayCalendarCode, input.BrokenPeriodMethod,
+				input.BrokenPeriodLocation, input.RoundingMethod, input.RoundingFrequency,
+				input.TdsDeductionTiming, input.EffectiveFrom, efToVal)
+			
+			if prevRow, dup := seenKeysInFile[key]; dup {
+				sendFail(i+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching unique keys)", i+2, prevRow))
+				return
+			}
+			seenKeysInFile[key] = i + 2
+			
 			if exists, existingID, err := bankConfigExists(ctx, pgxPool, input); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 				return
