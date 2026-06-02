@@ -439,7 +439,7 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
 			return
 		}
-		if err := insertCimplrInitiateAudit(ctx, tx, initiateAuditEntry{ID: closureInitiateID, Action: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: firstNonEmpty(req.Reason, "Create FD closure initiate"), RequestedBy: req.UserID, Old: nil}); err != nil {
+		if err := insertCimplrInitiateAudit(ctx, tx, initiateAuditEntry{ID: closureInitiateID, Action: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: req.Reason, RequestedBy: req.UserID, Old: nil}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "initiate audit failed: "+err.Error())
 			return
 		}
@@ -626,7 +626,7 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
 			return
 		}
-		if err := insertCimplrInitiateAudit(ctx, tx, initiateAuditEntry{ID: req.ClosureInitiateID, Action: constants.AuditActionEdit, Status: constants.StatusPendingEditApproval, Reason: firstNonEmpty(req.Reason, "Edit FD closure initiate"), RequestedBy: req.UserID, Old: oldRow}); err != nil {
+		if err := insertCimplrInitiateAudit(ctx, tx, initiateAuditEntry{ID: req.ClosureInitiateID, Action: constants.AuditActionEdit, Status: constants.StatusPendingEditApproval, Reason: req.Reason, RequestedBy: req.UserID, Old: oldRow}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "initiate audit failed: "+err.Error())
 			return
 		}
@@ -697,7 +697,7 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			if err := insertCimplrInitiateAudit(r.Context(), pool, initiateAuditEntry{ID: id, Action: constants.AuditActionDelete, Status: constants.StatusPendingDeleteApproval, Reason: firstNonEmpty(req.Comment, "Delete FD closure initiate"), RequestedBy: req.UserID, Old: oldRow}); err != nil {
+			if err := insertCimplrInitiateAudit(r.Context(), pool, initiateAuditEntry{ID: id, Action: constants.AuditActionDelete, Status: constants.StatusPendingDeleteApproval, Reason: req.Comment, RequestedBy: req.UserID, Old: oldRow}); err != nil {
 				res["success"] = false
 				res["error"] = err.Error()
 				results = append(results, res)
@@ -918,7 +918,7 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
 			return
 		}
-		if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: req.ClosureInitiateID, Action: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: firstNonEmpty(req.Reason, "Create FD closure confirm"), RequestedBy: req.UserID, Old: nil}); err != nil {
+		if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: req.ClosureInitiateID, Action: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: req.Reason, RequestedBy: req.UserID, Old: nil}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "confirm audit failed: "+err.Error())
 			return
 		}
@@ -1103,7 +1103,7 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
 			return
 		}
-		if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: closureInitiateID, Action: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: firstNonEmpty(req.Reason, "Create premature closure"), RequestedBy: req.UserID, Old: nil}); err != nil {
+		if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: closureInitiateID, Action: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: req.Reason, RequestedBy: req.UserID, Old: nil}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "premature audit failed: "+err.Error())
 			return
 		}
@@ -1318,7 +1318,7 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
 			return
 		}
-		if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: req.ClosureConfirmID, InitiateID: closureInitiateID, Action: constants.AuditActionEdit, Status: constants.StatusPendingEditApproval, Reason: firstNonEmpty(req.Reason, "Edit FD closure confirm"), RequestedBy: req.UserID, Old: oldRow}); err != nil {
+		if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: req.ClosureConfirmID, InitiateID: closureInitiateID, Action: constants.AuditActionEdit, Status: constants.StatusPendingEditApproval, Reason: req.Reason, RequestedBy: req.UserID, Old: oldRow}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "confirm audit failed: "+err.Error())
 			return
 		}
@@ -1384,7 +1384,7 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			if err := insertCimplrConfirmAudit(r.Context(), pool, confirmAuditEntry{ConfirmID: id, InitiateID: fmt.Sprint(oldRow["closure_initiate_id"]), Action: constants.AuditActionDelete, Status: constants.StatusPendingDeleteApproval, Reason: firstNonEmpty(req.Comment, "Delete FD closure confirm"), RequestedBy: req.UserID, Old: oldRow}); err != nil {
+			if err := insertCimplrConfirmAudit(r.Context(), pool, confirmAuditEntry{ConfirmID: id, InitiateID: fmt.Sprint(oldRow["closure_initiate_id"]), Action: constants.AuditActionDelete, Status: constants.StatusPendingDeleteApproval, Reason: req.Comment, RequestedBy: req.UserID, Old: oldRow}); err != nil {
 				res["success"] = false
 				res["error"] = err.Error()
 				results = append(results, res)

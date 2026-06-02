@@ -855,10 +855,7 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 
 		rows, err := db.Query(
 			`UPDATE exposure_headers
-			 SET approval_status = CASE
-			     	WHEN approval_status = 'PENDING_DELETE_APPROVAL' THEN 'APPROVED'
-			     	ELSE 'REJECTED'
-			     END,
+			 SET approval_status = 'REJECTED',
 			     rejected_by = $1,
 			     rejection_comment = $2,
 			     rejected_at = NOW()
@@ -1187,13 +1184,13 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		}
 		for _, row := range results["approved"].([]map[string]interface{}) {
 			id := fmt.Sprint(row["exposure_header_id"])
+			// Update the existing pending audit row in place instead of creating a new APPROVE row.
 			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "APPROVE", Status: constants.StatusApproved, Reason: approvalComment, RequestedBy: approvedBy, OldValues: oldValuesByID[id], NewValues: row})
 		}
 		for _, row := range results["deleted"].([]map[string]interface{}) {
 			id := fmt.Sprint(row["exposure_header_id"])
+			// Update the existing pending audit row in place instead of creating a new APPROVE row.
 			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "APPROVE", Status: constants.StatusApproved, Reason: approvalComment, RequestedBy: approvedBy, OldValues: oldValuesByID[id], NewValues: row})
 		}
 
 		json.NewEncoder(w).Encode(map[string]interface{}{

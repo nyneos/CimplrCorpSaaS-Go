@@ -833,7 +833,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			"closure_status": constants.StatusPendingApproval,
 		}
 		initialSnapJSON, _ := json.Marshal(initialSnapshot)
-		_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: closureRequestID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "CREATE", ProcessingStatus: constants.StatusPendingApproval, Reason: "Closure initiated", Snapshot: initialSnapJSON, OldValues: initialSnapshot})
+		_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: closureRequestID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "CREATE", ProcessingStatus: constants.StatusPendingApproval, Reason: "", Snapshot: initialSnapJSON, OldValues: initialSnapshot})
 		_, _ = tx.Exec(ctx, `UPDATE investment.fd_master SET closure_request_id=$1, updated_at=NOW() WHERE fd_id=$2`, closureRequestID, req.FDID)
 
 		instID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
@@ -1994,7 +1994,7 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: firstNonEmpty(req.Comment, "Bulk approved FD closure")})
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				errors = append(errors, crID+": "+actionErr.Error())
 				continue
@@ -2042,7 +2042,7 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 						errors = append(errors, crID+": delete approval instance created but linking failed: "+updErr.Error())
 						continue
 					}
-					retryRes, retryErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: firstNonEmpty(req.Comment, "Bulk approved FD closure delete")})
+					retryRes, retryErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 					if retryErr != nil {
 						errors = append(errors, crID+": "+retryErr.Error())
 						continue
@@ -2141,7 +2141,7 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: firstNonEmpty(req.Comment, "Bulk rejected FD closure")})
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				errors = append(errors, crID+": "+actionErr.Error())
 				continue
@@ -2966,7 +2966,7 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		"accounting_period": accountingPeriod, "total_debit": totalDebitAmt, "total_credit": totalCreditAmt, "approved_by_email": approvedByEmail,
 	}
 	snapshotJSON, _ := json.Marshal(postSnap)
-	if auditErr := insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: closureRequestID, PerformedBy: approvedBy, PerformedByEmail: approvedByEmail, ActionType: "EDIT", ProcessingStatus: constants.StatusApproved, Reason: "Journals posted on approval", Snapshot: snapshotJSON, OldValues: postSnap}); auditErr != nil {
+	if auditErr := insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: closureRequestID, PerformedBy: approvedBy, PerformedByEmail: approvedByEmail, ActionType: "EDIT", ProcessingStatus: constants.StatusApproved, Reason: "", Snapshot: snapshotJSON, OldValues: postSnap}); auditErr != nil {
 		return fmt.Errorf("postClosureJournals audit: %w", auditErr)
 	}
 
