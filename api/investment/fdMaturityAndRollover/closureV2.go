@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/fdMaster"
+	"CimplrCorpSaas/api/investment/fdNotifications"
+	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
 	"bytes"
@@ -25,13 +27,122 @@ import (
 const (
 	cimplrClosureModule = "FIXED_DEPOSIT"
 
-	txCimplrInitiateCreate = "FD_CLOSURE_INITIATE_CREATE"
-	txCimplrInitiateEdit   = "FD_CLOSURE_INITIATE_EDIT"
-	txCimplrInitiateDelete = "FD_CLOSURE_INITIATE_DELETE"
-	txCimplrConfirmCreate  = "FD_CLOSURE_CONFIRM_CREATE"
-	txCimplrConfirmEdit    = "FD_CLOSURE_CONFIRM_EDIT"
-	txCimplrConfirmDelete  = "FD_CLOSURE_CONFIRM_DELETE"
+	// Granular FD Closure Approval Types
+	txClosureInitiatePayoutCreate   = "FD_CLOSURE_INITIATE_PAYOUT_CREATE"
+	txClosureInitiatePayoutEdit     = "FD_CLOSURE_INITIATE_PAYOUT_EDIT"
+	txClosureInitiatePayoutDelete   = "FD_CLOSURE_INITIATE_PAYOUT_DELETE"
+	txClosureInitiateRolloverCreate = "FD_CLOSURE_INITIATE_ROLLOVER_CREATE"
+	txClosureInitiateRolloverEdit   = "FD_CLOSURE_INITIATE_ROLLOVER_EDIT"
+	txClosureInitiateRolloverDelete = "FD_CLOSURE_INITIATE_ROLLOVER_DELETE"
+
+	txClosureConfirmPayoutCreate   = "FD_CLOSURE_CONFIRM_PAYOUT_CREATE"
+	txClosureConfirmPayoutEdit     = "FD_CLOSURE_CONFIRM_PAYOUT_EDIT"
+	txClosureConfirmPayoutDelete   = "FD_CLOSURE_CONFIRM_PAYOUT_DELETE"
+	txClosureConfirmRolloverCreate = "FD_CLOSURE_CONFIRM_ROLLOVER_CREATE"
+	txClosureConfirmRolloverEdit   = "FD_CLOSURE_CONFIRM_ROLLOVER_EDIT"
+	txClosureConfirmRolloverDelete = "FD_CLOSURE_CONFIRM_ROLLOVER_DELETE"
+
+	txClosurePrematureCreate = "FD_CLOSURE_PREMATURE_CREATE"
+	txClosurePrematureEdit   = "FD_CLOSURE_PREMATURE_EDIT"
+	txClosurePrematureDelete = "FD_CLOSURE_PREMATURE_DELETE"
 )
+
+// --- Notification Trigger Helpers for FD Closure V2 ---
+func cimplrGetClosureTypes(ctx context.Context, pool *pgxpool.Pool, table string, ids []string) map[string]string {
+	out := make(map[string]string)
+	if len(ids) == 0 {
+		return out
+	}
+	idCol := "closure_initiate_id"
+	if table == "cimplr.fd_closure_confirm" {
+		idCol = "closure_confirm_id"
+	}
+
+	// Create placeholders for the query
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+
+	q := fmt.Sprintf(`SELECT %s, closure_type FROM %s WHERE %s IN (%s)`, idCol, table, idCol, strings.Join(placeholders, ","))
+	rows, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		api.LogError("[CimplrFDClosure] fetch types failed: %v", err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, cType string
+		if err := rows.Scan(&id, &cType); err == nil {
+			out[id] = strings.ToUpper(strings.TrimSpace(cType))
+		}
+	}
+	return out
+}
+
+func triggerClosureBulkNotif(ctx context.Context, pool *pgxpool.Pool, ids []string, table, stage, action, email string) {
+	if len(ids) == 0 {
+		return
+	}
+	// Premature is a direct flow
+	if stage == "premature" {
+		route := fmt.Sprintf("/investment/fd/closure/premature/%s", action)
+		payload := fdNotifications.BuildCimplrClosureConfirmNotifPayload(context.Background(), pool, ids, strings.ToUpper(action), email).ToMap()
+		notifcatalog.TriggerNotification(context.Background(), pool, route, ids[0], payload)
+		return
+	}
+
+	typeMap := cimplrGetClosureTypes(ctx, pool, table, ids)
+	payoutIDs := []string{}
+	rolloverIDs := []string{}
+	prematureIDs := []string{}
+	for _, id := range ids {
+		ctype := typeMap[id]
+		if ctype == "ROLLOVER" {
+			rolloverIDs = append(rolloverIDs, id)
+		} else if ctype == "PREMATURE" {
+			prematureIDs = append(prematureIDs, id)
+		} else {
+			// default to payout
+			payoutIDs = append(payoutIDs, id)
+		}
+	}
+
+	dispatch := func(batch []string, subtype string) {
+		if len(batch) == 0 {
+			return
+		}
+		route := fmt.Sprintf("/investment/fd/closure/%s/%s/%s", stage, subtype, action)
+		var payload map[string]interface{}
+		if stage == "initiate" {
+			payload = fdNotifications.BuildCimplrClosureInitiateNotifPayload(context.Background(), pool, batch, strings.ToUpper(action), email).ToMap()
+		} else {
+			payload = fdNotifications.BuildCimplrClosureConfirmNotifPayload(context.Background(), pool, batch, strings.ToUpper(action), email).ToMap()
+		}
+		notifcatalog.TriggerNotification(context.Background(), pool, route, batch[0], payload)
+	}
+	dispatch(payoutIDs, "payout")
+	dispatch(rolloverIDs, "rollover")
+
+	if len(prematureIDs) > 0 {
+		route := fmt.Sprintf("/investment/fd/closure/premature/%s", action)
+		payload := fdNotifications.BuildCimplrClosureConfirmNotifPayload(context.Background(), pool, prematureIDs, strings.ToUpper(action), email).ToMap()
+		notifcatalog.TriggerNotification(context.Background(), pool, route, prematureIDs[0], payload)
+	}
+}
+
+func getClosureTxCode(stage, subtype, action string) string {
+	subtype = strings.ToUpper(subtype)
+	action = strings.ToUpper(action)
+	if stage == "premature" {
+		return fmt.Sprintf("FD_CLOSURE_PREMATURE_%s", action)
+	}
+	return fmt.Sprintf("FD_CLOSURE_%s_%s_%s", strings.ToUpper(stage), subtype, action)
+}
+
+// ------------------------------------------------------
 
 type cimplrRowQuerier interface {
 	QueryRow(ctx context.Context, sql string, arguments ...interface{}) pgx.Row
@@ -208,12 +319,26 @@ func cimplrCalcToMap(c cimplrClosureCalc) map[string]interface{} {
 }
 
 func init() {
-	approvalengine.RegisterPostFinalizeHook(txCimplrInitiateCreate, cimplrInitiatePostFinalizeHook)
-	approvalengine.RegisterPostFinalizeHook(txCimplrInitiateEdit, cimplrInitiatePostFinalizeHook)
-	approvalengine.RegisterPostFinalizeHook(txCimplrInitiateDelete, cimplrInitiatePostFinalizeHook)
-	approvalengine.RegisterPostFinalizeHook(txCimplrConfirmCreate, cimplrConfirmPostFinalizeHook)
-	approvalengine.RegisterPostFinalizeHook(txCimplrConfirmEdit, cimplrConfirmPostFinalizeHook)
-	approvalengine.RegisterPostFinalizeHook(txCimplrConfirmDelete, cimplrConfirmPostFinalizeHook)
+	// Register Initiate Hooks
+	approvalengine.RegisterPostFinalizeHook(txClosureInitiatePayoutCreate, cimplrInitiatePostFinalizeHook)
+	approvalengine.RegisterPostFinalizeHook(txClosureInitiatePayoutEdit, cimplrInitiatePostFinalizeHook)
+	approvalengine.RegisterPostFinalizeHook(txClosureInitiatePayoutDelete, cimplrInitiatePostFinalizeHook)
+	approvalengine.RegisterPostFinalizeHook(txClosureInitiateRolloverCreate, cimplrInitiatePostFinalizeHook)
+	approvalengine.RegisterPostFinalizeHook(txClosureInitiateRolloverEdit, cimplrInitiatePostFinalizeHook)
+	approvalengine.RegisterPostFinalizeHook(txClosureInitiateRolloverDelete, cimplrInitiatePostFinalizeHook)
+
+	// Register Confirm Hooks
+	approvalengine.RegisterPostFinalizeHook(txClosureConfirmPayoutCreate, cimplrConfirmPostFinalizeHook)
+	approvalengine.RegisterPostFinalizeHook(txClosureConfirmPayoutEdit, cimplrConfirmPostFinalizeHook)
+	approvalengine.RegisterPostFinalizeHook(txClosureConfirmPayoutDelete, cimplrConfirmPostFinalizeHook)
+	approvalengine.RegisterPostFinalizeHook(txClosureConfirmRolloverCreate, cimplrConfirmPostFinalizeHook)
+	approvalengine.RegisterPostFinalizeHook(txClosureConfirmRolloverEdit, cimplrConfirmPostFinalizeHook)
+	approvalengine.RegisterPostFinalizeHook(txClosureConfirmRolloverDelete, cimplrConfirmPostFinalizeHook)
+	
+	// Register Premature Hooks
+	approvalengine.RegisterPostFinalizeHook(txClosurePrematureCreate, cimplrConfirmPostFinalizeHook)
+	approvalengine.RegisterPostFinalizeHook(txClosurePrematureEdit, cimplrConfirmPostFinalizeHook)
+	approvalengine.RegisterPostFinalizeHook(txClosurePrematureDelete, cimplrConfirmPostFinalizeHook)
 }
 
 func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
@@ -328,13 +453,19 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			api.LogError("[CimplrFDClosure] initiate variance failed: %v", err)
 		}
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: txCimplrInitiateCreate, Action: constants.AuditActionCreate, RecordID: closureInitiateID, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: src.EntityID, Amount: principal, UserID: req.UserID, UserEmail: userEmail})
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: getClosureTxCode("initiate", req.ClosureType, "CREATE"), Action: constants.AuditActionCreate, RecordID: closureInitiateID, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: src.EntityID, Amount: principal, UserID: req.UserID, UserEmail: userEmail})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] initiate approval create failed: %v", instErr)
 		}
 		if instanceID != "" {
 			_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_initiate SET approval_instance_id=$1 WHERE closure_initiate_id=$2`, instanceID, closureInitiateID)
 		}
+
+		go func(id, cType, email string) {
+			route := fmt.Sprintf("/investment/fd/closure/initiate/%s/create", strings.ToLower(cType))
+			payload := fdNotifications.BuildCimplrClosureInitiateNotifPayload(context.Background(), pool, []string{id}, "CREATE", email).ToMap()
+			notifcatalog.TriggerNotification(context.Background(), pool, route, id, payload)
+		}(closureInitiateID, req.ClosureType, userEmail)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"closure_initiate_id":  closureInitiateID,
@@ -506,7 +637,7 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 
 		varianceSummary, _ := persistCimplrInitiateVariances(ctx, pool, req.ClosureInitiateID, req, src, calc)
 		_ = approvalengine.CancelPendingInstances(ctx, pool, cimplrClosureModule, req.ClosureInitiateID, userEmail)
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: txCimplrInitiateEdit, Action: constants.AuditActionEdit, RecordID: req.ClosureInitiateID, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: src.EntityID, Amount: principal, UserID: req.UserID, UserEmail: userEmail})
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: getClosureTxCode("initiate", req.ClosureType, "EDIT"), Action: constants.AuditActionEdit, RecordID: req.ClosureInitiateID, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: src.EntityID, Amount: principal, UserID: req.UserID, UserEmail: userEmail})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] initiate edit approval failed: %v", instErr)
 		}
@@ -514,6 +645,7 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_initiate SET approval_instance_id=$1 WHERE closure_initiate_id=$2`, instanceID, req.ClosureInitiateID)
 		}
 
+		go triggerClosureBulkNotif(context.Background(), pool, []string{req.ClosureInitiateID}, "cimplr.fd_closure_initiate", "initiate", "edit", userEmail)
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"closure_initiate_id":  req.ClosureInitiateID,
 			"approval_instance_id": instanceID,
@@ -571,7 +703,7 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: txCimplrInitiateDelete, Action: constants.AuditActionDelete, RecordID: id, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: 0, UserID: req.UserID, UserEmail: userEmail})
+			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: getClosureTxCode("initiate", fmt.Sprint(oldRow["closure_type"]), "DELETE"), Action: constants.AuditActionDelete, RecordID: id, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: 0, UserID: req.UserID, UserEmail: userEmail})
 			if instanceID != "" {
 				_, _ = pool.Exec(r.Context(), `UPDATE cimplr.fd_closure_initiate SET approval_instance_id=$1 WHERE closure_initiate_id=$2`, instanceID, id)
 			}
@@ -580,6 +712,7 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, res)
 		}
 		ok, errStr := summarizeCimplrBatchResults(results)
+		go triggerClosureBulkNotif(context.Background(), pool, ids, "cimplr.fd_closure_initiate", "initiate", "delete", userEmail)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
 	}
 }
@@ -606,6 +739,7 @@ func CimplrInitiateApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		results := cimplrApproveInitiates(r.Context(), pool, ids, req.UserID, userEmail, req.Comment)
 		ok, errStr := summarizeCimplrBatchResults(results)
+		go triggerClosureBulkNotif(context.Background(), pool, ids, "cimplr.fd_closure_initiate", "initiate", "approve", userEmail)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
 	}
 }
@@ -632,6 +766,7 @@ func CimplrInitiateReject(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		results := cimplrRejectInitiates(r.Context(), pool, ids, req.UserID, userEmail, req.Comment)
 		ok, errStr := summarizeCimplrBatchResults(results)
+		go triggerClosureBulkNotif(context.Background(), pool, ids, "cimplr.fd_closure_initiate", "initiate", "reject", userEmail)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
 	}
 }
@@ -795,13 +930,19 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		if persisted, perr := persistCimplrConfirmVariances(ctx, pool, closureConfirmID, req, src, calc); perr == nil {
 			varianceSummary = persisted
 		}
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: txCimplrConfirmCreate, Action: constants.AuditActionCreate, RecordID: closureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail})
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: getClosureTxCode(func() string{if closureType=="PREMATURE"{return "premature"}; return "confirm"}(), closureType, "CREATE"), Action: constants.AuditActionCreate, RecordID: closureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] confirm approval create failed: %v", instErr)
 		}
 		if instanceID != "" {
 			_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET approval_instance_id=$1 WHERE closure_confirm_id=$2`, instanceID, closureConfirmID)
 		}
+
+		go func(id, cType, email string) {
+			route := fmt.Sprintf("/investment/fd/closure/confirm/%s/create", strings.ToLower(cType))
+			payload := fdNotifications.BuildCimplrClosureConfirmNotifPayload(context.Background(), pool, []string{id}, "CREATE", email).ToMap()
+			notifcatalog.TriggerNotification(context.Background(), pool, route, id, payload)
+		}(closureConfirmID, closureType, userEmail)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"closure_confirm_id":   closureConfirmID,
@@ -977,13 +1118,20 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		if persisted, perr := persistCimplrConfirmVariances(ctx, pool, closureConfirmID, req, src, calc); perr == nil {
 			varianceSummary = persisted
 		}
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: txCimplrConfirmCreate, Action: constants.AuditActionCreate, RecordID: closureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail})
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: getClosureTxCode(func() string{if "PREMATURE"=="PREMATURE"{return "premature"}; return "confirm"}(), "PREMATURE", "CREATE"), Action: constants.AuditActionCreate, RecordID: closureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] premature approval create failed: %v", instErr)
 		}
 		if instanceID != "" {
 			_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET approval_instance_id=$1 WHERE closure_confirm_id=$2`, instanceID, closureConfirmID)
 		}
+
+		go func(id, email string) {
+			route := "/investment/fd/closure/premature/create"
+			payload := fdNotifications.BuildCimplrClosureConfirmNotifPayload(context.Background(), pool, []string{id}, "CREATE", email).ToMap()
+			notifcatalog.TriggerNotification(context.Background(), pool, route, id, payload)
+		}(closureConfirmID, userEmail)
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"closure_initiate_id":  closureInitiateID,
 			"closure_confirm_id":   closureConfirmID,
@@ -1109,6 +1257,7 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		// approval queue stays clean.
 		varianceSummary, blockReason := cimplrAssertConfirmCreateAllowed(req, src, calc, req.ClosureConfirmID)
 		if blockReason != "" {
+			go triggerClosureBulkNotif(context.Background(), pool, []string{req.ClosureConfirmID}, "cimplr.fd_closure_confirm", "confirm", "edit", userEmail)
 			api.RespondWithPayload(w, false, blockReason, map[string]interface{}{
 				"blocked":  true,
 				"variance": varianceSummary,
@@ -1182,7 +1331,7 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			varianceSummary = persisted
 		}
 		_ = approvalengine.CancelPendingInstances(ctx, pool, cimplrClosureModule, req.ClosureConfirmID, userEmail)
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: txCimplrConfirmEdit, Action: constants.AuditActionEdit, RecordID: req.ClosureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail})
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: getClosureTxCode(func() string{if closureType=="PREMATURE"{return "premature"}; return "confirm"}(), closureType, "EDIT"), Action: constants.AuditActionEdit, RecordID: req.ClosureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] confirm edit approval failed: %v", instErr)
 		}
@@ -1241,7 +1390,7 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: txCimplrConfirmDelete, Action: constants.AuditActionDelete, RecordID: id, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: 0, UserID: req.UserID, UserEmail: userEmail})
+			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: getClosureTxCode(func() string{c:=fmt.Sprint(oldRow["closure_type"]); if c=="PREMATURE"{return "premature"}; return "confirm"}(), fmt.Sprint(oldRow["closure_type"]), "DELETE"), Action: constants.AuditActionDelete, RecordID: id, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: 0, UserID: req.UserID, UserEmail: userEmail})
 			if instanceID != "" {
 				_, _ = pool.Exec(r.Context(), `UPDATE cimplr.fd_closure_confirm SET approval_instance_id=$1 WHERE closure_confirm_id=$2`, instanceID, id)
 			}
@@ -1250,6 +1399,7 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, res)
 		}
 		ok, errStr := summarizeCimplrBatchResults(results)
+		go triggerClosureBulkNotif(context.Background(), pool, ids, "cimplr.fd_closure_confirm", "confirm", "delete", userEmail)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
 	}
 }
@@ -1319,6 +1469,7 @@ func CimplrConfirmApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		results := cimplrApproveConfirms(r.Context(), pool, ids, req.UserID, userEmail, req.Comment)
 		ok, errStr := summarizeCimplrBatchResults(results)
+		go triggerClosureBulkNotif(context.Background(), pool, ids, "cimplr.fd_closure_confirm", "confirm", "approve", userEmail)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
 	}
 }
@@ -1345,6 +1496,7 @@ func CimplrConfirmReject(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		results := cimplrRejectConfirms(r.Context(), pool, ids, req.UserID, userEmail, req.Comment)
 		ok, errStr := summarizeCimplrBatchResults(results)
+		go triggerClosureBulkNotif(context.Background(), pool, ids, "cimplr.fd_closure_confirm", "confirm", "reject", userEmail)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
 	}
 }
@@ -1810,56 +1962,53 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 
 func cimplrInitiatePostFinalizeHook(ctx context.Context, pool *pgxpool.Pool, recordID, transactionType, finalStatus, actorEmail, comment string) {
 	if finalStatus == approvalengine.InstStatusRejected {
-		if transactionType == txCimplrInitiateCreate || transactionType == txCimplrInitiateDelete {
+		if strings.HasSuffix(transactionType, "_CREATE") || strings.HasSuffix(transactionType, "_DELETE") {
 			_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_initiate SET closure_status='REJECTED' WHERE closure_initiate_id=$1 AND is_deleted=false`, recordID)
 		}
 		return
 	}
-	switch transactionType {
-	case txCimplrInitiateDelete:
+	if strings.HasSuffix(transactionType, "_DELETE") {
 		_, _ = pool.Exec(ctx, `
 			UPDATE cimplr.fd_closure_initiate
 			SET closure_status='DELETED', is_deleted=true, is_active=false, approval_instance_id=NULL
 			WHERE closure_initiate_id=$1`, recordID)
-	case txCimplrInitiateCreate, txCimplrInitiateEdit:
+	} else if strings.HasSuffix(transactionType, "_CREATE") || strings.HasSuffix(transactionType, "_EDIT") {
 		_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_initiate SET closure_status='CONFIRM' WHERE closure_initiate_id=$1 AND is_deleted=false`, recordID)
 	}
 }
 
 func cimplrConfirmPostFinalizeHook(ctx context.Context, pool *pgxpool.Pool, recordID, transactionType, finalStatus, actorEmail, comment string) {
 	if finalStatus == approvalengine.InstStatusRejected {
-		if transactionType == txCimplrConfirmCreate || transactionType == txCimplrConfirmDelete {
+		if strings.HasSuffix(transactionType, "_CREATE") || strings.HasSuffix(transactionType, "_DELETE") {
 			_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET closure_status='REJECTED' WHERE closure_confirm_id=$1 AND is_deleted=false`, recordID)
 		}
-		if transactionType == txCimplrConfirmCreate {
+		if strings.HasSuffix(transactionType, "_CREATE") {
 			_, _ = pool.Exec(ctx, `
 				UPDATE cimplr.fd_closure_initiate i
 				SET closure_status='REJECTED'
 				FROM cimplr.fd_closure_confirm c
 				WHERE c.closure_confirm_id=$1
 				  AND c.closure_initiate_id=i.closure_initiate_id
-				  AND c.closure_type='PREMATURE'
-				  AND i.closure_type='PREMATURE'
 				  AND COALESCE(i.is_deleted,false)=false`, recordID)
 		}
 		return
 	}
-	switch transactionType {
-	case txCimplrConfirmDelete:
-		var initiateID string
-		_ = pool.QueryRow(ctx, `SELECT COALESCE(closure_initiate_id,'') FROM cimplr.fd_closure_confirm WHERE closure_confirm_id=$1`, recordID).Scan(&initiateID)
+	if strings.HasSuffix(transactionType, "_DELETE") {
+		var initiateID, closureType string
+		_ = pool.QueryRow(ctx, `SELECT COALESCE(closure_initiate_id,''), COALESCE(closure_type,'') FROM cimplr.fd_closure_confirm WHERE closure_confirm_id=$1`, recordID).Scan(&initiateID, &closureType)
 		_, _ = pool.Exec(ctx, `
 			UPDATE cimplr.fd_closure_confirm
 			SET closure_status='DELETED', is_deleted=true, is_active=false,
-			    posting_status='', accounting_posted=false, approval_instance_id=NULL
+			    approval_instance_id=NULL, posting_status='FAILED'
 			WHERE closure_confirm_id=$1`, recordID)
 		if initiateID != "" {
-			_, _ = pool.Exec(ctx, `
-				UPDATE cimplr.fd_closure_initiate
-				SET closure_status='CONFIRM'
-				WHERE closure_initiate_id=$1 AND is_deleted=false`, initiateID)
+			if closureType == "PREMATURE" {
+				_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_initiate SET is_deleted=true, closure_status='DELETED' WHERE closure_initiate_id=$1 AND is_deleted=false`, initiateID)
+			} else {
+				_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_initiate SET closure_status='CONFIRM' WHERE closure_initiate_id=$1 AND is_deleted=false`, initiateID)
+			}
 		}
-	case txCimplrConfirmCreate, txCimplrConfirmEdit:
+	} else if strings.HasSuffix(transactionType, "_CREATE") || strings.HasSuffix(transactionType, "_EDIT") {
 		if err := finalizeCimplrConfirmApproval(ctx, pool, recordID, actorEmail, comment); err != nil {
 			api.LogError("[CimplrFDClosure] confirm finalize failed confirm_id=%s: %v", recordID, err)
 			_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET posting_status='FAILED' WHERE closure_confirm_id=$1`, recordID)
@@ -2063,18 +2212,19 @@ func cimplrApproveConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string
 			if err == nil {
 				switch pendingAction {
 				case constants.AuditActionDelete:
-					var initiateID string
-					_ = pool.QueryRow(ctx, `SELECT COALESCE(closure_initiate_id,'') FROM cimplr.fd_closure_confirm WHERE closure_confirm_id=$1`, id).Scan(&initiateID)
+					var initiateID, closureType string
+					_ = pool.QueryRow(ctx, `SELECT COALESCE(closure_initiate_id,''), COALESCE(closure_type,'') FROM cimplr.fd_closure_confirm WHERE closure_confirm_id=$1`, id).Scan(&initiateID, &closureType)
 					_, err = pool.Exec(ctx, `
 						UPDATE cimplr.fd_closure_confirm
 						SET closure_status='DELETED', is_deleted=true, is_active=false,
-						    posting_status='', accounting_posted=false, approval_instance_id=NULL
+						    posting_status='PENDING', accounting_posted=false, approval_instance_id=NULL
 						WHERE closure_confirm_id=$1`, id)
 					if err == nil && initiateID != "" {
-						_, err = pool.Exec(ctx, `
-							UPDATE cimplr.fd_closure_initiate
-							SET closure_status='CONFIRM'
-							WHERE closure_initiate_id=$1 AND is_deleted=false`, initiateID)
+						if closureType == "PREMATURE" {
+							_, err = pool.Exec(ctx, `UPDATE cimplr.fd_closure_initiate SET is_deleted=true, closure_status='DELETED' WHERE closure_initiate_id=$1 AND is_deleted=false`, initiateID)
+						} else {
+							_, err = pool.Exec(ctx, `UPDATE cimplr.fd_closure_initiate SET closure_status='CONFIRM' WHERE closure_initiate_id=$1 AND is_deleted=false`, initiateID)
+						}
 					}
 				default:
 					api.LogInfo("[CimplrFDClosure] confirm finalize starting (no approval engine) confirm_id=%s actor=%s", id, userEmail)

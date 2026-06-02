@@ -590,7 +590,7 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			efToVal := "null"
 			if input.EffectiveTo != nil { efToVal = *input.EffectiveTo }
 
-			key := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
+			key := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
 				input.BankCode, ptVal, minAmtVal, maxAmtVal, input.DayCountCode, input.CapitalizationScheduleType,
 				input.CapitalizationDateAdjustment, input.AccrualStartConvention, input.AccrualEndConvention,
 				input.PeriodBoundaryDefinition, input.HolidayCalendarCode, input.BrokenPeriodMethod,

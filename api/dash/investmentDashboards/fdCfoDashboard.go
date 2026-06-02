@@ -425,7 +425,7 @@ func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilt
 		f.ProcessingStatus = procStatus
 		f.Action = procStatus
 		f.Source = "Accrual Engine"
-		f.SourcePage = "fd-accrual-engine"
+		f.SourcePage = constants.FDAccrualEngine
 		f.Currency = "INR"
 		out = append(out, f)
 	}
@@ -641,7 +641,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 			Count: len(maturityItems), Value: govSumPrincipal(maturityItems),
 			Priority: "High", Items: maturityItems},
 		{Type: constants.AccrualRun, Category: constants.AccrualRun, Status: constants.StatusPendingApproval,
-			Source: "Accrual Engine", SourcePage: "fd-accrual-engine",
+			Source: "Accrual Engine", SourcePage: constants.FDAccrualEngine,
 			Count: len(accrualItems), Value: govSumPrincipal(accrualItems),
 			Priority: "Medium", Items: accrualItems},
 	}
@@ -662,7 +662,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		{ID: "fd_maturity", Label: constants.FDMaturity, Category: constants.FDMaturity, SourcePage: constants.FdmaturityLabel,
 			PendingCount: maturityPending, Done: maturityPending == 0, Blocker: maturityPending > 0,
 			Detail: formatInt64(int64(len(maturityItems))) + " closure approval(s), " + formatInt64(unprocessedMaturities) + " unprocessed maturity"},
-		{ID: "accrual_run", Label: constants.AccrualRun, Category: constants.AccrualRun, SourcePage: "fd-accrual-engine",
+		{ID: "accrual_run", Label: constants.AccrualRun, Category: constants.AccrualRun, SourcePage: constants.FDAccrualEngine,
 			PendingCount: accrualPending, Done: accrualPosted && accrualRunCount == 0, Blocker: accrualRunCount > 0,
 			Detail: "Latest run: " + latestRunStatus + "; " + formatInt64(accrualRunCount) + " pending approval(s)"},
 	}

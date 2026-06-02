@@ -339,7 +339,7 @@ const (
 
 // Forward booking status values
 const (
-	FwdStatusConfirmed          = "Confirmed"
+	FwdStatusConfirmed           = "Confirmed"
 	FwdStatusPendingConfirmation = "Pending Confirmation"
 )
 
@@ -493,6 +493,8 @@ const (
 	BatchIDsRequired                      = "batch_ids required"
 	ErrFailedToDeleteStagedStatements     = "failed to delete staged statements"
 	ErrConfirmedPrincipalAndInterest      = "confirmed_principal_amount and confirmed_interest_rate must be positive"
+	FDAccrualEngine                       = "fd-accrual-engine"
+	ExposureHeaders                       = "public.exposure_headers"
 )
 
 var (

@@ -76,7 +76,7 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 // 500 message to the client so DB internals are never exposed.
 func respondWithInternalError(w http.ResponseWriter, err error) {
 	log.Println("[ERROR] user:", err)
-	respondWithError(w, http.StatusInternalServerError, "Internal server error")
+	respondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 }
 
 // decodeSQLValue converts SQL driver types to JSON-friendly Go values.
@@ -202,7 +202,7 @@ func upsertActiveUserRole(exec sqlExecutor, userID, roleName string) error {
 		return err
 	}
 
-	// 1. Clean up any soft-deleted roles for this user first. 
+	// 1. Clean up any soft-deleted roles for this user first.
 	// This prevents the unique constraint error when updating the active row to a role_id that was previously soft-deleted.
 	if _, err := exec.Exec(`DELETE FROM user_roles WHERE user_id = $1 AND is_deleted = true`, userID); err != nil {
 		return err
@@ -362,7 +362,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		} else if err != sql.ErrNoRows {
 			log.Println("[ERROR] user uniqueness check:", err)
-			respondWithError(w, http.StatusInternalServerError, "Internal server error")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 			return
 		}
 		var userId string
@@ -424,7 +424,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			)
 			if err != nil {
 				log.Println("[ERROR] user entity mapping insert:", err)
-				respondWithError(w, http.StatusInternalServerError, "Internal server error")
+				respondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 				return
 			}
 		}
@@ -1071,7 +1071,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 			)
 			if err != nil {
 				log.Println("[ERROR] delete user_roles:", err)
-				respondWithError(w, http.StatusInternalServerError, "Internal server error")
+				respondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 				return
 			}
 			// Soft delete users (set is_deleted = true)

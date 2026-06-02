@@ -1097,7 +1097,7 @@ func normaliseError(raw string) string {
 	switch {
 	case contains(raw, "timeout", "timed out", "deadline"):
 		return "TIMEOUT"
-	case contains(raw, "500", "internal server error", "internal error"):
+	case contains(raw, "500", constants.ErrInternalServer, "internal error"):
 		return "500_INTERNAL"
 	case contains(raw, "400", "invalid payload", "bad request", "invalid", "validation"):
 		return "INVALID_PAYLOAD"

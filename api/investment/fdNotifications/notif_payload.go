@@ -660,6 +660,8 @@ func (p *ClosureNotifPayload) ToMap() map[string]interface{} {
 	return map[string]interface{}{
 		"Action":         p.Action,
 		"ActorEmail":     p.ActorEmail,
+		"actor_email":    p.ActorEmail, // dispatcher resolves actor entity via this key
+		"RequestedBy":    p.ActorEmail,
 		"Count":          p.Count,
 		"TotalNetPayout": p.TotalNetPayout,
 		"ActionAt":       p.ActionAt,
@@ -1041,5 +1043,227 @@ func BuildReceiptNotifPayload(
 		p.TotalNetAmount += fdAnyToFloat64(row["net_amount_received"])
 	}
 	p.ReceiptIDs = ids
+	return p
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CIMPLR CLOSURE V2
+// ─────────────────────────────────────────────────────────────────────────────
+
+func fetchCimplrClosureInitiateRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]map[string]interface{}, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	q := fmt.Sprintf(`
+		SELECT
+			ci.closure_initiate_id,
+			COALESCE(ci.fd_id,'')                                               AS fd_id,
+			COALESCE(m.bank_fd_ref_no,'')                                       AS fd_ref_no,
+			COALESCE(ci.entity_id,'')                                           AS entity_id,
+			COALESCE(ci.entity_name,'')                                         AS entity_name,
+			COALESCE(m.bank_name, ci.bank_id,'')                                AS bank_name,
+			COALESCE(ci.closure_type,'')                                        AS closure_type,
+			COALESCE(ci.principal_amount,0)                                     AS principal_amount,
+			COALESCE(ci.accrued_interest_till_date,0)                           AS accrued_interest,
+			COALESCE(ci.tds_expected,0)                                         AS tds_deducted,
+			0                                                                   AS penalty_amount,
+			COALESCE(ci.net_expected_amount,0)                                  AS net_payout_amount,
+			COALESCE(ci.maturity_status,'')                                     AS closure_status,
+			COALESCE(TO_CHAR(ci.requested_closure_date,'YYYY-MM-DD'),'')        AS closure_date,
+			COALESCE(TO_CHAR(ci.created_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS created_at,
+			COALESCE(ci.created_by,'')                                          AS created_by,
+			COALESCE(ci.remarks,'')                                             AS closure_remarks,
+			-- latest audit
+			COALESCE(la.processing_status,'')                                   AS processing_status,
+			COALESCE(la.requested_by,'')                                        AS requested_by,
+			COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')       AS requested_at,
+			COALESCE(la.checker_by,'')                                          AS checker_by,
+			COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS checker_at,
+			COALESCE(la.action_type,'')                                         AS action_type
+		FROM cimplr.fd_closure_initiate ci
+		LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id AND COALESCE(m.is_deleted,false)=false
+		LEFT JOIN LATERAL (
+			SELECT processing_status, requested_by, requested_at,
+				   checker_by, checker_at, action_type
+			FROM cimplr.fd_closure_initiate_audit
+			WHERE closure_initiate_id = ci.closure_initiate_id
+			ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp),
+							  COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
+			LIMIT 1
+		) la ON true
+		WHERE ci.closure_initiate_id IN (%s)
+		  AND COALESCE(ci.is_deleted,false) = false
+		ORDER BY ci.created_at DESC
+	`, placeholders(len(ids), 1))
+
+	rows, err := pool.Query(ctx, q, stringsToAny(ids)...)
+	if err != nil {
+		return nil, fmt.Errorf("fetchCimplrClosureInitiateRows: %w", err)
+	}
+	defer rows.Close()
+
+	var out []map[string]interface{}
+	for rows.Next() {
+		vals, err := rows.Values()
+		if err != nil {
+			continue
+		}
+		cols := rows.FieldDescriptions()
+		row := make(map[string]interface{}, len(cols))
+		for i, col := range cols {
+			row[string(col.Name)] = vals[i]
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func fetchCimplrClosureConfirmRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]map[string]interface{}, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	q := fmt.Sprintf(`
+		SELECT
+			cc.closure_confirm_id,
+			COALESCE(cc.fd_id,'')                                               AS fd_id,
+			COALESCE(m.bank_fd_ref_no,'')                                       AS fd_ref_no,
+			COALESCE(cc.entity_id,'')                                           AS entity_id,
+			COALESCE(cc.entity_name,'')                                         AS entity_name,
+			COALESCE(m.bank_name, cc.bank_id,'')                                AS bank_name,
+			COALESCE(cc.closure_type,'')                                        AS closure_type,
+			COALESCE(cc.principal_received, cc.principal_expected, 0)           AS principal_amount,
+			COALESCE(cc.interest_received, cc.interest_expected, 0)             AS accrued_interest,
+			COALESCE(cc.tds_deducted, cc.tds_expected, 0)                       AS tds_deducted,
+			0                                                                   AS penalty_amount,
+			COALESCE(cc.net_amount_received, cc.net_expected, 0)                AS net_payout_amount,
+			COALESCE(cc.resolution_action,'')                                   AS closure_status,
+			COALESCE(TO_CHAR(cc.actual_payout_date,'YYYY-MM-DD'),'')            AS closure_date,
+			COALESCE(TO_CHAR(cc.created_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS created_at,
+			COALESCE(cc.created_by,'')                                          AS created_by,
+			COALESCE(cc.remarks,'')                                             AS closure_remarks,
+			-- latest audit
+			COALESCE(la.processing_status,'')                                   AS processing_status,
+			COALESCE(la.requested_by,'')                                        AS requested_by,
+			COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')       AS requested_at,
+			COALESCE(la.checker_by,'')                                          AS checker_by,
+			COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS checker_at,
+			COALESCE(la.action_type,'')                                         AS action_type
+		FROM cimplr.fd_closure_confirm cc
+		LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id AND COALESCE(m.is_deleted,false)=false
+		LEFT JOIN LATERAL (
+			SELECT processing_status, requested_by, requested_at,
+				   checker_by, checker_at, action_type
+			FROM cimplr.fd_closure_confirm_audit
+			WHERE closure_confirm_id = cc.closure_confirm_id
+			ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp),
+							  COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
+			LIMIT 1
+		) la ON true
+		WHERE cc.closure_confirm_id IN (%s)
+		  AND COALESCE(cc.is_deleted,false) = false
+		ORDER BY cc.created_at DESC
+	`, placeholders(len(ids), 1))
+
+	rows, err := pool.Query(ctx, q, stringsToAny(ids)...)
+	if err != nil {
+		return nil, fmt.Errorf("fetchCimplrClosureConfirmRows: %w", err)
+	}
+	defer rows.Close()
+
+	var out []map[string]interface{}
+	for rows.Next() {
+		vals, err := rows.Values()
+		if err != nil {
+			continue
+		}
+		cols := rows.FieldDescriptions()
+		row := make(map[string]interface{}, len(cols))
+		for i, col := range cols {
+			row[string(col.Name)] = vals[i]
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func BuildCimplrClosureInitiateNotifPayload(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	closureInitiateIDs []string,
+	action string,
+	actorEmail string,
+) *ClosureNotifPayload {
+	p := &ClosureNotifPayload{
+		Action:       action,
+		ActorEmail:   actorEmail,
+		Count:        len(closureInitiateIDs),
+		ActionAt:     time.Now().Format(time.RFC3339),
+		Closures:     []map[string]interface{}{},
+		ClosureIDs:   closureInitiateIDs,
+		ByTypeKPIs:   []FDKPIRow{},
+		ByEntityKPIs: []FDKPIRow{},
+	}
+	if len(closureInitiateIDs) == 0 {
+		return p
+	}
+	rows, err := fetchCimplrClosureInitiateRows(ctx, pool, closureInitiateIDs)
+	if err != nil {
+		fmt.Printf("[ERROR] BuildCimplrClosureInitiateNotifPayload: %v\n", err)
+		return p
+	}
+	p.Closures = rows
+	p.ByTypeKPIs = computeKPIs(rows, "closure_type", "net_payout_amount")
+	p.ByEntityKPIs = computeKPIs(rows, "entity_name", "net_payout_amount")
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if id := fdStrField(row, "closure_initiate_id"); id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+		p.TotalNetPayout += fdAnyToFloat64(row["net_payout_amount"])
+	}
+	p.ClosureIDs = ids
+	return p
+}
+
+func BuildCimplrClosureConfirmNotifPayload(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	closureConfirmIDs []string,
+	action string,
+	actorEmail string,
+) *ClosureNotifPayload {
+	p := &ClosureNotifPayload{
+		Action:       action,
+		ActorEmail:   actorEmail,
+		Count:        len(closureConfirmIDs),
+		ActionAt:     time.Now().Format(time.RFC3339),
+		Closures:     []map[string]interface{}{},
+		ClosureIDs:   closureConfirmIDs,
+		ByTypeKPIs:   []FDKPIRow{},
+		ByEntityKPIs: []FDKPIRow{},
+	}
+	if len(closureConfirmIDs) == 0 {
+		return p
+	}
+	rows, err := fetchCimplrClosureConfirmRows(ctx, pool, closureConfirmIDs)
+	if err != nil {
+		fmt.Printf("[ERROR] BuildCimplrClosureConfirmNotifPayload: %v\n", err)
+		return p
+	}
+	p.Closures = rows
+	p.ByTypeKPIs = computeKPIs(rows, "closure_type", "net_payout_amount")
+	p.ByEntityKPIs = computeKPIs(rows, "entity_name", "net_payout_amount")
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if id := fdStrField(row, "closure_confirm_id"); id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+		p.TotalNetPayout += fdAnyToFloat64(row["net_payout_amount"])
+	}
+	p.ClosureIDs = ids
 	return p
 }
