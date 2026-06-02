@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"reflect"
 	"strings"
 	"time"
 
@@ -391,7 +392,7 @@ func BuildChangeSummary(oldValues, newValues interface{}) []map[string]interface
 	changes := make([]map[string]interface{}, 0)
 	for field, newValue := range newMap {
 		oldValue := oldMap[field]
-		if fmt.Sprint(oldValue) == fmt.Sprint(newValue) {
+		if auditValuesEqual(oldValue, newValue) {
 			continue
 		}
 		changes = append(changes, map[string]interface{}{
@@ -401,6 +402,29 @@ func BuildChangeSummary(oldValues, newValues interface{}) []map[string]interface
 		})
 	}
 	return changes
+}
+
+func auditValuesEqual(oldValue, newValue interface{}) bool {
+	if isAuditBlankValue(oldValue) && isAuditBlankValue(newValue) {
+		return true
+	}
+	if reflect.DeepEqual(oldValue, newValue) {
+		return true
+	}
+	return fmt.Sprint(oldValue) == fmt.Sprint(newValue)
+}
+
+func isAuditBlankValue(value interface{}) bool {
+	switch v := value.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(v) == ""
+	case []byte:
+		return strings.TrimSpace(string(v)) == ""
+	default:
+		return false
+	}
 }
 
 func Now() time.Time {
