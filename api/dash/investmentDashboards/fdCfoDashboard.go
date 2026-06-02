@@ -256,8 +256,8 @@ type govChecklistItem struct {
 	Detail       string `json:"detail,omitempty"`
 }
 
-func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, sql, action, source, sourcePage string) []govFDItem {
-	rows, err := pool.Query(ctx, sql, entityFilter)
+func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter, sql, action, source, sourcePage string) []govFDItem {
+	rows, err := pool.Query(ctx, sql, entityFilter, bankFilter)
 	if err != nil {
 		api.LogError("[CfoDash] governance %s query error: %v", action, err)
 		return []govFDItem{}
@@ -286,8 +286,8 @@ func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, sql, a
 
 // govFetchBookingItems returns one row per booking with booking_status and the
 // latest open audit processing_status (create/edit/delete).
-func govFetchBookingItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, sql, source, sourcePage string) []govFDItem {
-	rows, err := pool.Query(ctx, sql, entityFilter)
+func govFetchBookingItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter, sql, source, sourcePage string) []govFDItem {
+	rows, err := pool.Query(ctx, sql, entityFilter, bankFilter)
 	if err != nil {
 		api.LogError("[CfoDash] governance booking query error: %v", err)
 		return []govFDItem{}
@@ -396,7 +396,7 @@ func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilt
 	return out
 }
 
-func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter string, periodStart time.Time) map[string]interface{} {
+func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter string, periodStart time.Time) map[string]interface{} {
 	// Approvals Pending widget shows every row that is *not* finalised.
 	// "Finalised" = APPROVED / REJECTED (and CLOSED on booking). Everything
 	// in between (PENDING_APPROVAL, APPROVAL_PENDING, SUBMITTED, EDIT/DELETE
@@ -429,6 +429,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		    OR COALESCE(la.processing_status,'') <> ''
 		  )
 		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		  AND ($2::text='' OR COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'')=$2)
 		ORDER BY COALESCE(la.requested_at, b.created_at) DESC LIMIT 200`
 
 	pendingConfirmSQL := `
@@ -447,6 +448,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  AND ` + sqlConfirmationAwaitingApproval + `
 		  AND ` + sqlExcludeTerminalFdOnBooking + `
 		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		  AND ($2::text='' OR COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'')=$2)
 		ORDER BY c.created_at DESC LIMIT 200`
 
 	pendingActivationSQL := `
@@ -464,6 +466,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  AND UPPER(COALESCE(m.fd_status,'')) = 'PENDING_ACTIVATION'
 		  AND ` + sqlExcludeTerminalFdOnMaster + `
 		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		  AND ($2::text='' OR COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'')=$2)
 		ORDER BY m.created_at DESC LIMIT 200`
 
 	pendingClosureSQL := `
@@ -499,6 +502,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  WHERE COALESCE(ci.is_deleted, false) = false
 		    AND UPPER(COALESCE(la.processing_status, '')) NOT IN ('APPROVED','REJECTED','DELETED')
 		    AND ($1::text = '' OR COALESCE(ci.entity_id, m.entity_id, b.entity_id) = $1)
+		    AND ($2::text = '' OR COALESCE(ci.bank_name, m.bank_name, m.bank_id, b.bank_name, b.bank_id, '') = $2)
 		  UNION ALL
 		  -- New cimplr workflow: confirm stage rows (payout / rollover / premature finalisation)
 		  SELECT
@@ -528,6 +532,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  WHERE COALESCE(cc.is_deleted, false) = false
 		    AND UPPER(COALESCE(lca.processing_status, '')) NOT IN ('APPROVED','REJECTED','DELETED','POSTED')
 		    AND ($1::text = '' OR COALESCE(cc.entity_id, m.entity_id, b.entity_id) = $1)
+		    AND ($2::text = '' OR COALESCE(cc.bank_name, m.bank_name, m.bank_id, b.bank_name, b.bank_id, '') = $2)
 		  UNION ALL
 		  -- Legacy fd_closure_request fallback (older environments only)
 		  SELECT
@@ -545,14 +550,15 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  WHERE COALESCE(cr.is_deleted, false) = false
 		    AND UPPER(COALESCE(cr.closure_status,'')) NOT IN ('APPROVED','REJECTED','POSTED','COMPLETED','CLOSED','CANCELLED')
 		    AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)
+		    AND ($2::text = '' OR COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id, '') = $2)
 		) q
 		ORDER BY sort_ts DESC
 		LIMIT 200`
 
-	bookingItems := govFetchBookingItems(ctx, pool, entityFilter, pendingBookingSQL, constants.FDBookingLabel, constants.FDBooking)
-	confirmItems := govFetchItems(ctx, pool, entityFilter, pendingConfirmSQL, "PENDING_CONFIRMATION_APPROVAL", constants.FDConfirmation, constants.FDConfirmationLabel)
-	activationItems := govFetchItems(ctx, pool, entityFilter, pendingActivationSQL, "PENDING_ACTIVATION_APPROVAL", constants.FDActivationLabel, constants.FDActivation)
-	maturityItems := govFetchItems(ctx, pool, entityFilter, pendingClosureSQL, "PENDING_CLOSURE_APPROVAL", constants.FDMaturity, constants.FdmaturityLabel)
+	bookingItems := govFetchBookingItems(ctx, pool, entityFilter, bankFilter, pendingBookingSQL, constants.FDBookingLabel, constants.FDBooking)
+	confirmItems := govFetchItems(ctx, pool, entityFilter, bankFilter, pendingConfirmSQL, "PENDING_CONFIRMATION_APPROVAL", constants.FDConfirmation, constants.FDConfirmationLabel)
+	activationItems := govFetchItems(ctx, pool, entityFilter, bankFilter, pendingActivationSQL, "PENDING_ACTIVATION_APPROVAL", constants.FDActivationLabel, constants.FDActivation)
+	maturityItems := govFetchItems(ctx, pool, entityFilter, bankFilter, pendingClosureSQL, "PENDING_CLOSURE_APPROVAL", constants.FDMaturity, constants.FdmaturityLabel)
 
 	accrualItems := govFetchAccrualRunItems(ctx, pool, entityFilter)
 	accrualRunCount := int64(len(accrualItems))
@@ -572,8 +578,9 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  AND m.maturity_date >= $2::date
 		  AND m.fd_status IN ('ACTIVE','MATURED')
 		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		  AND ($3::text='' OR COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'')=$3)
 		  AND NOT (`+sqlAnyClosureProcessed+`)`,
-		entityFilter, periodStart.Format(constants.DateFormat)).Scan(&unprocessedMaturities)
+		entityFilter, periodStart.Format(constants.DateFormat), bankFilter).Scan(&unprocessedMaturities)
 
 	bookingPriority := "Low"
 	for _, it := range bookingItems {
@@ -684,9 +691,10 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Build optional entity filter SQL fragment (used across many queries)
 		entityFilter := req.EntityID
-		// Surface the fd_status filter early - `total_exposure` (and other
-		// early-registered widgets) need access to it via closure.
+		// Surface these filters early so all goroutine closures can access them.
 		fdStatusFilter := req.FDStatus
+		fdTypeFilter := req.FDType
+		bankFilter := req.Bank
 
 		// ── concurrent sub-computations ──────────────────────────────────────
 		type subResult struct {
@@ -727,11 +735,13 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted = false
 				  AND ($1::text = '' OR COALESCE(m.entity_id,b.entity_id) = $1)
-				  AND m.fd_status = COALESCE(NULLIF($2::text, ''), 'ACTIVE')
+				  AND m.fd_status = 'ACTIVE'
+				  AND ($2::text = '' OR COALESCE(m.interest_type_code,'') = $2)
+				  AND ($3::text = '' OR COALESCE(m.bank_name, m.bank_id,'') = $3)
 				  AND NOT ` + sqlAnyClosureProcessed
 			var value float64
 			var count int64
-			err := pool.QueryRow(ctx, sqlStr, entityFilter, fdStatusFilter).Scan(&value, &count)
+			err := pool.QueryRow(ctx, sqlStr, entityFilter, fdTypeFilter, bankFilter).Scan(&value, &count)
 			if err != nil {
 				return nil, err
 			}
@@ -761,8 +771,10 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				 FROM investment.fd_master m
 				 LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				 WHERE m.is_deleted=false AND m.fd_status = 'ACTIVE'
-				   AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
-				entityFilter).Scan(&totalAmt)
+				   AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				   AND ($2::text='' OR COALESCE(m.interest_type_code,'')=$2)
+				   AND ($3::text='' OR COALESCE(m.bank_name, m.bank_id,'')=$3)`,
+				entityFilter, fdTypeFilter, bankFilter).Scan(&totalAmt)
 
 			// 30% of total portfolio = default per-counterparty concentration cap
 			policyCap := totalAmt * 0.30
@@ -783,6 +795,8 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				) lim ON true
 				WHERE m.is_deleted=false AND m.fd_status = 'ACTIVE'
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR COALESCE(m.interest_type_code,'')=$2)
+				  AND ($3::text='' OR COALESCE(m.bank_name, m.bank_id,'')=$3)
 				GROUP BY COALESCE(m.bank_name, m.bank_id, ''), lim.bank_cap
 				ORDER BY exposure DESC`
 
@@ -797,7 +811,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				Breach         bool    `json:"breach"`
 			}
 
-			rows, err := pool.Query(ctx, sqlStr, entityFilter)
+			rows, err := pool.Query(ctx, sqlStr, entityFilter, fdTypeFilter, bankFilter)
 			if err != nil {
 				return nil, err
 			}
@@ -862,10 +876,12 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status = 'ACTIVE'
 				  AND NOT ` + sqlAnyClosureProcessed + `
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR COALESCE(m.interest_type_code,'')=$2)
+				  AND ($3::text='' OR COALESCE(m.bank_name, m.bank_id,'')=$3)`
 			var a7, a15, a30 float64
 			var c7, c15, c30 int64
-			err := pool.QueryRow(ctx, sqlStr, entityFilter).Scan(&a7, &c7, &a15, &c15, &a30, &c30)
+			err := pool.QueryRow(ctx, sqlStr, entityFilter, fdTypeFilter, bankFilter).Scan(&a7, &c7, &a15, &c15, &a30, &c30)
 			if err != nil {
 				return nil, err
 			}
@@ -1321,10 +1337,12 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE m.is_deleted=false AND m.fd_status='ACTIVE'
 				  AND NOT ` + sqlAnyClosureProcessed + `
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR COALESCE(m.interest_type_code,'')=$2)
+				  AND ($3::text='' OR COALESCE(m.bank_name, m.bank_id,'')=$3)
 				  ` + horizonClause + `
 				GROUP BY ` + bucketExpr + `, ` + sortExpr + `
 				ORDER BY ` + sortExpr
-			rows, err := pool.Query(ctx, sql, entityFilter)
+			rows, err := pool.Query(ctx, sql, entityFilter, fdTypeFilter, bankFilter)
 			if err != nil {
 				return nil, err
 			}
@@ -1399,9 +1417,10 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND ` + sqlAnyClosureProcessed + `
 				  AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)
 				  AND ($2::text = '' OR COALESCE(m.bank_name, m.bank_id, '') = $2)
+				  AND ($3::text = '' OR COALESCE(m.interest_type_code,'') = $3)
 				GROUP BY m.fd_status
 				ORDER BY m.fd_status`
-			rows, err := pool.Query(ctx, sql, entityFilter, req.Bank)
+			rows, err := pool.Query(ctx, sql, entityFilter, bankFilter, fdTypeFilter)
 			if err != nil {
 				return nil, err
 			}
@@ -1486,17 +1505,15 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 9. governance - approvals + period closing (5 categories) ─────────
 		run("governance", func(ctx context.Context) (interface{}, error) {
-			return buildGovernanceBundle(ctx, pool, entityFilter, periodStart), nil
+			return buildGovernanceBundle(ctx, pool, entityFilter, bankFilter, periodStart), nil
 		})
 
 		// ── 11. fd_list ───────────────────────────────────────────────────────
 		// Build dynamic WHERE for optional secondary filters (bank, fd_status,
 		// fd_type, interest_frequency). Status defaults remain ACTIVE/MATURED
 		// when no explicit fdStatusFilter was supplied.
-		bankFilter := req.Bank
-		fdTypeFilter := req.FDType
 		interestFreqFilter := req.InterestFrequency
-		// fdStatusFilter is declared earlier (above the run() loop)
+		// bankFilter, fdStatusFilter, fdTypeFilter are declared earlier (above the run() loop)
 
 		// Map UI status alias → DB column value
 		dbStatusFilter := ""

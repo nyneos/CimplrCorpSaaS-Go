@@ -40,6 +40,7 @@ type fdTreasuryDashRequest struct {
 	StartDate string `json:"start_date"` // YYYY-MM-DD when Period==CUSTOM
 	EndDate   string `json:"end_date"`   // YYYY-MM-DD when Period==CUSTOM
 	AsOnDate  string `json:"as_on_date"`
+	FDType    string `json:"fd_type"` // SIMPLE | COMPOUND — filters by interest_type_code
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -65,6 +66,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		now := time.Now().UTC()
 		ctx := r.Context()
 		entityFilter := req.EntityID
+		fdTypeFilter := req.FDType
 
 		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
 		startDateStr := periodBounds.StartStr
@@ -120,8 +122,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				      AND COALESCE(cr.is_deleted, false) = false
 				      AND cr.closure_status IN ('COMPLETED','POSTED','CLOSED')
 				  )
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
-				entityFilter).Scan(&activeAmt, &activeCnt)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)`,
+				entityFilter, fdTypeFilter).Scan(&activeAmt, &activeCnt)
 
 			_ = pool.QueryRow(ctx, `
 				SELECT COALESCE(SUM(m.principal_amount),0), COUNT(*)
@@ -129,8 +132,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted = false
 				  AND m.fd_status = 'PENDING_ACTIVATION'
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
-				entityFilter).Scan(&pendingAmt, &pendingCnt)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)`,
+				entityFilter, fdTypeFilter).Scan(&pendingAmt, &pendingCnt)
 
 			total := activeAmt + pendingAmt
 			return map[string]interface{}{
@@ -151,8 +155,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
-				entityFilter).Scan(&cnt)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)`,
+				entityFilter, fdTypeFilter).Scan(&cnt)
 			if err != nil {
 				api.LogError("[TreasuryDash] fd_count_active query error: %v", err)
 				return int64(0), nil
@@ -302,7 +307,8 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    WHERE ncc.fd_id = m.fd_id AND COALESCE(ncc.is_deleted,false) = false
 				  )
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				ORDER BY m.maturity_date ASC`, entityFilter)
+				  AND ($2::text='' OR m.interest_type_code=$2)
+				ORDER BY m.maturity_date ASC`, entityFilter, fdTypeFilter)
 			if err != nil {
 				api.LogError("[TreasuryDash] near_maturity query error: %v", err)
 				return map[string]interface{}{
@@ -377,8 +383,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
 				GROUP BY COALESCE(m.bank_name, m.bank_id)
-				ORDER BY exposure DESC`, entityFilter)
+				ORDER BY exposure DESC`, entityFilter, fdTypeFilter)
 			if err != nil {
 				return []interface{}{}, nil
 			}
@@ -413,8 +420,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
 				GROUP BY COALESCE(m.bank_name, m.bank_id)
-				ORDER BY weighted_avg_yield DESC`, entityFilter)
+				ORDER BY weighted_avg_yield DESC`, entityFilter, fdTypeFilter)
 			if err != nil {
 				return []interface{}{}, nil
 			}
@@ -473,8 +481,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				      AND cr.closure_status IN ('COMPLETED','POSTED','CLOSED')
 				  )
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
 				GROUP BY 1
-				ORDER BY MIN(m.maturity_date)`, entityFilter)
+				ORDER BY MIN(m.maturity_date)`, entityFilter, fdTypeFilter)
 			if err != nil {
 				return []interface{}{}, nil
 			}
@@ -519,8 +528,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
 				GROUP BY COALESCE(m.bank_name, m.bank_id), 2
-				ORDER BY COALESCE(m.bank_name, m.bank_id), MIN(m.interest_rate)`, entityFilter)
+				ORDER BY COALESCE(m.bank_name, m.bank_id), MIN(m.interest_rate)`, entityFilter, fdTypeFilter)
 			if err != nil {
 				return []interface{}{}, nil
 			}
@@ -1073,8 +1083,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    )
 				  )
 				  AND ($1::text='' OR COALESCE(m.entity_id, b.entity_id)=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
 				ORDER BY m.maturity_date ASC NULLS LAST
-				LIMIT 500`, entityFilter)
+				LIMIT 500`, entityFilter, fdTypeFilter)
 			if err != nil {
 				api.LogError("[TreasuryDash] fd_list query error: %v", err)
 				return []interface{}{}, nil
@@ -1143,8 +1154,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
 				GROUP BY 1
-				ORDER BY MIN(m.interest_rate)`, entityFilter)
+				ORDER BY MIN(m.interest_rate)`, entityFilter, fdTypeFilter)
 			if err != nil {
 				return []interface{}{}, nil
 			}

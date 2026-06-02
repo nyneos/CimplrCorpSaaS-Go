@@ -276,8 +276,10 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND b.booking_status IN ('SENT_TO_BANK','APPROVAL_PENDING')
 				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2)
+				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code, b.interest_type_code,''))=UPPER($3))
 				ORDER BY b.created_at ASC
-				LIMIT 100`, entityFilter)
+				LIMIT 100`, entityFilter, bankFilter, fdTypeFilter)
 			if err != nil {
 				api.LogError("[BodEodDash] confirmations_due query error: %v", err)
 				return map[string]interface{}{"rows": []interface{}{}, "count": 0, "overdue_count": 0}, nil
@@ -417,8 +419,10 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND cf.event_date = $1::date
 				  AND cf.event_type IN ('INTEREST_RECEIPT','MATURITY')
 				  AND ($2::text='' OR m.entity_id=$2)
+				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
+				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))
 				ORDER BY cf.net_cash_flow DESC NULLS LAST
-				LIMIT 200`, today, entityFilter)
+				LIMIT 200`, today, entityFilter, bankFilter, fdTypeFilter)
 			if err != nil {
 				api.LogError("[BodEodDash] expected_interest query error: %v", err)
 				return map[string]interface{}{"rows": []interface{}{}, "count": 0, "total_expected": 0}, nil
@@ -476,6 +480,8 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  WHERE is_deleted = false
 				    AND fd_status   = 'ACTIVE'
 				    AND ($1::text='' OR entity_id = $1)
+				    AND ($2::text='' OR bank_id=$2 OR bank_name=$2)
+				    AND ($3::text='' OR UPPER(COALESCE(interest_type_code,''))=UPPER($3))
 				)
 				SELECT
 				  COALESCE(SUM(
@@ -493,7 +499,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND cf.event_date >= CURRENT_DATE
 				  AND cf.event_type IN ('INTEREST_RECEIPT','MATURITY')
 				  AND COALESCE(cf.receipt_cleared, false) = false
-				  AND COALESCE(cf.posting_status,'') <> 'POSTED'`, entityFilter).Scan(&total, &fdCount, &cfCount)
+				  AND COALESCE(cf.posting_status,'') <> 'POSTED'`, entityFilter, bankFilter, fdTypeFilter).Scan(&total, &fdCount, &cfCount)
 			if err != nil {
 				api.LogError("[BodEodDash] active_interest_pipeline query error: %v", err)
 				return map[string]interface{}{
@@ -613,6 +619,8 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND b.booking_status IN ('DRAFT','APPROVAL_PENDING','SENT_TO_BANK')
 				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2)
+				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code, b.interest_type_code,''))=UPPER($3))
 				UNION ALL
 				SELECT
 				  ci.closure_initiate_id AS ref_id,
@@ -638,6 +646,8 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND COALESCE(la.processing_status, ci.closure_status, '') NOT IN ('POSTED', 'REJECTED', 'DELETED')
 				  AND NOT (`+sqlCimplrClosureProcessed+`)
 				  AND ($1::text = '' OR COALESCE(ci.entity_id, m.entity_id) = $1)
+				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)
+				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code, ''))=UPPER($3))
 				UNION ALL
 				SELECT
 				  cr.closure_request_id AS ref_id,
@@ -653,8 +663,10 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE cr.is_deleted=false
 				  AND cr.closure_status IN ('PENDING_APPROVAL','APPROVED')
 				  AND ($1::text='' OR cr.entity_id=$1)
+				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)
+				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code, ''))=UPPER($3))
 				ORDER BY aging_days DESC
-				LIMIT 100`, entityFilter)
+				LIMIT 100`, entityFilter, bankFilter, fdTypeFilter)
 			if err != nil {
 				api.LogError("[BodEodDash] action_list query error: %v", err)
 				return []interface{}{}, nil
@@ -752,8 +764,10 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND DATE(b.created_at) = $1::date
 				  AND ($2::text='' OR b.entity_id=$2)
+				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3 OR b.bank_id=$3 OR b.bank_name=$3)
+				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code, b.interest_type_code,''))=UPPER($4))
 				ORDER BY b.created_at DESC
-				LIMIT 100`, today, entityFilter)
+				LIMIT 100`, today, entityFilter, bankFilter, fdTypeFilter)
 			if err != nil {
 				api.LogError("[BodEodDash] bookings_today query error: %v", err)
 				return map[string]interface{}{"rows": []interface{}{}, "count": 0, "total_amount": 0}, nil
@@ -809,8 +823,10 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE cf.is_deleted=false
 				  AND DATE(cf.created_at) = $1::date
 				  AND ($2::text='' OR b.entity_id=$2)
+				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3 OR b.bank_id=$3 OR b.bank_name=$3)
+				  AND ($4::text='' OR UPPER(COALESCE(cf.confirmed_interest_type_code, m.interest_type_code, b.interest_type_code,''))=UPPER($4))
 				ORDER BY cf.created_at DESC
-				LIMIT 100`, today, entityFilter)
+				LIMIT 100`, today, entityFilter, bankFilter, fdTypeFilter)
 			if err != nil {
 				api.LogError("[BodEodDash] confirmations_today query error: %v", err)
 				return map[string]interface{}{"rows": []interface{}{}, "count": 0, "variance_count": 0}, nil
@@ -865,10 +881,13 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  SUM(CASE WHEN COALESCE(reconciliation_status,'') IN ('MATCHED','RECONCILED') THEN 1 ELSE 0 END) AS matched,
 				  SUM(CASE WHEN COALESCE(reconciliation_status,'UNMATCHED') IN ('UNMATCHED','PENDING','') THEN 1 ELSE 0 END) AS unmatched,
 				  COALESCE(SUM(COALESCE(gross_interest_received,0)),0) AS total_ingested
-				FROM investment.fd_interest_receipt
-				WHERE is_deleted=false
-				  AND DATE(created_at) = $1::date
-				  AND ($2::text='' OR entity_id=$2)`, today, entityFilter).Scan(&ingested, &matched, &unmatched, &totalIngested)
+				FROM investment.fd_interest_receipt ir
+				LEFT JOIN investment.fd_master m ON m.fd_id = ir.fd_id AND m.is_deleted=false
+				WHERE ir.is_deleted=false
+				  AND DATE(ir.created_at) = $1::date
+				  AND ($2::text='' OR ir.entity_id=$2)
+				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
+				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))`, today, entityFilter, bankFilter, fdTypeFilter).Scan(&ingested, &matched, &unmatched, &totalIngested)
 			if err != nil {
 				api.LogError("[BodEodDash] receipts_today query error: %v", err)
 				return map[string]interface{}{"ingested": 0, "matched": 0, "unmatched": 0, "total_amount": 0, "match_rate_pct": 0}, nil
@@ -895,12 +914,12 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  SUM(CASE WHEN exception_status IN ('RESOLVED','CLOSED') THEN 1 ELSE 0 END) AS closed,
 				  SUM(CASE WHEN exception_status = 'ESCALATED' THEN 1 ELSE 0 END) AS escalated
 				FROM investment.fd_accrual_exception ae
+				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id AND m.is_deleted=false
 				WHERE COALESCE(ae.is_deleted,false)=false
 				  AND DATE(ae.created_at) = $1::date
-				  AND ($2::text='' OR EXISTS (
-				      SELECT 1 FROM investment.fd_master m
-				      WHERE m.fd_id = ae.fd_id AND m.entity_id=$2
-				  ))`, today, entityFilter).Scan(&opened, &closed, &escalated)
+				  AND ($2::text='' OR m.entity_id=$2)
+				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
+				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))`, today, entityFilter, bankFilter, fdTypeFilter).Scan(&opened, &closed, &escalated)
 			if err != nil {
 				api.LogError("[BodEodDash] exceptions_today query error: %v", err)
 				return map[string]interface{}{"opened": 0, "closed": 0, "escalated": 0}, nil
@@ -922,7 +941,9 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				JOIN investment.fd_master m ON m.fd_id = cf.fd_id AND m.is_deleted=false
 				WHERE cf.is_deleted=false
 				  AND DATE(cf.last_modified_at) = $1::date
-				  AND ($2::text='' OR m.entity_id=$2)`, today, entityFilter).Scan(&posted, &failed, &notPosted, &totalPosted)
+				  AND ($2::text='' OR m.entity_id=$2)
+				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
+				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))`, today, entityFilter, bankFilter, fdTypeFilter).Scan(&posted, &failed, &notPosted, &totalPosted)
 			if err != nil {
 				api.LogError("[BodEodDash] posting_today query error: %v", err)
 				return map[string]interface{}{"posted": 0, "failed": 0, "not_posted": 0, "total_posted_amount": 0}, nil
