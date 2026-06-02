@@ -43,6 +43,15 @@ func (a sqlExecAdapter) ExecContext(ctx context.Context, query string, args ...i
 	return err
 }
 
+type txExecAdapter struct {
+	tx *sql.Tx
+}
+
+func (a txExecAdapter) ExecContext(ctx context.Context, query string, args ...interface{}) error {
+	_, err := a.tx.ExecContext(ctx, query, args...)
+	return err
+}
+
 type pgxExecAdapter struct {
 	pool *pgxpool.Pool
 }
@@ -59,12 +68,41 @@ type execAttempt struct {
 
 func execFirstSuccess(ctx context.Context, exec ExecContext, attempts []execAttempt) error {
 	var lastErr error
+	errors := make([]string, 0)
 	for _, attempt := range attempts {
 		if err := exec.ExecContext(ctx, attempt.query, attempt.args...); err == nil {
 			return nil
 		} else {
 			lastErr = err
+			errors = append(errors, err.Error())
 		}
+	}
+	if len(errors) > 0 {
+		return fmt.Errorf("%v; attempts=%s", lastErr, strings.Join(errors, " | "))
+	}
+	return lastErr
+}
+
+func execFirstSuccessTx(ctx context.Context, tx *sql.Tx, attempts []execAttempt) error {
+	var lastErr error
+	errors := make([]string, 0)
+	for i, attempt := range attempts {
+		savepoint := fmt.Sprintf("audit_insert_attempt_%d", i)
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT "+savepoint); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, attempt.query, attempt.args...); err == nil {
+			_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT "+savepoint)
+			return nil
+		} else {
+			lastErr = err
+			errors = append(errors, err.Error())
+			_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+savepoint)
+			_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT "+savepoint)
+		}
+	}
+	if len(errors) > 0 {
+		return fmt.Errorf("%v; attempts=%s", lastErr, strings.Join(errors, " | "))
 	}
 	return lastErr
 }
@@ -197,56 +235,77 @@ type DownloadParams struct {
 	ExtraColumns map[string]string
 }
 
-func RecordAction(ctx context.Context, db *sql.DB, p ActionParams) {
+func recordAction(ctx context.Context, exec ExecContext, p ActionParams) error {
 	p.ParentID = strings.TrimSpace(p.ParentID)
 	p.RequestedBy = strings.TrimSpace(p.RequestedBy)
-	if p.ParentID == "" || p.RequestedBy == "" || db == nil {
+	if p.ParentID == "" || p.RequestedBy == "" || exec == nil {
+		return fmt.Errorf("parent id, requested by, and executor are required")
+	}
+	attempts := buildActionInsertAttempts(p)
+	return execFirstSuccess(ctx, exec, attempts)
+}
+
+func buildActionInsertAttempts(p ActionParams) []execAttempt {
+	actionColumns := []string{"actiontype", "action_type"}
+	idExpressions := []string{
+		"",
+		fmt.Sprintf("(SELECT COALESCE(MAX(action_id), 0) + 1 FROM %s)", p.TableName),
+		fmt.Sprintf("(SELECT (COALESCE(MAX(action_id::bigint), 0) + 1)::text FROM %s)", p.TableName),
+	}
+	attempts := make([]execAttempt, 0, len(actionColumns)*len(idExpressions)*2)
+
+	for _, includeJSON := range []bool{true, false} {
+		for _, idExpression := range idExpressions {
+			for _, actionColumn := range actionColumns {
+				columns := []string{p.ParentColumn, actionColumn, "processing_status", "reason", "requested_by", "requested_at"}
+				values := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
+				args := []interface{}{p.ParentID, p.ActionType, p.Status, NullIfBlank(p.Reason), p.RequestedBy}
+				if idExpression != "" {
+					columns = append([]string{"action_id"}, columns...)
+					values = append([]string{idExpression}, values...)
+				}
+				if includeJSON {
+					columns = append(columns, "old_values", "new_values", "change_summary")
+					values = append(values, "$6", "$7", "$8")
+					args = append(args, JSONValue(p.OldValues), JSONValue(p.NewValues), JSONValue(BuildChangeSummary(p.OldValues, p.NewValues)))
+				}
+				attempts = append(attempts, execAttempt{
+					query: fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", p.TableName, strings.Join(columns, ", "), strings.Join(values, ", ")),
+					args:  args,
+				})
+			}
+		}
+	}
+
+	return attempts
+}
+
+func RecordAction(ctx context.Context, db *sql.DB, p ActionParams) {
+	if db == nil {
 		return
 	}
-	attempts := []execAttempt{
-		{
-			query: fmt.Sprintf(`
-			INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values, change_summary)
-			VALUES ($1, $2, $3, $4, $5, now(), $6, $7, $8)
-		`, p.TableName, p.ParentColumn),
-			args: []interface{}{p.ParentID, p.ActionType, p.Status, NullIfBlank(p.Reason), p.RequestedBy, JSONValue(p.OldValues), JSONValue(p.NewValues), JSONValue(BuildChangeSummary(p.OldValues, p.NewValues))},
-		},
-		{
-			query: fmt.Sprintf(`
-			INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at)
-			VALUES ($1, $2, $3, $4, $5, now())
-		`, p.TableName, p.ParentColumn),
-			args: []interface{}{p.ParentID, p.ActionType, p.Status, NullIfBlank(p.Reason), p.RequestedBy},
-		},
-	}
-	if err := execFirstSuccess(ctx, sqlExecAdapter{db: db}, attempts); err != nil {
+	if err := recordAction(ctx, sqlExecAdapter{db: db}, p); err != nil {
 		logger.LogError("fx audit insert failed table=%s parent=%s action=%s: %v", p.TableName, p.ParentID, p.ActionType, err)
 	}
 }
 
-func RecordActionPGX(ctx context.Context, pool *pgxpool.Pool, p ActionParams) {
+func RecordActionTx(ctx context.Context, tx *sql.Tx, p ActionParams) error {
+	if tx == nil {
+		return fmt.Errorf("transaction is required")
+	}
 	p.ParentID = strings.TrimSpace(p.ParentID)
 	p.RequestedBy = strings.TrimSpace(p.RequestedBy)
-	if p.ParentID == "" || p.RequestedBy == "" || pool == nil {
+	if p.ParentID == "" || p.RequestedBy == "" {
+		return fmt.Errorf("parent id and requested by are required")
+	}
+	return execFirstSuccessTx(ctx, tx, buildActionInsertAttempts(p))
+}
+
+func RecordActionPGX(ctx context.Context, pool *pgxpool.Pool, p ActionParams) {
+	if pool == nil {
 		return
 	}
-	attempts := []execAttempt{
-		{
-			query: fmt.Sprintf(`
-			INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values, change_summary)
-			VALUES ($1, $2, $3, $4, $5, now(), $6, $7, $8)
-		`, p.TableName, p.ParentColumn),
-			args: []interface{}{p.ParentID, p.ActionType, p.Status, NullIfBlank(p.Reason), p.RequestedBy, JSONValue(p.OldValues), JSONValue(p.NewValues), JSONValue(BuildChangeSummary(p.OldValues, p.NewValues))},
-		},
-		{
-			query: fmt.Sprintf(`
-			INSERT INTO %s (%s, actiontype, processing_status, reason, requested_by, requested_at)
-			VALUES ($1, $2, $3, $4, $5, now())
-		`, p.TableName, p.ParentColumn),
-			args: []interface{}{p.ParentID, p.ActionType, p.Status, NullIfBlank(p.Reason), p.RequestedBy},
-		},
-	}
-	if err := execFirstSuccess(ctx, pgxExecAdapter{pool: pool}, attempts); err != nil {
+	if err := recordAction(ctx, pgxExecAdapter{pool: pool}, p); err != nil {
 		logger.LogError("fx audit insert failed table=%s parent=%s action=%s: %v", p.TableName, p.ParentID, p.ActionType, err)
 	}
 }
