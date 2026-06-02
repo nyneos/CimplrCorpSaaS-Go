@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 
@@ -237,7 +238,24 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 		go func(id, uEmail, fID, eID string) {
 			defer func() { recover() }() //nolint:errcheck
-			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/tds-register/create", id, map[string]interface{}{
+			bgCtx := context.Background()
+			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "FIXED_DEPOSIT",
+				EntityCode:       eID,
+				TransactionType:  "FD_TDS_REGISTER_CREATE",
+				RecordID:         id,
+				RecordTable:      "investment.fd_tds_receipt",
+				AuditTable:       "investment.fd_tds_receipt_audit",
+				AuditIDColumn:    "tds_id",
+				ActionType:       "CREATE",
+				SubmittedByEmail: uEmail,
+			})
+			if instErr != nil {
+				api.LogError("[FDTDS] CreateInstance CREATE failed: %v", instErr)
+			} else if instID != "" {
+				api.LogInfo("[FDTDS] CreateInstance CREATE created instance=%s", instID)
+			}
+			notifcatalog.TriggerNotification(bgCtx, pool, "/investment/fd/tds-register/create", id, map[string]interface{}{
 				"record_id": id, "event": "FD_TDS_REGISTER_CREATED", "actor_email": uEmail,
 				"fd_id": fID, "entity_id": eID,
 			})
@@ -511,7 +529,24 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 		go func(uEmail, eID, action string) {
 			defer func() { recover() }() //nolint:errcheck
-			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/tds-register/reconcile", eID, map[string]interface{}{
+			bgCtx := context.Background()
+			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "FIXED_DEPOSIT",
+				EntityCode:       eID,
+				TransactionType:  "FD_TDS_REGISTER_RECONCILE",
+				RecordID:         eID,
+				RecordTable:      "investment.fd_tds_receipt",
+				AuditTable:       "investment.fd_tds_receipt_audit",
+				AuditIDColumn:    "tds_id",
+				ActionType:       "RECONCILE",
+				SubmittedByEmail: uEmail,
+			})
+			if instErr != nil {
+				api.LogError("[FDTDS] CreateInstance RECONCILE failed: %v", instErr)
+			} else if instID != "" {
+				api.LogInfo("[FDTDS] CreateInstance RECONCILE created instance=%s", instID)
+			}
+			notifcatalog.TriggerNotification(bgCtx, pool, "/investment/fd/tds-register/reconcile", eID, map[string]interface{}{
 				"record_id": eID, "event": "FD_TDS_REGISTER_RECONCILED", "actor_email": uEmail,
 				"entity_id": eID, "reconcile_action": action,
 			})

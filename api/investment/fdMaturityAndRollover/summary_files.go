@@ -526,7 +526,17 @@ func createFDMaturitySummaryFile(ctx context.Context, pool *pgxpool.Pool, target
 	if err := s3storage.PutObjectToS3(ctx, s3Key, body, contentType); err != nil {
 		return fdSummaryFileRecord{}, err
 	}
-	rec, err := insertFDMaturitySummaryFileMetadata(ctx, pool, target, storedFileName, originalName, contentType, int64(len(body)), fileHash, s3Key, userEmail, uploadedAt)
+	rec, err := insertFDMaturitySummaryFileMetadata(ctx, pool, insertFDMaturitySummaryFileParams{
+		Target:         target,
+		StoredFileName: storedFileName,
+		OriginalName:   originalName,
+		ContentType:    contentType,
+		FileSize:       int64(len(body)),
+		FileHash:       fileHash,
+		S3Key:          s3Key,
+		UserEmail:      userEmail,
+		UploadedAt:     uploadedAt,
+	})
 	if err != nil {
 		_ = s3storage.DeleteFromS3(ctx, s3Key)
 		return fdSummaryFileRecord{}, err
@@ -534,19 +544,31 @@ func createFDMaturitySummaryFile(ctx context.Context, pool *pgxpool.Pool, target
 	return rec, nil
 }
 
-func insertFDMaturitySummaryFileMetadata(ctx context.Context, pool *pgxpool.Pool, target fdSummaryFileSource, storedFileName, originalName, contentType string, fileSize int64, fileHash, s3Key, userEmail string, uploadedAt time.Time) (fdSummaryFileRecord, error) {
+type insertFDMaturitySummaryFileParams struct {
+	Target         fdSummaryFileSource
+	StoredFileName string
+	OriginalName   string
+	ContentType    string
+	FileSize       int64
+	FileHash       string
+	S3Key          string
+	UserEmail      string
+	UploadedAt     time.Time
+}
+
+func insertFDMaturitySummaryFileMetadata(ctx context.Context, pool *pgxpool.Pool, params insertFDMaturitySummaryFileParams) (fdSummaryFileRecord, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fdSummaryFileRecord{}, err
 	}
 	defer tx.Rollback(ctx)
 	var fileID string
-	if target.Module == fdSummaryModuleClosure {
+	if params.Target.Module == fdSummaryModuleClosure {
 		initiateID, confirmID := "", ""
-		if target.Kind == "closure_initiate_id" {
-			initiateID = target.RecordID
+		if params.Target.Kind == "closure_initiate_id" {
+			initiateID = params.Target.RecordID
 		} else {
-			confirmID = target.RecordID
+			confirmID = params.Target.RecordID
 		}
 		err = tx.QueryRow(ctx, `
 			INSERT INTO cimplr.fd_closure_files (
@@ -554,7 +576,7 @@ func insertFDMaturitySummaryFileMetadata(ctx context.Context, pool *pgxpool.Pool
 				content_type, file_size, file_hash, upload_s3_key, uploaded_by
 			) VALUES (NULLIF($1,''), NULLIF($2,''), 'SUPPORTING', $3, $4, $5, $6, $7, $8, $9)
 			RETURNING file_id::text`,
-			initiateID, confirmID, storedFileName, originalName, contentType, fileSize, fileHash, s3Key, userEmail,
+			initiateID, confirmID, params.StoredFileName, params.OriginalName, params.ContentType, params.FileSize, params.FileHash, params.S3Key, params.UserEmail,
 		).Scan(&fileID)
 		if err == nil {
 			_, err = tx.Exec(ctx, `
@@ -562,12 +584,12 @@ func insertFDMaturitySummaryFileMetadata(ctx context.Context, pool *pgxpool.Pool
 					file_id, closure_initiate_id, closure_confirm_id, action_type, processing_status,
 					reason, requested_by
 				) VALUES ($1::uuid, NULLIF($2,''), NULLIF($3,''), 'CREATE', 'APPROVED', $4, $5)`,
-				fileID, initiateID, confirmID, "File uploaded from FD Maturity Summary", userEmail,
+				fileID, initiateID, confirmID, "File uploaded from FD Maturity Summary", params.UserEmail,
 			)
 		}
 	} else {
 		tableName, parentColumn := "investment.fd_master_files", "fd_id"
-		if target.Module == fdSummaryModuleBooking {
+		if params.Target.Module == fdSummaryModuleBooking {
 			tableName, parentColumn = "investment.fd_booking_request_files", "booking_id"
 		}
 		err = tx.QueryRow(ctx, fmt.Sprintf(`
@@ -576,7 +598,7 @@ func insertFDMaturitySummaryFileMetadata(ctx context.Context, pool *pgxpool.Pool
 				upload_s3_key, uploaded_by, uploaded_at, is_deleted
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false)
 			RETURNING file_id::text`, tableName, parentColumn),
-			target.RecordID, storedFileName, contentType, fileSize, fileHash, s3Key, userEmail, uploadedAt,
+			params.Target.RecordID, params.StoredFileName, params.ContentType, params.FileSize, params.FileHash, params.S3Key, params.UserEmail, params.UploadedAt,
 		).Scan(&fileID)
 		if err == nil {
 			_, err = tx.Exec(ctx, `
@@ -584,7 +606,7 @@ func insertFDMaturitySummaryFileMetadata(ctx context.Context, pool *pgxpool.Pool
 					module_key, parent_record_id, file_id, action_type, processing_status,
 					requested_by, requested_at, reason
 				) VALUES ($1, $2, $3, 'CREATE', 'APPROVED', $4, $5, $6)`,
-				target.Module, target.RecordID, fileID, userEmail, uploadedAt, "File uploaded from FD Maturity Summary",
+				params.Target.Module, params.Target.RecordID, fileID, params.UserEmail, params.UploadedAt, "File uploaded from FD Maturity Summary",
 			)
 		}
 	}
@@ -596,17 +618,17 @@ func insertFDMaturitySummaryFileMetadata(ctx context.Context, pool *pgxpool.Pool
 	}
 	return fdSummaryFileRecord{
 		FileID:             strings.TrimSpace(fileID),
-		StoredFileName:     storedFileName,
-		ContentType:        contentType,
-		FileSize:           fileSize,
-		UploadS3Key:        s3Key,
-		UploadedBy:         userEmail,
-		UploadedAt:         uploadedAt,
+		StoredFileName:     params.StoredFileName,
+		ContentType:        params.ContentType,
+		FileSize:           params.FileSize,
+		UploadS3Key:        params.S3Key,
+		UploadedBy:         params.UserEmail,
+		UploadedAt:         params.UploadedAt,
 		ProcessingStatus:   "ACTIVE",
-		SourceModule:       target.Module,
-		SourceModuleLabel:  target.Label,
-		SourceRecordID:     target.RecordID,
-		SourceRecordIDName: target.Kind,
+		SourceModule:       params.Target.Module,
+		SourceModuleLabel:  params.Target.Label,
+		SourceRecordID:     params.Target.RecordID,
+		SourceRecordIDName: params.Target.Kind,
 	}, nil
 }
 

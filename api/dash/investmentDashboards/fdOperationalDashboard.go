@@ -38,6 +38,7 @@ type fdOperationalDashRequest struct {
 	Period    string `json:"period"`
 	StartDate string `json:"start_date"`
 	EndDate   string `json:"end_date"`
+	AsOnDate  string `json:"as_on_date"`
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────

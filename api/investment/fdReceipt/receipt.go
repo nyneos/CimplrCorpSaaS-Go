@@ -379,6 +379,28 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		api.LogInfo("[FDReceipt] Created receipt_id=%s fd=%s gross=%.4f tds=%.4f", receiptID, req.FdID, req.GrossInterestReceived, req.TdsAmountDeducted)
 
+		go func(rID, eID, uEmail string, amount float64) {
+			bgCtx := context.Background()
+			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "FIXED_DEPOSIT",
+				EntityCode:       eID,
+				TransactionType:  "FD_RECEIPT_CREATE",
+				RecordID:         rID,
+				RecordTable:      constants.QuerryInterestReceipt,
+				AuditTable:       constants.QuerryAuditInterestReceipt,
+				AuditIDColumn:    "receipt_id",
+				ActionType:       "CREATE",
+				Amount:           amount,
+				SubmittedBy:      req.UserID,
+				SubmittedByEmail: uEmail,
+			})
+			if instErr != nil {
+				api.LogError("[FDReceipt] CreateInstance CREATE failed: %v", instErr)
+			} else if instID != "" {
+				api.LogInfo("[FDReceipt] CreateInstance CREATE created instance=%s", instID)
+			}
+		}(receiptID, entityID, userEmail, req.GrossInterestReceived)
+
 		go func(rID, fdID, uEmail string, gross float64) {
 			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/create", rID, map[string]interface{}{
 				"record_id":   rID,

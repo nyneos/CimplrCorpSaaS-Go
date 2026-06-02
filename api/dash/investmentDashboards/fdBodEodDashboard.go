@@ -44,13 +44,17 @@ import (
 // ─── request type ─────────────────────────────────────────────────────────────
 
 type fdBodEodDashRequest struct {
-	UserID    string `json:"user_id"`
-	EntityID  string `json:"entity_id"`
-	Currency  string `json:"currency"`
-	Mode      string `json:"mode"`       // "BOD" | "EOD" — default "BOD"
-	Period    string `json:"period"`     // "Today" | "This Week" | "This Month"
-	StartDate string `json:"start_date"` // for custom range
-	EndDate   string `json:"end_date"`
+	UserID             string `json:"user_id"`
+	EntityID           string `json:"entity_id"`
+	Currency           string `json:"currency"`
+	Mode               string `json:"mode"`                // "BOD" | "EOD" — default "BOD"
+	Period             string `json:"period"`              // "Today" | "This Week" | "This Month"
+	StartDate          string `json:"start_date"`          // for custom range
+	EndDate            string `json:"end_date"`
+	BankID             string `json:"bank_id"`             // filter by specific bank
+	FDType             string `json:"fd_type"`             // e.g. "SIMPLE" | "COMPOUNDING"
+	InterestFrequency  string `json:"interest_frequency"`  // e.g. "PAYOUT" | "COMPOUNDING"
+	AsOnDate           string `json:"as_on_date"`          // override today's date for historical BOD/EOD view
 }
 
 // ─── handler ──────────────────────────────────────────────────────────────────
@@ -75,10 +79,17 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		now := time.Now().UTC()
 		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
+		// as_on_date lets callers view a historical BOD/EOD state; defaults to today.
 		today := now.Format(constants.DateFormat)
+		if req.AsOnDate != "" {
+			today = req.AsOnDate
+		}
 		threeDaysOut := now.AddDate(0, 0, 3).Format(constants.DateFormat)
 		ctx := r.Context()
-		entityFilter := req.EntityID
+		entityFilter        := req.EntityID
+		bankFilter          := req.BankID
+		fdTypeFilter        := req.FDType
+		interestFreqFilter  := req.InterestFrequency
 
 		type subResult struct {
 			data interface{}
@@ -129,8 +140,11 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE m.is_deleted=false
 				  AND m.maturity_date = $1::date
 				  AND ($2::text='' OR m.entity_id=$2)
+				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
+				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))
+				  AND ($5::text='' OR UPPER(COALESCE(m.frequency_id,''))=UPPER($5))
 				ORDER BY m.principal_amount DESC NULLS LAST
-				LIMIT 200`, today, entityFilter)
+				LIMIT 200`, today, entityFilter, bankFilter, fdTypeFilter, interestFreqFilter)
 			if err != nil {
 				api.LogError("[BodEodDash] maturities_today query error: %v", err)
 				return map[string]interface{}{"rows": []interface{}{}, "count": 0, "total_principal": 0, "total_interest": 0}, nil
@@ -195,8 +209,11 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND m.maturity_date > $1::date
 				  AND m.maturity_date <= $2::date
 				  AND ($3::text='' OR m.entity_id=$3)
+				  AND ($4::text='' OR m.bank_id=$4 OR m.bank_name=$4)
+				  AND ($5::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($5))
+				  AND ($6::text='' OR UPPER(COALESCE(m.frequency_id,''))=UPPER($6))
 				ORDER BY m.maturity_date ASC, m.principal_amount DESC NULLS LAST
-				LIMIT 200`, today, threeDaysOut, entityFilter)
+				LIMIT 200`, today, threeDaysOut, entityFilter, bankFilter, fdTypeFilter, interestFreqFilter)
 			if err != nil {
 				api.LogError("[BodEodDash] maturities_3days query error: %v", err)
 				return map[string]interface{}{"rows": []interface{}{}, "count": 0, "total_principal": 0}, nil
@@ -488,6 +505,95 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"fd_count":       fdCount,
 				"cashflow_count": cfCount,
 			}, nil
+		})
+
+		// ── BOD: 5c. Active FD list with upcoming interest (per-FD detail) ──────
+		// Powers the "Expected Interest" drilldown — returns one row per active
+		// FD with the sum of all upcoming (uncleared) interest cashflows.
+		run("active_fd_list", func(ctx context.Context) (interface{}, error) {
+			rows, err := pool.Query(ctx, `
+				SELECT
+				  m.fd_id,
+				  COALESCE(m.bank_name, m.bank_id, '')              AS bank_name,
+				  COALESCE(m.entity_name, '')                        AS entity_name,
+				  COALESCE(m.entity_id, '')                          AS entity_id,
+				  COALESCE(m.principal_amount, 0)                    AS principal,
+				  COALESCE(m.interest_rate, 0)                       AS interest_rate,
+				  COALESCE(TO_CHAR(m.start_date,'YYYY-MM-DD'),'')    AS start_date,
+				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'') AS maturity_date,
+				  COALESCE(m.fd_status,'')                           AS fd_status,
+				  COALESCE((
+				    SELECT SUM(
+				      CASE
+				        WHEN cf2.event_type = 'INTEREST_RECEIPT' THEN COALESCE(cf2.net_cash_flow, cf2.interest_accrued, 0)
+				        WHEN cf2.event_type = 'MATURITY'         THEN COALESCE(cf2.interest_accrued, 0)
+				        ELSE 0
+				      END
+				    )
+				    FROM investment.fd_cashflow_schedule cf2
+				    WHERE cf2.fd_id = m.fd_id
+				      AND cf2.is_deleted = false
+				      AND cf2.event_date >= CURRENT_DATE
+				      AND cf2.event_type IN ('INTEREST_RECEIPT','MATURITY')
+				      AND COALESCE(cf2.receipt_cleared, false) = false
+				      AND COALESCE(cf2.posting_status,'') <> 'POSTED'
+				  ), 0)                                               AS upcoming_interest,
+				  COALESCE((
+				    SELECT COUNT(*)
+				    FROM investment.fd_cashflow_schedule cf3
+				    WHERE cf3.fd_id = m.fd_id
+				      AND cf3.is_deleted = false
+				      AND cf3.event_date >= CURRENT_DATE
+				      AND cf3.event_type IN ('INTEREST_RECEIPT','MATURITY')
+				      AND COALESCE(cf3.receipt_cleared, false) = false
+				  ), 0)::int                                          AS cashflow_events,
+				  COALESCE(m.tenure_days, 0)                         AS tenure_days
+				FROM investment.fd_master m
+				WHERE m.is_deleted = false
+				  AND m.fd_status = 'ACTIVE'
+				  AND ($1::text='' OR m.entity_id=$1)
+				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)
+				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($3))
+				  AND ($4::text='' OR UPPER(COALESCE(m.frequency_id,''))=UPPER($4))
+				ORDER BY m.principal_amount DESC NULLS LAST
+				LIMIT 200`, entityFilter, bankFilter, fdTypeFilter, interestFreqFilter)
+			if err != nil {
+				api.LogError("[BodEodDash] active_fd_list query error: %v", err)
+				return []interface{}{}, nil
+			}
+			defer rows.Close()
+
+			type fdRow struct {
+				FDID             string  `json:"fd_id"`
+				BankName         string  `json:"bank_name"`
+				EntityName       string  `json:"entity_name"`
+				EntityID         string  `json:"entity_id"`
+				Principal        float64 `json:"principal"`
+				InterestRate     float64 `json:"interest_rate"`
+				StartDate        string  `json:"start_date"`
+				MaturityDate     string  `json:"maturity_date"`
+				FDStatus         string  `json:"fd_status"`
+				UpcomingInterest float64 `json:"upcoming_interest"`
+				CashflowEvents   int     `json:"cashflow_events"`
+				TenureDays       int     `json:"tenure_days"`
+			}
+			out := []fdRow{}
+			for rows.Next() {
+				var r fdRow
+				if err2 := rows.Scan(
+					&r.FDID, &r.BankName, &r.EntityName, &r.EntityID,
+					&r.Principal, &r.InterestRate, &r.StartDate, &r.MaturityDate,
+					&r.FDStatus, &r.UpcomingInterest, &r.CashflowEvents, &r.TenureDays,
+				); err2 != nil {
+					api.LogError("[BodEodDash] active_fd_list scan error: %v", err2)
+					continue
+				}
+				r.Principal = fdRound(r.Principal, 2)
+				r.InterestRate = fdRound(r.InterestRate, 4)
+				r.UpcomingInterest = fdRound(r.UpcomingInterest, 2)
+				out = append(out, r)
+			}
+			return out, nil
 		})
 
 		// ── BOD: 6. Today's action list (booking + closure tasks) ─────────────
@@ -1044,9 +1150,12 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE m.is_deleted=false
 				  AND m.fd_status IN ('ACTIVE','PENDING_ACTIVATION')
 				  AND ($1::text='' OR m.entity_id=$1)
+				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)
+				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($3))
+				  AND ($4::text='' OR UPPER(COALESCE(m.frequency_id,''))=UPPER($4))
 				GROUP BY m.bank_name, m.bank_id
 				ORDER BY total_principal DESC
-				LIMIT 20`, entityFilter)
+				LIMIT 20`, entityFilter, bankFilter, fdTypeFilter, interestFreqFilter)
 			if err != nil {
 				api.LogError("[BodEodDash] bank_concentration query error: %v", err)
 				return []interface{}{}, nil
@@ -1189,12 +1298,16 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"generated_at": now.Format(time.RFC3339),
 			"as_of_date":   today,
 			"filters": map[string]interface{}{
-				"entity_id":  entityFilter,
-				"currency":   req.Currency,
-				"mode":       req.Mode,
-				"period":     periodBounds.Period,
-				"start_date": periodBounds.StartStr,
-				"end_date":   periodBounds.EndStr,
+				"entity_id":          entityFilter,
+				"currency":           req.Currency,
+				"mode":               req.Mode,
+				"period":             periodBounds.Period,
+				"start_date":         periodBounds.StartStr,
+				"end_date":           periodBounds.EndStr,
+				"bank_id":            bankFilter,
+				"fd_type":            fdTypeFilter,
+				"interest_frequency": interestFreqFilter,
+				"as_on_date":         req.AsOnDate,
 			},
 			// ── BOD KPIs ──────────────────────────────────────────────────────
 			"bod_kpis": map[string]interface{}{
@@ -1241,6 +1354,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"eod_checklist":            get("eod_checklist"),
 			"bank_concentration":       get("bank_concentration"),
 			"active_interest_pipeline": get("active_interest_pipeline"),
+			"active_fd_list":           get("active_fd_list"),
 		}
 
 		api.RespondWithPayload(w, true, "", payload)
