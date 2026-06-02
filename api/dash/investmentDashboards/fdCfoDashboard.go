@@ -89,18 +89,10 @@ func interestTrendGranularity(granularity string) (dateTrunc, interval string) {
 }
 
 // buildInterestTrendSeries buckets accrued vs received interest for the CFO trend chart.
-// Primary source: fd_cashflow_schedule (cashflow.go event types).
-// Fallback: fd_accrual_ledger + fd_interest_receipt (same sources as interest KPIs).
+// Source: fd_cashflow_schedule only.
 func buildInterestTrendSeries(ctx context.Context, pool *pgxpool.Pool, entityFilter, granularity string) ([]interestTrendRow, error) {
 	dateTrunc, interval := interestTrendGranularity(granularity)
-	out, err := interestTrendFromCashflow(ctx, pool, entityFilter, dateTrunc, interval)
-	if err != nil {
-		return nil, err
-	}
-	if len(out) == 0 {
-		out, err = interestTrendFromLedger(ctx, pool, entityFilter, dateTrunc, interval)
-	}
-	return out, err
+	return interestTrendFromCashflow(ctx, pool, entityFilter, dateTrunc, interval)
 }
 
 // interestTrendFromCashflow aggregates ACCRUAL vs payout rows from fd_cashflow_schedule.
@@ -135,34 +127,6 @@ func interestTrendFromCashflow(ctx context.Context, pool *pgxpool.Pool, entityFi
 	return mergeInterestTrendBuckets(ctx, pool, entityFilter, dateTrunc, accrualSQL, receivedSQL)
 }
 
-// interestTrendFromLedger mirrors the interest KPI queries (posted accruals + receipts).
-func interestTrendFromLedger(ctx context.Context, pool *pgxpool.Pool, entityFilter, dateTrunc, interval string) ([]interestTrendRow, error) {
-	accrualSQL := `
-		SELECT
-		  TO_CHAR(DATE_TRUNC('` + dateTrunc + `', al.accrual_period_end), 'YYYY-MM-DD') AS sort_key,
-		  COALESCE(SUM(al.period_interest_accrued), 0) AS accrued
-		FROM investment.fd_accrual_ledger al
-		LEFT JOIN investment.fd_master m ON m.fd_id = al.fd_id
-		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-		WHERE COALESCE(al.is_deleted, false) = false
-		  AND al.accrual_period_end >= CURRENT_DATE - INTERVAL '` + interval + `'
-		  AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)
-		GROUP BY 1
-		ORDER BY 1`
-
-	receivedSQL := `
-		SELECT
-		  TO_CHAR(DATE_TRUNC('` + dateTrunc + `', ir.receipt_date), 'YYYY-MM-DD') AS sort_key,
-		  COALESCE(SUM(ir.gross_interest_received), 0) AS received
-		FROM investment.fd_interest_receipt ir
-		WHERE ir.is_deleted = false
-		  AND ir.receipt_date >= CURRENT_DATE - INTERVAL '` + interval + `'
-		  AND ($1::text = '' OR ir.entity_id = $1)
-		GROUP BY 1
-		ORDER BY 1`
-
-	return mergeInterestTrendBuckets(ctx, pool, entityFilter, dateTrunc, accrualSQL, receivedSQL)
-}
 
 func mergeInterestTrendBuckets(ctx context.Context, pool *pgxpool.Pool, entityFilter, dateTrunc, accrualSQL, receivedSQL string) ([]interestTrendRow, error) {
 	monthNames := []string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
