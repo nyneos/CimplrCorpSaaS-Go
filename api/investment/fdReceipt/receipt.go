@@ -901,6 +901,15 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(resp)
+			for _, rID := range req.ReceiptIDs {
+				go func(id, uEmail string) {
+					notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/bulk-approve", id, map[string]interface{}{
+						"record_id":   id,
+						"event":       "FD_RECEIPT_APPROVED",
+						"actor_email": uEmail,
+					})
+				}(rID, userEmail)
+			}
 			return
 		}
 		tx, err := pool.Begin(ctx)
@@ -1114,6 +1123,15 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(resp)
+			for _, rID := range req.ReceiptIDs {
+				go func(id, uEmail string) {
+					notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/bulk-reject", id, map[string]interface{}{
+						"record_id":   id,
+						"event":       "FD_RECEIPT_REJECTED",
+						"actor_email": uEmail,
+					})
+				}(rID, userEmail)
+			}
 			return
 		}
 		tx, err := pool.Begin(ctx)
@@ -2171,6 +2189,15 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 		api.LogInfo("[FDReceipt] ReconcilePreview (no DB write) entity=%s i=%d tds=%d",
 			req.EntityID, preview.Interest.Processed, preview.TDS.Processed)
 
+		go func(eID, email string) {
+			notifcatalog.TriggerNotification(context.Background(), pool,
+				"/investment/fd/reconcile/run", eID, map[string]interface{}{
+					"entity_id":   eID,
+					"event":       "FD_RCPT_RECONCILE",
+					"actor_email": email,
+				})
+		}(req.EntityID, userEmail)
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
@@ -2299,7 +2326,7 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDReceipt] IngestReconciliation notification panic run=%s: %v", rID, rec)
 				}
 			}()
-			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/reconcile/ingest", rID, map[string]interface{}{
+			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/reconcile/ingest", rID, map[string]interface{}{
 				"entity_id":   eID,
 				"record_id":   rID,
 				"event":       "FD_RECONCILIATION_INGESTED",

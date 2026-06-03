@@ -77,7 +77,7 @@ func runAutoReconcile(db *pgxpool.Pool) {
 		}
 		logger.LogInfo("[fd_receipt_scheduler] auto-reconcile triggered: run=%s entity=%s", runID, e.EntityID)
 		notifcatalog.TriggerNotification(ctx, db,
-			"/investment/fd/receipt/reconcile/auto-run",
+			"/investment/fd/reconcile/auto-run",
 			runID,
 			map[string]interface{}{
 				"entity_id":    e.EntityID,

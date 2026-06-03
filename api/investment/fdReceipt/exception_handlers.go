@@ -123,7 +123,7 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}()
 			notifcatalog.TriggerNotification(context.Background(), pool,
-				"/investment/fd/receipt/exception/edit", eID, map[string]interface{}{
+				"/investment/fd/exception/edit", eID, map[string]interface{}{
 					"record_id":   eID,
 					"event":       "FD_EXCEPTION_EDIT_SUBMITTED",
 					"actor_email": uEmail,
@@ -244,7 +244,7 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}()
 			notifcatalog.TriggerNotification(context.Background(), pool,
-				"/investment/fd/receipt/exception/resolve", eID, map[string]interface{}{
+				"/investment/fd/exception/resolve", eID, map[string]interface{}{
 					"record_id":   eID,
 					"event":       "FD_EXCEPTION_RESOLVED",
 					"actor_email": uEmail,
@@ -368,7 +368,7 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 						api.LogError("[FDReceipt] ApproveException notification panic for %s: %v", id, rec)
 					}
 				}()
-				notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/exceptions/approve", id, map[string]interface{}{
+				notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/exception/approve", id, map[string]interface{}{
 					"record_id": id, "event": "FD_RECEIPT_EXCEPTION_APPROVED", "actor_email": u,
 				})
 			}(eid, userEmail)
@@ -472,7 +472,7 @@ func closeOneVariance(ctx context.Context, pool *pgxpool.Pool, exceptionID, user
 			}
 		}()
 		notifcatalog.TriggerNotification(context.Background(), pool,
-			"/investment/fd/receipt/exception/close", eID, map[string]interface{}{
+			"/investment/fd/exception/close", eID, map[string]interface{}{
 				"record_id":   eID,
 				"event":       "FD_EXCEPTION_CLOSED",
 				"actor_email": uEmail,
@@ -662,7 +662,7 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}()
 				notifcatalog.TriggerNotification(context.Background(), pool,
-					"/investment/fd/receipt/exception/reject", id, map[string]interface{}{
+					"/investment/fd/exception/reject", id, map[string]interface{}{
 						"record_id":   id,
 						"event":       "FD_EXCEPTION_REJECTED",
 						"actor_email": uEmail,
