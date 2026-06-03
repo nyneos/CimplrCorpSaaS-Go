@@ -45,8 +45,10 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				processing_status,
 				requested_by,
 				requested_at,
+				requested_ip,
 				checker_by,
 				checker_at,
+				checker_ip,
 				checker_comment,
 				reason
 			FROM auditactionbankbalances
@@ -62,9 +64,9 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		payload := make([]map[string]interface{}, 0)
 		for rows.Next() {
 			var entityID string
-			var action, status, performedBy, checkerBy, comment, reason sql.NullString
+			var action, status, performedBy, requestedIP, checkerBy, checkerIP, comment, reason sql.NullString
 			var performedAt, checkerAt sql.NullTime
-			if err := rows.Scan(&entityID, &action, &status, &performedBy, &performedAt, &checkerBy, &checkerAt, &comment, &reason); err != nil {
+			if err := rows.Scan(&entityID, &action, &status, &performedBy, &performedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &comment, &reason); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read bank balance audit history")
 				return
 			}
@@ -75,8 +77,10 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"processing_status": auditString(status),
 				"requested_by":      auditString(performedBy),
 				"requested_at":      auditTime(performedAt),
+				"requested_ip":      auditString(requestedIP),
 				"checker_by":        auditString(checkerBy),
 				"checker_at":        auditTime(checkerAt),
+				"checker_ip":        auditString(checkerIP),
 				"checker_comment":   auditString(comment),
 				"reason":            auditString(reason),
 			}
@@ -94,7 +98,7 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		downloadRows, err := pgxPool.Query(ctx, `
-			SELECT balance_id, requested_by, requested_at, file_name, upload_s3_key
+			SELECT balance_id, requested_by, requested_at, requested_ip, file_name, upload_s3_key
 			FROM auditactionbankbalance_downloads
 			WHERE balance_id = $1
 			ORDER BY requested_at ASC, download_audit_id ASC
@@ -108,8 +112,8 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for downloadRows.Next() {
 			var entityID, requestedBy string
 			var requestedAt sql.NullTime
-			var fileName, uploadKey sql.NullString
-			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &fileName, &uploadKey); err != nil {
+			var requestedIP, fileName, uploadKey sql.NullString
+			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &requestedIP, &fileName, &uploadKey); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadBankBalanceAuditHistory)
 				return
 			}
@@ -119,8 +123,10 @@ func GetBankBalanceAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":     "DOWNLOAD",
 				"requested_by":    strings.TrimSpace(requestedBy),
 				"requested_at":    auditTime(requestedAt),
+				"requested_ip":    auditString(requestedIP),
 				"checker_by":      "",
 				"checker_at":      nil,
+				"checker_ip":      "",
 				"checker_comment": "",
 				"reason":          "",
 				"file_name":       auditString(fileName),
@@ -153,7 +159,7 @@ func auditTime(value sql.NullTime) interface{} {
 	return api.FormatAuditTimestampNullIST(value)
 }
 
-func insertBankBalanceDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, balanceID, requestedBy, uploadS3Key string) {
+func insertBankBalanceDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, balanceID, requestedBy, uploadS3Key, requestedIP string) {
 	balanceID = strings.TrimSpace(balanceID)
 	requestedBy = strings.TrimSpace(requestedBy)
 	uploadS3Key = strings.TrimSpace(uploadS3Key)
@@ -170,9 +176,9 @@ func insertBankBalanceDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, 
 	}
 
 	_, err := pgxPool.Exec(ctx, `
-		INSERT INTO auditactionbankbalance_downloads (balance_id, requested_by, requested_at, file_name, upload_s3_key)
-		VALUES ($1, $2, now(), $3, $4)
-	`, balanceID, requestedBy, extractAuditFileName(uploadS3Key), nullIfEmpty(uploadS3Key))
+		INSERT INTO auditactionbankbalance_downloads (balance_id, requested_by, requested_at, requested_ip, file_name, upload_s3_key)
+		VALUES ($1, $2, now(), $3, $4, $5)
+	`, balanceID, requestedBy, nullIfEmpty(requestedIP), extractAuditFileName(uploadS3Key), nullIfEmpty(uploadS3Key))
 	if err != nil {
 		logger.LogError("failed to insert bank balance download audit for %s: %v", balanceID, err)
 	}

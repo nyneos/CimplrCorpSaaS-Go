@@ -807,8 +807,8 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithPayload(w, false, msg, nil)
 			return
 		}
-		upd := `UPDATE auditactionbankstatement SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id, bankstatementid, actiontype`
-		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, actionIDs)
+		upd := `UPDATE auditactionbankstatement SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4) RETURNING action_id, bankstatementid, actiontype`
+		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, nullIfBlank(api.ClientIPFromRequest(r)), actionIDs)
 		if err != nil {
 			api.RespondWithPayload(w, false, "failed to update audit rows: "+err.Error(), nil)
 			return
@@ -966,8 +966,8 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithPayload(w, false, msg, nil)
 			return
 		}
-		upd := `UPDATE auditactionbankstatement SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id, bankstatementid`
-		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, actionIDs)
+		upd := `UPDATE auditactionbankstatement SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4) RETURNING action_id, bankstatementid`
+		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, nullIfBlank(api.ClientIPFromRequest(r)), actionIDs)
 		if err != nil {
 			api.RespondWithPayload(w, false, "failed to update audit rows: "+err.Error(), nil)
 			return
@@ -1052,7 +1052,8 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 			}
 		}()
-		q := `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
+		requestedIP := nullIfBlank(api.ClientIPFromRequest(r))
+		q := `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4)`
 		for _, id := range req.IDs {
 			if strings.TrimSpace(id) == "" {
 				tx.Rollback(ctx)
@@ -1077,7 +1078,7 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if strings.TrimSpace(deleteReason) == "" {
 				deleteReason = req.Comment
 			}
-			if _, err := tx.Exec(ctx, q, id, deleteReason, requestedBy); err != nil {
+			if _, err := tx.Exec(ctx, q, id, deleteReason, requestedBy, requestedIP); err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithPayload(w, false, err.Error(), nil)
 				return

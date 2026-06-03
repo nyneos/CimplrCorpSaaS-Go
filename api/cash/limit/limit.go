@@ -131,10 +131,10 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		auditQ := `INSERT INTO cimplrcorpsaas.auditactionbanklimit (
-			limit_id, action_type, processing_status, reason, requested_by, requested_at
-		) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
+			limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+		) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now(),$4)`
 
-		if _, err := tx.Exec(ctx, auditQ, limitID, nullifyEmpty(req.Reason), requestedBy); err != nil {
+		if _, err := tx.Exec(ctx, auditQ, limitID, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
 			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
 			return
 		}
@@ -370,10 +370,10 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				auditQ := `INSERT INTO cimplrcorpsaas.auditactionbanklimit (
-					limit_id, action_type, processing_status, reason, requested_by, requested_at
-				) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
+					limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+				) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now(),$4)`
 
-				if _, err := tx.Exec(ctx, auditQ, limitID, nullifyEmpty(lim.Reason), requestedBy); err != nil {
+				if _, err := tx.Exec(ctx, auditQ, limitID, nullifyEmpty(lim.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
 					tx.Rollback(ctx)
 					result["success"] = false
 					result["error"] = "failed to create audit"
@@ -608,10 +608,10 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		auditQ := `INSERT INTO cimplrcorpsaas.auditactionbanklimit (
-			limit_id, action_type, processing_status, reason, requested_by, requested_at
-		) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())`
+			limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+		) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4)`
 
-		if _, err := tx.Exec(ctx, auditQ, req.LimitID, nullifyEmpty(req.Reason), requestedBy); err != nil {
+		if _, err := tx.Exec(ctx, auditQ, req.LimitID, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
 			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
 			return
 		}
@@ -682,10 +682,10 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			auditQ := `INSERT INTO cimplrcorpsaas.auditactionbanklimit (
-				limit_id, action_type, processing_status, reason, requested_by, requested_at
-			) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
+				limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+			) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4)`
 
-			if _, err := tx.Exec(ctx, auditQ, limitID, nullifyEmpty(req.Reason), requestedBy); err != nil {
+			if _, err := tx.Exec(ctx, auditQ, limitID, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
 				tx.Rollback(ctx)
 				result["success"] = false
 				result["error"] = "failed to create delete audit"
@@ -1002,10 +1002,10 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Update audit status to APPROVED
 		upd := `UPDATE cimplrcorpsaas.auditactionbanklimit 
-			SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 
-			WHERE action_id = ANY($3)`
+			SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+			WHERE action_id = ANY($4)`
 
-		if _, err := pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
+		if _, err := pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
 			api.RespondWithResult(w, false, "failed to approve: "+err.Error())
 			return
 		}
@@ -1109,10 +1109,10 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		upd := `UPDATE cimplrcorpsaas.auditactionbanklimit 
-			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 
-			WHERE action_id = ANY($3)`
+			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+			WHERE action_id = ANY($4)`
 
-		if _, err := pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
+		if _, err := pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
 			api.RespondWithResult(w, false, "failed to reject: "+err.Error())
 			return
 		}

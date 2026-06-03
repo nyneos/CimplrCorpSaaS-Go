@@ -63,10 +63,11 @@ type CreateInput struct {
 }
 
 type MainUploadAuditPayload struct {
-	FileID     string    `json:"file_id,omitempty"`
-	FileName   string    `json:"file_name"`
-	UploadedBy string    `json:"uploaded_by"`
-	UploadedAt time.Time `json:"uploaded_at"`
+	FileID      string    `json:"file_id,omitempty"`
+	FileName    string    `json:"file_name"`
+	UploadedBy  string    `json:"uploaded_by"`
+	UploadedAt  time.Time `json:"uploaded_at"`
+	RequestedIP string    `json:"requested_ip,omitempty"`
 }
 
 type Config struct {
@@ -121,8 +122,10 @@ type fileAuditEvent struct {
 	ProcessingStatus string     `json:"processing_status"`
 	RequestedBy      string     `json:"requested_by,omitempty"`
 	RequestedAt      *time.Time `json:"requested_at,omitempty"`
+	RequestedIP      string     `json:"requested_ip,omitempty"`
 	CheckerBy        string     `json:"checker_by,omitempty"`
 	CheckerAt        *time.Time `json:"checker_at,omitempty"`
+	CheckerIP        string     `json:"checker_ip,omitempty"`
 	CheckerComment   string     `json:"checker_comment,omitempty"`
 	Reason           string     `json:"reason,omitempty"`
 }
@@ -201,6 +204,7 @@ func NewUploadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		if uploadedBy == "" {
 			uploadedBy = userID
 		}
+		requestedIP := api.ClientIPFromRequest(r)
 
 		fileHeaders := collectMultipartFiles(r, "file", "files")
 		if len(fileHeaders) == 0 {
@@ -210,7 +214,7 @@ func NewUploadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 
 		uploaded := make([]FileRecord, 0, len(fileHeaders))
 		for _, header := range fileHeaders {
-			record, err := uploadOneFile(r.Context(), pool, cfg, parentID, uploadedBy, header)
+			record, err := uploadOneFile(r.Context(), pool, cfg, parentID, uploadedBy, requestedIP, header)
 			if err != nil {
 				if errors.Is(err, ErrFileAlreadyUploaded) {
 					api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
@@ -287,17 +291,19 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 
 		if auditEnabled(cfg) {
 			performedBy := requestedByOrFallback(r.Context(), req.UserID)
-			if err := recordDownloadAudit(r.Context(), pool, cfg, parentID, *record, performedBy); err != nil {
+			requestedIP := api.ClientIPFromRequest(r)
+			if err := recordDownloadAudit(r.Context(), pool, cfg, parentID, *record, performedBy, requestedIP); err != nil {
 				if !isUndefinedTableError(err) {
 					api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 					return
 				}
 			}
 			if err := recordMainDownloadAuditSafely(r.Context(), pool, cfg, parentID, MainUploadAuditPayload{
-				FileID:     strings.TrimSpace(record.FileID),
-				FileName:   strings.TrimSpace(record.StoredFileName),
-				UploadedBy: performedBy,
-				UploadedAt: time.Now().UTC(),
+				FileID:      strings.TrimSpace(record.FileID),
+				FileName:    strings.TrimSpace(record.StoredFileName),
+				UploadedBy:  performedBy,
+				UploadedAt:  time.Now().UTC(),
+				RequestedIP: requestedIP,
 			}); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 				return
@@ -348,6 +354,7 @@ func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc
 
 		files := make([]map[string]string, 0, len(records))
 		performedBy := requestedByOrFallback(r.Context(), req.UserID)
+		requestedIP := api.ClientIPFromRequest(r)
 		for _, record := range records {
 			if strings.TrimSpace(record.UploadS3Key) == "" {
 				failedIDs = append(failedIDs, record.FileID)
@@ -360,7 +367,7 @@ func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc
 				continue
 			}
 			if auditEnabled(cfg) {
-				if auditErr := recordDownloadAudit(r.Context(), pool, cfg, parentID, record, performedBy); auditErr != nil {
+				if auditErr := recordDownloadAudit(r.Context(), pool, cfg, parentID, record, performedBy, requestedIP); auditErr != nil {
 					if isUndefinedTableError(auditErr) {
 						files = append(files, map[string]string{
 							"file_id":      record.FileID,
@@ -372,10 +379,11 @@ func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc
 					continue
 				}
 				if auditErr := recordMainDownloadAuditSafely(r.Context(), pool, cfg, parentID, MainUploadAuditPayload{
-					FileID:     strings.TrimSpace(record.FileID),
-					FileName:   strings.TrimSpace(record.StoredFileName),
-					UploadedBy: performedBy,
-					UploadedAt: time.Now().UTC(),
+					FileID:      strings.TrimSpace(record.FileID),
+					FileName:    strings.TrimSpace(record.StoredFileName),
+					UploadedBy:  performedBy,
+					UploadedAt:  time.Now().UTC(),
+					RequestedIP: requestedIP,
 				}); auditErr != nil {
 					failedIDs = append(failedIDs, record.FileID)
 					continue
@@ -451,7 +459,7 @@ func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		}
 
 		requestedBy := requestedByOrFallback(r.Context(), req.UserID)
-		if err := recordDeleteRequestAudit(r.Context(), pool, cfg, parentID, *record, requestedBy, strings.TrimSpace(req.Reason)); err != nil {
+		if err := recordDeleteRequestAudit(r.Context(), pool, cfg, parentID, *record, requestedBy, api.ClientIPFromRequest(r), strings.TrimSpace(req.Reason)); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -686,7 +694,7 @@ func collectMultipartFiles(r *http.Request, keys ...string) []*multipart.FileHea
 	return files
 }
 
-func uploadOneFile(ctx context.Context, pool *pgxpool.Pool, cfg Config, parentID, uploadedBy string, header *multipart.FileHeader) (*FileRecord, error) {
+func uploadOneFile(ctx context.Context, pool *pgxpool.Pool, cfg Config, parentID, uploadedBy, requestedIP string, header *multipart.FileHeader) (*FileRecord, error) {
 	file, err := header.Open()
 	if err != nil {
 		return nil, fmt.Errorf("open file %s: %w", header.Filename, err)
@@ -750,7 +758,7 @@ func uploadOneFile(ctx context.Context, pool *pgxpool.Pool, cfg Config, parentID
 	}
 
 	if auditEnabled(cfg) && strings.TrimSpace(fileID) != "" {
-		if err := recordCreateAuditTx(ctx, tx, cfg, parentID, fileID, input); err != nil {
+		if err := recordCreateAuditTx(ctx, tx, cfg, parentID, fileID, input, requestedIP); err != nil {
 			if !isUndefinedTableError(err) {
 				_ = s3storage.DeleteFromS3(ctx, s3Key)
 				return nil, err
@@ -759,10 +767,11 @@ func uploadOneFile(ctx context.Context, pool *pgxpool.Pool, cfg Config, parentID
 
 		if cfg.RecordMainUploadAudit != nil {
 			err := recordMainUploadAuditSafely(ctx, tx, cfg, parentID, MainUploadAuditPayload{
-				FileID:     strings.TrimSpace(fileID),
-				FileName:   strings.TrimSpace(header.Filename),
-				UploadedBy: input.UploadedBy,
-				UploadedAt: input.UploadedAt,
+				FileID:      strings.TrimSpace(fileID),
+				FileName:    strings.TrimSpace(header.Filename),
+				UploadedBy:  input.UploadedBy,
+				UploadedAt:  input.UploadedAt,
+				RequestedIP: requestedIP,
 			})
 			if err != nil {
 				_ = s3storage.DeleteFromS3(ctx, s3Key)
@@ -878,7 +887,7 @@ func newDeleteDecisionHandler(pool *pgxpool.Pool, cfg Config, nextStatus string)
 
 		checkerBy := requestedByOrFallback(r.Context(), req.UserID)
 		checkerAt := time.Now().UTC()
-		if err := updateDeleteAuditDecision(r.Context(), tx, cfg, deleteAuditDecisionParams{AuditID: auditRow.AuditID, NextStatus: nextStatus, CheckerBy: checkerBy, CheckerAt: checkerAt, CheckerComment: strings.TrimSpace(req.Comment)}); err != nil {
+		if err := updateDeleteAuditDecision(r.Context(), tx, cfg, deleteAuditDecisionParams{AuditID: auditRow.AuditID, NextStatus: nextStatus, CheckerBy: checkerBy, CheckerAt: checkerAt, CheckerIP: api.ClientIPFromRequest(r), CheckerComment: strings.TrimSpace(req.Comment)}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -1002,8 +1011,10 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 			file_id,
 			requested_by,
 			requested_at,
+			requested_ip,
 			checker_by,
 			checker_at,
+			checker_ip,
 			checker_comment,
 			processing_status
 		FROM ` + auditTableName(cfg) + `
@@ -1033,8 +1044,10 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 		var state pendingDeleteState
 		var requestedBy sql.NullString
 		var requestedAt sql.NullTime
+		var requestedIP sql.NullString
 		var checkerBy sql.NullString
 		var checkerAt sql.NullTime
+		var checkerIP sql.NullString
 		var checkerComment sql.NullString
 		var processingStatus sql.NullString
 
@@ -1042,8 +1055,10 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 			&state.FileID,
 			&requestedBy,
 			&requestedAt,
+			&requestedIP,
 			&checkerBy,
 			&checkerAt,
+			&checkerIP,
 			&checkerComment,
 			&processingStatus,
 		); err != nil {
@@ -1082,7 +1097,7 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 	return files, nil
 }
 
-func recordCreateAuditTx(ctx context.Context, exec auditExecutor, cfg Config, parentID, fileID string, input CreateInput) error {
+func recordCreateAuditTx(ctx context.Context, exec auditExecutor, cfg Config, parentID, fileID string, input CreateInput, requestedIP string) error {
 	return insertAuditEvent(ctx, exec, cfg, fileAuditEvent{
 		EntityID:         fileID,
 		ModuleKey:        cfg.Module,
@@ -1092,10 +1107,11 @@ func recordCreateAuditTx(ctx context.Context, exec auditExecutor, cfg Config, pa
 		ProcessingStatus: fileAuditCompletedStatus,
 		RequestedBy:      input.UploadedBy,
 		RequestedAt:      &input.UploadedAt,
+		RequestedIP:      requestedIP,
 	})
 }
 
-func recordDownloadAudit(ctx context.Context, exec auditExecutor, cfg Config, parentID string, file FileRecord, requestedBy string) error {
+func recordDownloadAudit(ctx context.Context, exec auditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, requestedIP string) error {
 	requestedAt := time.Now().UTC()
 	reason, err := MainDownloadAuditReasonJSON(MainUploadAuditPayload{
 		FileID:     file.FileID,
@@ -1115,11 +1131,12 @@ func recordDownloadAudit(ctx context.Context, exec auditExecutor, cfg Config, pa
 		ProcessingStatus: fileAuditCompletedStatus,
 		RequestedBy:      requestedBy,
 		RequestedAt:      &requestedAt,
+		RequestedIP:      requestedIP,
 		Reason:           reason,
 	})
 }
 
-func recordDeleteRequestAudit(ctx context.Context, exec auditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, reason string) error {
+func recordDeleteRequestAudit(ctx context.Context, exec auditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, requestedIP, reason string) error {
 	requestedAt := time.Now().UTC()
 	return insertAuditEvent(ctx, exec, cfg, fileAuditEvent{
 		EntityID:         file.FileID,
@@ -1130,6 +1147,7 @@ func recordDeleteRequestAudit(ctx context.Context, exec auditExecutor, cfg Confi
 		ProcessingStatus: fileAuditPendingDeleteApproval,
 		RequestedBy:      requestedBy,
 		RequestedAt:      &requestedAt,
+		RequestedIP:      requestedIP,
 		Reason:           reason,
 	})
 }
@@ -1144,12 +1162,14 @@ func insertAuditEvent(ctx context.Context, exec auditExecutor, cfg Config, event
 			processing_status,
 			requested_by,
 			requested_at,
+			requested_ip,
 			checker_by,
 			checker_at,
+			checker_ip,
 			checker_comment,
 			reason
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
 		)
 	`
 	_, err := exec.Exec(
@@ -1162,8 +1182,10 @@ func insertAuditEvent(ctx context.Context, exec auditExecutor, cfg Config, event
 		event.ProcessingStatus,
 		event.RequestedBy,
 		event.RequestedAt,
+		nullIfBlank(event.RequestedIP),
 		nullIfBlank(event.CheckerBy),
 		event.CheckerAt,
+		nullIfBlank(event.CheckerIP),
 		nullIfBlank(event.CheckerComment),
 		nullIfBlank(event.Reason),
 	)
@@ -1213,12 +1235,12 @@ func InsertMainUploadAudit(ctx context.Context, tx pgx.Tx, tableName, parentColu
 	}
 
 	query := fmt.Sprintf(
-		`INSERT INTO %s (%s, %s, processing_status, reason, requested_by, requested_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+		`INSERT INTO %s (%s, %s, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		tableName,
 		parentColumn,
 		actionColumn,
 	)
-	_, err = tx.Exec(ctx, query, parentID, "UPLOAD_FILE", fileAuditApprovedStatus, reason, payload.UploadedBy, payload.UploadedAt)
+	_, err = tx.Exec(ctx, query, parentID, "UPLOAD_FILE", fileAuditApprovedStatus, reason, payload.UploadedBy, payload.UploadedAt, nullIfBlank(payload.RequestedIP))
 	return err
 }
 
@@ -1232,8 +1254,10 @@ func listAuditEvents(ctx context.Context, pool *pgxpool.Pool, cfg Config, parent
 		       processing_status,
 		       requested_by,
 		       requested_at,
+		       requested_ip,
 		       checker_by,
 		       checker_at,
+		       checker_ip,
 		       checker_comment,
 		       reason
 		FROM ` + auditTableName(cfg) + `
@@ -1256,8 +1280,10 @@ func listAuditEvents(ctx context.Context, pool *pgxpool.Pool, cfg Config, parent
 		var parentRecordID sql.NullString
 		var requestedBy sql.NullString
 		var requestedAt sql.NullTime
+		var requestedIP sql.NullString
 		var checkerBy sql.NullString
 		var checkerAt sql.NullTime
+		var checkerIP sql.NullString
 		var checkerComment sql.NullString
 		var reason sql.NullString
 		if err := rows.Scan(
@@ -1269,8 +1295,10 @@ func listAuditEvents(ctx context.Context, pool *pgxpool.Pool, cfg Config, parent
 			&event.ProcessingStatus,
 			&requestedBy,
 			&requestedAt,
+			&requestedIP,
 			&checkerBy,
 			&checkerAt,
+			&checkerIP,
 			&checkerComment,
 			&reason,
 		); err != nil {
@@ -1281,11 +1309,13 @@ func listAuditEvents(ctx context.Context, pool *pgxpool.Pool, cfg Config, parent
 		event.ModuleKey = strings.TrimSpace(moduleKey.String)
 		event.ParentRecordID = strings.TrimSpace(parentRecordID.String)
 		event.RequestedBy = strings.TrimSpace(requestedBy.String)
+		event.RequestedIP = strings.TrimSpace(requestedIP.String)
 		if requestedAt.Valid {
 			t := requestedAt.Time
 			event.RequestedAt = &t
 		}
 		event.CheckerBy = strings.TrimSpace(checkerBy.String)
+		event.CheckerIP = strings.TrimSpace(checkerIP.String)
 		if checkerAt.Valid {
 			t := checkerAt.Time
 			event.CheckerAt = &t
@@ -1323,8 +1353,10 @@ func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, cfg Co
 		       processing_status,
 		       requested_by,
 		       requested_at,
+		       requested_ip,
 		       checker_by,
 		       checker_at,
+		       checker_ip,
 		       checker_comment,
 		       reason
 		FROM ` + auditTableName(cfg) + `
@@ -1344,8 +1376,10 @@ func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, cfg Co
 	var parent sql.NullString
 	var requestedBy sql.NullString
 	var requestedAt sql.NullTime
+	var requestedIP sql.NullString
 	var checkerBy sql.NullString
 	var checkerAt sql.NullTime
+	var checkerIP sql.NullString
 	var checkerComment sql.NullString
 	var reason sql.NullString
 	err := queryer.QueryRow(ctx, query, cfg.Module, fileID, fileAuditDeleteAction, fileAuditPendingDeleteApproval).Scan(
@@ -1357,8 +1391,10 @@ func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, cfg Co
 		&event.ProcessingStatus,
 		&requestedBy,
 		&requestedAt,
+		&requestedIP,
 		&checkerBy,
 		&checkerAt,
+		&checkerIP,
 		&checkerComment,
 		&reason,
 	)
@@ -1372,11 +1408,13 @@ func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, cfg Co
 	event.ModuleKey = strings.TrimSpace(module.String)
 	event.ParentRecordID = strings.TrimSpace(parent.String)
 	event.RequestedBy = strings.TrimSpace(requestedBy.String)
+	event.RequestedIP = strings.TrimSpace(requestedIP.String)
 	if requestedAt.Valid {
 		t := requestedAt.Time
 		event.RequestedAt = &t
 	}
 	event.CheckerBy = strings.TrimSpace(checkerBy.String)
+	event.CheckerIP = strings.TrimSpace(checkerIP.String)
 	if checkerAt.Valid {
 		t := checkerAt.Time
 		event.CheckerAt = &t
@@ -1391,6 +1429,7 @@ type deleteAuditDecisionParams struct {
 	NextStatus     string
 	CheckerBy      string
 	CheckerAt      time.Time
+	CheckerIP      string
 	CheckerComment string
 }
 
@@ -1399,16 +1438,18 @@ func updateDeleteAuditDecision(ctx context.Context, exec auditExecutor, cfg Conf
 	nextStatus := p.NextStatus
 	checkerBy := p.CheckerBy
 	checkerAt := p.CheckerAt
+	checkerIP := p.CheckerIP
 	checkerComment := p.CheckerComment
 	query := `
 		UPDATE ` + auditTableName(cfg) + `
 		SET processing_status = $2,
 		    checker_by = $3,
 		    checker_at = $4,
-		    checker_comment = $5
+		    checker_ip = $5,
+		    checker_comment = $6
 		WHERE audit_id = $1
 	`
-	_, err := exec.Exec(ctx, query, auditID, nextStatus, checkerBy, checkerAt, nullIfBlank(checkerComment))
+	_, err := exec.Exec(ctx, query, auditID, nextStatus, checkerBy, checkerAt, nullIfBlank(checkerIP), nullIfBlank(checkerComment))
 	return err
 }
 
@@ -1453,8 +1494,10 @@ func writeAuditSuccess(w http.ResponseWriter, rows []fileAuditEvent) {
 			"processing_status": row.ProcessingStatus,
 			"requested_by":      row.RequestedBy,
 			"requested_at":      api.FormatAuditTimestampPtrIST(row.RequestedAt),
+			"requested_ip":      row.RequestedIP,
 			"checker_by":        row.CheckerBy,
 			"checker_at":        api.FormatAuditTimestampPtrIST(row.CheckerAt),
+			"checker_ip":        row.CheckerIP,
 			"checker_comment":   row.CheckerComment,
 			"reason":            row.Reason,
 		})

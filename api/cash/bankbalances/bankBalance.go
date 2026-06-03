@@ -245,7 +245,7 @@ func GetBankBalanceDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		insertBankBalanceDownloadAudit(ctx, pgxPool, req.BalanceID, requestedByFromCtx(ctx, req.UserID), key)
+		insertBankBalanceDownloadAudit(ctx, pgxPool, req.BalanceID, requestedByFromCtx(ctx, req.UserID), key, api.ClientIPFromRequest(r))
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -306,7 +306,7 @@ func GetBankBalanceBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"balance_id":   balanceID,
 				"download_url": downloadURL,
 			})
-			insertBankBalanceDownloadAudit(ctx, pgxPool, balanceID, requestedBy, key)
+			insertBankBalanceDownloadAudit(ctx, pgxPool, balanceID, requestedBy, key, api.ClientIPFromRequest(r))
 		}
 
 		if len(files) == 0 {
@@ -492,8 +492,8 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// insert audit action
-		auditQ := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
-		_, err = tx.Exec(ctx, auditQ, balanceID, nullifyEmpty(req.Reason), requestedBy)
+		auditQ := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now(),$4)`
+		_, err = tx.Exec(ctx, auditQ, balanceID, nullifyEmpty(req.Reason), requestedBy, nullIfEmpty(api.ClientIPFromRequest(r)))
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to create audit action: "+pgUserFriendlyMessage(err))
 			return
@@ -584,8 +584,8 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		// Update audit actions to APPROVED
-		upd := `UPDATE auditactionbankbalances SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
-		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs)
+		upd := `UPDATE auditactionbankbalances SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
+		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullIfEmpty(api.ClientIPFromRequest(r)), actionIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to approve actions: "+pgUserFriendlyMessage(err))
 			return
@@ -643,7 +643,6 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-
 
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, "failed to commit approve: "+pgUserFriendlyMessage(err))
@@ -728,8 +727,8 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		upd := `UPDATE auditactionbankbalances SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
-		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs)
+		upd := `UPDATE auditactionbankbalances SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
+		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullIfEmpty(api.ClientIPFromRequest(r)), actionIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to reject actions: "+pgUserFriendlyMessage(err))
 			return
@@ -789,7 +788,8 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		ins := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
+		requestedIP := nullIfEmpty(api.ClientIPFromRequest(r))
+		ins := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4)`
 		for _, id := range req.BalanceIDs {
 			var latestActionType, latestStatus string
 			latestErr := tx.QueryRow(ctx, `
@@ -804,7 +804,7 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithResult(w, false, fmt.Sprintf("delete request already pending for balance_id: %s", id))
 				return
 			}
-			if _, err := tx.Exec(ctx, ins, id, nullifyEmpty(req.Reason), requestedBy); err != nil {
+			if _, err := tx.Exec(ctx, ins, id, nullifyEmpty(req.Reason), requestedBy, requestedIP); err != nil {
 				api.RespondWithResult(w, false, "failed to create delete audit: "+pgUserFriendlyMessage(err))
 				return
 			}
@@ -1474,8 +1474,8 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// insert audit action
-		auditQ := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())`
-		if _, err := tx.Exec(ctx, auditQ, req.BalanceID, nullifyEmpty(req.Reason), requestedBy); err != nil {
+		auditQ := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4)`
+		if _, err := tx.Exec(ctx, auditQ, req.BalanceID, nullifyEmpty(req.Reason), requestedBy, nullIfEmpty(api.ClientIPFromRequest(r))); err != nil {
 			api.RespondWithResult(w, false, "failed to create audit action: "+pgUserFriendlyMessage(err))
 			return
 		}

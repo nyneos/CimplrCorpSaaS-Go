@@ -142,8 +142,8 @@ func CreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		auditQ := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
-		if _, err := pgxPool.Exec(ctx, auditQ, sweepID, nullifyEmpty(req.Reason), requestedBy); err != nil {
+		auditQ := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now(),$4)`
+		if _, err := pgxPool.Exec(ctx, auditQ, sweepID, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
 			api.RespondWithResult(w, false, "failed to create audit action: "+err.Error())
 			return
 		}
@@ -305,8 +305,8 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Create audit record
-			auditQ := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
-			if _, err := tx.Exec(ctx, auditQ, sweepID, nullifyEmpty(cfg.Reason), requestedBy); err != nil {
+			auditQ := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now(),$4)`
+			if _, err := tx.Exec(ctx, auditQ, sweepID, nullifyEmpty(cfg.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
 				api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: failed to create audit: %s", i, err.Error()))
 				return
 			}
@@ -599,8 +599,8 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		auditQ := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())`
-		if _, err := tx.Exec(ctx, auditQ, req.SweepID, nullifyEmpty(req.Reason), requestedBy); err != nil {
+		auditQ := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4)`
+		if _, err := tx.Exec(ctx, auditQ, req.SweepID, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
 			api.RespondWithResult(w, false, "failed to create audit action: "+err.Error())
 			return
 		}
@@ -1022,8 +1022,8 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		upd := `UPDATE cimplrcorpsaas.auditactionsweepconfiguration SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
-		if _, err := tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
+		upd := `UPDATE cimplrcorpsaas.auditactionsweepconfiguration SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
+		if _, err := tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
 			api.RespondWithResult(w, false, "failed to approve actions: "+err.Error())
 			return
 		}
@@ -1147,8 +1147,8 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		upd := `UPDATE cimplrcorpsaas.auditactionsweepconfiguration SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
-		if _, err := tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
+		upd := `UPDATE cimplrcorpsaas.auditactionsweepconfiguration SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
+		if _, err := tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
 			api.RespondWithResult(w, false, "failed to reject actions: "+err.Error())
 			return
 		}
@@ -1213,7 +1213,8 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 			}
 		}()
 
-		ins := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
+		requestedIP := nullifyEmpty(api.ClientIPFromRequest(r))
+		ins := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4)`
 		for _, id := range req.SweepIDs {
 			var latestActionType, latestStatus string
 			latestErr := tx.QueryRow(ctx, `
@@ -1227,7 +1228,7 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 				api.RespondWithResult(w, false, "delete request already pending for sweep: "+id)
 				return
 			}
-			if _, err := tx.Exec(ctx, ins, id, nullifyEmpty(req.Reason), requestedBy); err != nil {
+			if _, err := tx.Exec(ctx, ins, id, nullifyEmpty(req.Reason), requestedBy, requestedIP); err != nil {
 				api.RespondWithResult(w, false, "failed to create delete audit: "+err.Error())
 				return
 			}

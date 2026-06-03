@@ -72,16 +72,23 @@ func recordFundPlanMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID stri
 
 	entityClause, entityArgs := fundPlanEntityScope(ctx, 5)
 	query := `
-		INSERT INTO public.auditaction_fund_plan_groups (group_id, actiontype, processing_status, reason, requested_by, requested_at)
-		SELECT fpg.group_id, 'UPLOAD_FILE', 'COMPLETED', $2, $3, $4
+		INSERT INTO public.auditaction_fund_plan_groups (group_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+		SELECT fpg.group_id, 'UPLOAD_FILE', 'COMPLETED', $2, $3, $4, $5
 		FROM public.fund_plan_groups fpg
 		WHERE fpg.plan_id = $1
 	` + entityClause
 
-	args := []interface{}{parentID, reason, payload.UploadedBy, payload.UploadedAt}
+	args := []interface{}{parentID, reason, payload.UploadedBy, payload.UploadedAt, nullIfEmpty(payload.RequestedIP)}
 	args = append(args, entityArgs...)
 	_, err = tx.Exec(ctx, query, args...)
 	return err
+}
+
+func nullIfEmpty(value string) interface{} {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return strings.TrimSpace(value)
 }
 
 func listFundPlanAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

@@ -112,8 +112,10 @@ func readLimitWorkflowAudit(ctx context.Context, pgxPool *pgxpool.Pool, limitID 
 			processing_status,
 			requested_by,
 			requested_at,
+			requested_ip,
 			checker_by,
 			checker_at,
+			checker_ip,
 			checker_comment,
 			reason
 		FROM cimplrcorpsaas.auditactionbanklimit
@@ -153,8 +155,10 @@ func readUtilizationWorkflowAudit(ctx context.Context, pgxPool *pgxpool.Pool, ut
 			processing_status,
 			requested_by,
 			requested_at,
+			requested_ip,
 			checker_by,
 			checker_at,
+			checker_ip,
 			checker_comment,
 			reason
 		FROM cimplrcorpsaas.auditactionbanklimitutilization
@@ -192,10 +196,10 @@ type limitAuditScanner interface {
 func scanLimitWorkflowAuditRows(row limitAuditScanner, changesFn func(action string) []map[string]interface{}) ([]map[string]interface{}, error) {
 	var auditID interface{}
 	var entityID string
-	var action, status, requestedBy, checkerBy, checkerComment, reason sql.NullString
+	var action, status, requestedBy, requestedIP, checkerBy, checkerIP, checkerComment, reason sql.NullString
 	var requestedAt, checkerAt sql.NullTime
 
-	if err := row.Scan(&auditID, &entityID, &action, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+	if err := row.Scan(&auditID, &entityID, &action, &status, &requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason); err != nil {
 		return nil, err
 	}
 
@@ -207,8 +211,10 @@ func scanLimitWorkflowAuditRows(row limitAuditScanner, changesFn func(action str
 		"processing_status": limitAuditString(status),
 		"requested_by":      limitAuditString(requestedBy),
 		"requested_at":      limitAuditTime(requestedAt),
+		"requested_ip":      limitAuditString(requestedIP),
 		"checker_by":        limitAuditString(checkerBy),
 		"checker_at":        limitAuditTime(checkerAt),
+		"checker_ip":        limitAuditString(checkerIP),
 		"checker_comment":   limitAuditString(checkerComment),
 		"reason":            limitAuditString(reason),
 		"source":            limitAuditSourceWorkflow,
@@ -260,8 +266,10 @@ func appendLimitAdditionalFileAudit(ctx context.Context, pgxPool *pgxpool.Pool, 
 			processing_status,
 			requested_by,
 			requested_at,
+			requested_ip,
 			checker_by,
 			checker_at,
+			checker_ip,
 			checker_comment,
 			reason
 		FROM `+limitAdditionalFileAuditTbl+`
@@ -289,10 +297,10 @@ func appendLimitAdditionalFileAudit(ctx context.Context, pgxPool *pgxpool.Pool, 
 
 func scanLimitFileAuditRows(row limitAuditScanner, moduleKey string) ([]map[string]interface{}, error) {
 	var auditID int64
-	var parentRecordID, fileID, action, status, requestedBy, checkerBy, checkerComment, reason sql.NullString
+	var parentRecordID, fileID, action, status, requestedBy, requestedIP, checkerBy, checkerIP, checkerComment, reason sql.NullString
 	var requestedAt, checkerAt sql.NullTime
 
-	if err := row.Scan(&auditID, &parentRecordID, &fileID, &action, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+	if err := row.Scan(&auditID, &parentRecordID, &fileID, &action, &status, &requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason); err != nil {
 		return nil, err
 	}
 
@@ -310,8 +318,10 @@ func scanLimitFileAuditRows(row limitAuditScanner, moduleKey string) ([]map[stri
 		"processing_status": limitAuditString(status),
 		"requested_by":      limitAuditString(requestedBy),
 		"requested_at":      limitAuditTime(requestedAt),
+		"requested_ip":      limitAuditString(requestedIP),
 		"checker_by":        limitAuditString(checkerBy),
 		"checker_at":        limitAuditTime(checkerAt),
+		"checker_ip":        limitAuditString(checkerIP),
 		"checker_comment":   limitAuditString(checkerComment),
 		"reason":            limitAuditString(reason),
 		"source":            limitAuditSourceFile,
