@@ -3759,6 +3759,9 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			req.TdsID, req.Reason, userEmail,
 			oldStatus, oldActual, oldRateApplied, oldVariance,
 			oldExceptionRaised, oldBankTDSRef, oldIsActive)
+		var entityID string
+		_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, req.TdsID).Scan(&entityID)
+
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
@@ -3805,7 +3808,7 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}(req.TdsID, userEmail)
 
-		go func(tID, uEmail string) {
+		go func(tID, uEmail, eID string) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDReceipt] UpdateTDS notification panic for %s: %v", tID, rec)
@@ -3814,10 +3817,11 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			notifcatalog.TriggerNotification(context.Background(), pool,
 				"/investment/fd/receipt/tds/update", tID, map[string]interface{}{
 					"record_id":   tID,
+					"entity_id":   eID,
 					"event":       "FD_TDS_EDIT_SUBMITTED",
 					"actor_email": uEmail,
 				})
-		}(req.TdsID, userEmail)
+		}(req.TdsID, userEmail, entityID)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{

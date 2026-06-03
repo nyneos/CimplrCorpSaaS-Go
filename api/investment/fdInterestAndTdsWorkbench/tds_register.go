@@ -779,7 +779,7 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				tds_rate_expected  = $8,
 				tds_section        = $9,
 				has_pan            = $10,
-				exception_raised   = ($7 != 0)
+				exception_raised   = ($7::numeric != 0)
 			WHERE tds_id = $11`,
 			req.PeriodStart, req.PeriodEnd, deductionDate,
 			req.GrossInterest, req.TDSExpected, req.TDSDeductedActual, tdsVariance,
@@ -790,10 +790,13 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		var entityID string
+		_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, req.TDSID).Scan(&entityID)
+
 		tx.Exec(ctx, `
 			INSERT INTO investment.fd_tds_receipt_audit
 				(tds_id, action_type, processing_status, requested_by, requested_at, checker_comment)
-			VALUES ($1, 'EDIT', 'PENDING_APPROVAL', $2, now(), $3)`,
+			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, now(), $3)`,
 			req.TDSID, userEmail, nullIfEmpty(req.Reason)) //nolint:errcheck
 
 		if err = tx.Commit(ctx); err != nil {
@@ -801,17 +804,13 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		go func(tID, uEmail string) {
+		go func(tID, uEmail, eID string) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDTDS] UpdateTDSRegister engine panic for %s: %v", tID, rec)
 				}
 			}()
 			bgCtx := context.Background()
-			var eID string
-			_ = pool.QueryRow(bgCtx,
-				`SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, tID,
-			).Scan(&eID)
 			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", tID, uEmail)
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
@@ -830,9 +829,9 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			api.LogInfo("[FDTDS] UpdateTDSRegister engine instance %s for tds %s", instID, tID)
-		}(req.TDSID, userEmail)
+		}(req.TDSID, userEmail, entityID)
 
-		go func(tID, uEmail string) {
+		go func(tID, uEmail, eID string) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDTDS] UpdateTDSRegister notification panic for %s: %v", tID, rec)
@@ -841,10 +840,11 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			notifcatalog.TriggerNotification(context.Background(), pool,
 				"/investment/fd/tds-register/update", tID, map[string]interface{}{
 					"record_id":   tID,
+					"entity_id":   eID,
 					"event":       "FD_TDS_REGISTER_EDIT_SUBMITTED",
 					"actor_email": uEmail,
 				})
-		}(req.TDSID, userEmail)
+		}(req.TDSID, userEmail, entityID)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
