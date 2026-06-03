@@ -156,7 +156,7 @@ func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 				"action_type":       "DOWNLOAD",
 				"processing_status": "COMPLETED",
 				"requested_by":      performedBy.String,
-				"requested_at":      performedAt,
+				"requested_at":      api.FormatAuditTimestampIST(performedAt),
 				"checker_by":        "",
 				"checker_at":        nil,
 				"checker_comment":   "",
@@ -372,10 +372,7 @@ func validateEntityAuditAccess(ctx context.Context, db *sql.DB, entityName strin
 }
 
 func nullableTime(value sql.NullTime) interface{} {
-	if value.Valid {
-		return value.Time
-	}
-	return nil
+	return api.FormatAuditTimestampNullIST(value)
 }
 
 func respondAuditPayload(w http.ResponseWriter, payload interface{}) {

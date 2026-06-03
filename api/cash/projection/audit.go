@@ -77,9 +77,9 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":       action,
 				"processing_status": status,
 				"requested_by":      performedBy,
-				"requested_at":      performedAt,
+				"requested_at":      api.FormatAuditTimestampIST(performedAt),
 				"checker_by":        ifaceToString(checkerBy),
-				"checker_at":        ifaceToTimeString(checkerAt),
+				"checker_at":        projectionAuditTime(checkerAt),
 				"checker_comment":   ifaceToString(checkerComment),
 				"reason":            ifaceToString(reason),
 			}
@@ -97,9 +97,9 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"action_type":       decisionAction,
 					"processing_status": status,
 					"requested_by":      projectionFirstNonEmpty(ifaceToString(checkerBy), performedBy),
-					"requested_at":      ifaceToTimeString(checkerAt),
+					"requested_at":      projectionAuditTime(checkerAt),
 					"checker_by":        ifaceToString(checkerBy),
-					"checker_at":        ifaceToTimeString(checkerAt),
+					"checker_at":        projectionAuditTime(checkerAt),
 					"checker_comment":   ifaceToString(checkerComment),
 					"reason":            ifaceToString(reason),
 				})
@@ -136,7 +136,7 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":       "DOWNLOAD",
 				"processing_status": "COMPLETED",
 				"requested_by":      strings.TrimSpace(requestedBy),
-				"requested_at":      requestedAt.Time,
+				"requested_at":      api.FormatAuditTimestampNullIST(requestedAt),
 				"checker_by":        "",
 				"checker_at":        nil,
 				"checker_comment":   "",
@@ -161,7 +161,7 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func projectionDecisionAction(action, status string, checkerAt interface{}) string {
-	if ifaceToTimeString(checkerAt) == "" {
+	if projectionAuditTime(checkerAt) == nil {
 		return ""
 	}
 
@@ -177,6 +177,21 @@ func projectionDecisionAction(action, status string, checkerAt interface{}) stri
 		return "REJECT"
 	default:
 		return ""
+	}
+}
+
+func projectionAuditTime(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case time.Time:
+		return api.FormatAuditTimestampIST(typed)
+	case *time.Time:
+		return api.FormatAuditTimestampPtrIST(typed)
+	case sql.NullTime:
+		return api.FormatAuditTimestampNullIST(typed)
+	default:
+		return nil
 	}
 }
 

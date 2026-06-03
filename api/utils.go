@@ -3,11 +3,14 @@ package api
 import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 )
+
+var auditISTLocation = time.FixedZone("IST", 5*60*60+30*60)
 
 // ActionAuditInfo holds audit info for a record
 type ActionAuditInfo struct {
@@ -50,6 +53,27 @@ func getPtrTime(t *time.Time) string {
 		return t.Format(constants.DateTimeFormat)
 	}
 	return ""
+}
+
+
+func FormatAuditTimestampIST(t time.Time) string {
+	return t.In(auditISTLocation).Format(constants.DateTimeFormat)
+}
+
+
+func FormatAuditTimestampPtrIST(t *time.Time) interface{} {
+	if t == nil {
+		return nil
+	}
+	return FormatAuditTimestampIST(*t)
+}
+
+
+func FormatAuditTimestampNullIST(t sql.NullTime) interface{} {
+	if !t.Valid {
+		return nil
+	}
+	return FormatAuditTimestampIST(t.Time)
 }
 
 // Helper to determine overall success for bulk operations

@@ -90,7 +90,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":       action,
 				"processing_status": status,
 				"requested_by":      performedBy,
-				"requested_at":      performedAt,
+				"requested_at":      api.FormatAuditTimestampIST(performedAt),
 				"checker_by":        stringPointerValue(checkerBy),
 				"checker_at":        timePointerValue(checkerAt),
 				"checker_comment":   stringPointerValue(checkerComment),
@@ -129,7 +129,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":       "DOWNLOAD",
 				"processing_status": "COMPLETED",
 				"requested_by":      strings.TrimSpace(requestedBy),
-				"requested_at":      timePointerValue(&requestedAt.Time),
+				"requested_at":      api.FormatAuditTimestampNullIST(requestedAt),
 				"checker_by":        "",
 				"checker_at":        nil,
 				"checker_comment":   "",
@@ -307,10 +307,7 @@ func stringPointerValue(value *string) string {
 }
 
 func timePointerValue(value *time.Time) interface{} {
-	if value == nil {
-		return nil
-	}
-	return *value
+	return api.FormatAuditTimestampPtrIST(value)
 }
 
 func transactionRequestedBy(userID string) string {

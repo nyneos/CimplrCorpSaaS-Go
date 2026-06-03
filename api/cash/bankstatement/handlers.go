@@ -1375,7 +1375,7 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 				       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
 					       bankstatementid, actiontype, processing_status, requested_by, requested_at, reason
 				       ) VALUES ($1, $2, $3, $4, $5, $6)
-			       `, bsid, constants.AuditActionDelete, constants.StatusPendingDeleteApproval, requestedBy, time.Now(), deleteComment)
+			       `, bsid, constants.AuditActionDelete, constants.StatusPendingDeleteApproval, requestedBy, time.Now().UTC(), deleteComment)
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,

@@ -364,10 +364,7 @@ func sweepAuditString(value sql.NullString) string {
 }
 
 func sweepAuditTime(value sql.NullTime) interface{} {
-	if !value.Valid {
-		return nil
-	}
-	return value.Time
+	return api.FormatAuditTimestampNullIST(value)
 }
 
 func sweepAuditID(value interface{}) string {

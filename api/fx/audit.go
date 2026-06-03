@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
 )
@@ -427,7 +428,7 @@ func firstNonZeroTime(values ...interface{}) interface{} {
 		switch v := value.(type) {
 		case time.Time:
 			if !v.IsZero() {
-				return v
+				return api.FormatAuditTimestampIST(v)
 			}
 		case string:
 			text := strings.TrimSpace(v)
@@ -647,10 +648,7 @@ func nullString(value sql.NullString) string {
 }
 
 func nullTime(value sql.NullTime) interface{} {
-	if !value.Valid {
-		return nil
-	}
-	return value.Time
+	return api.FormatAuditTimestampNullIST(value)
 }
 
 func parseJSONColumn(value sql.NullString) interface{} {

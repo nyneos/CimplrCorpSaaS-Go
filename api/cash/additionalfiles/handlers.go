@@ -1445,11 +1445,26 @@ func isCheckViolationError(err error) bool {
 }
 
 func writeAuditSuccess(w http.ResponseWriter, rows []fileAuditEvent) {
+	auditRows := make([]map[string]interface{}, 0, len(rows))
+	for _, row := range rows {
+		auditRows = append(auditRows, map[string]interface{}{
+			"entity_id":         row.EntityID,
+			"action_type":       row.ActionType,
+			"processing_status": row.ProcessingStatus,
+			"requested_by":      row.RequestedBy,
+			"requested_at":      api.FormatAuditTimestampPtrIST(row.RequestedAt),
+			"checker_by":        row.CheckerBy,
+			"checker_at":        api.FormatAuditTimestampPtrIST(row.CheckerAt),
+			"checker_comment":   row.CheckerComment,
+			"reason":            row.Reason,
+		})
+	}
+
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		constants.ValueSuccess: true,
-		"audit_logs":           rows,
+		"audit_logs":           auditRows,
 	})
 }
 

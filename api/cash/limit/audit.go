@@ -552,10 +552,7 @@ func limitAuditString(value sql.NullString) string {
 }
 
 func limitAuditTime(value sql.NullTime) interface{} {
-	if !value.Valid {
-		return nil
-	}
-	return value.Time
+	return api.FormatAuditTimestampNullIST(value)
 }
 
 func limitAuditID(value interface{}) string {

@@ -150,10 +150,7 @@ func auditString(value sql.NullString) string {
 }
 
 func auditTime(value sql.NullTime) interface{} {
-	if !value.Valid {
-		return nil
-	}
-	return value.Time
+	return api.FormatAuditTimestampNullIST(value)
 }
 
 func insertBankBalanceDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, balanceID, requestedBy, uploadS3Key string) {
