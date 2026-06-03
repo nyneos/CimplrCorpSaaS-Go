@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 
@@ -94,6 +95,41 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		go func(eID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDReceipt] EditVariance engine panic for %s: %v", eID, rec)
+				}
+			}()
+			bgCtx := context.Background()
+			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", eID, uEmail)
+			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "FIXED_DEPOSIT",
+				TransactionType:  "FD_EXCEPTION_EDIT",
+				RecordID:         eID,
+				RecordTable:      "investment.fd_receipt_exception",
+				AuditTable:       "investment.fd_receipt_exception_audit",
+				AuditIDColumn:    "exception_id",
+				ActionType:       "EDIT",
+				SubmittedBy:      uEmail,
+				SubmittedByEmail: uEmail,
+			})
+		}(req.ExceptionID, userEmail)
+
+		go func(eID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDReceipt] EditVariance notification panic for %s: %v", eID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pool,
+				"/investment/fd/receipt/exception/edit", eID, map[string]interface{}{
+					"record_id":   eID,
+					"event":       "FD_EXCEPTION_EDIT_SUBMITTED",
+					"actor_email": uEmail,
+				})
+		}(req.ExceptionID, userEmail)
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":           true,
@@ -180,6 +216,41 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		go func(eID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDReceipt] ResolveException engine panic for %s: %v", eID, rec)
+				}
+			}()
+			bgCtx := context.Background()
+			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", eID, uEmail)
+			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "FIXED_DEPOSIT",
+				TransactionType:  "FD_EXCEPTION_RESOLVE",
+				RecordID:         eID,
+				RecordTable:      "investment.fd_receipt_exception",
+				AuditTable:       "investment.fd_receipt_exception_audit",
+				AuditIDColumn:    "exception_id",
+				ActionType:       "EDIT",
+				SubmittedBy:      uEmail,
+				SubmittedByEmail: uEmail,
+			})
+		}(req.ExceptionID, userEmail)
+
+		go func(eID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDReceipt] ResolveException notification panic for %s: %v", eID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pool,
+				"/investment/fd/receipt/exception/resolve", eID, map[string]interface{}{
+					"record_id":   eID,
+					"event":       "FD_EXCEPTION_RESOLVED",
+					"actor_email": uEmail,
+				})
+		}(req.ExceptionID, userEmail)
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":           true,
@@ -238,6 +309,29 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			// Try engine first; fall through to direct stamp on no-matrix path.
+			approveActionRes, approveActionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FIXED_DEPOSIT", RecordID: eid,
+				UserID: req.UserID, UserEmail: userEmail, RoleID: "",
+				Action: approvalengine.ActionApproved, Comment: req.Comment,
+			})
+			if approveActionErr != nil {
+				api.LogError("[FDReceipt] ApproveException engine error exception=%s: %v", eid, approveActionErr)
+			}
+			if approveActionRes.Acted && approveActionRes.InstanceStatus != approvalengine.InstStatusApproved {
+				// Multi-level approval in progress — not final eye yet.
+				res["success"] = true
+				res["exception_status"] = "IN_REVIEW"
+				res["processing_status"] = approveActionRes.InstanceStatus
+				results = append(results, res)
+				continue
+			}
+			if !approveActionRes.Acted && !approveActionRes.CancelledStale && approveActionRes.Reason != "" {
+				res["error"] = approveActionRes.Reason
+				results = append(results, res)
+				continue
+			}
+
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				res["error"] = constants.ErrTransactionFailed
@@ -269,6 +363,11 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, res)
 
 			go func(id, u string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDReceipt] ApproveException notification panic for %s: %v", id, rec)
+					}
+				}()
 				notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/exceptions/approve", id, map[string]interface{}{
 					"record_id": id, "event": "FD_RECEIPT_EXCEPTION_APPROVED", "actor_email": u,
 				})
@@ -345,6 +444,40 @@ func closeOneVariance(ctx context.Context, pool *pgxpool.Pool, exceptionID, user
 	}
 
 	applyExceptionClosure(ctx, pool, exceptionID)
+
+	go func(eID, uEmail string) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				api.LogError("[FDReceipt] CloseException engine panic for %s: %v", eID, rec)
+			}
+		}()
+		bgCtx := context.Background()
+		_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+			ModuleCode:       "FIXED_DEPOSIT",
+			TransactionType:  "FD_EXCEPTION_CLOSE",
+			RecordID:         eID,
+			RecordTable:      "investment.fd_receipt_exception",
+			AuditTable:       "investment.fd_receipt_exception_audit",
+			AuditIDColumn:    "exception_id",
+			ActionType:       "EDIT",
+			SubmittedBy:      uEmail,
+			SubmittedByEmail: uEmail,
+		})
+	}(exceptionID, userEmail)
+
+	go func(eID, uEmail string) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				api.LogError("[FDReceipt] CloseException notification panic for %s: %v", eID, rec)
+			}
+		}()
+		notifcatalog.TriggerNotification(context.Background(), pool,
+			"/investment/fd/receipt/exception/close", eID, map[string]interface{}{
+				"record_id":   eID,
+				"event":       "FD_EXCEPTION_CLOSED",
+				"actor_email": uEmail,
+			})
+	}(exceptionID, userEmail)
 
 	canPost := false
 	if receiptID, _ := resolveExceptionReceiptLinks(ctx, pool, hdr.ReceiptID, hdr.TDSID); receiptID != "" {
@@ -461,6 +594,21 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			// Try engine first; direct stamp on no-matrix path.
+			rejectActionRes, rejectActionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FIXED_DEPOSIT", RecordID: eid,
+				UserID: req.UserID, UserEmail: userEmail, RoleID: "",
+				Action: approvalengine.ActionRejected, Comment: req.Reason,
+			})
+			if rejectActionErr != nil {
+				api.LogError("[FDReceipt] RejectException engine error exception=%s: %v", eid, rejectActionErr)
+			}
+			if !rejectActionRes.Acted && !rejectActionRes.CancelledStale && rejectActionRes.Reason != "" {
+				res["error"] = rejectActionRes.Reason
+				results = append(results, res)
+				continue
+			}
+
 			auditOld := auditOldFromHeader(hdr)
 			tx, err := pool.Begin(ctx)
 			if err != nil {
@@ -506,6 +654,20 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			res["exception_status"] = "OPEN"
 			res["processing_status"] = constants.StatusRejected
 			results = append(results, res)
+
+			go func(id, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDReceipt] RejectException notification panic for %s: %v", id, rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.Background(), pool,
+					"/investment/fd/receipt/exception/reject", id, map[string]interface{}{
+						"record_id":   id,
+						"event":       "FD_EXCEPTION_REJECTED",
+						"actor_email": uEmail,
+					})
+			}(eid, userEmail)
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

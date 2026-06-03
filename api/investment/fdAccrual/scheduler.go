@@ -165,7 +165,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       entID,
-				TransactionType:  "FD_ACCRUAL_SCHEDULE_APPROVE",
+				TransactionType:  "FD_ACCRUAL_SCHEDULE_CREATE",
 				RecordID:         cfgID,
 				RecordTable:      constants.QuerryAccrualScheduleConfig,
 				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
@@ -325,7 +325,7 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       entID,
-				TransactionType:  "FD_ACCRUAL_SCHEDULE_APPROVE",
+				TransactionType:  "FD_ACCRUAL_SCHEDULE_EDIT",
 				RecordID:         cfgID,
 				RecordTable:      constants.QuerryAccrualScheduleConfig,
 				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
@@ -607,6 +607,21 @@ func ApproveScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"errors":              errors,
 			"checker":             userEmail,
 		})
+		for _, id := range approved {
+			go func(cfgID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDAccrual] ApproveScheduleConfig notification panic for %s: %v", cfgID, rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+					"/investment/fd/accrual/schedule/approve", cfgID, map[string]interface{}{
+						"record_id":   cfgID,
+						"event":       "FD_ACCRUAL_SCHEDULE_APPROVED",
+						"actor_email": uEmail,
+					})
+			}(id, userEmail)
+		}
 		api.LogInfo("[FDAccrual] ApproveScheduleConfig: approved=%d deleted=%d by=%s", len(approved), len(deleted), userEmail)
 	}
 }
@@ -701,6 +716,21 @@ func RejectScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"errors":              errors,
 			"checker":             userEmail,
 		})
+		for _, id := range rejected {
+			go func(cfgID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDAccrual] RejectScheduleConfig notification panic for %s: %v", cfgID, rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+					"/investment/fd/accrual/schedule/reject", cfgID, map[string]interface{}{
+						"record_id":   cfgID,
+						"event":       "FD_ACCRUAL_SCHEDULE_REJECTED",
+						"actor_email": uEmail,
+					})
+			}(id, userEmail)
+		}
 		api.LogInfo("[FDAccrual] RejectScheduleConfig: count=%d errors=%d by=%s", len(rejected), len(errors), userEmail)
 	}
 }
@@ -933,7 +963,7 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       entID,
-				TransactionType:  "FD_ACCRUAL_SCHEDULE_APPROVE",
+				TransactionType:  "FD_ACCRUAL_SCHEDULE_DELETE",
 				RecordID:         cfgID,
 				RecordTable:      constants.QuerryAccrualScheduleConfig,
 				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
