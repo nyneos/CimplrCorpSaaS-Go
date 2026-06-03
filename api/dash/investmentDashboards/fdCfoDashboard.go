@@ -959,7 +959,10 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				              AND ir.receipt_status  = 'POSTED'
 				              AND ir.reconcile_status = 'MATCHED'
 				              AND ($1::text='' OR ir.entity_id=$1)
-				              AND ($5::text='' OR ir.bank_id=$5)),0) AS received
+				              AND ($5::text='' OR ir.bank_id=$5)
+				              AND ('` + periodBounds.StartStr + `' = '' OR ir.receipt_date >= '` + periodBounds.StartStr + `'::date)
+				              AND ('` + periodBounds.EndStr + `' = '' OR ir.receipt_date <= '` + periodBounds.EndStr + `'::date)
+				           ),0) AS received
 				FROM (
 				  SELECT al_inner.*
 				  FROM investment.fd_accrual_ledger al_inner

@@ -1536,6 +1536,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_interest_receipt ir
 				WHERE ir.is_deleted = false
 				  AND ir.reconcile_status = 'MATCHED'
+				  AND ir.receipt_date <= ('` + snapshotDate + `'::date)
 				  AND ($1::text='' OR ir.entity_id=$1)
 				  AND ($2::text='' OR ir.bank_id=$2)`,
 				entityFilter, bankFilter).Scan(&mtd, &qtd, &ytd, &received)
