@@ -902,12 +902,14 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(SUM(CASE WHEN al.accrual_period_end >= $3::date THEN al.period_interest_accrued ELSE 0 END),0) AS period_accrued,
 				  -- QTD accrued (Apr 1 of current FY quarter start)
 				  COALESCE(SUM(CASE WHEN al.accrual_period_end >= $4::date THEN al.period_interest_accrued ELSE 0 END),0) AS qtd_accrued,
-				  -- Interest received (receipts)
-				  COALESCE((SELECT SUM(ir.gross_interest_received)
+				  -- Interest received (receipts: POSTED + MATCHED + not deleted + bank filter)
+				  COALESCE((SELECT SUM(ir.net_amount_received)
 				            FROM investment.fd_interest_receipt ir
 				            WHERE ir.is_deleted=false
-				              AND ir.receipt_date >= $2::date
-				              AND ($1::text='' OR ir.entity_id=$1)),0) AS received
+				              AND ir.receipt_status  = 'POSTED'
+				              AND ir.reconcile_status = 'MATCHED'
+				              AND ($1::text='' OR ir.entity_id=$1)
+				              AND ($5::text='' OR ir.bank_id=$5)),0) AS received
 				FROM (
 				  SELECT al_inner.*
 				  FROM investment.fd_accrual_ledger al_inner
@@ -930,7 +932,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			qtdStart := periodStartDate("QTD", now)
 			var ytd, periodAcc, qtd, received float64
 			err := pool.QueryRow(ctx, sql, entityFilter, fyStart.Format(constants.DateFormat),
-				periodStart.Format(constants.DateFormat), qtdStart.Format(constants.DateFormat)).
+				periodStart.Format(constants.DateFormat), qtdStart.Format(constants.DateFormat), bankFilter).
 				Scan(&ytd, &periodAcc, &qtd, &received)
 			if err != nil {
 				return nil, err
