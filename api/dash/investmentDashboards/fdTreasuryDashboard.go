@@ -65,6 +65,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
+		if asOn, ok := parseFDDate(req.AsOnDate); ok {
+			now = asOn
+		}
+		snapshotDate := now.Format(constants.DateFormat)
+
 		ctx := r.Context()
 		entityFilter := req.EntityID
 		bankFilter    := req.Bank
@@ -1193,15 +1198,15 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 10b. interest_trend (same logic as CFO dashboard — cashflow + ledger fallback)
 		run("interest_trend", func(ctx context.Context) (interface{}, error) {
-			daily, dErr := buildInterestTrendSeries(ctx, pool, entityFilter, "DAY")
+			daily, dErr := buildInterestTrendSeries(ctx, pool, entityFilter, "DAY", snapshotDate)
 			if dErr != nil {
 				daily = []interestTrendRow{}
 			}
-			monthly, mErr := buildInterestTrendSeries(ctx, pool, entityFilter, "MONTH")
+			monthly, mErr := buildInterestTrendSeries(ctx, pool, entityFilter, "MONTH", snapshotDate)
 			if mErr != nil {
 				monthly = []interestTrendRow{}
 			}
-			yearly, yErr := buildInterestTrendSeries(ctx, pool, entityFilter, "YEAR")
+			yearly, yErr := buildInterestTrendSeries(ctx, pool, entityFilter, "YEAR", snapshotDate)
 			if yErr != nil {
 				yearly = []interestTrendRow{}
 			}

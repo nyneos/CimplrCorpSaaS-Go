@@ -89,20 +89,31 @@ func interestTrendGranularity(granularity string) (dateTrunc, interval string) {
 }
 
 // buildInterestTrendSeries buckets accrued vs received interest for the CFO trend chart.
-// Source: fd_cashflow_schedule only.
-func buildInterestTrendSeries(ctx context.Context, pool *pgxpool.Pool, entityFilter, granularity string) ([]interestTrendRow, error) {
+// snapshotDate is the as_on_date upper bound (YYYY-MM-DD); pass "" for no upper cap.
+func buildInterestTrendSeries(ctx context.Context, pool *pgxpool.Pool, entityFilter, granularity, snapshotDate string) ([]interestTrendRow, error) {
 	dateTrunc, interval := interestTrendGranularity(granularity)
-	return interestTrendFromCashflow(ctx, pool, entityFilter, dateTrunc, interval)
+	return interestTrendFromCashflow(ctx, pool, entityFilter, dateTrunc, interval, snapshotDate)
 }
 
 // interestTrendFromCashflow aggregates ACCRUAL vs payout rows from fd_cashflow_schedule.
-func interestTrendFromCashflow(ctx context.Context, pool *pgxpool.Pool, entityFilter, dateTrunc, interval string) ([]interestTrendRow, error) {
+func interestTrendFromCashflow(ctx context.Context, pool *pgxpool.Pool, entityFilter, dateTrunc, interval, snapshotDate string) ([]interestTrendRow, error) {
+	// snapshotDate caps the upper bound; fallback to no upper cap when empty.
+	upperBound := ""
+	if snapshotDate != "" {
+		upperBound = "  AND cf.event_date <= '" + snapshotDate + "'::date"
+	}
+	lowerBound := "  AND cf.event_date >= '" + snapshotDate + "'::date - INTERVAL '" + interval + "'"
+	if snapshotDate == "" {
+		lowerBound = "  AND cf.event_date >= CURRENT_DATE - INTERVAL '" + interval + "'"
+	}
+
 	entityJoin := `
 		FROM investment.fd_cashflow_schedule cf
 		INNER JOIN investment.fd_master m ON m.fd_id = cf.fd_id AND COALESCE(m.is_deleted, false) = false
 		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 		WHERE COALESCE(cf.is_deleted, false) = false
-		  AND cf.event_date >= CURRENT_DATE - INTERVAL '` + interval + `'
+		` + lowerBound + `
+		` + upperBound + `
 		  AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)`
 
 	accrualSQL := `
@@ -685,6 +696,13 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
+		if asOn, ok := parseFDDate(req.AsOnDate); ok {
+			now = asOn
+		}
+		// snapshotDate is passed to SQL queries to replace CURRENT_DATE so all
+		// date-sensitive queries are anchored to the requested as_on_date.
+		snapshotDate := now.Format(constants.DateFormat)
+
 		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
 		periodStart := periodBounds.Start
 		ctx := r.Context()
@@ -1379,15 +1397,15 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 7. interest_trend (daily / monthly / yearly - cashflow schedule + ledger fallback)
 		run("interest_trend", func(ctx context.Context) (interface{}, error) {
-			daily, dErr := buildInterestTrendSeries(ctx, pool, entityFilter, "DAY")
+			daily, dErr := buildInterestTrendSeries(ctx, pool, entityFilter, "DAY", snapshotDate)
 			if dErr != nil {
 				daily = []interestTrendRow{}
 			}
-			monthly, mErr := buildInterestTrendSeries(ctx, pool, entityFilter, "MONTH")
+			monthly, mErr := buildInterestTrendSeries(ctx, pool, entityFilter, "MONTH", snapshotDate)
 			if mErr != nil {
 				monthly = []interestTrendRow{}
 			}
-			yearly, yErr := buildInterestTrendSeries(ctx, pool, entityFilter, "YEAR")
+			yearly, yErr := buildInterestTrendSeries(ctx, pool, entityFilter, "YEAR", snapshotDate)
 			if yErr != nil {
 				yearly = []interestTrendRow{}
 			}

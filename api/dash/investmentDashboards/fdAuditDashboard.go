@@ -62,6 +62,11 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
+		// Use as_on_date as the reference date so period calculations and
+		// the default 30-day window are relative to the requested snapshot date.
+		if asOn, ok := parseFDDate(req.AsOnDate); ok {
+			now = asOn
+		}
 		entityFilter := req.EntityID
 		fdFilter := req.FDID
 		actionFilter := req.ActionType
@@ -83,16 +88,6 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if endDate == "" {
 			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
-		}
-
-		// If as_on_date is provided, cap the exclusive end at as_on_date + 1 day.
-		if req.AsOnDate != "" {
-			if asOn, ok := parseFDDate(req.AsOnDate); ok {
-				capEnd := asOn.AddDate(0, 0, 1).Format(constants.DateFormat)
-				if capEnd < endDate {
-					endDate = capEnd
-				}
-			}
 		}
 
 		// Guard: if the resolved range is a single day (e.g. "This Month" on the

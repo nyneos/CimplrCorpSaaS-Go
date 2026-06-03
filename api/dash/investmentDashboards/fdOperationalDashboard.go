@@ -64,6 +64,9 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
+		if asOn, ok := parseFDDate(req.AsOnDate); ok {
+			now = asOn
+		}
 		ctx := r.Context()
 		entityFilter := req.EntityID
 		bankFilter := req.Bank
