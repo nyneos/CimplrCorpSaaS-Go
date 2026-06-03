@@ -138,7 +138,6 @@ func interestTrendFromCashflow(ctx context.Context, pool *pgxpool.Pool, entityFi
 	return mergeInterestTrendBuckets(ctx, pool, entityFilter, dateTrunc, accrualSQL, receivedSQL)
 }
 
-
 func mergeInterestTrendBuckets(ctx context.Context, pool *pgxpool.Pool, entityFilter, dateTrunc, accrualSQL, receivedSQL string) ([]interestTrendRow, error) {
 	monthNames := []string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
 	weekIdx := 0
@@ -420,14 +419,14 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 	if snapshotDate != "" {
 		snapUntil = " AND b.created_at <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
 	}
-	snapFilter    := snapUntil // booking uses b.created_at
-	snapConfirm   := ""
+	snapFilter := snapUntil // booking uses b.created_at
+	snapConfirm := ""
 	snapActivation := ""
-	snapClosure   := ""
+	snapClosure := ""
 	if snapshotDate != "" {
-		snapConfirm    = " AND c.created_at  <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+		snapConfirm = " AND c.created_at  <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
 		snapActivation = " AND m.created_at  <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
-		snapClosure    = " AND sort_ts       <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+		snapClosure = " AND sort_ts       <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
 	}
 	// Approvals Pending widget shows every row that is *not* finalised.
 	// "Finalised" = APPROVED / REJECTED (and CLOSED on booking). Everything
@@ -960,9 +959,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				              AND ir.reconcile_status = 'MATCHED'
 				              AND ($1::text='' OR ir.entity_id=$1)
 				              AND ($5::text='' OR ir.bank_id=$5)
-				              AND ('` + periodBounds.StartStr + `' = '' OR ir.receipt_date >= '` + periodBounds.StartStr + `'::date)
-				              AND ('` + periodBounds.EndStr + `' = '' OR ir.receipt_date <= '` + periodBounds.EndStr + `'::date)
-				           ),0) AS received
+				                ),0) AS received
 				FROM (
 				  SELECT al_inner.*
 				  FROM investment.fd_accrual_ledger al_inner
