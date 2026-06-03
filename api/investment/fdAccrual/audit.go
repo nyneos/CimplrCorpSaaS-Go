@@ -49,29 +49,45 @@ func GetAccrualRunAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, `
 			SELECT
-				audit_id,
-				run_id,
-				action_type,
-				processing_status,
-				COALESCE(reason, '')                                              AS reason,
-				COALESCE(requested_by, '')                                        AS requested_by,
-				COALESCE(TO_CHAR(requested_at, 'YYYY-MM-DD HH24:MI:SS'), '')      AS requested_at,
-				COALESCE(checker_by, '')                                          AS checker_by,
-				COALESCE(TO_CHAR(checker_at, 'YYYY-MM-DD HH24:MI:SS'), '')        AS checker_at,
-				COALESCE(checker_comment, '')                                     AS checker_comment,
-				COALESCE(old_run_status, '')                                      AS old_run_status,
-				COALESCE(old_run_mode, '')                                        AS old_run_mode,
-				COALESCE(old_day_count_convention, '')                            AS old_day_count_convention,
-				COALESCE(old_rounding_rule, '')                                   AS old_rounding_rule,
-				COALESCE(old_precision_decimals, 0)                               AS old_precision_decimals,
-				old_accrual_period_start,
-				old_accrual_period_end,
-				COALESCE(old_financial_period, '')                                AS old_financial_period,
-				COALESCE(old_fd_status_filter, '')                                AS old_fd_status_filter,
-				COALESCE(old_fd_inclusion_method, '')                             AS old_fd_inclusion_method
-			FROM investment.fd_accrual_run_audit
-			WHERE run_id = $1
-			ORDER BY requested_at DESC
+				a.audit_id,
+				a.run_id,
+				a.action_type,
+				a.processing_status,
+				COALESCE(a.reason, '')                                              AS reason,
+				COALESCE(a.requested_by, '')                                        AS requested_by,
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '')      AS requested_at,
+				COALESCE(a.checker_by, '')                                          AS checker_by,
+				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '')        AS checker_at,
+				COALESCE(a.checker_comment, '')                                     AS checker_comment,
+				COALESCE(a.old_run_status, '')                                      AS old_run_status,
+				COALESCE(a.old_run_mode, '')                                        AS old_run_mode,
+				COALESCE(a.old_day_count_convention, '')                            AS old_day_count_convention,
+				COALESCE(a.old_rounding_rule, '')                                   AS old_rounding_rule,
+				COALESCE(a.old_precision_decimals, 0)                               AS old_precision_decimals,
+				a.old_accrual_period_start,
+				a.old_accrual_period_end,
+				COALESCE(a.old_financial_period, '')                                AS old_financial_period,
+				COALESCE(a.old_fd_status_filter, '')                                AS old_fd_status_filter,
+				COALESCE(a.old_fd_inclusion_method, '')                             AS old_fd_inclusion_method,
+				COALESCE(ai.instance_id,'')                                         AS approval_instance_id,
+				COALESCE(ai.status,'')                                              AS approval_engine_status,
+				COALESCE(aie.instance_eye_id,'')                                    AS current_eye_id,
+				COALESCE(aie.position::text,'')                                     AS current_eye_position,
+				COALESCE(aie.approvals_required,0)                                  AS approvals_required,
+				COALESCE(aie.approvals_received,0)                                  AS approvals_received,
+				aie.sla_deadline                                                    AS sla_deadline,
+				COALESCE(aie.is_escalated,false)                                    AS is_escalated
+			FROM investment.fd_accrual_run_audit a
+			LEFT JOIN uam.approval_instance ai
+				ON ai.record_id = a.run_id
+				AND ai.module_code = 'FIXED_DEPOSIT'
+				AND ai.status = 'PENDING'
+				AND ai.is_deleted = false
+			LEFT JOIN uam.approval_instance_eye aie
+				ON aie.instance_id = ai.instance_id
+				AND aie.status = 'ACTIVE'
+			WHERE a.run_id = $1
+			ORDER BY a.requested_at DESC
 		`, req.RunID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())

@@ -102,20 +102,39 @@ func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		query := `SELECT * FROM investment.fd_audit_cashflow_schedule WHERE 1=1`
+		query := `
+			SELECT a.*,
+				COALESCE(ai.instance_id,'')        AS approval_instance_id,
+				COALESCE(ai.status,'')             AS approval_engine_status,
+				COALESCE(aie.instance_eye_id,'')   AS current_eye_id,
+				COALESCE(aie.position::text,'')    AS current_eye_position,
+				COALESCE(aie.approvals_required,0) AS approvals_required,
+				COALESCE(aie.approvals_received,0) AS approvals_received,
+				aie.sla_deadline                   AS sla_deadline,
+				COALESCE(aie.is_escalated,false)   AS is_escalated
+			FROM investment.fd_audit_cashflow_schedule a
+			LEFT JOIN uam.approval_instance ai
+				ON ai.record_id = a.audit_id::text
+				AND ai.module_code = 'FIXED_DEPOSIT'
+				AND ai.status = 'PENDING'
+				AND ai.is_deleted = false
+			LEFT JOIN uam.approval_instance_eye aie
+				ON aie.instance_id = ai.instance_id
+				AND aie.status = 'ACTIVE'
+			WHERE 1=1`
 		var args []interface{}
 		pos := 1
 		if fdID != "" {
-			query += fmt.Sprintf(" AND fd_id = $%d", pos)
+			query += fmt.Sprintf(" AND a.fd_id = $%d", pos)
 			args = append(args, fdID)
 			pos++
 		}
 		if cashflowID != "" {
-			query += fmt.Sprintf(" AND cashflow_id = $%d", pos)
+			query += fmt.Sprintf(" AND a.cashflow_id = $%d", pos)
 			args = append(args, cashflowID)
 			pos++
 		}
-		query += " ORDER BY requested_at DESC"
+		query += " ORDER BY a.requested_at DESC"
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {

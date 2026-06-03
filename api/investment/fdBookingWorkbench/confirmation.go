@@ -518,24 +518,53 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(cID, uID, uEmail, eID string, amount float64) {
-			defer func() { recover() }() //nolint:errcheck
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] CaptureConfirmation engine panic for %s: %v", cID, rec)
+				}
+			}()
 			bgCtx := context.Background()
-			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", cID, uEmail)
-			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode: "FIXED_DEPOSIT", EntityCode: eID,
-				TransactionType: "FD_CONFIRMATION_CREATE", RecordID: cID,
-				RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
-				AuditIDColumn: "confirmation_id", ActionType: "CREATE",
-				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
+			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+				ModuleCode:       "FIXED_DEPOSIT",
+				EntityCode:       eID,
+				TransactionType:  "FD_CONFIRMATION_CREATE",
+				RecordID:         cID,
+				RecordTable:      constants.QuerryConfirmation,
+				AuditTable:       constants.QuerryAuditConfirmation,
+				AuditIDColumn:    "confirmation_id",
+				ActionType:       "CREATE",
+				Amount:           amount,
+				SubmittedBy:      uID,
+				SubmittedByEmail: uEmail,
 			})
+			if err != nil {
+				api.LogError("[FDBooking] CaptureConfirmation CreateInstance failed for %s: %v", cID, err)
+				return
+			}
+			if instID != "" {
+				if _, uerr := pgxPool.Exec(bgCtx,
+					`UPDATE investment.fd_confirmation SET confirmation_status = 'APPROVAL_PENDING' WHERE confirmation_id = $1`,
+					cID); uerr != nil {
+					api.LogError("[FDBooking] CaptureConfirmation status→APPROVAL_PENDING failed for %s: %v", cID, uerr)
+				}
+			}
 		}(confirmationID, req.UserID, userEmail, entityID, req.ConfirmedPrincipalAmount)
 
 		go func(cID, bID, eID, uEmail string, amount float64) {
-			defer func() { recover() }() //nolint:errcheck
-			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/capture", cID, map[string]interface{}{
-				"entity_id": eID, "record_id": cID, "booking_id": bID,
-				"event": "FD_CONFIRMATION_CAPTURED", "actor_email": uEmail, "amount": amount,
-			})
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] CaptureConfirmation notification panic for %s: %v", cID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				"/investment/fd/confirmation/capture", cID, map[string]interface{}{
+					"entity_id":   eID,
+					"record_id":   cID,
+					"booking_id":  bID,
+					"event":       "FD_CONFIRMATION_CAPTURED",
+					"actor_email": uEmail,
+					"amount":      amount,
+				})
 		}(confirmationID, req.BookingID, entityID, userEmail, req.ConfirmedPrincipalAmount)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -1069,6 +1098,27 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}(confirmationID, req.UserID, userEmail, entityID, req.ConfirmedPrincipalAmount, isUpdate)
 
+		go func(cID, bID, eID, uEmail string, hasVar bool) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] VarianceResolve notification panic for %s: %v", cID, rec)
+				}
+			}()
+			event := "FD_CONFIRMATION_VARIANCE_RESOLVED"
+			if hasVar {
+				event = "FD_CONFIRMATION_VARIANCE_PENDING"
+			}
+			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				"/investment/fd/confirmation/variance-resolve", cID, map[string]interface{}{
+					"entity_id":    eID,
+					"record_id":    cID,
+					"booking_id":   bID,
+					"event":        event,
+					"actor_email":  uEmail,
+					"has_variance": hasVar,
+				})
+		}(confirmationID, bookingID, entityID, userEmail, hasVariance)
+
 		// Build variance items response
 		varOut := make([]map[string]interface{}, 0, len(varItems))
 		for _, v := range varItems {
@@ -1552,6 +1602,23 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}(req.ConfirmationID, req.UserID, userEmail, entityID, updateAmount)
 
+		go func(cID, bID, eID, uEmail string, hasVar bool) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] EditConfirmation notification panic for %s: %v", cID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				"/investment/fd/confirmation/edit", cID, map[string]interface{}{
+					"entity_id":    eID,
+					"record_id":    cID,
+					"booking_id":   bID,
+					"event":        "FD_CONFIRMATION_EDIT_SUBMITTED",
+					"actor_email":  uEmail,
+					"has_variance": hasVar,
+				})
+		}(req.ConfirmationID, bookingID, entityID, userEmail, hasVariance)
+
 		// Build variance items response — return ALL fields so UI can render full comparison table
 		varOut := make([]map[string]interface{}, 0, len(varItems))
 		for _, v := range varItems {
@@ -1760,6 +1827,22 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
 			})
 		}(req.ConfirmationID, req.UserID, userEmail, entityID, confPrincipal)
+
+		go func(cID, bID, eID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] VarianceException notification panic for %s: %v", cID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				"/investment/fd/confirmation/variance-exception", cID, map[string]interface{}{
+					"entity_id":   eID,
+					"record_id":   cID,
+					"booking_id":  bID,
+					"event":       "FD_CONFIRMATION_VARIANCE_EXCEPTION_RAISED",
+					"actor_email": uEmail,
+				})
+		}(req.ConfirmationID, bookingID, entityID, userEmail)
 
 		api.RespondWithPayload(w, true, "Variance accepted as exception — confirmation ready for approval", map[string]interface{}{
 			"confirmation_id":     req.ConfirmationID,
@@ -3097,7 +3180,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					TransactionType: "FD_CONFIRMATION_DELETE", RecordID: cID,
 					RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 					AuditIDColumn: "confirmation_id", ActionType: "DELETE",
-					Amount: 0, SubmittedBy: uID, SubmittedByEmail: uEmail,
+					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
 				})
 				if err != nil {
 					api.LogError("[FDBooking] CreateInstance(DELETE) failed for confirmation %s: %v", cID, err)

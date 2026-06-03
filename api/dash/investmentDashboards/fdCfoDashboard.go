@@ -89,28 +89,31 @@ func interestTrendGranularity(granularity string) (dateTrunc, interval string) {
 }
 
 // buildInterestTrendSeries buckets accrued vs received interest for the CFO trend chart.
-// Primary source: fd_cashflow_schedule (cashflow.go event types).
-// Fallback: fd_accrual_ledger + fd_interest_receipt (same sources as interest KPIs).
-func buildInterestTrendSeries(ctx context.Context, pool *pgxpool.Pool, entityFilter, granularity string) ([]interestTrendRow, error) {
+// snapshotDate is the as_on_date upper bound (YYYY-MM-DD); pass "" for no upper cap.
+func buildInterestTrendSeries(ctx context.Context, pool *pgxpool.Pool, entityFilter, granularity, snapshotDate string) ([]interestTrendRow, error) {
 	dateTrunc, interval := interestTrendGranularity(granularity)
-	out, err := interestTrendFromCashflow(ctx, pool, entityFilter, dateTrunc, interval)
-	if err != nil {
-		return nil, err
-	}
-	if len(out) == 0 {
-		out, err = interestTrendFromLedger(ctx, pool, entityFilter, dateTrunc, interval)
-	}
-	return out, err
+	return interestTrendFromCashflow(ctx, pool, entityFilter, dateTrunc, interval, snapshotDate)
 }
 
 // interestTrendFromCashflow aggregates ACCRUAL vs payout rows from fd_cashflow_schedule.
-func interestTrendFromCashflow(ctx context.Context, pool *pgxpool.Pool, entityFilter, dateTrunc, interval string) ([]interestTrendRow, error) {
+func interestTrendFromCashflow(ctx context.Context, pool *pgxpool.Pool, entityFilter, dateTrunc, interval, snapshotDate string) ([]interestTrendRow, error) {
+	// snapshotDate caps the upper bound; fallback to no upper cap when empty.
+	upperBound := ""
+	if snapshotDate != "" {
+		upperBound = "  AND cf.event_date <= '" + snapshotDate + "'::date"
+	}
+	lowerBound := "  AND cf.event_date >= '" + snapshotDate + "'::date - INTERVAL '" + interval + "'"
+	if snapshotDate == "" {
+		lowerBound = "  AND cf.event_date >= CURRENT_DATE - INTERVAL '" + interval + "'"
+	}
+
 	entityJoin := `
 		FROM investment.fd_cashflow_schedule cf
 		INNER JOIN investment.fd_master m ON m.fd_id = cf.fd_id AND COALESCE(m.is_deleted, false) = false
 		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 		WHERE COALESCE(cf.is_deleted, false) = false
-		  AND cf.event_date >= CURRENT_DATE - INTERVAL '` + interval + `'
+		` + lowerBound + `
+		` + upperBound + `
 		  AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)`
 
 	accrualSQL := `
@@ -129,35 +132,6 @@ func interestTrendFromCashflow(ctx context.Context, pool *pgxpool.Pool, entityFi
 		` + entityJoin + `
 		  AND cf.event_type IN ('INTEREST_RECEIPT', 'CAPITALIZATION', 'MATURITY')
 		  AND COALESCE(cf.interest_accrued, 0) <> 0
-		GROUP BY 1
-		ORDER BY 1`
-
-	return mergeInterestTrendBuckets(ctx, pool, entityFilter, dateTrunc, accrualSQL, receivedSQL)
-}
-
-// interestTrendFromLedger mirrors the interest KPI queries (posted accruals + receipts).
-func interestTrendFromLedger(ctx context.Context, pool *pgxpool.Pool, entityFilter, dateTrunc, interval string) ([]interestTrendRow, error) {
-	accrualSQL := `
-		SELECT
-		  TO_CHAR(DATE_TRUNC('` + dateTrunc + `', al.accrual_period_end), 'YYYY-MM-DD') AS sort_key,
-		  COALESCE(SUM(al.period_interest_accrued), 0) AS accrued
-		FROM investment.fd_accrual_ledger al
-		LEFT JOIN investment.fd_master m ON m.fd_id = al.fd_id
-		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-		WHERE COALESCE(al.is_deleted, false) = false
-		  AND al.accrual_period_end >= CURRENT_DATE - INTERVAL '` + interval + `'
-		  AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)
-		GROUP BY 1
-		ORDER BY 1`
-
-	receivedSQL := `
-		SELECT
-		  TO_CHAR(DATE_TRUNC('` + dateTrunc + `', ir.receipt_date), 'YYYY-MM-DD') AS sort_key,
-		  COALESCE(SUM(ir.gross_interest_received), 0) AS received
-		FROM investment.fd_interest_receipt ir
-		WHERE ir.is_deleted = false
-		  AND ir.receipt_date >= CURRENT_DATE - INTERVAL '` + interval + `'
-		  AND ($1::text = '' OR ir.entity_id = $1)
 		GROUP BY 1
 		ORDER BY 1`
 
@@ -292,8 +266,8 @@ type govChecklistItem struct {
 	Detail       string `json:"detail,omitempty"`
 }
 
-func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, sql, action, source, sourcePage string) []govFDItem {
-	rows, err := pool.Query(ctx, sql, entityFilter)
+func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter, sql, action, source, sourcePage string) []govFDItem {
+	rows, err := pool.Query(ctx, sql, entityFilter, bankFilter)
 	if err != nil {
 		api.LogError("[CfoDash] governance %s query error: %v", action, err)
 		return []govFDItem{}
@@ -322,8 +296,8 @@ func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, sql, a
 
 // govFetchBookingItems returns one row per booking with booking_status and the
 // latest open audit processing_status (create/edit/delete).
-func govFetchBookingItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, sql, source, sourcePage string) []govFDItem {
-	rows, err := pool.Query(ctx, sql, entityFilter)
+func govFetchBookingItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter, sql, source, sourcePage string) []govFDItem {
+	rows, err := pool.Query(ctx, sql, entityFilter, bankFilter)
 	if err != nil {
 		api.LogError("[CfoDash] governance booking query error: %v", err)
 		return []govFDItem{}
@@ -372,7 +346,7 @@ func govSumPrincipal(items []govFDItem) float64 {
 // govFetchAccrualRunItems returns accrual runs awaiting CFO approval.
 // Mirrors GetAccrualRuns (/run/all): run_status must be PENDING_APPROVAL and the
 // latest fd_accrual_run_audit.processing_status must not be APPROVED or REJECTED.
-func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilter string) []govFDItem {
+func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, snapshotDate string) []govFDItem {
 	sql := `
 		WITH latest_audit AS (
 		  SELECT DISTINCT ON (run_id)
@@ -399,7 +373,13 @@ func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilt
 		  AND UPPER(COALESCE(r.run_status,'')) = 'PENDING_APPROVAL'
 		  AND UPPER(COALESCE(NULLIF(la.processing_status,''), 'PENDING_APPROVAL'))
 		      NOT IN ('APPROVED','REJECTED')
-		  AND ($1::text='' OR r.entity_id=$1)
+		  AND ($1::text='' OR r.entity_id=$1)` +
+		func() string {
+			if snapshotDate != "" {
+				return " AND r.created_at <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+			}
+			return ""
+		}() + `
 		ORDER BY r.created_at DESC
 		LIMIT 200`
 	rows, err := pool.Query(ctx, sql, entityFilter)
@@ -432,7 +412,22 @@ func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilt
 	return out
 }
 
-func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter string, periodStart time.Time) map[string]interface{} {
+func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter, snapshotDate string, periodStart time.Time) map[string]interface{} {
+	// snapshotDate upper-bound: only show items that existed as of this date.
+	// An empty snapshotDate means "no upper bound" (current live view).
+	snapUntil := ""
+	if snapshotDate != "" {
+		snapUntil = " AND b.created_at <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+	}
+	snapFilter := snapUntil // booking uses b.created_at
+	snapConfirm := ""
+	snapActivation := ""
+	snapClosure := ""
+	if snapshotDate != "" {
+		snapConfirm = " AND c.created_at  <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+		snapActivation = " AND m.created_at  <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+		snapClosure = " AND sort_ts       <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+	}
 	// Approvals Pending widget shows every row that is *not* finalised.
 	// "Finalised" = APPROVED / REJECTED (and CLOSED on booking). Everything
 	// in between (PENDING_APPROVAL, APPROVAL_PENDING, SUBMITTED, EDIT/DELETE
@@ -465,6 +460,8 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		    OR COALESCE(la.processing_status,'') <> ''
 		  )
 		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2)` +
+		snapFilter + `
 		ORDER BY COALESCE(la.requested_at, b.created_at) DESC LIMIT 200`
 
 	pendingConfirmSQL := `
@@ -483,6 +480,8 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  AND ` + sqlConfirmationAwaitingApproval + `
 		  AND ` + sqlExcludeTerminalFdOnBooking + `
 		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2)` +
+		snapConfirm + `
 		ORDER BY c.created_at DESC LIMIT 200`
 
 	pendingActivationSQL := `
@@ -500,6 +499,8 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  AND UPPER(COALESCE(m.fd_status,'')) = 'PENDING_ACTIVATION'
 		  AND ` + sqlExcludeTerminalFdOnMaster + `
 		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2)` +
+		snapActivation + `
 		ORDER BY m.created_at DESC LIMIT 200`
 
 	pendingClosureSQL := `
@@ -535,6 +536,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  WHERE COALESCE(ci.is_deleted, false) = false
 		    AND UPPER(COALESCE(la.processing_status, '')) NOT IN ('APPROVED','REJECTED','DELETED')
 		    AND ($1::text = '' OR COALESCE(ci.entity_id, m.entity_id, b.entity_id) = $1)
+		    AND ($2::text = '' OR ci.bank_name=$2 OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2)
 		  UNION ALL
 		  -- New cimplr workflow: confirm stage rows (payout / rollover / premature finalisation)
 		  SELECT
@@ -564,6 +566,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  WHERE COALESCE(cc.is_deleted, false) = false
 		    AND UPPER(COALESCE(lca.processing_status, '')) NOT IN ('APPROVED','REJECTED','DELETED','POSTED')
 		    AND ($1::text = '' OR COALESCE(cc.entity_id, m.entity_id, b.entity_id) = $1)
+		    AND ($2::text = '' OR cc.bank_name=$2 OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2)
 		  UNION ALL
 		  -- Legacy fd_closure_request fallback (older environments only)
 		  SELECT
@@ -581,16 +584,18 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  WHERE COALESCE(cr.is_deleted, false) = false
 		    AND UPPER(COALESCE(cr.closure_status,'')) NOT IN ('APPROVED','REJECTED','POSTED','COMPLETED','CLOSED','CANCELLED')
 		    AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)
+		    AND ($2::text = '' OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2)
 		) q
+		WHERE 1=1` + snapClosure + `
 		ORDER BY sort_ts DESC
 		LIMIT 200`
 
-	bookingItems := govFetchBookingItems(ctx, pool, entityFilter, pendingBookingSQL, constants.FDBookingLabel, constants.FDBooking)
-	confirmItems := govFetchItems(ctx, pool, entityFilter, pendingConfirmSQL, "PENDING_CONFIRMATION_APPROVAL", constants.FDConfirmation, constants.FDConfirmationLabel)
-	activationItems := govFetchItems(ctx, pool, entityFilter, pendingActivationSQL, "PENDING_ACTIVATION_APPROVAL", constants.FDActivationLabel, constants.FDActivation)
-	maturityItems := govFetchItems(ctx, pool, entityFilter, pendingClosureSQL, "PENDING_CLOSURE_APPROVAL", constants.FDMaturity, constants.FdmaturityLabel)
+	bookingItems := govFetchBookingItems(ctx, pool, entityFilter, bankFilter, pendingBookingSQL, constants.FDBookingLabel, constants.FDBooking)
+	confirmItems := govFetchItems(ctx, pool, entityFilter, bankFilter, pendingConfirmSQL, "PENDING_CONFIRMATION_APPROVAL", constants.FDConfirmation, constants.FDConfirmationLabel)
+	activationItems := govFetchItems(ctx, pool, entityFilter, bankFilter, pendingActivationSQL, "PENDING_ACTIVATION_APPROVAL", constants.FDActivationLabel, constants.FDActivation)
+	maturityItems := govFetchItems(ctx, pool, entityFilter, bankFilter, pendingClosureSQL, "PENDING_CLOSURE_APPROVAL", constants.FDMaturity, constants.FdmaturityLabel)
 
-	accrualItems := govFetchAccrualRunItems(ctx, pool, entityFilter)
+	accrualItems := govFetchAccrualRunItems(ctx, pool, entityFilter, snapshotDate)
 	accrualRunCount := int64(len(accrualItems))
 
 	var latestRunStatus string
@@ -608,8 +613,9 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  AND m.maturity_date >= $2::date
 		  AND m.fd_status IN ('ACTIVE','MATURED')
 		  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+		  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3 OR b.bank_id=$3 OR b.bank_name=$3)
 		  AND NOT (`+sqlAnyClosureProcessed+`)`,
-		entityFilter, periodStart.Format(constants.DateFormat)).Scan(&unprocessedMaturities)
+		entityFilter, periodStart.Format(constants.DateFormat), bankFilter).Scan(&unprocessedMaturities)
 
 	bookingPriority := "Low"
 	for _, it := range bookingItems {
@@ -714,15 +720,27 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
+		if asOn, ok := parseFDDate(req.AsOnDate); ok {
+			now = asOn
+		}
+		// snapshotDate is passed to SQL queries to replace CURRENT_DATE so all
+		// date-sensitive queries are anchored to the requested as_on_date.
+		snapshotDate := now.Format(constants.DateFormat)
+
 		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
 		periodStart := periodBounds.Start
 		ctx := r.Context()
 
 		// Build optional entity filter SQL fragment (used across many queries)
 		entityFilter := req.EntityID
-		// Surface the fd_status filter early - `total_exposure` (and other
-		// early-registered widgets) need access to it via closure.
+		// Surface these filters early so all goroutine closures can access them.
 		fdStatusFilter := req.FDStatus
+		fdTypeFilter := req.FDType
+		bankFilter := req.Bank
+
+		// snapshotFilter limits every fd_master query to FDs that existed on
+		// as_on_date. Injected as a SQL fragment (value is already validated).
+		snapshotFilter := " AND m.start_date <= '" + snapshotDate + "'::date"
 
 		// ── concurrent sub-computations ──────────────────────────────────────
 		type subResult struct {
@@ -763,11 +781,14 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted = false
 				  AND ($1::text = '' OR COALESCE(m.entity_id,b.entity_id) = $1)
-				  AND m.fd_status = COALESCE(NULLIF($2::text, ''), 'ACTIVE')
+				  AND m.fd_status = 'ACTIVE'
+				  AND ($2::text = '' OR COALESCE(m.interest_type_code,'') = $2)
+				  AND ($3::text = '' OR m.bank_id = $3 OR m.bank_name = $3)` +
+				snapshotFilter + `
 				  AND NOT ` + sqlAnyClosureProcessed
 			var value float64
 			var count int64
-			err := pool.QueryRow(ctx, sqlStr, entityFilter, fdStatusFilter).Scan(&value, &count)
+			err := pool.QueryRow(ctx, sqlStr, entityFilter, fdTypeFilter, bankFilter).Scan(&value, &count)
 			if err != nil {
 				return nil, err
 			}
@@ -797,8 +818,10 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				 FROM investment.fd_master m
 				 LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				 WHERE m.is_deleted=false AND m.fd_status = 'ACTIVE'
-				   AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
-				entityFilter).Scan(&totalAmt)
+				   AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				   AND ($2::text='' OR COALESCE(m.interest_type_code,'')=$2)
+				   AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)`+snapshotFilter,
+				entityFilter, fdTypeFilter, bankFilter).Scan(&totalAmt)
 
 			// 30% of total portfolio = default per-counterparty concentration cap
 			policyCap := totalAmt * 0.30
@@ -819,6 +842,9 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				) lim ON true
 				WHERE m.is_deleted=false AND m.fd_status = 'ACTIVE'
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR COALESCE(m.interest_type_code,'')=$2)
+				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)` +
+				snapshotFilter + `
 				GROUP BY COALESCE(m.bank_name, m.bank_id, ''), lim.bank_cap
 				ORDER BY exposure DESC`
 
@@ -833,7 +859,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				Breach         bool    `json:"breach"`
 			}
 
-			rows, err := pool.Query(ctx, sqlStr, entityFilter)
+			rows, err := pool.Query(ctx, sqlStr, entityFilter, fdTypeFilter, bankFilter)
 			if err != nil {
 				return nil, err
 			}
@@ -898,10 +924,13 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status = 'ACTIVE'
 				  AND NOT ` + sqlAnyClosureProcessed + `
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR COALESCE(m.interest_type_code,'')=$2)
+				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)` +
+				snapshotFilter
 			var a7, a15, a30 float64
 			var c7, c15, c30 int64
-			err := pool.QueryRow(ctx, sqlStr, entityFilter).Scan(&a7, &c7, &a15, &c15, &a30, &c30)
+			err := pool.QueryRow(ctx, sqlStr, entityFilter, fdTypeFilter, bankFilter, snapshotDate).Scan(&a7, &c7, &a15, &c15, &a30, &c30)
 			if err != nil {
 				return nil, err
 			}
@@ -922,12 +951,15 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(SUM(CASE WHEN al.accrual_period_end >= $3::date THEN al.period_interest_accrued ELSE 0 END),0) AS period_accrued,
 				  -- QTD accrued (Apr 1 of current FY quarter start)
 				  COALESCE(SUM(CASE WHEN al.accrual_period_end >= $4::date THEN al.period_interest_accrued ELSE 0 END),0) AS qtd_accrued,
-				  -- Interest received (receipts)
+				  -- Interest received (receipts: POSTED + MATCHED + not deleted + bank filter)
 				  COALESCE((SELECT SUM(ir.gross_interest_received)
 				            FROM investment.fd_interest_receipt ir
 				            WHERE ir.is_deleted=false
-				              AND ir.receipt_date >= $2::date
-				              AND ($1::text='' OR ir.entity_id=$1)),0) AS received
+				              AND ir.receipt_status  = 'POSTED'
+				              AND ir.reconcile_status = 'MATCHED'
+				              AND ($1::text='' OR ir.entity_id=$1)
+				              AND ($5::text='' OR ir.bank_id=$5)
+				                ),0) AS received
 				FROM (
 				  SELECT al_inner.*
 				  FROM investment.fd_accrual_ledger al_inner
@@ -950,7 +982,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			qtdStart := periodStartDate("QTD", now)
 			var ytd, periodAcc, qtd, received float64
 			err := pool.QueryRow(ctx, sql, entityFilter, fyStart.Format(constants.DateFormat),
-				periodStart.Format(constants.DateFormat), qtdStart.Format(constants.DateFormat)).
+				periodStart.Format(constants.DateFormat), qtdStart.Format(constants.DateFormat), bankFilter).
 				Scan(&ytd, &periodAcc, &qtd, &received)
 			if err != nil {
 				return nil, err
@@ -1357,10 +1389,12 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE m.is_deleted=false AND m.fd_status='ACTIVE'
 				  AND NOT ` + sqlAnyClosureProcessed + `
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR COALESCE(m.interest_type_code,'')=$2)
+				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
 				  ` + horizonClause + `
 				GROUP BY ` + bucketExpr + `, ` + sortExpr + `
 				ORDER BY ` + sortExpr
-			rows, err := pool.Query(ctx, sql, entityFilter)
+			rows, err := pool.Query(ctx, sql, entityFilter, fdTypeFilter, bankFilter)
 			if err != nil {
 				return nil, err
 			}
@@ -1395,15 +1429,15 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 7. interest_trend (daily / monthly / yearly - cashflow schedule + ledger fallback)
 		run("interest_trend", func(ctx context.Context) (interface{}, error) {
-			daily, dErr := buildInterestTrendSeries(ctx, pool, entityFilter, "DAY")
+			daily, dErr := buildInterestTrendSeries(ctx, pool, entityFilter, "DAY", snapshotDate)
 			if dErr != nil {
 				daily = []interestTrendRow{}
 			}
-			monthly, mErr := buildInterestTrendSeries(ctx, pool, entityFilter, "MONTH")
+			monthly, mErr := buildInterestTrendSeries(ctx, pool, entityFilter, "MONTH", snapshotDate)
 			if mErr != nil {
 				monthly = []interestTrendRow{}
 			}
-			yearly, yErr := buildInterestTrendSeries(ctx, pool, entityFilter, "YEAR")
+			yearly, yErr := buildInterestTrendSeries(ctx, pool, entityFilter, "YEAR", snapshotDate)
 			if yErr != nil {
 				yearly = []interestTrendRow{}
 			}
@@ -1434,10 +1468,12 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND m.fd_status IN ('MATURED', 'ROLLED_OVER', 'PREMATURELY_CLOSED')
 				  AND ` + sqlAnyClosureProcessed + `
 				  AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)
-				  AND ($2::text = '' OR COALESCE(m.bank_name, m.bank_id, '') = $2)
+				  AND ($2::text = '' OR m.bank_id = $2 OR m.bank_name = $2)
+				  AND ($3::text = '' OR COALESCE(m.interest_type_code,'') = $3)` +
+				snapshotFilter + `
 				GROUP BY m.fd_status
 				ORDER BY m.fd_status`
-			rows, err := pool.Query(ctx, sql, entityFilter, req.Bank)
+			rows, err := pool.Query(ctx, sql, entityFilter, bankFilter, fdTypeFilter)
 			if err != nil {
 				return nil, err
 			}
@@ -1477,7 +1513,8 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				  WHERE m.is_deleted = false
 				    AND m.fd_status = 'ACTIVE'
-				    AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)
+				    AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)` +
+				snapshotFilter + `
 				)
 				SELECT
 				  CASE
@@ -1522,17 +1559,15 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 9. governance - approvals + period closing (5 categories) ─────────
 		run("governance", func(ctx context.Context) (interface{}, error) {
-			return buildGovernanceBundle(ctx, pool, entityFilter, periodStart), nil
+			return buildGovernanceBundle(ctx, pool, entityFilter, bankFilter, snapshotDate, periodStart), nil
 		})
 
 		// ── 11. fd_list ───────────────────────────────────────────────────────
 		// Build dynamic WHERE for optional secondary filters (bank, fd_status,
 		// fd_type, interest_frequency). Status defaults remain ACTIVE/MATURED
 		// when no explicit fdStatusFilter was supplied.
-		bankFilter := req.Bank
-		fdTypeFilter := req.FDType
 		interestFreqFilter := req.InterestFrequency
-		// fdStatusFilter is declared earlier (above the run() loop)
+		// bankFilter, fdStatusFilter, fdTypeFilter are declared earlier (above the run() loop)
 
 		// Map UI status alias → DB column value
 		dbStatusFilter := ""
@@ -1643,14 +1678,15 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				) cr ON true
 				WHERE m.is_deleted=false
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				  AND ($2::text='' OR COALESCE(m.bank_name, m.bank_id,'')=$2)
+				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)
 				  AND (
 				    ($3::text <> '' AND m.fd_status = $3) OR
 				    ($3::text = '' AND m.fd_status NOT IN ('DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED', 'CLOSED_IN_SYSTEM'))
 				  )
-				  AND ($4::boolean=false OR (m.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE+30))
+				  AND ($4::boolean=false OR (m.maturity_date BETWEEN $7::date AND $7::date+30))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code,'')=$5)
-				  AND ($6::text='' OR COALESCE(m.frequency_id,'')=$6)
+				  AND ($6::text='' OR COALESCE(m.frequency_id,'')=$6)` +
+				snapshotFilter + `
 				ORDER BY m.maturity_date ASC
 				LIMIT 500`
 			rows, err := pool.Query(ctx, sql,
@@ -1660,6 +1696,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				nearMaturity,
 				fdTypeFilter,
 				interestFreqFilter,
+				snapshotDate,
 			)
 			if err != nil {
 				// Log loudly - `run()` swallows the error and a silent failure

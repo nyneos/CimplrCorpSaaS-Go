@@ -61,8 +61,24 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 			COALESCE(ca.requested_at::text, e.raised_at::text,''),
 			COALESCE(ca.requested_by, e.raised_by,''),
 			COALESCE(ea.requested_at::text,''),
-			COALESCE(ea.requested_by,'')
+			COALESCE(ea.requested_by,''),
+			COALESCE(ai.instance_id,''),
+			COALESCE(ai.status,''),
+			COALESCE(aie.instance_eye_id,''),
+			COALESCE(aie.position::text,''),
+			COALESCE(aie.approvals_required,0),
+			COALESCE(aie.approvals_received,0),
+			aie.sla_deadline,
+			COALESCE(aie.is_escalated,false)
 		FROM investment.fd_receipt_exception e
+		LEFT JOIN uam.approval_instance ai
+			ON ai.record_id = e.exception_id
+			AND ai.module_code = 'FIXED_DEPOSIT'
+			AND ai.status = 'PENDING'
+			AND ai.is_deleted = false
+		LEFT JOIN uam.approval_instance_eye aie
+			ON aie.instance_id = ai.instance_id
+			AND aie.status = 'ACTIVE'
 		LEFT JOIN LATERAL (
 			SELECT a.*
 			FROM investment.fd_receipt_exception_audit a
@@ -127,6 +143,11 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 			varianceOutcome                                                      *string
 			expectedAmount, receivedAmount, varianceAmount                       float64
 			isActive, isDeleted                                                  bool
+			approvalInstanceID, approvalEngineStatus                             string
+			currentEyeID, currentEyePosition                                    string
+			approvalsRequired, approvalsReceived                                 int
+			slaDeadline                                                          interface{}
+			isEscalated                                                          bool
 		)
 		if err := rows.Scan(
 			&exceptionID, &reconcileRunID, &resultID, &fdID, &fdRefNo, &resultType,
@@ -141,6 +162,10 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 			&oldExceptionStatus, &oldProposedResolution, &oldReasonCode,
 			&oldResolutionRemarks, &oldAttachment, &oldCaseType, &oldVarianceOutcome,
 			&createdAt, &createdBy, &editedAt, &editedBy,
+			&approvalInstanceID, &approvalEngineStatus,
+			&currentEyeID, &currentEyePosition,
+			&approvalsRequired, &approvalsReceived,
+			&slaDeadline, &isEscalated,
 		); err != nil {
 			return nil, err
 		}
@@ -207,6 +232,14 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 			"old_attachment":          oldAttachment,
 			"old_case_type":           oldCaseType,
 			"old_variance_outcome":    oldVarianceOutcome,
+			"approval_instance_id":    approvalInstanceID,
+			"approval_engine_status":  approvalEngineStatus,
+			"current_eye_id":          currentEyeID,
+			"current_eye_position":    currentEyePosition,
+			"approvals_required":      approvalsRequired,
+			"approvals_received":      approvalsReceived,
+			"sla_deadline":            slaDeadline,
+			"is_escalated":            isEscalated,
 		}
 		out = append(out, row)
 	}

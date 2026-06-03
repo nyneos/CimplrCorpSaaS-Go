@@ -40,6 +40,8 @@ type fdTreasuryDashRequest struct {
 	StartDate string `json:"start_date"` // YYYY-MM-DD when Period==CUSTOM
 	EndDate   string `json:"end_date"`   // YYYY-MM-DD when Period==CUSTOM
 	AsOnDate  string `json:"as_on_date"`
+	Bank      string `json:"bank"`    // bank_id filter
+	FDType    string `json:"fd_type"` // SIMPLE | COMPOUND — filters by interest_type_code
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -63,8 +65,22 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
+		if asOn, ok := parseFDDate(req.AsOnDate); ok {
+			now = asOn
+		}
+		snapshotDate := now.Format(constants.DateFormat)
+
 		ctx := r.Context()
 		entityFilter := req.EntityID
+		bankFilter := req.Bank
+		fdTypeFilter := req.FDType
+
+		// snapshotFilter restricts every fd_master query to FDs that started
+		// on or before as_on_date — enforces the strict snapshot semantics.
+		snapshotFilter := " AND m.start_date <= '" + snapshotDate + "'::date"
+		snapBookingFilter := " AND b.created_at <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+		snapConfirmationFilter := " AND c.created_at <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+		snapNegotiationFilter := " AND n.created_at <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
 
 		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
 		startDateStr := periodBounds.StartStr
@@ -120,8 +136,10 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				      AND COALESCE(cr.is_deleted, false) = false
 				      AND cr.closure_status IN ('COMPLETED','POSTED','CLOSED')
 				  )
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
-				entityFilter).Scan(&activeAmt, &activeCnt)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
+				  AND ($3::text='' OR m.bank_id=$3)`+snapshotFilter,
+				entityFilter, fdTypeFilter, bankFilter).Scan(&activeAmt, &activeCnt)
 
 			_ = pool.QueryRow(ctx, `
 				SELECT COALESCE(SUM(m.principal_amount),0), COUNT(*)
@@ -129,8 +147,10 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted = false
 				  AND m.fd_status = 'PENDING_ACTIVATION'
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
-				entityFilter).Scan(&pendingAmt, &pendingCnt)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
+				  AND ($3::text='' OR m.bank_id=$3)`+snapshotFilter,
+				entityFilter, fdTypeFilter, bankFilter).Scan(&pendingAmt, &pendingCnt)
 
 			total := activeAmt + pendingAmt
 			return map[string]interface{}{
@@ -151,8 +171,10 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
-				entityFilter).Scan(&cnt)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
+				  AND ($3::text='' OR m.bank_id=$3)`+snapshotFilter,
+				entityFilter, fdTypeFilter, bankFilter).Scan(&cnt)
 			if err != nil {
 				api.LogError("[TreasuryDash] fd_count_active query error: %v", err)
 				return int64(0), nil
@@ -178,7 +200,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_bank_rate_negotiation n
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = n.booking_id
 				WHERE COALESCE(n.is_deleted,false)=false
-				  AND ($1::text='' OR n.entity_id=$1)
+				  AND ($1::text='' OR n.entity_id=$1)`+snapNegotiationFilter+`
 				ORDER BY n.created_at DESC
 				LIMIT 50`, entityFilter)
 			if err != nil {
@@ -230,7 +252,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				if nr.OfferedRate > bestRate {
 					bestRate = nr.OfferedRate
 				}
-				if nr.ExpiresAt != "" && nr.ExpiresAt[:10] == time.Now().Format(constants.DateFormat) {
+				if nr.ExpiresAt != "" && nr.ExpiresAt[:10] == snapshotDate {
 					offersToday = append(offersToday, nr)
 				}
 			}
@@ -267,7 +289,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  TO_CHAR(m.start_date,'YYYY-MM-DD') AS start_date,
 				  COALESCE(m.maturity_instructions,'') AS maturity_instructions,
 				  m.fd_status,
-				  (m.maturity_date - CURRENT_DATE) AS days_to_maturity,
+				  (m.maturity_date - ('`+snapshotDate+`'::date)) AS days_to_maturity,
 				  COALESCE(al.total_interest_accrued, 0) AS interest_accrued,
 				  COALESCE(ci.closure_initiate_id, '') AS closure_initiate_id,
 				  COALESCE(ci.closure_type, '') AS workflow_closure_type,
@@ -288,7 +310,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				) ci ON true
 				WHERE m.is_deleted = false
 				  AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND m.maturity_date <= CURRENT_DATE + INTERVAL '30 days'
+				  AND m.maturity_date <= ('`+snapshotDate+`'::date) + INTERVAL '30 days'
 				  AND NOT EXISTS (
 				    SELECT 1 FROM investment.fd_closure_request xcr
 				    WHERE xcr.fd_id = m.fd_id AND COALESCE(xcr.is_deleted,false) = false
@@ -302,7 +324,10 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    WHERE ncc.fd_id = m.fd_id AND COALESCE(ncc.is_deleted,false) = false
 				  )
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
-				ORDER BY m.maturity_date ASC`, entityFilter)
+				  AND ($2::text='' OR m.interest_type_code=$2)
+				  AND ($3::text='' OR m.bank_id=$3)`+
+				snapshotFilter+`
+				ORDER BY m.maturity_date ASC`, entityFilter, fdTypeFilter, bankFilter)
 			if err != nil {
 				api.LogError("[TreasuryDash] near_maturity query error: %v", err)
 				return map[string]interface{}{
@@ -377,8 +402,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
+				  AND ($3::text='' OR m.bank_id=$3)`+
+				snapshotFilter+`
 				GROUP BY COALESCE(m.bank_name, m.bank_id)
-				ORDER BY exposure DESC`, entityFilter)
+				ORDER BY exposure DESC`, entityFilter, fdTypeFilter, bankFilter)
 			if err != nil {
 				return []interface{}{}, nil
 			}
@@ -413,8 +441,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
+				  AND ($3::text='' OR m.bank_id=$3)`+
+				snapshotFilter+`
 				GROUP BY COALESCE(m.bank_name, m.bank_id)
-				ORDER BY weighted_avg_yield DESC`, entityFilter)
+				ORDER BY weighted_avg_yield DESC`, entityFilter, fdTypeFilter, bankFilter)
 			if err != nil {
 				return []interface{}{}, nil
 			}
@@ -443,13 +474,13 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			rows, err := pool.Query(ctx, `
 				SELECT
 				  CASE
-				    WHEN m.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE+6   THEN 'Wk 1'
-				    WHEN m.maturity_date BETWEEN CURRENT_DATE+7  AND CURRENT_DATE+13  THEN 'Wk 2'
-				    WHEN m.maturity_date BETWEEN CURRENT_DATE+14 AND CURRENT_DATE+20  THEN 'Wk 3'
-				    WHEN m.maturity_date BETWEEN CURRENT_DATE+21 AND CURRENT_DATE+27  THEN 'Wk 4'
-				    WHEN m.maturity_date BETWEEN CURRENT_DATE+28 AND CURRENT_DATE+59  THEN 'M 2'
-				    WHEN m.maturity_date BETWEEN CURRENT_DATE+60 AND CURRENT_DATE+89  THEN 'M 3'
-				    WHEN m.maturity_date BETWEEN CURRENT_DATE+90 AND CURRENT_DATE+179 THEN 'Q3'
+				    WHEN m.maturity_date BETWEEN ('`+snapshotDate+`'::date) AND ('`+snapshotDate+`'::date)+6   THEN 'Wk 1'
+				    WHEN m.maturity_date BETWEEN ('`+snapshotDate+`'::date)+7  AND ('`+snapshotDate+`'::date)+13  THEN 'Wk 2'
+				    WHEN m.maturity_date BETWEEN ('`+snapshotDate+`'::date)+14 AND ('`+snapshotDate+`'::date)+20  THEN 'Wk 3'
+				    WHEN m.maturity_date BETWEEN ('`+snapshotDate+`'::date)+21 AND ('`+snapshotDate+`'::date)+27  THEN 'Wk 4'
+				    WHEN m.maturity_date BETWEEN ('`+snapshotDate+`'::date)+28 AND ('`+snapshotDate+`'::date)+59  THEN 'M 2'
+				    WHEN m.maturity_date BETWEEN ('`+snapshotDate+`'::date)+60 AND ('`+snapshotDate+`'::date)+89  THEN 'M 3'
+				    WHEN m.maturity_date BETWEEN ('`+snapshotDate+`'::date)+90 AND ('`+snapshotDate+`'::date)+179 THEN 'Q3'
 				    ELSE 'Q4+'
 				  END AS period,
 				  COALESCE(SUM(m.principal_amount),0) AS amount,
@@ -458,7 +489,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted = false
 				  AND m.fd_status = 'ACTIVE'
-				  AND m.maturity_date >= CURRENT_DATE
+				  AND m.maturity_date >= ('`+snapshotDate+`'::date)
 				  AND NOT EXISTS (
 				    SELECT 1 FROM cimplr.fd_closure_confirm cc
 				    WHERE cc.fd_id = m.fd_id
@@ -473,8 +504,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				      AND cr.closure_status IN ('COMPLETED','POSTED','CLOSED')
 				  )
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
+				  AND ($3::text='' OR m.bank_id=$3)`+
+				snapshotFilter+`
 				GROUP BY 1
-				ORDER BY MIN(m.maturity_date)`, entityFilter)
+				ORDER BY MIN(m.maturity_date)`, entityFilter, fdTypeFilter, bankFilter)
 			if err != nil {
 				return []interface{}{}, nil
 			}
@@ -519,8 +553,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
+				  AND ($3::text='' OR m.bank_id=$3)`+
+				snapshotFilter+`
 				GROUP BY COALESCE(m.bank_name, m.bank_id), 2
-				ORDER BY COALESCE(m.bank_name, m.bank_id), MIN(m.interest_rate)`, entityFilter)
+				ORDER BY COALESCE(m.bank_name, m.bank_id), MIN(m.interest_rate)`, entityFilter, fdTypeFilter, bankFilter)
 			if err != nil {
 				return []interface{}{}, nil
 			}
@@ -564,7 +601,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD"T"HH24:MI:SS'),'')                     AS sent_at,
 				  b.booking_status                                                                 AS booking_status,
 				  COALESCE(b.created_by,'')                                                        AS created_by,
-				  COALESCE(EXTRACT(EPOCH FROM (NOW()-b.created_at))/3600,0)                        AS elapsed_hours,
+				  COALESCE(EXTRACT(EPOCH FROM (('`+snapshotDate+`'::timestamp)-b.created_at))/3600,0)                        AS elapsed_hours,
 				  COALESCE(m.fd_id,'')                                                             AS fd_id,
 				  COALESCE(m.fd_status,'')                                                         AS fd_status,
 				  COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS'),'')                     AS activation_date,
@@ -603,7 +640,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND b.booking_status IN ('APPROVAL_PENDING','SENT_TO_BANK','APPROVED','DRAFT','CONFIRMED','ACTIVE')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR b.entity_id=$1)`+snapBookingFilter+`
 				ORDER BY b.created_at ASC
 				LIMIT 100`, entityFilter)
 			if err != nil {
@@ -749,7 +786,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(c.bank_fd_ref_no,''),
 				  COALESCE(c.created_by,''),
 				  COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
-				  COALESCE(EXTRACT(EPOCH FROM (NOW()-c.created_at))/3600, 0),
+				  COALESCE(EXTRACT(EPOCH FROM (('`+snapshotDate+`'::timestamp)-c.created_at))/3600, 0),
 				  COALESCE(b.booking_status,'')
 				FROM investment.fd_confirmation c
 				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id AND b.is_deleted=false
@@ -757,7 +794,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE COALESCE(c.is_deleted,false)=false
 				  AND `+sqlConfirmationAwaitingApproval+`
 				  AND `+sqlExcludeTerminalFdOnBooking+`
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR b.entity_id=$1)`+snapConfirmationFilter+`
 				ORDER BY c.created_at ASC
 				LIMIT 100`, entityFilter)
 			if err != nil {
@@ -895,12 +932,12 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    COALESCE(TO_CHAR(ci.maturity_date, 'YYYY-MM-DD'), TO_CHAR(m.maturity_date, 'YYYY-MM-DD'), '') AS maturity_date,
 				    COALESCE(cc.closure_status, ci.closure_status, '') AS closure_status,
 				    COALESCE(ci.closure_type, '') AS closure_type,
-				    COALESCE((m.maturity_date - CURRENT_DATE)::int, 0) AS days_to_maturity,
+				    COALESCE((m.maturity_date - ('`+snapshotDate+`'::date))::int, 0) AS days_to_maturity,
 				    COALESCE(m.maturity_instructions, '') AS maturity_instructions,
 				    -- cimplr.fd_closure_initiate has no created_at column; pull
 				    -- the timestamp from the latest audit row instead so newest
 				    -- pending decisions surface at the top.
-				    COALESCE(ia.requested_at, NOW()) AS sort_ts
+				    COALESCE(ia.requested_at, ('`+snapshotDate+`'::timestamp)) AS sort_ts
 				  FROM cimplr.fd_closure_initiate ci
 				  JOIN investment.fd_master m ON m.fd_id = ci.fd_id AND m.is_deleted = false
 				  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
@@ -924,6 +961,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    AND COALESCE(cc.closure_status, ci.closure_status, '') NOT IN ('POSTED', 'REJECTED', 'DELETED')
 				    AND NOT (`+sqlCimplrClosureProcessed+`)
 				    AND ($1::text = '' OR COALESCE(ci.entity_id, m.entity_id, b.entity_id) = $1)
+				    AND (ia.requested_at IS NULL OR ia.requested_at <= ('`+snapshotDate+`'::date + INTERVAL '1 day'))`+snapshotFilter+`
 				  UNION ALL
 				  -- ACTIVE FDs maturing soon with no closure initiate yet (needs decision)
 				  SELECT
@@ -936,14 +974,14 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    COALESCE(TO_CHAR(m.maturity_date, 'YYYY-MM-DD'), '') AS maturity_date,
 				    'PENDING_DECISION' AS closure_status,
 				    '' AS closure_type,
-				    COALESCE((m.maturity_date - CURRENT_DATE)::int, 0) AS days_to_maturity,
+				    COALESCE((m.maturity_date - ('`+snapshotDate+`'::date))::int, 0) AS days_to_maturity,
 				    COALESCE(m.maturity_instructions, '') AS maturity_instructions,
 				    m.maturity_date::timestamptz AS sort_ts
 				  FROM investment.fd_master m
 				  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				  WHERE m.is_deleted = false
 				    AND m.fd_status IN ('ACTIVE','MATURED')
-				    AND m.maturity_date <= CURRENT_DATE + INTERVAL '30 days'
+				    AND m.maturity_date <= ('`+snapshotDate+`'::date) + INTERVAL '30 days'
 				    AND NOT EXISTS (
 				      SELECT 1 FROM cimplr.fd_closure_initiate ci2
 				      WHERE ci2.fd_id = m.fd_id AND COALESCE(ci2.is_deleted,false) = false
@@ -956,7 +994,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				      SELECT 1 FROM investment.fd_closure_request cr2
 				      WHERE cr2.fd_id = m.fd_id AND COALESCE(cr2.is_deleted,false) = false
 				    )
-				    AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)
+				    AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)`+snapshotFilter+`
 				  UNION ALL
 				  SELECT
 				    COALESCE(cr.closure_request_id::text, ''),
@@ -968,15 +1006,16 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    COALESCE(TO_CHAR(m.maturity_date, 'YYYY-MM-DD'), ''),
 				    COALESCE(cr.closure_status, ''),
 				    COALESCE(cr.closure_type, ''),
-				    COALESCE((m.maturity_date - CURRENT_DATE)::int, 0),
+				    COALESCE((m.maturity_date - ('`+snapshotDate+`'::date))::int, 0),
 				    COALESCE(m.maturity_instructions, ''),
-				    COALESCE(cr.created_at, NOW())
+				    COALESCE(cr.created_at, ('`+snapshotDate+`'::timestamp))
 				  FROM investment.fd_closure_request cr
 				  LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id AND m.is_deleted = false
 				  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				  WHERE COALESCE(cr.is_deleted, false) = false
 				    AND cr.closure_status = 'PENDING_APPROVAL'
-				    AND ($1::text = '' OR COALESCE(m.entity_id, cr.entity_id, b.entity_id) = $1)
+				    AND cr.created_at <= ('`+snapshotDate+`'::date + INTERVAL '1 day')
+				    AND ($1::text = '' OR COALESCE(m.entity_id, cr.entity_id, b.entity_id) = $1)`+snapshotFilter+`
 				) pending
 				ORDER BY sort_ts ASC, maturity_date ASC NULLS LAST
 				LIMIT 100`, entityFilter)
@@ -1039,7 +1078,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(b.booking_status,'') AS booking_status,
 				  COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD'),'') AS booking_date,
 				  COALESCE(b.created_by, m.created_by,'') AS created_by,
-				  COALESCE((m.maturity_date - CURRENT_DATE)::int, 0) AS days_to_maturity,
+				  COALESCE((m.maturity_date - ('`+snapshotDate+`'::date))::int, 0) AS days_to_maturity,
 				  COALESCE(al.total_interest_accrued, 0) AS interest_accrued,
 				  EXISTS (
 				    SELECT 1 FROM investment.fd_accrual_ledger al2
@@ -1073,8 +1112,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    )
 				  )
 				  AND ($1::text='' OR COALESCE(m.entity_id, b.entity_id)=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
+				  AND ($3::text='' OR m.bank_id=$3)`+
+				snapshotFilter+`
 				ORDER BY m.maturity_date ASC NULLS LAST
-				LIMIT 500`, entityFilter)
+				LIMIT 500`, entityFilter, fdTypeFilter, bankFilter)
 			if err != nil {
 				api.LogError("[TreasuryDash] fd_list query error: %v", err)
 				return []interface{}{}, nil
@@ -1143,8 +1185,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($2::text='' OR m.interest_type_code=$2)
+				  AND ($3::text='' OR m.bank_id=$3)`+
+				snapshotFilter+`
 				GROUP BY 1
-				ORDER BY MIN(m.interest_rate)`, entityFilter)
+				ORDER BY MIN(m.interest_rate)`, entityFilter, fdTypeFilter, bankFilter)
 			if err != nil {
 				return []interface{}{}, nil
 			}
@@ -1169,15 +1214,15 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 10b. interest_trend (same logic as CFO dashboard — cashflow + ledger fallback)
 		run("interest_trend", func(ctx context.Context) (interface{}, error) {
-			daily, dErr := buildInterestTrendSeries(ctx, pool, entityFilter, "DAY")
+			daily, dErr := buildInterestTrendSeries(ctx, pool, entityFilter, "DAY", snapshotDate)
 			if dErr != nil {
 				daily = []interestTrendRow{}
 			}
-			monthly, mErr := buildInterestTrendSeries(ctx, pool, entityFilter, "MONTH")
+			monthly, mErr := buildInterestTrendSeries(ctx, pool, entityFilter, "MONTH", snapshotDate)
 			if mErr != nil {
 				monthly = []interestTrendRow{}
 			}
-			yearly, yErr := buildInterestTrendSeries(ctx, pool, entityFilter, "YEAR")
+			yearly, yErr := buildInterestTrendSeries(ctx, pool, entityFilter, "YEAR", snapshotDate)
 			if yErr != nil {
 				yearly = []interestTrendRow{}
 			}
@@ -1272,6 +1317,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE i.is_deleted = false
 				  AND i.module_code = 'FIXED_DEPOSIT'
 				  AND i.submitted_at >= $1::date
+				  AND i.submitted_at <= ('`+snapshotDate+`'::date + INTERVAL '1 day')
 				  AND ($2::text='' OR i.entity_code=$2 OR b.entity_id=$2)
 				GROUP BY i.instance_id, i.transaction_type, i.record_id, i.status,
 				         i.submitted_by_email, i.submitted_at, i.resolved_by_email, i.resolved_at
@@ -1396,7 +1442,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			var sentAmt float64
 			_ = pool.QueryRow(ctx, `
 				SELECT COUNT(*),
-				       COUNT(*) FILTER (WHERE EXTRACT(DAY FROM NOW()-created_at) >= 2),
+				       COUNT(*) FILTER (WHERE EXTRACT(DAY FROM (('`+snapshotDate+`'::timestamp)-created_at)) >= 2),
 				       COALESCE(SUM(principal_amount),0)
 				FROM investment.fd_booking_request
 				WHERE is_deleted=false
@@ -1466,6 +1512,49 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
+		// ── interest_income — from fd_interest_receipt (MATCHED + POSTED + not deleted) ──
+		run("interest_income", func(ctx context.Context) (interface{}, error) {
+			var mtd, qtd, ytd, received float64
+			err := pool.QueryRow(ctx, `
+				SELECT
+				  COALESCE(SUM(CASE
+				    WHEN ir.receipt_date >= DATE_TRUNC('month', ('`+snapshotDate+`'::date))
+				    THEN ir.gross_interest_received ELSE 0 END), 0) AS mtd,
+				  COALESCE(SUM(CASE
+				    WHEN ir.receipt_date >= DATE_TRUNC('quarter', ('`+snapshotDate+`'::date))
+				    THEN ir.gross_interest_received ELSE 0 END), 0) AS qtd,
+				  COALESCE(SUM(CASE
+				    WHEN ir.receipt_date >= (
+				      CASE WHEN EXTRACT(MONTH FROM ('`+snapshotDate+`'::date)) >= 4
+				           THEN DATE_TRUNC('year', ('`+snapshotDate+`'::date)) + INTERVAL '3 months'
+				           ELSE DATE_TRUNC('year', ('`+snapshotDate+`'::date)) - INTERVAL '9 months'
+				      END)
+				    THEN ir.gross_interest_received ELSE 0 END), 0) AS ytd,
+				  COALESCE(SUM(CASE
+				    WHEN ir.receipt_status = 'POSTED'
+				    THEN ir.gross_interest_received ELSE 0 END), 0) AS received
+				FROM investment.fd_interest_receipt ir
+				WHERE ir.is_deleted = false
+				  AND ir.reconcile_status = 'MATCHED'
+				  AND ir.receipt_date <= ('`+snapshotDate+`'::date)
+				  AND ($1::text='' OR ir.entity_id=$1)
+				  AND ($2::text='' OR ir.bank_id=$2)`,
+				entityFilter, bankFilter).Scan(&mtd, &qtd, &ytd, &received)
+			if err != nil {
+				api.LogError("[TreasuryDash] interest_income query error: %v", err)
+				return map[string]interface{}{
+					"mtd_accrued": 0.0, "qtd_accrued": 0.0,
+					"ytd_accrued": 0.0, "received": 0.0,
+				}, nil
+			}
+			return map[string]interface{}{
+				"mtd_accrued": fdRound(mtd, 2),
+				"qtd_accrued": fdRound(qtd, 2),
+				"ytd_accrued": fdRound(ytd, 2),
+				"received":    fdRound(received, 2),
+			}, nil
+		})
+
 		// wait for all
 		wg.Wait()
 
@@ -1490,6 +1579,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"fd_count":           get("fd_count_active"),
 				"near_maturity":      get("near_maturity"),
 				"negotiations":       get("negotiations"),
+				"interest_income":    get("interest_income"),
 			},
 			"charts": map[string]interface{}{
 				"maturity_ladder":       get("maturity_ladder_treasury"),

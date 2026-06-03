@@ -346,11 +346,27 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(h.deleted_by,'')              AS deleted_by,
 				COALESCE(h.deleted_at,'')              AS deleted_at,
 				COALESCE(tds.reconcile_status,'PENDING')  AS reconcile_status,
-				COALESCE(tds.reconcile_run_id,'')         AS reconcile_run_id
+				COALESCE(tds.reconcile_run_id,'')         AS reconcile_run_id,
+				COALESCE(ai.instance_id,'')               AS approval_instance_id,
+				COALESCE(ai.status,'')                    AS approval_engine_status,
+				COALESCE(aie.instance_eye_id,'')          AS current_eye_id,
+				COALESCE(aie.position::text,'')           AS current_eye_position,
+				COALESCE(aie.approvals_required,0)        AS approvals_required,
+				COALESCE(aie.approvals_received,0)        AS approvals_received,
+				aie.sla_deadline                          AS sla_deadline,
+				COALESCE(aie.is_escalated,false)          AS is_escalated
 			FROM investment.fd_tds_receipt tds
 			LEFT JOIN investment.fd_master fd ON fd.fd_id = tds.fd_id
 			LEFT JOIN latest_audit la ON la.tds_id = tds.tds_id
 			LEFT JOIN history h ON h.tds_id = tds.tds_id
+			LEFT JOIN uam.approval_instance ai
+				ON ai.record_id = tds.tds_id
+				AND ai.module_code = 'FIXED_DEPOSIT'
+				AND ai.status = 'PENDING'
+				AND ai.is_deleted = false
+			LEFT JOIN uam.approval_instance_eye aie
+				ON aie.instance_id = ai.instance_id
+				AND aie.status = 'ACTIVE'
 			WHERE tds.is_deleted = false
 		  AND tds.ingestion_source = 'TDS_WORKBENCH'`
 
@@ -631,6 +647,34 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Try engine path; direct stamp above serves as no-matrix fallback.
+		go func(tID, uID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDTDS] ApproveTDSRegister engine panic for %s: %v", tID, rec)
+				}
+			}()
+			_, _ = approvalengine.ActOnPendingOrDiagnose(context.Background(), pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FIXED_DEPOSIT", RecordID: tID,
+				UserID: uID, UserEmail: uEmail, RoleID: "",
+				Action: approvalengine.ActionApproved,
+			})
+		}(req.TDSID, req.UserID, userEmail)
+
+		go func(tID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDTDS] ApproveTDSRegister notification panic for %s: %v", tID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pool,
+				"/investment/fd/tds-register/approve", tID, map[string]interface{}{
+					"record_id":   tID,
+					"event":       "FD_TDS_REGISTER_APPROVED",
+					"actor_email": uEmail,
+				})
+		}(req.TDSID, userEmail)
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
 			"success": true,
@@ -735,7 +779,7 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				tds_rate_expected  = $8,
 				tds_section        = $9,
 				has_pan            = $10,
-				exception_raised   = ($7 != 0)
+				exception_raised   = ($7::numeric != 0)
 			WHERE tds_id = $11`,
 			req.PeriodStart, req.PeriodEnd, deductionDate,
 			req.GrossInterest, req.TDSExpected, req.TDSDeductedActual, tdsVariance,
@@ -746,16 +790,61 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		var entityID string
+		_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, req.TDSID).Scan(&entityID)
+
 		tx.Exec(ctx, `
 			INSERT INTO investment.fd_tds_receipt_audit
 				(tds_id, action_type, processing_status, requested_by, requested_at, checker_comment)
-			VALUES ($1, 'EDIT', 'PENDING_APPROVAL', $2, now(), $3)`,
+			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, now(), $3)`,
 			req.TDSID, userEmail, nullIfEmpty(req.Reason)) //nolint:errcheck
 
 		if err = tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
 			return
 		}
+
+		go func(tID, uEmail, eID string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDTDS] UpdateTDSRegister engine panic for %s: %v", tID, rec)
+				}
+			}()
+			bgCtx := context.Background()
+			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", tID, uEmail)
+			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "FIXED_DEPOSIT",
+				EntityCode:       eID,
+				TransactionType:  "FD_TDS_REGISTER_EDIT",
+				RecordID:         tID,
+				RecordTable:      "investment.fd_tds_receipt",
+				AuditTable:       "investment.fd_tds_receipt_audit",
+				AuditIDColumn:    "tds_id",
+				ActionType:       "EDIT",
+				SubmittedBy:      uEmail,
+				SubmittedByEmail: uEmail,
+			})
+			if instErr != nil {
+				api.LogError("[FDTDS] UpdateTDSRegister CreateInstance failed tds=%s: %v", tID, instErr)
+				return
+			}
+			api.LogInfo("[FDTDS] UpdateTDSRegister engine instance %s for tds %s", instID, tID)
+		}(req.TDSID, userEmail, entityID)
+
+		go func(tID, uEmail, eID string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDTDS] UpdateTDSRegister notification panic for %s: %v", tID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pool,
+				"/investment/fd/tds-register/update", tID, map[string]interface{}{
+					"record_id":   tID,
+					"entity_id":   eID,
+					"event":       "FD_TDS_REGISTER_EDIT_SUBMITTED",
+					"actor_email": uEmail,
+				})
+		}(req.TDSID, userEmail, entityID)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
@@ -837,6 +926,33 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"failed":   len(req.TDSIDs) - approved,
 			"results":  results,
 		})
+		for _, tdsID := range req.TDSIDs {
+			go func(tID, uID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDTDS] BulkApproveTDSRegister engine panic for %s: %v", tID, rec)
+					}
+				}()
+				_, _ = approvalengine.ActOnPendingOrDiagnose(context.Background(), pool, approvalengine.ActOnPendingRequest{
+					ModuleCode: "FIXED_DEPOSIT", RecordID: tID,
+					UserID: uID, UserEmail: uEmail, RoleID: "",
+					Action: approvalengine.ActionApproved, Comment: req.Comment,
+				})
+			}(tdsID, req.UserID, userEmail)
+			go func(tID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDTDS] BulkApproveTDSRegister notification panic for %s: %v", tID, rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.Background(), pool,
+					"/investment/fd/tds-register/bulk-approve", tID, map[string]interface{}{
+						"record_id":   tID,
+						"event":       "FD_TDS_REGISTER_APPROVED",
+						"actor_email": uEmail,
+					})
+			}(tdsID, userEmail)
+		}
 	}
 }
 
@@ -896,6 +1012,33 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"success":  rejected > 0,
 			"rejected": rejected,
 		})
+		for _, tdsID := range req.TDSIDs {
+			go func(tID, uID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDTDS] BulkRejectTDSRegister engine panic for %s: %v", tID, rec)
+					}
+				}()
+				_, _ = approvalengine.ActOnPendingOrDiagnose(context.Background(), pool, approvalengine.ActOnPendingRequest{
+					ModuleCode: "FIXED_DEPOSIT", RecordID: tID,
+					UserID: uID, UserEmail: uEmail, RoleID: "",
+					Action: approvalengine.ActionRejected, Comment: req.Comment,
+				})
+			}(tdsID, req.UserID, userEmail)
+			go func(tID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDTDS] BulkRejectTDSRegister notification panic for %s: %v", tID, rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.Background(), pool,
+					"/investment/fd/tds-register/bulk-reject", tID, map[string]interface{}{
+						"record_id":   tID,
+						"event":       "FD_TDS_REGISTER_REJECTED",
+						"actor_email": uEmail,
+					})
+			}(tdsID, userEmail)
+		}
 	}
 }
 
@@ -954,6 +1097,33 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
 			return
 		}
+
+		go func(tID, uID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDTDS] RejectTDSRegister engine panic for %s: %v", tID, rec)
+				}
+			}()
+			_, _ = approvalengine.ActOnPendingOrDiagnose(context.Background(), pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FIXED_DEPOSIT", RecordID: tID,
+				UserID: uID, UserEmail: uEmail, RoleID: "",
+				Action: approvalengine.ActionRejected,
+			})
+		}(req.TDSID, req.UserID, userEmail)
+
+		go func(tID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDTDS] RejectTDSRegister notification panic for %s: %v", tID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pool,
+				"/investment/fd/tds-register/reject", tID, map[string]interface{}{
+					"record_id":   tID,
+					"event":       "FD_TDS_REGISTER_REJECTED",
+					"actor_email": uEmail,
+				})
+		}(req.TDSID, userEmail)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
@@ -1133,5 +1303,20 @@ func BulkDeleteTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"deleted": deleted,
 			"failed":  failed,
 		})
+		for _, tdsID := range req.TDSIDs {
+			go func(tID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDTDS] BulkDeleteTDSRegister notification panic for %s: %v", tID, rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.Background(), pool,
+					"/investment/fd/tds-register/bulk-delete", tID, map[string]interface{}{
+						"record_id":   tID,
+						"event":       "FD_TDS_REGISTER_DELETE_SUBMITTED",
+						"actor_email": uEmail,
+					})
+			}(tdsID, userEmail)
+		}
 	}
 }

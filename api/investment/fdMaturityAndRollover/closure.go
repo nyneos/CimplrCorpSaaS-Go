@@ -2026,7 +2026,7 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 						AuditTable:       constants.QuerryAuditClosureRequest,
 						AuditIDColumn:    "closure_request_id",
 						ActionType:       "DELETE",
-						Amount:           0,
+						Amount:           principalAmt,
 						SubmittedBy:      req.UserID,
 						SubmittedByEmail: userEmail,
 					})
@@ -2251,12 +2251,13 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		var curStatus, fdID, entityID, approvalInstanceID string
+		var principalAmt float64
 		err := pool.QueryRow(ctx, `
-			SELECT closure_status, fd_id, COALESCE(entity_id,''), COALESCE(approval_instance_id, '')
+			SELECT closure_status, fd_id, COALESCE(entity_id,''), COALESCE(approval_instance_id, ''), COALESCE(principal_amount, 0)
 			FROM investment.fd_closure_request
 			WHERE closure_request_id=$1 AND is_deleted=false`,
 			req.ClosureRequestID,
-		).Scan(&curStatus, &fdID, &entityID, &approvalInstanceID)
+		).Scan(&curStatus, &fdID, &entityID, &approvalInstanceID, &principalAmt)
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				api.RespondWithError(w, http.StatusNotFound, constants.ErrClosureRequestNotFound)
@@ -2296,7 +2297,7 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			AuditTable:       constants.QuerryAuditClosureRequest,
 			AuditIDColumn:    "closure_request_id",
 			ActionType:       "DELETE",
-			Amount:           0,
+			Amount:           principalAmt,
 			SubmittedBy:      req.UserID,
 			SubmittedByEmail: userEmail,
 		})

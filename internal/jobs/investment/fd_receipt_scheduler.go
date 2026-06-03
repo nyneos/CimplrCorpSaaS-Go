@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"fmt"
 	"time"
@@ -75,6 +76,19 @@ func runAutoReconcile(db *pgxpool.Pool) {
 			continue
 		}
 		logger.LogInfo("[fd_receipt_scheduler] auto-reconcile triggered: run=%s entity=%s", runID, e.EntityID)
+		notifcatalog.TriggerNotification(ctx, db,
+			"/investment/fd/reconcile/auto-run",
+			runID,
+			map[string]interface{}{
+				"entity_id":    e.EntityID,
+				"entity_name":  e.EntityName,
+				"record_id":    runID,
+				"event":        "FD_RECEIPT_RECONCILIATION_AUTO_RUN",
+				"actor_email":  "system@cimplr.auto",
+				"period_start": e.PeriodStart.Format("2006-01-02"),
+				"period_end":   e.PeriodEnd.Format("2006-01-02"),
+				"trigger_mode": "AUTO",
+			})
 	}
 	logger.LogInfo("[fd_receipt_scheduler] cycle complete — %d entity(-ies) processed", len(entities))
 }
