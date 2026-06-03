@@ -759,7 +759,8 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 					bgCtx := context.Background()
 					// Fetch entity_id for this receipt
 					var eID string
-					pool.QueryRow(bgCtx, `SELECT COALESCE(entity_id,'') FROM investment.fd_interest_receipt WHERE receipt_id=$1`, rid).Scan(&eID) //nolint:errcheck
+					var amount float64
+					pool.QueryRow(bgCtx, `SELECT COALESCE(entity_id,''), COALESCE(gross_interest_received, 0) FROM investment.fd_interest_receipt WHERE receipt_id=$1`, rid).Scan(&eID, &amount) //nolint:errcheck
 					instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 						ModuleCode:       "FIXED_DEPOSIT",
 						EntityCode:       eID,
@@ -769,7 +770,7 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 						AuditTable:       constants.QuerryAuditInterestReceipt,
 						AuditIDColumn:    "receipt_id",
 						ActionType:       "DELETE",
-						Amount:           0,
+						Amount:           amount,
 						SubmittedBy:      req.UserID,
 						SubmittedByEmail: userEmail,
 					})
@@ -1920,7 +1921,7 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			viewerUserID := r.URL.Query().Get("user_id")
+			viewerUserID := api.GetUserIDFromCtx(ctx)
 			if instanceID != "" {
 				richDetail, richErr := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, viewerUserID)
 				if richErr == nil {
@@ -3027,12 +3028,32 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			results = []ResultRow{}
 		}
 
+		var approvalWorkflow *approvalengine.RichInstanceDetail
+		var instanceID string
+		_ = pool.QueryRow(ctx, `
+			SELECT instance_id
+			FROM uam.approval_instance
+			WHERE record_id = $1
+			  AND module_code = 'FIXED_DEPOSIT'
+			  AND status = 'PENDING'
+			  AND is_deleted = false
+			LIMIT 1`, req.ReconcileRunID).Scan(&instanceID)
+		if instanceID != "" {
+			viewerUserID := api.GetUserIDFromCtx(ctx)
+			if richDetail, err := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, viewerUserID); err == nil {
+				approvalWorkflow = richDetail
+			} else {
+				api.LogError("[FDReceipt] GetRichInstanceDetail failed reconcile=%s: %v", req.ReconcileRunID, err)
+			}
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":      true,
-			"run":          run,
-			"result_count": len(results),
-			"results":      results,
+			"success":           true,
+			"run":               run,
+			"result_count":      len(results),
+			"results":           results,
+			"approval_workflow": approvalWorkflow,
 		})
 	}
 }
@@ -3860,11 +3881,31 @@ func GetTDSDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		defer auditRows.Close()
 		auditData, _ := rowsToMapSlice(auditRows)
 
+		var approvalWorkflow *approvalengine.RichInstanceDetail
+		var instanceID string
+		_ = pool.QueryRow(ctx, `
+			SELECT instance_id
+			FROM uam.approval_instance
+			WHERE record_id = $1
+			  AND module_code = 'FIXED_DEPOSIT'
+			  AND status = 'PENDING'
+			  AND is_deleted = false
+			LIMIT 1`, req.TdsID).Scan(&instanceID)
+		if instanceID != "" {
+			viewerUserID := api.GetUserIDFromCtx(ctx)
+			if richDetail, err := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, viewerUserID); err == nil {
+				approvalWorkflow = richDetail
+			} else {
+				api.LogError("[FDReceipt] GetRichInstanceDetail failed tds=%s: %v", req.TdsID, err)
+			}
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":       true,
-			"tds":           tds,
-			"audit_history": auditData,
+			"success":           true,
+			"tds":               tds,
+			"audit_history":     auditData,
+			"approval_workflow": approvalWorkflow,
 		})
 	}
 }

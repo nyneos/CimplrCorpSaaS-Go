@@ -937,6 +937,28 @@ func GetAccrualCalculationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			result["rows"] = ledgerRows
 		}
+
+		if req.RunID != "" {
+			var approvalWorkflow *approvalengine.RichInstanceDetail
+			var instanceID string
+			_ = pgxPool.QueryRow(ctx, `
+				SELECT instance_id
+				FROM uam.approval_instance
+				WHERE record_id = $1
+				  AND module_code = 'FIXED_DEPOSIT'
+				  AND status = 'PENDING'
+				  AND is_deleted = false
+				LIMIT 1`, req.RunID).Scan(&instanceID)
+			if instanceID != "" {
+				if richDetail, err := approvalengine.GetRichInstanceDetail(ctx, pgxPool, instanceID, req.UserID); err == nil {
+					approvalWorkflow = richDetail
+				} else {
+					api.LogError("[FDAccrual] GetRichInstanceDetail failed run=%s: %v", req.RunID, err)
+				}
+			}
+			result["approval_workflow"] = approvalWorkflow
+		}
+
 		api.RespondWithPayload(w, true, "", result)
 	}
 }

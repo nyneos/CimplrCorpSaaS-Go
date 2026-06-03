@@ -3180,7 +3180,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					TransactionType: "FD_CONFIRMATION_DELETE", RecordID: cID,
 					RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 					AuditIDColumn: "confirmation_id", ActionType: "DELETE",
-					Amount: 0, SubmittedBy: uID, SubmittedByEmail: uEmail,
+					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
 				})
 				if err != nil {
 					api.LogError("[FDBooking] CreateInstance(DELETE) failed for confirmation %s: %v", cID, err)

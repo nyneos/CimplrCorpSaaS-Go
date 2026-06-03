@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -703,7 +704,7 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: getClosureTxCode("initiate", fmt.Sprint(oldRow["closure_type"]), "DELETE"), Action: constants.AuditActionDelete, RecordID: id, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: 0, UserID: req.UserID, UserEmail: userEmail})
+			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: getClosureTxCode("initiate", fmt.Sprint(oldRow["closure_type"]), "DELETE"), Action: constants.AuditActionDelete, RecordID: id, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: cimplrFloat(oldRow["principal_amount"]), UserID: req.UserID, UserEmail: userEmail})
 			if instanceID != "" {
 				_, _ = pool.Exec(r.Context(), `UPDATE cimplr.fd_closure_initiate SET approval_instance_id=$1 WHERE closure_initiate_id=$2`, instanceID, id)
 			}
@@ -1390,7 +1391,7 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: getClosureTxCode(func() string{c:=fmt.Sprint(oldRow["closure_type"]); if c=="PREMATURE"{return "premature"}; return "confirm"}(), fmt.Sprint(oldRow["closure_type"]), "DELETE"), Action: constants.AuditActionDelete, RecordID: id, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: 0, UserID: req.UserID, UserEmail: userEmail})
+			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: getClosureTxCode(func() string{c:=fmt.Sprint(oldRow["closure_type"]); if c=="PREMATURE"{return "premature"}; return "confirm"}(), fmt.Sprint(oldRow["closure_type"]), "DELETE"), Action: constants.AuditActionDelete, RecordID: id, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: cimplrFloat(oldRow["principal_expected"]), UserID: req.UserID, UserEmail: userEmail})
 			if instanceID != "" {
 				_, _ = pool.Exec(r.Context(), `UPDATE cimplr.fd_closure_confirm SET approval_instance_id=$1 WHERE closure_confirm_id=$2`, instanceID, id)
 			}
@@ -3870,14 +3871,22 @@ func fetchCimplrAudit(ctx context.Context, pool *pgxpool.Pool, stage, id string)
 		ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, audit_id DESC`, id)
 }
 
-func fetchCimplrApprovalWorkflow(ctx context.Context, pool *pgxpool.Pool, recordID string) []map[string]interface{} {
-	return fetchCimplrSubRows(ctx, pool, `
-		SELECT i.instance_id, i.transaction_type, i.action_type, i.status, i.submitted_by_email,
-		       i.submitted_at, i.resolved_at, ie.instance_eye_id, ie.position, ie.status AS eye_status
-		FROM uam.approval_instance i
-		LEFT JOIN uam.approval_instance_eye ie ON ie.instance_id=i.instance_id
-		WHERE i.record_id=$1 AND i.module_code='FIXED_DEPOSIT'
-		ORDER BY i.submitted_at DESC, ie.position ASC`, recordID)
+func fetchCimplrApprovalWorkflow(ctx context.Context, pool *pgxpool.Pool, recordID string) interface{} {
+	var instanceID string
+	err := pool.QueryRow(ctx, `
+		SELECT instance_id
+		FROM uam.approval_instance
+		WHERE record_id=$1 AND module_code='FIXED_DEPOSIT'
+		ORDER BY submitted_at DESC LIMIT 1`, recordID).Scan(&instanceID)
+	
+	if err == nil && instanceID != "" {
+		viewerUserID := api.GetUserIDFromCtx(ctx)
+		richDetail, err := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, viewerUserID)
+		if err == nil {
+			return richDetail
+		}
+	}
+	return nil
 }
 
 func loadCimplrDownloadFiles(ctx context.Context, pool *pgxpool.Pool, fileID, initiateID, confirmID, fileType string) ([]map[string]interface{}, error) {
@@ -4042,6 +4051,11 @@ func cimplrFloat(v interface{}) float64 {
 		return t
 	case float32:
 		return float64(t)
+	case pgtype.Numeric:
+		if vFloat, err := t.Float64Value(); err == nil && t.Valid {
+			return vFloat.Float64
+		}
+		return 0
 	case int:
 		return float64(t)
 	case int64:

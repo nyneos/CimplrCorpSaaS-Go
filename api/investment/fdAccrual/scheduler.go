@@ -1758,6 +1758,24 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
+		var approvalWorkflow *approvalengine.RichInstanceDetail
+		var instanceID string
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT instance_id
+			FROM uam.approval_instance
+			WHERE record_id = $1
+			  AND module_code = 'FIXED_DEPOSIT'
+			  AND status = 'PENDING'
+			  AND is_deleted = false
+			LIMIT 1`, req.ConfigID).Scan(&instanceID)
+		if instanceID != "" {
+			if richDetail, err := approvalengine.GetRichInstanceDetail(ctx, pgxPool, instanceID, req.UserID); err == nil {
+				approvalWorkflow = richDetail
+			} else {
+				api.LogError("[FDAccrual] GetRichInstanceDetail failed config=%s: %v", req.ConfigID, err)
+			}
+		}
+
 		// ── 1. Config base data with audit ──────────────────────────────────
 		var configData map[string]interface{}
 		configRow := pgxPool.QueryRow(ctx, `
@@ -1881,6 +1899,7 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"edited_at":                histEditedAt,
 			"deleted_by":               histDeletedBy,
 			"deleted_at":               histDeletedAt,
+			"approval_workflow":        approvalWorkflow,
 		}
 
 		// ── 2. All runs created by this schedule ────────────────────────────
