@@ -228,9 +228,11 @@ func bpwProcessOutbox(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig,
 			continue
 		}
 
+		title := bpwPushTitle(row.RenderedSubject)
+		body := bpwPushBody(title, row.RenderedBody)
 		payload := bpwEventPayload{
-			Title:         row.RenderedSubject,
-			Body:          bpwTruncate(bpwStripHTML(row.RenderedBody), 200),
+			Title:         title,
+			Body:          bpwTruncate(bpwStripHTML(body), 200),
 			Tag:           row.EventID,
 			URL:           "/notifications",
 			CorrelationID: row.CorrelationID,
@@ -550,6 +552,26 @@ func bpwTruncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+func bpwPushTitle(subject string) string {
+	subject = strings.TrimSpace(subject)
+	if subject != "" {
+		return subject
+	}
+	return "Notification"
+}
+
+func bpwPushBody(subject, body string) string {
+	body = strings.TrimSpace(body)
+	if body != "" {
+		return body
+	}
+	subject = strings.TrimSpace(subject)
+	if subject != "" {
+		return subject
+	}
+	return "You have a new notification. Please review it in the system."
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
