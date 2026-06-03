@@ -3458,6 +3458,15 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		go func(eID, uEmail string) {
+			notifcatalog.TriggerNotification(context.Background(), pool,
+				"/investment/fd/exception/resolve", eID, map[string]interface{}{
+					"record_id":   eID,
+					"event":       "FD_EXCEPTION_RESOLVED",
+					"actor_email": uEmail,
+				})
+		}(req.ExceptionID, userEmail)
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":          true,
