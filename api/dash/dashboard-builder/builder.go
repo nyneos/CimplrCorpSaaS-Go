@@ -123,12 +123,12 @@ func SaveDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 // ─── ListDashboards ────────────────────────────────────────────────────────────
 //
-// GET /dash/builder/dashboard/list
+// POST /dash/builder/dashboard/list
 //
 // Returns summary rows (no config blob) for the current user, newest first.
 func ListDashboards(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodPost {
 			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
@@ -177,12 +177,13 @@ func ListDashboards(pool *pgxpool.Pool) http.HandlerFunc {
 
 // ─── GetDashboardByID ──────────────────────────────────────────────────────────
 //
-// GET /dash/builder/dashboard/get?id=<uuid>
+// POST /dash/builder/dashboard/get
 //
+// Body: { "id": "<uuid>" }
 // Returns the full config JSON for one dashboard owned by the current user.
 func GetDashboardByID(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodPost {
 			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
@@ -193,9 +194,16 @@ func GetDashboardByID(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		var body struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		id := strings.TrimSpace(body.ID)
 		if id == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "id query param is required")
+			api.RespondWithError(w, http.StatusBadRequest, "id is required")
 			return
 		}
 
