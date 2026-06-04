@@ -160,7 +160,7 @@ var (
 		ParentIDField: "tds_id",
 		TableName:     "investment.fd_tds_receipt_files",
 		ParentColumn:  "tds_id",
-		ParentTable:   "investment.fd_tds_receipt",
+		ParentTable:   constants.QuerryTDSReceipt,
 		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdReconcileResultFilesDefinition = investmentFileDefinition{
@@ -175,7 +175,7 @@ var (
 		ParentIDField: "exception_id",
 		TableName:     "investment.fd_receipt_exception_files",
 		ParentColumn:  "exception_id",
-		ParentTable:   "investment.fd_receipt_exception",
+		ParentTable:   constants.QuerryReceiptException,
 		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	varianceExceptionFilesDefinition = investmentFileDefinition{
@@ -183,7 +183,7 @@ var (
 		ParentIDField: "exception_id",
 		TableName:     "investment.fd_receipt_exception_files",
 		ParentColumn:  "exception_id",
-		ParentTable:   "investment.fd_receipt_exception",
+		ParentTable:   constants.QuerryReceiptException,
 		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdAccrualRunFilesDefinition = investmentFileDefinition{
@@ -361,7 +361,7 @@ func recordDynamicInvestmentMainUploadAudit(ctx context.Context, tx pgx.Tx, tabl
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 	}
 	query := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s)",
+		constants.ErrInsertFailed,
 		tableName,
 		strings.Join(insertColumns, ", "),
 		strings.Join(placeholders, ", "),
@@ -482,7 +482,7 @@ func recordFDClosureMainUploadAudit(ctx context.Context, tx pgx.Tx, closureReque
 }
 
 func recordFDCashflowMainUploadAudit(ctx context.Context, tx pgx.Tx, fdID string, payload cashfiles.MainUploadAuditPayload) error {
-	return recordDynamicInvestmentMainUploadAudit(ctx, tx, "investment.fd_audit_cashflow_schedule", []string{"fd_id", "master_id"}, fdID, payload, nil)
+	return recordDynamicInvestmentMainUploadAudit(ctx, tx, constants.QuerryAuditCashflowSchedule, []string{"fd_id", "master_id"}, fdID, payload, nil)
 }
 
 func recordFDInterestReceiptMainUploadAudit(ctx context.Context, tx pgx.Tx, receiptID string, payload cashfiles.MainUploadAuditPayload) error {

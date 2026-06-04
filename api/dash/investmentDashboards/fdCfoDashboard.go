@@ -1,3 +1,32 @@
+// Package investmentdashboards - FD CFO Dashboard
+//
+// POST /dash/investment/fd/cfo-dashboard
+//
+// Returns a single aggregated JSON payload covering every KPI, chart, governance
+// and FD-list panel required by the CFO's Fixed Deposit dashboard.
+// All sub-computations run concurrently via sync.WaitGroup + goroutines so
+// latency is bounded by the single slowest query, not their sum.
+//
+// Request:
+//
+//	{
+//	  "user_id":   "...",          // optional - for session scoping
+//	  "entity_id": "",             // "" = all entities
+//	  "currency":  "INR",         // default INR
+//	  "period":    "MTD"          // MTD | QTD | YTD - controls interest roll-up
+//	}
+//
+// Response shape mirrors the spec exactly:
+//
+//	{
+//	  "success": true,
+//	  "generated_at": "<RFC3339>",
+//	  "filters": { "entity_id":"", "currency":"INR", "period":"MTD" },
+//	  "kpis": { total_exposure, bank_concentration, maturity, interest, exceptions },
+//	  "charts": { maturity_ladder, interest_trend, rate_distribution, bank_concentration },
+//	  "governance": { approvals, closing_status },
+//	  "fd_list": [ ... ]
+//	}
 package investmentdashboards
 
 import (
@@ -237,10 +266,17 @@ type govChecklistItem struct {
 	Detail       string `json:"detail,omitempty"`
 }
 
-func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter, sql, action, source, sourcePage string) []govFDItem {
-	rows, err := pool.Query(ctx, sql, entityFilter, bankFilter)
+type govFetchItemsRequest struct {
+	SQL        string
+	Action     string
+	Source     string
+	SourcePage string
+}
+
+func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter string, req govFetchItemsRequest) []govFDItem {
+	rows, err := pool.Query(ctx, req.SQL, entityFilter, bankFilter)
 	if err != nil {
-		api.LogError("[CfoDash] governance %s query error: %v", action, err)
+		api.LogError("[CfoDash] governance %s query error: %v", req.Action, err)
 		return []govFDItem{}
 	}
 	defer rows.Close()
@@ -256,9 +292,9 @@ func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFi
 		}
 		f.Principal = fdRound(f.Principal, 2)
 		f.Rate = fdRound(f.Rate, 4)
-		f.Action = action
-		f.Source = source
-		f.SourcePage = sourcePage
+		f.Action = req.Action
+		f.Source = req.Source
+		f.SourcePage = req.SourcePage
 		f.Currency = "INR"
 		out = append(out, f)
 	}
@@ -347,7 +383,7 @@ func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilt
 		  AND ($1::text='' OR r.entity_id=$1)` +
 		func() string {
 			if snapshotDate != "" {
-				return " AND r.created_at <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+				return " AND r.created_at <= '" + snapshotDate + constants.ErrDateInterval
 			}
 			return ""
 		}() + `
@@ -388,16 +424,16 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 	// An empty snapshotDate means "no upper bound" (current live view).
 	snapUntil := ""
 	if snapshotDate != "" {
-		snapUntil = " AND b.created_at <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+		snapUntil = " AND b.created_at <= '" + snapshotDate + constants.ErrDateInterval
 	}
 	snapFilter := snapUntil // booking uses b.created_at
 	snapConfirm := ""
 	snapActivation := ""
 	snapClosure := ""
 	if snapshotDate != "" {
-		snapConfirm = " AND c.created_at  <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
-		snapActivation = " AND m.created_at  <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
-		snapClosure = " AND sort_ts       <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+		snapConfirm = " AND c.created_at  <= '" + snapshotDate + constants.ErrDateInterval
+		snapActivation = " AND m.created_at  <= '" + snapshotDate + constants.ErrDateInterval
+		snapClosure = " AND sort_ts       <= '" + snapshotDate + constants.ErrDateInterval
 	}
 	// Approvals Pending widget shows every row that is *not* finalised.
 	// "Finalised" = APPROVED / REJECTED (and CLOSED on booking). Everything
@@ -562,9 +598,9 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		LIMIT 200`
 
 	bookingItems := govFetchBookingItems(ctx, pool, entityFilter, bankFilter, pendingBookingSQL, constants.FDBookingLabel, constants.FDBooking)
-	confirmItems := govFetchItems(ctx, pool, entityFilter, bankFilter, pendingConfirmSQL, "PENDING_CONFIRMATION_APPROVAL", constants.FDConfirmation, constants.FDConfirmationLabel)
-	activationItems := govFetchItems(ctx, pool, entityFilter, bankFilter, pendingActivationSQL, "PENDING_ACTIVATION_APPROVAL", constants.FDActivationLabel, constants.FDActivation)
-	maturityItems := govFetchItems(ctx, pool, entityFilter, bankFilter, pendingClosureSQL, "PENDING_CLOSURE_APPROVAL", constants.FDMaturity, constants.FdmaturityLabel)
+	confirmItems := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingConfirmSQL, Action: "PENDING_CONFIRMATION_APPROVAL", Source: constants.FDConfirmation, SourcePage: constants.FDConfirmationLabel})
+	activationItems := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingActivationSQL, Action: "PENDING_ACTIVATION_APPROVAL", Source: constants.FDActivationLabel, SourcePage: constants.FDActivation})
+	maturityItems := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingClosureSQL, Action: "PENDING_CLOSURE_APPROVAL", Source: constants.FDMaturity, SourcePage: constants.FdmaturityLabel})
 
 	accrualItems := govFetchAccrualRunItems(ctx, pool, entityFilter, snapshotDate)
 	accrualRunCount := int64(len(accrualItems))
@@ -926,7 +962,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE((SELECT SUM(ir.gross_interest_received)
 				            FROM investment.fd_interest_receipt ir
 				            WHERE ir.is_deleted=false
-				              AND ir.receipt_status  = 'POSTED'
+				              AND ir.receipt_status  = 'POSTED'	             
 				              AND ($1::text='' OR ir.entity_id=$1)
 				              AND ($5::text='' OR ir.bank_id=$5)
 				                ),0) AS received
