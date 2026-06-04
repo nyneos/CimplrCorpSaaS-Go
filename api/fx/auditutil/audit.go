@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -270,7 +271,7 @@ func buildActionInsertAttempts(p ActionParams) []execAttempt {
 					args = append(args, JSONValue(p.OldValues), JSONValue(p.NewValues), JSONValue(BuildChangeSummary(p.OldValues, p.NewValues)))
 				}
 				attempts = append(attempts, execAttempt{
-					query: fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", p.TableName, strings.Join(columns, ", "), strings.Join(values, ", ")),
+					query: fmt.Sprintf(constants.ErrInsertFailed, p.TableName, strings.Join(columns, ", "), strings.Join(values, ", ")),
 					args:  args,
 				})
 			}
@@ -411,7 +412,7 @@ func RecordDownload(ctx context.Context, db *sql.DB, p DownloadParams) {
 		args = append(args, strings.TrimSpace(val))
 		next++
 	}
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", p.TableName, strings.Join(columns, ", "), strings.Join(values, ", "))
+	query := fmt.Sprintf(constants.ErrInsertFailed, p.TableName, strings.Join(columns, ", "), strings.Join(values, ", "))
 	if _, err := db.ExecContext(ctx, query, args...); err != nil {
 		logger.LogError("fx audit download insert failed table=%s parent=%s: %v", p.TableName, p.ParentID, err)
 	}
@@ -436,7 +437,7 @@ func RecordDownloadPGX(ctx context.Context, pool *pgxpool.Pool, p DownloadParams
 		args = append(args, strings.TrimSpace(val))
 		next++
 	}
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", p.TableName, strings.Join(columns, ", "), strings.Join(values, ", "))
+	query := fmt.Sprintf(constants.ErrInsertFailed, p.TableName, strings.Join(columns, ", "), strings.Join(values, ", "))
 	if _, err := pool.Exec(ctx, query, args...); err != nil {
 		logger.LogError("fx audit download insert failed table=%s parent=%s: %v", p.TableName, p.ParentID, err)
 	}

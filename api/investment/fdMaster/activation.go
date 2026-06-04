@@ -179,7 +179,7 @@ func buildDynamicInsert(table string, columns map[string]bool, preferred []strin
 	}
 
 	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s)",
+		constants.ErrInsertFailed,
 		table,
 		strings.Join(insertCols, ","),
 		buildPlaceholders(len(insertCols), 1),
@@ -2745,8 +2745,8 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					EntityCode:       entityID,
 					TransactionType:  "FD_CASHFLOW_EDIT",
 					RecordID:         auditID,
-					RecordTable:      "investment.fd_audit_cashflow_schedule",
-					AuditTable:       "investment.fd_audit_cashflow_schedule",
+					RecordTable:      constants.QuerryAuditCashflowSchedule,
+					AuditTable:       constants.QuerryAuditCashflowSchedule,
 					AuditIDColumn:    "audit_id",
 					ActionType:       constants.AuditActionEdit,
 					Amount:           amount,
@@ -3469,8 +3469,8 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					EntityCode:       eID,
 					TransactionType:  "FD_CASHFLOW_DELETE",
 					RecordID:         aID,
-					RecordTable:      "investment.fd_audit_cashflow_schedule",
-					AuditTable:       "investment.fd_audit_cashflow_schedule",
+					RecordTable:      constants.QuerryAuditCashflowSchedule,
+					AuditTable:       constants.QuerryAuditCashflowSchedule,
 					AuditIDColumn:    "audit_id",
 					ActionType:       "DELETE",
 					Amount:           amount,

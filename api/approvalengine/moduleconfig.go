@@ -38,8 +38,8 @@ var txTypeRegistry = map[string]txTableConfig{
 	"FD_MASTER_CREATE":   {AuditTable: constants.QuerryAuditMaster, AuditIDColumn: "fd_id"}, // legacy activation type
 	"FD_MASTER_EDIT":     {AuditTable: constants.QuerryAuditMaster, AuditIDColumn: "fd_id"},
 	"FD_MASTER_DELETE":   {AuditTable: constants.QuerryAuditMaster, AuditIDColumn: "fd_id"},
-	"FD_CASHFLOW_EDIT":   {AuditTable: "investment.fd_audit_cashflow_schedule", AuditIDColumn: "audit_id"},
-	"FD_CASHFLOW_DELETE": {AuditTable: "investment.fd_audit_cashflow_schedule", AuditIDColumn: "audit_id"},
+	"FD_CASHFLOW_EDIT":   {AuditTable: constants.QuerryAuditCashflowSchedule, AuditIDColumn: "audit_id"},
+	"FD_CASHFLOW_DELETE": {AuditTable: constants.QuerryAuditCashflowSchedule, AuditIDColumn: "audit_id"},
 
 	// ── FD Accrual ────────────────────────────────────────────────────────
 	"FD_ACCRUAL_RUN":              {AuditTable: "investment.fd_accrual_run_audit", AuditIDColumn: "run_id"},
@@ -54,17 +54,17 @@ var txTypeRegistry = map[string]txTableConfig{
 	"FD_RECEIPT_CREATE":    {AuditTable: constants.QuerryAuditInterestReceipt, AuditIDColumn: "receipt_id"},
 	"FD_RECEIPT_EDIT":      {AuditTable: constants.QuerryAuditInterestReceipt, AuditIDColumn: "receipt_id"},
 	"FD_RECEIPT_DELETE":    {AuditTable: constants.QuerryAuditInterestReceipt, AuditIDColumn: "receipt_id"},
-	"FD_TDS_EDIT":          {AuditTable: "investment.fd_tds_receipt_audit", AuditIDColumn: "tds_id"},
+	"FD_TDS_EDIT":          {AuditTable: constants.QuerryAuditTDSReceipt, AuditIDColumn: "tds_id"},
 	"FD_RECONCILE_CREATE":  {AuditTable: "investment.fd_receipt_reconcile_run", AuditIDColumn: "reconcile_run_id"},
-	"FD_EXCEPTION_EDIT":    {AuditTable: "investment.fd_receipt_exception_audit", AuditIDColumn: "exception_id"},
-	"FD_EXCEPTION_RESOLVE": {AuditTable: "investment.fd_receipt_exception_audit", AuditIDColumn: "exception_id"},
-	"FD_EXCEPTION_CLOSE":   {AuditTable: "investment.fd_receipt_exception_audit", AuditIDColumn: "exception_id"},
+	"FD_EXCEPTION_EDIT":    {AuditTable: constants.QuerryReceiptExceptionAudit, AuditIDColumn: "exception_id"},
+	"FD_EXCEPTION_RESOLVE": {AuditTable: constants.QuerryReceiptExceptionAudit, AuditIDColumn: "exception_id"},
+	"FD_EXCEPTION_CLOSE":   {AuditTable: constants.QuerryReceiptExceptionAudit, AuditIDColumn: "exception_id"},
 
 	// ── FD TDS Register ──────────────────────────────────────────────────
-	"FD_TDS_REGISTER_CREATE":    {AuditTable: "investment.fd_tds_receipt_audit", AuditIDColumn: "tds_id"},
-	"FD_TDS_REGISTER_EDIT":      {AuditTable: "investment.fd_tds_receipt_audit", AuditIDColumn: "tds_id"},
-	"FD_TDS_REGISTER_DELETE":    {AuditTable: "investment.fd_tds_receipt_audit", AuditIDColumn: "tds_id"},
-	"FD_TDS_REGISTER_RECONCILE": {AuditTable: "investment.fd_tds_receipt_audit", AuditIDColumn: "tds_id"},
+	"FD_TDS_REGISTER_CREATE":    {AuditTable: constants.QuerryAuditTDSReceipt, AuditIDColumn: "tds_id"},
+	"FD_TDS_REGISTER_EDIT":      {AuditTable: constants.QuerryAuditTDSReceipt, AuditIDColumn: "tds_id"},
+	"FD_TDS_REGISTER_DELETE":    {AuditTable: constants.QuerryAuditTDSReceipt, AuditIDColumn: "tds_id"},
+	"FD_TDS_REGISTER_RECONCILE": {AuditTable: constants.QuerryAuditTDSReceipt, AuditIDColumn: "tds_id"},
 
 	// ── Cash / Payables & Receivables ─────────────────────────────────────
 	// (add specific types here as the cash module is wired up)

@@ -92,17 +92,27 @@ func cancelRollRowSnapshot(ctx context.Context, db *sql.DB, requestType, booking
 	return snapshot
 }
 
-func recordCancelRollStatusAction(ctx context.Context, db *sql.DB, requestType, bookingID, requestDate, action, status, actor, comment string) {
+type cancelRollStatusActionParams struct {
+	RequestType string
+	BookingID   string
+	RequestDate string
+	Action      string
+	Status      string
+	Actor       string
+	Comment     string
+}
+
+func recordCancelRollStatusAction(ctx context.Context, db *sql.DB, params cancelRollStatusActionParams) {
 	auditutil.RecordAction(ctx, db, auditutil.ActionParams{
-		TableName:    cancelRollAuditTable(requestType),
+		TableName:    cancelRollAuditTable(params.RequestType),
 		ParentColumn: "booking_id",
-		ParentID:     bookingID,
-		ActionType:   action,
-		Status:       status,
-		Reason:       comment,
-		RequestedBy:  actor,
-		OldValues:    map[string]interface{}{"status": "Pending", "request_date": requestDate},
-		NewValues:    map[string]interface{}{"status": status, "request_date": requestDate},
+		ParentID:     params.BookingID,
+		ActionType:   params.Action,
+		Status:       params.Status,
+		Reason:       params.Comment,
+		RequestedBy:  params.Actor,
+		OldValues:    map[string]interface{}{"status": "Pending", "request_date": params.RequestDate},
+		NewValues:    map[string]interface{}{"status": params.Status, "request_date": params.RequestDate},
 	})
 }
 
@@ -153,10 +163,10 @@ func executeCancellationApproval(ctx context.Context, db *sql.DB, userID, bookin
 		return err
 	}
 	if affected, _ := result.RowsAffected(); affected == 0 {
-		return fmt.Errorf("pending cancellation was not updated")
+		return fmt.Errorf(constants.ErrPendingCancellationNotUpdated)
 	}
 	auditutil.RecordDecision(ctx, db, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(userID), Comment: cancellationReason})
-	recordCancelRollStatusAction(ctx, db, cancelRollTypeCancellation, bookingID, requestDate, constants.AuditActionApprove, constants.StatusApproved, auditutil.Actor(userID), cancellationReason)
+	recordCancelRollStatusAction(ctx, db, cancelRollStatusActionParams{RequestType: cancelRollTypeCancellation, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(userID), Comment: cancellationReason})
 	if newOpenAmount == 0 {
 		if _, err = db.ExecContext(ctx, `UPDATE forward_bookings SET status = 'Cancelled' WHERE system_transaction_id = $1`, bookingID); err == nil {
 			_ = DeactivateExposureHedgeLinks(db, []string{bookingID})
@@ -213,10 +223,10 @@ func executeRolloverApproval(ctx context.Context, db *sql.DB, userID, bookingID,
 		return err
 	}
 	if affected, _ := result.RowsAffected(); affected == 0 {
-		return fmt.Errorf("pending rollover was not updated")
+		return fmt.Errorf(constants.ErrPendingRolloverNotUpdated)
 	}
 	auditutil.RecordDecision(ctx, db, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(userID), Comment: comment})
-	recordCancelRollStatusAction(ctx, db, cancelRollTypeRollover, bookingID, requestDate, constants.AuditActionApprove, constants.StatusApproved, auditutil.Actor(userID), comment)
+	recordCancelRollStatusAction(ctx, db, cancelRollStatusActionParams{RequestType: cancelRollTypeRollover, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(userID), Comment: comment})
 	if newOpenAmount == 0 {
 		_, _ = db.ExecContext(ctx, `UPDATE forward_bookings SET status = 'Rolled Over' WHERE system_transaction_id = $1`, bookingID)
 	} else {
@@ -317,7 +327,7 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 				}
 				if affected, _ := result.RowsAffected(); affected == 0 {
 					w.WriteHeader(http.StatusBadRequest)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "pending cancellation was not updated"})
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrPendingCancellationNotUpdated})
 					return
 				}
 				_, _ = db.Exec(`UPDATE forward_bookings SET status = $1, processing_status = $2 WHERE system_transaction_id = $3 AND status = 'Pending Cancellation'`, constants.FwdStatusConfirmed, constants.FwdProcessingStatusApproved, bid)
@@ -326,7 +336,7 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 					decisionComment = strings.TrimSpace(req.CancellationReason)
 				}
 				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
-				recordCancelRollStatusAction(r.Context(), db, cancelRollTypeCancellation, bid, cancellationDate, constants.AuditActionReject, constants.StatusRejected, auditutil.Actor(req.UserID), decisionComment)
+				recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: decisionComment})
 				continue
 			}
 			// Perform the actual cancellation logic (ledger, cancellation record, etc.)
@@ -369,11 +379,11 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 			}
 			if affected, _ := result.RowsAffected(); affected == 0 {
 				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "pending cancellation was not updated"})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrPendingCancellationNotUpdated})
 				return
 			}
 			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: req.CancellationReason})
-			recordCancelRollStatusAction(r.Context(), db, cancelRollTypeCancellation, bid, cancellationDate, constants.AuditActionApprove, constants.StatusApproved, auditutil.Actor(req.UserID), req.CancellationReason)
+			recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(req.UserID), Comment: req.CancellationReason})
 			// If fully cancelled, update booking status to Cancelled and processing_status to Approved
 			if newOpenAmount == 0 {
 				_, err = db.Exec(`UPDATE forward_bookings SET status = 'Cancelled' WHERE system_transaction_id = $1`, bid)
@@ -407,7 +417,7 @@ func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve business units"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
 		// Join forward_cancellations with forward_bookings to get entity_level_0 (bu)
@@ -499,7 +509,7 @@ func GetAllCancellationRollovers(db *sql.DB) http.HandlerFunc {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve business units"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
 
@@ -718,7 +728,7 @@ func CancellationRolloverAction(db *sql.DB) http.HandlerFunc {
 						return
 					}
 					auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
-					recordCancelRollStatusAction(r.Context(), db, requestType, bookingID, requestDate, constants.AuditActionReject, constants.StatusRejected, auditutil.Actor(req.UserID), req.Comment)
+					recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: requestType, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: req.Comment})
 				} else if strings.EqualFold(currentStatus, "Pending") {
 					updateQuery := fmt.Sprintf(`UPDATE %s SET status = 'Rejected' WHERE booking_id = $1 AND %s = $2 AND COALESCE(is_deleted, false) = false`, tableName, dateColumn)
 					if _, err := db.Exec(updateQuery, bookingID, requestDate); err != nil {
@@ -731,7 +741,7 @@ func CancellationRolloverAction(db *sql.DB) http.HandlerFunc {
 					}
 					_, _ = db.Exec(`UPDATE forward_bookings SET status = $1, processing_status = $2 WHERE system_transaction_id = $3 AND status = $4`, constants.FwdStatusConfirmed, constants.FwdProcessingStatusApproved, bookingID, parentPendingStatus)
 					auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
-					recordCancelRollStatusAction(r.Context(), db, requestType, bookingID, requestDate, constants.AuditActionReject, constants.StatusRejected, auditutil.Actor(req.UserID), req.Comment)
+					recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: requestType, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: req.Comment})
 				} else {
 					respondWithError(w, http.StatusBadRequest, "reject is only allowed for Pending or PENDING_DELETE_APPROVAL rows")
 					return
@@ -1160,7 +1170,7 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 					return
 				}
 				if affected, _ := result.RowsAffected(); affected == 0 {
-					respondWithError(w, http.StatusBadRequest, "pending rollover was not updated")
+					respondWithError(w, http.StatusBadRequest, constants.ErrPendingRolloverNotUpdated)
 					return
 				}
 				_, _ = db.Exec(`UPDATE forward_bookings SET status = $1, processing_status = $2 WHERE system_transaction_id = $3 AND status = 'Pending Rollover'`, constants.FwdStatusConfirmed, constants.FwdProcessingStatusApproved, bid)
@@ -1169,7 +1179,7 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 					decisionComment = strings.TrimSpace(req.RejectionComment)
 				}
 				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
-				recordCancelRollStatusAction(r.Context(), db, cancelRollTypeRollover, bid, cancellationDate, constants.AuditActionReject, constants.StatusRejected, auditutil.Actor(req.UserID), decisionComment)
+				recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: decisionComment})
 				continue
 			}
 			// The pending tab is driven by forward_rollovers.status, so do not block
@@ -1215,11 +1225,11 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			if affected, _ := result.RowsAffected(); affected == 0 {
-				respondWithError(w, http.StatusBadRequest, "pending rollover was not updated")
+				respondWithError(w, http.StatusBadRequest, constants.ErrPendingRolloverNotUpdated)
 				return
 			}
 			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: ""})
-			recordCancelRollStatusAction(r.Context(), db, cancelRollTypeRollover, bid, cancellationDate, constants.AuditActionApprove, constants.StatusApproved, auditutil.Actor(req.UserID), strings.TrimSpace(req.Comment))
+			recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(req.UserID), Comment: strings.TrimSpace(req.Comment)})
 			// If fully rolled over, update booking status to Rolled Over and processing_status to Approved
 			if newOpenAmount == 0 {
 				_, _ = db.Exec(`UPDATE forward_bookings SET status = 'Rolled Over' WHERE system_transaction_id = $1`, bid)
@@ -1289,7 +1299,7 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve business units"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
 		// Join forward_rollovers with forward_bookings to get entity_level_0 (bu)

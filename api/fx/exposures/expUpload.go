@@ -1747,7 +1747,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					if len(keys) == 0 {
 						continue
 					}
-					query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", field.TableName, strings.Join(keys, ", "), strings.Join(placeholders, ", "))
+					query := fmt.Sprintf(constants.ErrInsertFailed, field.TableName, strings.Join(keys, ", "), strings.Join(placeholders, ", "))
 					if _, err := tx.ExecContext(ctx, query, vals...); err != nil {
 						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to insert row: " + err.Error()})
 						return

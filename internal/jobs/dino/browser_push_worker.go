@@ -286,7 +286,7 @@ func bpwSendDigest(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig) {
 		  AND ian.is_deleted = FALSE
 		  AND (
 		      pdt.last_digest_at IS NULL
-		      OR pdt.last_digest_at < NOW() - make_interval(mins => $1)
+		      OR pdt.last_digest_at < NOW() - ($1 || ' minutes')::INTERVAL
 		  )
 	`, throttleMinutes)
 	if err != nil {

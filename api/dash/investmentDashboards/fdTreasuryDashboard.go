@@ -78,9 +78,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// snapshotFilter restricts every fd_master query to FDs that started
 		// on or before as_on_date — enforces the strict snapshot semantics.
 		snapshotFilter := " AND m.start_date <= '" + snapshotDate + "'::date"
-		snapBookingFilter := " AND b.created_at <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
-		snapConfirmationFilter := " AND c.created_at <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
-		snapNegotiationFilter := " AND n.created_at <= '" + snapshotDate + "'::date + INTERVAL '1 day'"
+		snapBookingFilter := " AND b.created_at <= '" + snapshotDate + constants.ErrDateInterval
+		snapConfirmationFilter := " AND c.created_at <= '" + snapshotDate + constants.ErrDateInterval
+		snapNegotiationFilter := " AND n.created_at <= '" + snapshotDate + constants.ErrDateInterval
 
 		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
 		startDateStr := periodBounds.StartStr
