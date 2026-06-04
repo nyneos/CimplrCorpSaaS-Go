@@ -277,6 +277,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			// logger.LogInfo("=========================================\n\n")
 
 			ctx = context.WithValue(ctx, "user_id", userID)
+			ctx = context.WithValue(ctx, api.ClientIPContextKey, api.ClientIPFromRequest(r))
 			ctx = context.WithValue(ctx, "session", session)
 			// backward-compat single values (first mapped entity)
 			ctx = context.WithValue(ctx, "root_entity_id", validationResult.RootEntityID)
