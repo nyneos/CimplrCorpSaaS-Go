@@ -1069,11 +1069,11 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				actionTime := time.Now()
 				_, err = tx.Exec(`
 				       INSERT INTO auditactionbankbalances (
-					       balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
+					       balance_id, actiontype, processing_status, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip, checker_comment
 				       )
-				       SELECT $1, $2, $3, $4, $5, $6, $7, $8
+				       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 				       WHERE NOT EXISTS (
-				           SELECT 1 FROM auditactionbankbalances WHERE balance_id = $9
+				           SELECT 1 FROM auditactionbankbalances WHERE balance_id = $11
 				       )
 				       `,
 					bsid,
@@ -1081,8 +1081,10 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					constants.StatusApproved,
 					actorName,
 					actionTime,
+					nullIfBlank(apictx.ClientIPFromRequest(r)),
 					actorName,
 					actionTime,
+					nullIfBlank(apictx.ClientIPFromRequest(r)),
 					body.Comment,
 					bsid,
 				)
@@ -1373,9 +1375,9 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 			requestedBy := auditActorDisplayName(ctx, body.UserID)
 			_, err := db.ExecContext(ctx, `
 				       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
-					       bankstatementid, actiontype, processing_status, requested_by, requested_at, reason
-				       ) VALUES ($1, $2, $3, $4, $5, $6)
-			       `, bsid, constants.AuditActionDelete, constants.StatusPendingDeleteApproval, requestedBy, time.Now().UTC(), deleteComment)
+					       bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip, reason
+				       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			       `, bsid, constants.AuditActionDelete, constants.StatusPendingDeleteApproval, requestedBy, time.Now().UTC(), nullIfBlank(apictx.ClientIPFromRequest(r)), deleteComment)
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
@@ -1442,7 +1444,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 
 		if isPDF {
 			logger.LogInfo("[BANK_STATEMENT] PDF flag detected, processing from bank.json")
-			result, err := ProcessBankStatementFromJSON(r.Context(), db)
+			result, err := ProcessBankStatementFromJSON(r.Context(), db, apictx.ClientIPFromRequest(r))
 			if err != nil {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"success": false,
@@ -1654,6 +1656,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 				AccountNumberOverride: accountOverride,
 				UploadFileName:        uploadFileName,
 				UploadedBy:            requestedByFromCtx(r.Context(), r.FormValue("user_id")),
+				RequestedIP:           apictx.ClientIPFromRequest(r),
 				Password:              r.FormValue("password"),
 				PgxPool:               pgxPool,
 			},
@@ -2096,6 +2099,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 					AccountNumberOverride: accountOverride,
 					UploadFileName:        ze.name,
 					UploadedBy:            requestedByFromCtx(ctx, r.FormValue("user_id")),
+					RequestedIP:           apictx.ClientIPFromRequest(r),
 					PgxPool:               pool,
 				},
 			)

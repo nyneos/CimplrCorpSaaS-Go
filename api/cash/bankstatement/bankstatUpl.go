@@ -295,8 +295,9 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			rows2.Close()
 			// Insert audit action rows for created bank statements
+			requestedIP := nullIfBlank(api.ClientIPFromRequest(r))
 			for _, bsid := range newIDs {
-				if _, aerr := pgxPool.Exec(ctx, `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now())`, bsid, userName); aerr != nil {
+				if _, aerr := pgxPool.Exec(ctx, `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now(),$3)`, bsid, userName, requestedIP); aerr != nil {
 					// log but don't fail the entire upload for audit insert error
 					// (could collect and return these later if desired)
 					fmt.Println("audit insert error:", aerr)
@@ -1569,7 +1570,8 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ifsccode, statement_period, chequerefno, withdrawalamount, depositamount, modeoftransaction
 		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING bankstatementid`
 
-		auditQ := `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
+		auditQ := `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now(),$4)`
+		requestedIP := nullIfBlank(api.ClientIPFromRequest(r))
 
 		for _, row := range req.Rows {
 			// basic validation
@@ -1654,7 +1656,7 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// reasonJSON = fmt.Sprintf(`{"old_entityid":"%s","old_account_number":"%s","old_description":"%s"}`, "", "", "")
 				reasonJSON = ""
 			}
-			if _, err := tx.Exec(ctx, auditQ, id, reasonJSON, createdBy); err != nil {
+			if _, err := tx.Exec(ctx, auditQ, id, reasonJSON, createdBy, requestedIP); err != nil {
 				api.RespondWithPayload(w, false, "Audit insert error: "+err.Error(), nil)
 				return
 			}
@@ -1887,7 +1889,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// create audit action
-		auditQ := `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())`
+		auditQ := `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4)`
 
 		// Use frontend-provided reason if present; otherwise build a placeholder JSON with old_* values
 		reasonJSON := req.Reason
@@ -1897,7 +1899,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			reasonJSON = ""
 		}
 
-		if _, err := tx.Exec(ctx, auditQ, req.BankStatementID, reasonJSON, requestedBy); err != nil {
+		if _, err := tx.Exec(ctx, auditQ, req.BankStatementID, reasonJSON, requestedBy, nullIfBlank(api.ClientIPFromRequest(r))); err != nil {
 			api.RespondWithPayload(w, false, "failed to create audit action: "+err.Error(), nil)
 			return
 		}

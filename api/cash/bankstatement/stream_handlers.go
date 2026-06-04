@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	apipreval "CimplrCorpSaas/api/middlewares"
 	notif "CimplrCorpSaas/api/notification/catalog"
@@ -1611,9 +1612,9 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cimplrcorpsaas.auditactionbankstatement (
-				bankstatementid, actiontype, processing_status, requested_by, requested_at
-			) VALUES ($1, $2, $3, $4, $5)
-		`, bankStatementID, "CREATE", constants.StatusPendingApproval, requestedBy, time.Now().UTC())
+				bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip
+			) VALUES ($1, $2, $3, $4, $5, $6)
+		`, bankStatementID, "CREATE", constants.StatusPendingApproval, requestedBy, time.Now().UTC(), nullIfBlank(api.ClientIPFromRequest(r)))
 		if err != nil {
 			tx.Rollback()
 			respondWithError(w, err, "Failed to record audit action", http.StatusInternalServerError)

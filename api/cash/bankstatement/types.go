@@ -47,6 +47,7 @@ type UploadOpts struct {
 	AccountNumberOverride string
 	UploadFileName        string
 	UploadedBy            string
+	RequestedIP           string
 	Password              string
 	// PgxPool is optional; when provided the smart categorization engine runs
 	// after the upload commit so that new transactions are classified via the

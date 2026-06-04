@@ -21,7 +21,7 @@ import (
 
 // ProcessBankStatementFromJSON reads bank.json and processes it like Excel upload.
 // This is a placeholder for future PDF OCR integration.
-func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]interface{}, error) {
+func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB, requestedIP string) (map[string]interface{}, error) {
 	logger.LogInfo("[PDF_PROCESSOR] Reading bank.json file")
 
 	possiblePaths := []string{
@@ -76,14 +76,14 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 	}
 	hash := sha256.Sum256(jsonBytes)
 	fileHash := fmt.Sprintf("%x", hash[:])
-	return ProcessBankStatementFromStructuredInput(ctx, db, structured, fileHash, nil)
+	return ProcessBankStatementFromStructuredInput(ctx, db, structured, fileHash, nil, requestedIP)
 }
 
 // ProcessBankStatementFromStructuredInput performs ingestion, categorization,
 // dedup and KPI computation for structured input (no file I/O or header detection).
 // pgxPool is optional: when non-nil, the smart categorization engine is triggered
 // asynchronously after the commit so that uploads use the full 10-step waterfall.
-func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, input StructuredBankStatement, fileHash string, pgxPool *pgxpool.Pool) (map[string]interface{}, error) {
+func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, input StructuredBankStatement, fileHash string, pgxPool *pgxpool.Pool, requestedIP string) (map[string]interface{}, error) {
 	var entityID, accountName, bankName string
 	err := db.QueryRowContext(ctx, `
 		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
@@ -299,9 +299,9 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO cimplrcorpsaas.auditactionbankstatement (
-			bankstatementid, actiontype, processing_status, requested_by, requested_at
-		) VALUES ($1, $2, $3, $4, $5)
-	`, bankStatementID, "CREATE", constants.StatusPendingApproval, requestedBy, time.Now().UTC())
+			bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip
+		) VALUES ($1, $2, $3, $4, $5, $6)
+	`, bankStatementID, "CREATE", constants.StatusPendingApproval, requestedBy, time.Now().UTC(), nullIfBlank(requestedIP))
 	if err != nil {
 		return nil, fmt.Errorf(constants.ErrFailedToInsertAuditAction, err)
 	}

@@ -77,9 +77,10 @@ func recordBankBalanceMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID s
 			processing_status,
 			reason,
 			requested_by,
-			requested_at
-		) VALUES ($1, 'UPLOAD_FILE', 'APPROVED', $2, $3, $4)
-	`, parentID, reason, payload.UploadedBy, payload.UploadedAt)
+			requested_at,
+			requested_ip
+		) VALUES ($1, 'UPLOAD_FILE', 'APPROVED', $2, $3, $4, $5)
+	`, parentID, reason, payload.UploadedBy, payload.UploadedAt, nullIfEmpty(payload.RequestedIP))
 	return err
 }
 
