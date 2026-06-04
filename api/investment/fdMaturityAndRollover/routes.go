@@ -42,16 +42,6 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 		mid(http.HandlerFunc(GetFDMaturitySummary(pool))))
 	mux.Handle("/investment/fd/closure/maturity-summary",
 		mid(http.HandlerFunc(CimplrMaturitySummary(pool))))
-	mux.Handle("/investment/fd/closure/maturity-summary/files/list",
-		mid(http.HandlerFunc(CimplrMaturitySummaryFilesList(pool))))
-	mux.Handle("/investment/fd/closure/maturity-summary/files/download",
-		mid(http.HandlerFunc(CimplrMaturitySummaryFilesDownload(pool))))
-	mux.Handle("/investment/fd/closure/maturity-summary/files/download-bulk",
-		mid(http.HandlerFunc(CimplrMaturitySummaryFilesDownloadBulk(pool))))
-	mux.Handle("/investment/fd/closure/maturity-summary/files/upload",
-		mid(http.HandlerFunc(CimplrMaturitySummaryFilesUpload(pool))))
-	mux.Handle("/investment/fd/closure/maturity-summary/files/audit",
-		mid(http.HandlerFunc(CimplrMaturitySummaryFilesAudit(pool))))
 
 	mux.Handle("/investment/fd/closure/audit",
 		mid(http.HandlerFunc(GetClosureAuditHandler(pool))))
