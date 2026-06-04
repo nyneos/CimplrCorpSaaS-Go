@@ -310,6 +310,8 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var validInputs []BankRateCardInput
+		seenKeysInFile := make(map[string]int)
+
 		for ri, row := range rows {
 			if len(row) == 0 {
 				continue
@@ -424,6 +426,26 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// uniqueness pre-check
+			
+			// in-file duplicate check
+			minAmtVal, maxAmtVal := "null", "null"
+			if input.MinAmount != nil {
+				minAmtVal = fmt.Sprintf("%v", *input.MinAmount)
+			}
+			if input.MaxAmount != nil {
+				maxAmtVal = fmt.Sprintf("%v", *input.MaxAmount)
+			}
+			efToVal := "null"
+			if input.EffectiveTo != nil {
+				efToVal = *input.EffectiveTo
+			}
+			key := fmt.Sprintf("%s|%s|%d|%d|%s|%s|%s|%s", input.BankCode, input.DepositType, input.MinTenorDays, input.MaxTenorDays, minAmtVal, maxAmtVal, input.EffectiveFrom, efToVal)
+			if prevRow, dup := seenKeysInFile[key]; dup {
+				sendFail(ri+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching unique keys)", ri+2, prevRow))
+				return
+			}
+			seenKeysInFile[key] = ri + 2
+			
 			exists, err := rateCardExists(ctx, pgxPool, input)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())

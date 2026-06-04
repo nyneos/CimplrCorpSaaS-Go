@@ -667,6 +667,10 @@ func dispatchForEvent(
 				if err != nil {
 					renderedSubject = tw.tpl.subject
 				}
+				if strings.EqualFold(tw.tpl.channel, "PUSH") {
+					renderedSubject = fallbackPushSubject(renderedSubject)
+					renderedBody = fallbackPushBody(renderedSubject, renderedBody)
+				}
 
 				// final priority = channel_priority * 10 + recipient_priority
 				// lower value = higher urgency; defaults: 3*10+3 = 33
@@ -1540,6 +1544,8 @@ func insertInAppNotification(
 			// Outbox row was skipped (ON CONFLICT) and already delivered — skip inbox too.
 			continue
 		}
+		renderedSubject := fallbackPushSubject(r.renderedSubject)
+		renderedBody := fallbackPushBody(renderedSubject, r.renderedBody)
 		inAppRows = append(inAppRows, inAppRow{
 			outboxID:        outboxID,
 			correlationID:   r.correlationID,
@@ -1547,8 +1553,8 @@ func insertInAppNotification(
 			auditID:         r.auditID,
 			recipientUserID: r.recipientUserID,
 			recipientName:   safeUTF8(r.recipientName),
-			renderedSubject: safeUTF8(r.renderedSubject),
-			renderedBody:    safeUTF8(r.renderedBody),
+			renderedSubject: renderedSubject,
+			renderedBody:    renderedBody,
 			priorityLevel:   r.priorityLevel,
 		})
 	}
@@ -1573,8 +1579,8 @@ func insertInAppNotification(
 			ir.auditID,
 			ir.recipientUserID,
 			nullStr(ir.recipientName),
-			nullStr(ir.renderedSubject), // → subject
-			nullStr(ir.renderedBody),    // → body
+			ir.renderedSubject, // → subject
+			ir.renderedBody,    // → body; never NULL because the DB column is NOT NULL
 			ir.priorityLevel,
 		)
 		pos += 9
@@ -1596,4 +1602,24 @@ func insertInAppNotification(
 	api.LogInfo("[NOTIF] in_app_notification: inserted %d PUSH inbox rows (correlation=%s)",
 		len(inAppRows), inAppRows[0].correlationID)
 	return nil
+}
+
+func fallbackPushSubject(subject string) string {
+	subject = strings.TrimSpace(safeUTF8(subject))
+	if subject != "" {
+		return subject
+	}
+	return "Notification"
+}
+
+func fallbackPushBody(subject, body string) string {
+	body = strings.TrimSpace(safeUTF8(body))
+	if body != "" {
+		return body
+	}
+	subject = strings.TrimSpace(safeUTF8(subject))
+	if subject != "" {
+		return subject
+	}
+	return "You have a new notification. Please review it in the system."
 }

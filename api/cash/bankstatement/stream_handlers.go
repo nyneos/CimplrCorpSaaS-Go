@@ -151,11 +151,11 @@ func respondWithError(w http.ResponseWriter, err error, userMsg string, code int
 	if userMsg == "" && err != nil {
 		userMsg = userFriendlyUploadError(err)
 		if userMsg == "" {
-			userMsg = "Internal server error"
+			userMsg = constants.ErrInternalServer
 		}
 	}
 	if userMsg == "" {
-		userMsg = "Internal server error"
+		userMsg = constants.ErrInternalServer
 	}
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(code)
