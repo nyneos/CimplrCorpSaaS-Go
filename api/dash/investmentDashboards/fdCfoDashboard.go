@@ -1,32 +1,3 @@
-// Package investmentdashboards - FD CFO Dashboard
-//
-// POST /dash/investment/fd/cfo-dashboard
-//
-// Returns a single aggregated JSON payload covering every KPI, chart, governance
-// and FD-list panel required by the CFO's Fixed Deposit dashboard.
-// All sub-computations run concurrently via sync.WaitGroup + goroutines so
-// latency is bounded by the single slowest query, not their sum.
-//
-// Request:
-//
-//	{
-//	  "user_id":   "...",          // optional - for session scoping
-//	  "entity_id": "",             // "" = all entities
-//	  "currency":  "INR",         // default INR
-//	  "period":    "MTD"          // MTD | QTD | YTD - controls interest roll-up
-//	}
-//
-// Response shape mirrors the spec exactly:
-//
-//	{
-//	  "success": true,
-//	  "generated_at": "<RFC3339>",
-//	  "filters": { "entity_id":"", "currency":"INR", "period":"MTD" },
-//	  "kpis": { total_exposure, bank_concentration, maturity, interest, exceptions },
-//	  "charts": { maturity_ladder, interest_trend, rate_distribution, bank_concentration },
-//	  "governance": { approvals, closing_status },
-//	  "fd_list": [ ... ]
-//	}
 package investmentdashboards
 
 import (
@@ -956,7 +927,6 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				            FROM investment.fd_interest_receipt ir
 				            WHERE ir.is_deleted=false
 				              AND ir.receipt_status  = 'POSTED'
-				              AND ir.reconcile_status = 'MATCHED'
 				              AND ($1::text='' OR ir.entity_id=$1)
 				              AND ($5::text='' OR ir.bank_id=$5)
 				                ),0) AS received
