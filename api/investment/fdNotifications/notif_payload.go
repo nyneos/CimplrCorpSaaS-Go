@@ -265,9 +265,9 @@ func fetchBookingRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 			-- latest audit snapshot
 			COALESCE(la.processing_status,'')                                   AS processing_status,
 			COALESCE(la.requested_by,'')                                        AS requested_by,
-			COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
+			COALESCE(TO_CHAR((la.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
 			COALESCE(la.checker_by,'')                                          AS checker_by,
-			COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
+			COALESCE(TO_CHAR((la.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
 			COALESCE(la.checker_comment,'')                                     AS checker_comment,
 			COALESCE(la.reason,'')                                              AS reason
 		FROM investment.fd_booking_request b
@@ -409,9 +409,9 @@ func fetchConfirmationRows(ctx context.Context, pool *pgxpool.Pool, ids []string
 			-- latest audit
 			COALESCE(la.processing_status,'')                                   AS processing_status,
 			COALESCE(la.requested_by,'')                                        AS requested_by,
-			COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
+			COALESCE(TO_CHAR((la.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
 			COALESCE(la.checker_by,'')                                          AS checker_by,
-			COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at
+			COALESCE(TO_CHAR((la.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at
 		FROM investment.fd_confirmation c
 		LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 		LEFT JOIN LATERAL (
@@ -554,9 +554,9 @@ func fetchFDMasterRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([
 			-- latest audit
 			COALESCE(la.processing_status,'')                                   AS processing_status,
 			COALESCE(la.requested_by,'')                                        AS requested_by,
-			COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
+			COALESCE(TO_CHAR((la.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
 			COALESCE(la.checker_by,'')                                          AS checker_by,
-			COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
+			COALESCE(TO_CHAR((la.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
 			COALESCE(la.action_type,'')                                         AS action_type
 		FROM investment.fd_master m
 		LEFT JOIN LATERAL (
@@ -701,9 +701,9 @@ func fetchClosureRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 			-- latest audit
 			COALESCE(la.processing_status,'')                                   AS processing_status,
 			COALESCE(la.requested_by,'')                                        AS requested_by,
-			COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
+			COALESCE(TO_CHAR((la.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
 			COALESCE(la.checker_by,'')                                          AS checker_by,
-			COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
+			COALESCE(TO_CHAR((la.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
 			COALESCE(la.action_type,'')                                         AS action_type
 		FROM investment.fd_closure_request cr
 		LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id AND COALESCE(m.is_deleted,false)=false
@@ -961,9 +961,9 @@ func fetchReceiptRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 			COALESCE(la.processing_status,'')                                   AS processing_status,
 			COALESCE(la.action_type,'')                                         AS action_type,
 			COALESCE(la.requested_by,'')                                        AS requested_by,
-			COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
+			COALESCE(TO_CHAR((la.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
 			COALESCE(la.checker_by,'')                                          AS checker_by,
-			COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
+			COALESCE(TO_CHAR((la.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
 			COALESCE(la.checker_comment,'')                                     AS checker_comment
 		FROM investment.fd_interest_receipt r
 		LEFT JOIN LATERAL (
@@ -1076,9 +1076,9 @@ func fetchCimplrClosureInitiateRows(ctx context.Context, pool *pgxpool.Pool, ids
 			-- latest audit
 			COALESCE(la.processing_status,'')                                   AS processing_status,
 			COALESCE(la.requested_by,'')                                        AS requested_by,
-			COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')       AS requested_at,
+			COALESCE(TO_CHAR((la.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')       AS requested_at,
 			COALESCE(la.checker_by,'')                                          AS checker_by,
-			COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS checker_at,
+			COALESCE(TO_CHAR((la.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')         AS checker_at,
 			COALESCE(la.action_type,'')                                         AS action_type
 		FROM cimplr.fd_closure_initiate ci
 		LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id AND COALESCE(m.is_deleted,false)=false
@@ -1144,9 +1144,9 @@ func fetchCimplrClosureConfirmRows(ctx context.Context, pool *pgxpool.Pool, ids 
 			-- latest audit
 			COALESCE(la.processing_status,'')                                   AS processing_status,
 			COALESCE(la.requested_by,'')                                        AS requested_by,
-			COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')       AS requested_at,
+			COALESCE(TO_CHAR((la.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')       AS requested_at,
 			COALESCE(la.checker_by,'')                                          AS checker_by,
-			COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS checker_at,
+			COALESCE(TO_CHAR((la.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')         AS checker_at,
 			COALESCE(la.action_type,'')                                         AS action_type
 		FROM cimplr.fd_closure_confirm cc
 		LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id AND COALESCE(m.is_deleted,false)=false

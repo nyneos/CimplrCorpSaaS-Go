@@ -442,9 +442,9 @@ func GetCorporateActionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
 				COALESCE(l.requested_by,'') AS audit_requested_by,
-				TO_CHAR(NULLIF(l.requested_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR((NULLIF(l.requested_at::text, '')::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(NULLIF(l.checker_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR((NULLIF(l.checker_at::text, '')::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason
 			FROM investment.accounting_corporate_action ca

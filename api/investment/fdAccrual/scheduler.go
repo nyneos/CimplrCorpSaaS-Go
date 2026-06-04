@@ -1633,11 +1633,11 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT
 				config_id,
 				MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by,
-				MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+				MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
 				MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-				MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+				MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
 				MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-				MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+				MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
 			FROM investment.fd_accrual_schedule_config_audit
 			GROUP BY config_id
 		)
@@ -1669,9 +1669,9 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			COALESCE(l.processing_status,'')            AS processing_status,
 			COALESCE(l.processing_status,'')            AS approval_status,
 			COALESCE(l.requested_by,'')                 AS requested_by,
-			COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+			COALESCE(TO_CHAR((l.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
 			COALESCE(l.checker_by,'')                   AS checker_by,
-			COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+			COALESCE(TO_CHAR((l.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
 			COALESCE(l.checker_comment,'')              AS checker_comment,
 			COALESCE(l.reason,'')                       AS reason,
 			COALESCE(h.created_by,'')                   AS created_by,
@@ -1796,11 +1796,11 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					config_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
 				FROM investment.fd_accrual_schedule_config_audit
 				WHERE config_id = $1
 				GROUP BY config_id

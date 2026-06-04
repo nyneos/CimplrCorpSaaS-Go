@@ -85,9 +85,9 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.processing_status,
 				COALESCE(a.reason,'') AS reason,
 				COALESCE(a.requested_by,'') AS requested_by,
-				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				COALESCE(a.checker_by,'') AS checker_by,
-				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment
 			FROM investment.auditactionamc a
 			LEFT JOIN investment.masteramc m ON m.amc_id = a.amc_id
@@ -105,9 +105,9 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.processing_status,
 				COALESCE(a.reason,'') AS reason,
 				COALESCE(a.requested_by,'') AS requested_by,
-				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				COALESCE(a.checker_by,'') AS checker_by,
-				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment
 			FROM investment.auditactionscheme a
 			LEFT JOIN investment.masterscheme m ON m.scheme_id = a.scheme_id
@@ -125,9 +125,9 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.processing_status,
 				COALESCE(a.reason,'') AS reason,
 				COALESCE(a.requested_by,'') AS requested_by,
-				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				COALESCE(a.checker_by,'') AS checker_by,
-				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment
 			FROM investment.auditactiondp a
 			LEFT JOIN investment.masterdepositoryparticipant m ON m.dp_id = a.dp_id
@@ -145,9 +145,9 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.processing_status,
 				COALESCE(a.reason,'') AS reason,
 				COALESCE(a.requested_by,'') AS requested_by,
-				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				COALESCE(a.checker_by,'') AS checker_by,
-				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment
 			FROM investment.auditactiondemat a
 			LEFT JOIN investment.masterdemataccount m ON m.demat_id = a.demat_id
@@ -165,9 +165,9 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.processing_status,
 				COALESCE(a.reason,'') AS reason,
 				COALESCE(a.requested_by,'') AS requested_by,
-				TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				COALESCE(a.checker_by,'') AS checker_by,
-				TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment
 			FROM investment.auditactionfolio a
 			LEFT JOIN investment.masterfolio m ON m.folio_id = a.folio_id
@@ -198,9 +198,9 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.processing_status,
 					COALESCE(a.reason,'') AS reason,
 					COALESCE(a.requested_by,'') AS requested_by,
-					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+					TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
-					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+					TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 					COALESCE(a.checker_comment,'') AS checker_comment
 				FROM investment.auditactionamc a
 				LEFT JOIN investment.masteramc m ON m.amc_id = a.amc_id
@@ -218,9 +218,9 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.processing_status,
 					COALESCE(a.reason,'') AS reason,
 					COALESCE(a.requested_by,'') AS requested_by,
-					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+					TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
-					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+					TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 					COALESCE(a.checker_comment,'') AS checker_comment
 				FROM investment.auditactionscheme a
 				LEFT JOIN investment.masterscheme m ON m.scheme_id = a.scheme_id
@@ -238,9 +238,9 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.processing_status,
 					COALESCE(a.reason,'') AS reason,
 					COALESCE(a.requested_by,'') AS requested_by,
-					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+					TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
-					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+					TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 					COALESCE(a.checker_comment,'') AS checker_comment
 				FROM investment.auditactiondp a
 				LEFT JOIN investment.masterdepositoryparticipant m ON m.dp_id = a.dp_id
@@ -258,9 +258,9 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.processing_status,
 					COALESCE(a.reason,'') AS reason,
 					COALESCE(a.requested_by,'') AS requested_by,
-					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+					TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
-					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+					TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 					COALESCE(a.checker_comment,'') AS checker_comment
 				FROM investment.auditactiondemat a
 				LEFT JOIN investment.masterdemataccount m ON m.demat_id = a.demat_id
@@ -278,9 +278,9 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.processing_status,
 					COALESCE(a.reason,'') AS reason,
 					COALESCE(a.requested_by,'') AS requested_by,
-					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+					TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
-					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+					TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 					COALESCE(a.checker_comment,'') AS checker_comment
 				FROM investment.auditactionfolio a
 				LEFT JOIN investment.masterfolio m ON m.folio_id = a.folio_id
@@ -298,9 +298,9 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.processing_status,
 					COALESCE(a.reason,'') AS reason,
 					COALESCE(a.requested_by,'') AS requested_by,
-					TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+					TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
-					TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+					TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 					COALESCE(a.checker_comment,'') AS checker_comment
 				FROM investment.additional_file_audit a
 				LEFT JOIN investment.onboard_batch_files f

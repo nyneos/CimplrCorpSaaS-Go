@@ -2275,7 +2275,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					confirmation_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS created_at
 				FROM investment.fd_audit_confirmation
 				GROUP BY confirmation_id
 			)
@@ -2359,9 +2359,9 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.action_type,'')                                             AS action_type,
 				COALESCE(l.processing_status,'')                                       AS processing_status,
 				COALESCE(l.requested_by,'')                                            AS requested_by,
-				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')          AS requested_at,
+				COALESCE(TO_CHAR((l.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')          AS requested_at,
 				COALESCE(l.checker_by,'')                                              AS checker_by,
-				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')            AS checker_at,
+				COALESCE(TO_CHAR((l.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')            AS checker_at,
 				COALESCE(l.checker_comment,'')                                         AS checker_comment,
 				COALESCE(l.reason,'')                                                  AS reason,
 				COALESCE(l.old_confirmation_status,'')                                 AS old_confirmation_status,
@@ -2454,9 +2454,9 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					a.audit_id::text, a.confirmation_id, a.action_type, a.processing_status,
 					COALESCE(a.requested_by,'') AS requested_by,
-					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+					COALESCE(TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
-					COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+					COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
 					COALESCE(a.checker_comment,'') AS checker_comment,
 					COALESCE(a.reason,'') AS reason,
 					COALESCE(a.old_confirmation_status,'') AS old_confirmation_status,
@@ -2487,9 +2487,9 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					a.audit_id::text, a.confirmation_id, a.action_type, a.processing_status,
 					COALESCE(a.requested_by,'') AS requested_by,
-					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+					COALESCE(TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
-					COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+					COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
 					COALESCE(a.checker_comment,'') AS checker_comment,
 					COALESCE(a.reason,'') AS reason,
 					COALESCE(a.old_confirmation_status,'') AS old_confirmation_status,
@@ -2930,9 +2930,9 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.action_type,
 				a.processing_status,
 				COALESCE(a.requested_by,'')                                        AS requested_by,
-				COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
+				COALESCE(TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
 				COALESCE(a.checker_by,'')                                          AS checker_by,
-				COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
+				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
 				COALESCE(a.checker_comment,'')                                     AS checker_comment,
 				COALESCE(a.reason,'')                                                      AS reason,
 				COALESCE(a.old_confirmation_status,'')                                     AS old_confirmation_status,
@@ -3286,7 +3286,7 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(cf.confirmation_status,'')                          AS existing_confirmation_status,
 				-- who sent to bank + when
 				COALESCE(aud.requested_by,'')                                AS sent_to_bank_by,
-				COALESCE(TO_CHAR(aud.requested_at,'YYYY-MM-DD HH24:MI'),'') AS sent_to_bank_at
+				COALESCE(TO_CHAR((aud.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI'),'') AS sent_to_bank_at
 			FROM investment.fd_booking_request br
 			LEFT JOIN investment.fd_bank_config_master bc ON bc.config_id = br.bank_config_id
 			LEFT JOIN investment.fd_bank_rate_card_master rc
