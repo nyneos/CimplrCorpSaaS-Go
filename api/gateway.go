@@ -184,9 +184,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	session, mfaPending, err := authService.Login(req.Username, req.Password, clientIP)
 	if err != nil {
 		logger.LogError("Login failed for %s from %s: %v", req.Username, clientIP, err)
-		w.Header().Set(headerContentType, contentTypeJSON)
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		RespondWithError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
@@ -237,7 +235,8 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	err := authService.Logout(userID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		logger.LogError("Logout failed for userID %s: %v", userID, err)
+		RespondWithError(w, http.StatusUnauthorized, "Logout failed")
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -804,11 +803,12 @@ func StartGateway(port string, pathPrefix string) {
 		latency := time.Since(start)
 
 		if err != nil {
+			logger.LogError("Health check DB ping failed: %v", err)
 			w.WriteHeader(http.StatusServiceUnavailable)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"status":  "unhealthy",
 				"db":      "disconnected",
-				"error":   err.Error(),
+				"error":   "Database unavailable",
 				"latency": latency.String(),
 			})
 			return
