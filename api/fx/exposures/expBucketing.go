@@ -57,9 +57,9 @@ var allowedExposureBucketingCols = map[string]bool{
 	"old_month3": true, "old_month4": true, "old_month4to6": true, "old_month6plus": true,
 }
 
-// allowedHedgingProposalCols is the set of columns that callers may update on hedging_proposal.
-var allowedHedgingProposalCols = map[string]bool{
-	"status": true, "status_hedging": true, "updated_by": true, "updated_at": true, "comments": true,
+// allowedHedgingProposalCols maps client field names to safe hedging_proposal columns.
+var allowedHedgingProposalCols = map[string]string{
+	"status": "status", "status_hedging": "status_hedging", "updated_by": "updated_by", "updated_at": "updated_at", "comments": "comments",
 }
 
 // filterColumns returns a copy of fields containing only keys present in allowed.
@@ -71,6 +71,18 @@ func filterColumns(fields map[string]interface{}, allowed map[string]bool) (map[
 			return nil, fmt.Errorf("column %q is not permitted for update", k)
 		}
 		out[k] = v
+	}
+	return out, nil
+}
+
+func mapColumns(fields map[string]interface{}, allowed map[string]string) (map[string]interface{}, error) {
+	out := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		col, ok := allowed[k]
+		if !ok {
+			return nil, fmt.Errorf("column %q is not permitted for update", k)
+		}
+		out[col] = v
 	}
 	return out, nil
 }
@@ -270,7 +282,7 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 
 		// Update hedging_proposal
 		if len(req.HedgingFields) > 0 {
-			safeHedgingFields, err := filterColumns(req.HedgingFields, allowedHedgingProposalCols)
+			safeHedgingFields, err := mapColumns(req.HedgingFields, allowedHedgingProposalCols)
 			if err != nil {
 				respondWithError(w, http.StatusBadRequest, "hedgingFields: "+err.Error())
 				return

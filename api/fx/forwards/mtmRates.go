@@ -266,12 +266,14 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 			sheet := xl.GetSheetName(0)
 			xRows, err := xl.GetRows(sheet)
 			if err != nil || len(xRows) < 1 {
+				xl.Close()
 				results = append(results, map[string]interface{}{
 					"filename":           fileHeader.Filename,
 					constants.ValueError: "No data in Excel file",
 				})
 				continue
 			}
+			xl.Close()
 			headers := xRows[0]
 			for _, row := range xRows[1:] {
 				obj := map[string]interface{}{}
