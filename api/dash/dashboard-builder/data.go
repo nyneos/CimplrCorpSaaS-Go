@@ -195,7 +195,7 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			COALESCE(fc.tenor_years,                        0)  AS tenor_years,
 			fc.actual_start_date,
 			fc.actual_maturity_date
-		FROM investment.fd_booking_confirmation fc
+		FROM investment.fd_confirmation fc
 		LEFT JOIN investment.fd_booking_request br ON br.booking_id = fc.booking_id
 		WHERE COALESCE(fc.is_deleted, false) = false %s
 		ORDER BY fc.created_at DESC
