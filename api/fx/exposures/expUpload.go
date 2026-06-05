@@ -2166,7 +2166,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 						ParentID:     exposureHeaderID,
 						ActionType:   "CREATE",
 						Status:       constants.StatusPendingApproval,
-						Reason:       "Uploaded file: " + filename,
+						Reason:       "",
 						RequestedBy:  uploadedBy,
 						OldValues:    nil,
 						NewValues:    newValues,
