@@ -513,7 +513,7 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 		if r.URL.Path == "/events" {
 			// SSE endpoints don't need wrapped response writers
 			// Just log the connection and pass through
-			fmt.Printf("[GATEWAY] Incoming SSE connection request from %s query=%s\n", r.RemoteAddr, r.URL.RawQuery)
+			logger.LogInfoCtx(r.Context(), "[GATEWAY] Incoming SSE connection from %s query=%s", r.RemoteAddr, r.URL.RawQuery)
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -551,8 +551,8 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 		duration := time.Since(start)
 		clientIP := extractClientIP(r)
 		userAgent := r.Header.Get("User-Agent")
-		fmt.Printf(
-			"[REQ] %s %s | Status: %d | IP: %s | UA: %s | Duration: %v | Body: %s | RespSize: %d\n",
+		logger.LogInfoCtx(r.Context(),
+			"[REQ] %s %s status=%d ip=%s ua=%s duration=%v body=%s resp_size=%d",
 			r.Method, r.URL.Path, rw.statusCode, clientIP, userAgent, duration, body, rw.body.Len(),
 		)
 	})
