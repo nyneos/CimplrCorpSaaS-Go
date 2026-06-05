@@ -396,6 +396,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 				lineFields[k] = v
 			}
 		}
+		delete(headerFields, "approval_status")
 		if val, ok := headerFields["document_date"]; ok {
 			headerFields["value_date"] = val
 			delete(headerFields, "document_date")
@@ -411,7 +412,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 				values = append(values, v)
 				i++
 			}
-			setParts = append(setParts, "approval_status = 'Pending'")
+			setParts = append(setParts, fmt.Sprintf("approval_status = '%s'", constants.StatusPendingEditApproval))
 			values = append(values, exposureHeaderID)
 
 			query := fmt.Sprintf(
@@ -421,6 +422,16 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			)
 			if _, err := db.Exec(query, values...); err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Header update failed: "+err.Error())
+				return
+			}
+		}
+		if len(headerFields) == 0 && len(lineFields) > 0 {
+			if _, err := db.Exec(
+				`UPDATE exposure_headers SET approval_status = $1 WHERE exposure_header_id = $2`,
+				constants.StatusPendingEditApproval,
+				exposureHeaderID,
+			); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Header status update failed: "+err.Error())
 				return
 			}
 		}
