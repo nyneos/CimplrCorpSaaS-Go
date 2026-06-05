@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -72,6 +73,55 @@ func cancelRollAmountColumn(requestType string) string {
 		return "amount_rolled_over"
 	}
 	return "amount_cancelled"
+}
+
+func isUUIDValue(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 36 {
+		return false
+	}
+	for idx, char := range value {
+		if idx == 8 || idx == 13 || idx == 18 || idx == 23 {
+			if char != '-' {
+				return false
+			}
+			continue
+		}
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func resolveForwardBookingID(ctx context.Context, db *sql.DB, bookingOrReferenceID string, buNames []string) (string, error) {
+	bookingOrReferenceID = strings.TrimSpace(bookingOrReferenceID)
+	if bookingOrReferenceID == "" {
+		return "", sql.ErrNoRows
+	}
+	if isUUIDValue(bookingOrReferenceID) {
+		return bookingOrReferenceID, nil
+	}
+
+	var systemTransactionID string
+	if len(buNames) > 0 {
+		err := db.QueryRowContext(ctx, `
+			SELECT system_transaction_id::text
+			FROM forward_bookings
+			WHERE internal_reference_id = $1
+			  AND entity_level_0 = ANY($2)
+			LIMIT 1
+		`, bookingOrReferenceID, pq.Array(buNames)).Scan(&systemTransactionID)
+		return systemTransactionID, err
+	}
+
+	err := db.QueryRowContext(ctx, `
+		SELECT system_transaction_id::text
+		FROM forward_bookings
+		WHERE internal_reference_id = $1
+		LIMIT 1
+	`, bookingOrReferenceID).Scan(&systemTransactionID)
+	return systemTransactionID, err
 }
 
 func cancelRollRequestLabel(requestType string) string {
@@ -1099,21 +1149,31 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "user_id, booking_amounts (map), cancellation_date, and cancellation_rate are required")
 			return
 		}
+		buNames, _ := r.Context().Value(api.BusinessUnitsKey).([]string)
 		// Save cancellation request as pending
-		for bid, amtCancelled := range req.BookingAmounts {
-			_, err := db.Exec(`INSERT INTO forward_cancellations (booking_id, amount_cancelled, cancellation_date, cancellation_rate, realized_gain_loss, cancellation_reason, status) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-				bid, amtCancelled, req.CancellationDate, req.CancellationRate, req.RealizedGainLoss, req.CancellationReason, "Pending")
+		for bookingOrReferenceID, amtCancelled := range req.BookingAmounts {
+			bookingID, err := resolveForwardBookingID(r.Context(), db, bookingOrReferenceID, buNames)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Failed to save cancellation request")
+				if errors.Is(err, sql.ErrNoRows) {
+					respondWithError(w, http.StatusBadRequest, fmt.Sprintf("Forward booking not found for %s", bookingOrReferenceID))
+					return
+				}
+				respondWithError(w, http.StatusInternalServerError, "Failed to validate forward booking: "+err.Error())
+				return
+			}
+			_, err = db.Exec(`INSERT INTO forward_cancellations (booking_id, amount_cancelled, cancellation_date, cancellation_rate, realized_gain_loss, cancellation_reason, status) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				bookingID, amtCancelled, req.CancellationDate, req.CancellationRate, req.RealizedGainLoss, req.CancellationReason, "Pending")
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to save cancellation request: "+err.Error())
 				return
 			}
 			// Set booking status to Pending Cancellation
-			_, err = db.Exec(`UPDATE forward_bookings SET status = 'Pending Cancellation', processing_status = 'Pending' WHERE system_transaction_id = $1`, bid)
+			_, err = db.Exec(`UPDATE forward_bookings SET status = 'Pending Cancellation', processing_status = 'Pending' WHERE system_transaction_id = $1`, bookingID)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Failed to update booking status to pending cancellation")
 				return
 			}
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: req.CancellationReason, RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: map[string]interface{}{"amount_cancelled": amtCancelled, "cancellation_date": req.CancellationDate, "cancellation_rate": req.CancellationRate, "realized_gain_loss": req.RealizedGainLoss}})
+			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bookingID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: req.CancellationReason, RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: map[string]interface{}{"amount_cancelled": amtCancelled, "cancellation_date": req.CancellationDate, "cancellation_rate": req.CancellationRate, "realized_gain_loss": req.RealizedGainLoss}})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
