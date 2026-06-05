@@ -970,7 +970,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					TransactionType: "FD_BOOKING_DELETE", RecordID: bID,
 					RecordTable: constants.QuerryBookingRequest, AuditTable: constants.QuerryAuditBookingRequest,
 					AuditIDColumn: "booking_id", ActionType: "DELETE",
-					Amount: 0, SubmittedBy: uID, SubmittedByEmail: uEmail,
+					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
 				})
 				if err != nil {
 					api.LogError("[FDBooking] CreateInstance(DELETE) failed for booking %s: %v", bID, err)

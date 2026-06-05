@@ -565,9 +565,13 @@ func dispatchForEvent(
 	// sent successfully, the partial misses are admin-config issues — not actionable
 	// noise for the end user who triggered the event.
 	if len(work) == 0 {
-		for _, w := range deferredWarnings {
-			PushSystemNotification(actor, w)
-		}
+		// Commented out: suppress system push notifications when no work was dispatched
+		// (e.g. events with no approved templates produce "nothing to dispatch" — the
+		// user was seeing extra push notifications saying nothing was triggered).
+		// for _, w := range deferredWarnings {
+		// 	PushSystemNotification(actor, w)
+		// }
+		_ = deferredWarnings // suppress unused variable warning
 	} else if len(deferredWarnings) > 0 {
 		api.LogInfo("[NOTIF] suppressing %d deferred warning(s) — at least one channel dispatched successfully", len(deferredWarnings))
 	}
@@ -662,6 +666,10 @@ func dispatchForEvent(
 				renderedSubject, err := notificationFunctions.EvaluateTemplate(tw.tpl.subject, localPayload)
 				if err != nil {
 					renderedSubject = tw.tpl.subject
+				}
+				if strings.EqualFold(tw.tpl.channel, "PUSH") {
+					renderedSubject = fallbackPushSubject(renderedSubject)
+					renderedBody = fallbackPushBody(renderedSubject, renderedBody)
 				}
 
 				// final priority = channel_priority * 10 + recipient_priority
@@ -833,26 +841,39 @@ func lookupEvents(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) (
 //	→ any event scoped to any entity in the pool (or global) fires.
 //	→ self-entity match (depth=0) is ranked first, then nearest relatives, then global.
 func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, actorEntity string) ([]resolvedEvent, error) {
-	// Single recursive CTE: PostgreSQL rejects UNION (dedup) between anchor and recursive terms
-	// and can error (42P19) when RECURSIVE is paired with a non-recursive CTE before the working table.
-	// rel_edges is inlined; anchor ∪ recursive uses UNION ALL only.
+	// Two separate unidirectional recursive CTEs replace the previous single bidirectional CTE.
+	//
+	// The old bidirectional approach (UNION ALL of parent→child and child→parent in one CTE)
+	// caused an infinite depth oscillation when an entity had many children: the depth value
+	// cycled 0→1→0→1… staying within ABS(depth)<10 forever, producing millions of rows and
+	// triggering a PostgreSQL statement timeout (SQLSTATE 57014) for large orgs like TACO.
+	//
+	// Fix: split into two unidirectional CTEs that each strictly advance in one direction,
+	// making cycles structurally impossible. UNION (not UNION ALL) in org_pool deduplicates
+	// the combined result. Index idx_cer_child_name on child_entity_name covers the UP pass.
 	q := `
-		WITH RECURSIVE org_pool AS (
-			SELECT mec.entity_name::text AS entity_name, 0 AS depth
-			FROM public.masterentitycash mec
-			WHERE mec.entity_name = $2
-			  AND (mec.is_deleted = false OR mec.is_deleted IS NULL)
-			UNION ALL
-			SELECT rel.to_entity::text AS entity_name, op.depth + rel.step AS depth
-			FROM org_pool op
-			INNER JOIN (
-				SELECT r.parent_entity_name AS from_entity, r.child_entity_name AS to_entity, 1 AS step
-				FROM public.cashentityrelationships r
-				UNION ALL
-				SELECT r.child_entity_name AS from_entity, r.parent_entity_name AS to_entity, -1 AS step
-				FROM public.cashentityrelationships r
-			) rel ON rel.from_entity = op.entity_name
-			WHERE ABS(op.depth) < 10
+		WITH RECURSIVE
+		-- Walk UP the hierarchy: actor entity → its parents → grandparents …
+		ancestors AS (
+			SELECT $2::text AS entity_name
+			UNION
+			SELECT r.parent_entity_name::text
+			FROM ancestors a
+			INNER JOIN public.cashentityrelationships r ON r.child_entity_name = a.entity_name
+		),
+		-- Walk DOWN the hierarchy: actor entity → its children → grandchildren …
+		descendants AS (
+			SELECT $2::text AS entity_name
+			UNION
+			SELECT r.child_entity_name::text
+			FROM descendants d
+			INNER JOIN public.cashentityrelationships r ON r.parent_entity_name = d.entity_name
+		),
+		-- Full org pool = self + all ancestors + all descendants (distinct)
+		org_pool AS (
+			SELECT entity_name FROM ancestors
+			UNION
+			SELECT entity_name FROM descendants
 		)
 		SELECT e.event_id, COALESCE(e.entity_name,'')
 		FROM notification_svc.event e
@@ -874,11 +895,9 @@ func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, 
 			END
 		  )
 		ORDER BY
-			-- Self-entity (depth=0) first, then nearest relatives by absolute depth distance
-			ABS(COALESCE((
-				SELECT op.depth FROM org_pool op
-				WHERE op.entity_name = COALESCE(e.entity_name,'') LIMIT 1
-			), 999)) ASC,
+			-- Self-entity exact match first, then other pool members, then global
+			(COALESCE(e.entity_name,'') = $2) DESC,
+			(COALESCE(e.entity_name,'') <> '') DESC,
 			-- prefer events with an enabled notification_config
 			(EXISTS (SELECT 1 FROM notification_svc.notification_config nc WHERE nc.event_id = e.event_id AND nc.is_enabled = true)) DESC,
 			-- then prefer events with an approved template
@@ -1069,17 +1088,15 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 			-- External email (no users row matched) — always include
 			u.id IS NULL
 			OR
+			-- Explicitly named USER recipients bypass the entity filter.
+			-- The template approver already made the deliberate decision to include
+			-- this specific user — entity mapping is irrelevant at dispatch time.
+			tr.recipient_type = 'USER'
+			OR
 			-- ROLE recipients are org-wide — bypass entity filter so all members
 			-- of the configured role receive notifications regardless of their
 			-- individual entity mapping (e.g. ADMIN / CIMPLR ADMIN are global).
 			tr.recipient_type = 'ROLE'
-			OR
-			-- USER recipients: must be mapped to the event entity or any descendant
-			EXISTS (
-				SELECT 1 FROM user_entity_mappings uem
-				JOIN entity_tree et ON et.eid = uem.entity_id OR et.entity_name = uem.entity_name
-				WHERE uem.user_id = u.id::text
-			)
 		  )
 	`
 	rows, err := pool.Query(ctx, q, templateID, entityName)
@@ -1527,6 +1544,8 @@ func insertInAppNotification(
 			// Outbox row was skipped (ON CONFLICT) and already delivered — skip inbox too.
 			continue
 		}
+		renderedSubject := fallbackPushSubject(r.renderedSubject)
+		renderedBody := fallbackPushBody(renderedSubject, r.renderedBody)
 		inAppRows = append(inAppRows, inAppRow{
 			outboxID:        outboxID,
 			correlationID:   r.correlationID,
@@ -1534,8 +1553,8 @@ func insertInAppNotification(
 			auditID:         r.auditID,
 			recipientUserID: r.recipientUserID,
 			recipientName:   safeUTF8(r.recipientName),
-			renderedSubject: safeUTF8(r.renderedSubject),
-			renderedBody:    safeUTF8(r.renderedBody),
+			renderedSubject: renderedSubject,
+			renderedBody:    renderedBody,
 			priorityLevel:   r.priorityLevel,
 		})
 	}
@@ -1560,8 +1579,8 @@ func insertInAppNotification(
 			ir.auditID,
 			ir.recipientUserID,
 			nullStr(ir.recipientName),
-			nullStr(ir.renderedSubject), // → subject
-			nullStr(ir.renderedBody),    // → body
+			ir.renderedSubject, // → subject
+			ir.renderedBody,    // → body; never NULL because the DB column is NOT NULL
 			ir.priorityLevel,
 		)
 		pos += 9
@@ -1583,4 +1602,24 @@ func insertInAppNotification(
 	api.LogInfo("[NOTIF] in_app_notification: inserted %d PUSH inbox rows (correlation=%s)",
 		len(inAppRows), inAppRows[0].correlationID)
 	return nil
+}
+
+func fallbackPushSubject(subject string) string {
+	subject = strings.TrimSpace(safeUTF8(subject))
+	if subject != "" {
+		return subject
+	}
+	return "Notification"
+}
+
+func fallbackPushBody(subject, body string) string {
+	body = strings.TrimSpace(safeUTF8(body))
+	if body != "" {
+		return body
+	}
+	subject = strings.TrimSpace(safeUTF8(subject))
+	if subject != "" {
+		return subject
+	}
+	return "You have a new notification. Please review it in the system."
 }

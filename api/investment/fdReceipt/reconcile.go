@@ -405,9 +405,9 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 					SystemComment: fmt.Sprintf("TDS reconcile run %s (basis=%s)", runID, matchingBasis),
 				}}
 				tItems := varianceengine.Compare("FD_TDS_RECEIPT", tds.TDSID, tds.EntityID, tveRunID, tRules)
-				varianceengine.PersistVariances(ctx, pool, tItems)                                                              //nolint:errcheck
-				varianceengine.UpdateRecordFlags(ctx, pool, "investment.fd_tds_receipt", "tds_id", tds.TDSID, tveRunID, tItems) //nolint:errcheck
-				varianceengine.AutoResolveCleared(ctx, pool, tds.TDSID, tItems, triggeredBy, triggeredBy)                       //nolint:errcheck
+				varianceengine.PersistVariances(ctx, pool, tItems)                                                             //nolint:errcheck
+				varianceengine.UpdateRecordFlags(ctx, pool, constants.QuerryTDSReceipt, "tds_id", tds.TDSID, tveRunID, tItems) //nolint:errcheck
+				varianceengine.AutoResolveCleared(ctx, pool, tds.TDSID, tItems, triggeredBy, triggeredBy)                      //nolint:errcheck
 
 				// Always create an exception for non-MATCHED TDS rows. Do NOT gate
 				// on tdsResultID != ""; if insertTDSResult failed the exception

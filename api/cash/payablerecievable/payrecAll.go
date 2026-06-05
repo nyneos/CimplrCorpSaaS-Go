@@ -1242,6 +1242,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // BulkApproveTransactions approves latest audit actions for mixed transaction ids (payable or receivable)
 func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		var req struct {
 			UserID         string   `json:"user_id"`
 			TransactionIDs []string `json:"transaction_ids"`
@@ -1442,30 +1443,44 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(payDeleteActionIDs) > 0 {
-			if _, err := tx.Exec(ctx, `
+			payDeleteTag, err := tx.Exec(ctx, `
 				UPDATE tr_payables p
 				SET is_deleted = TRUE,
 					deleted_at = now(),
 					deleted_by = aa.requested_by
 				FROM auditactionpayable aa
 				WHERE aa.action_id = ANY($1)
+				  AND aa.actiontype = 'DELETE'
+				  AND aa.processing_status = 'APPROVED'
 				  AND aa.payable_id = p.payable_id
-			`, payDeleteActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to soft delete payables"})
+			`, payDeleteActionIDs)
+			if err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to soft delete payables: " + err.Error()})
+				return
+			}
+			if payDeleteTag.RowsAffected() != int64(len(payDeleteActionIDs)) {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("soft deleted %d of %d payable delete approvals", payDeleteTag.RowsAffected(), len(payDeleteActionIDs))})
 				return
 			}
 		}
 		if len(recDeleteActionIDs) > 0 {
-			if _, err := tx.Exec(ctx, `
+			recDeleteTag, err := tx.Exec(ctx, `
 				UPDATE tr_receivables r
 				SET is_deleted = TRUE,
 					deleted_at = now(),
 					deleted_by = aa.requested_by
 				FROM auditactionreceivable aa
 				WHERE aa.action_id = ANY($1)
+				  AND aa.actiontype = 'DELETE'
+				  AND aa.processing_status = 'APPROVED'
 				  AND aa.receivable_id = r.receivable_id
-			`, recDeleteActionIDs); err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to soft delete receivables"})
+			`, recDeleteActionIDs)
+			if err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to soft delete receivables: " + err.Error()})
+				return
+			}
+			if recDeleteTag.RowsAffected() != int64(len(recDeleteActionIDs)) {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("soft deleted %d of %d receivable delete approvals", recDeleteTag.RowsAffected(), len(recDeleteActionIDs))})
 				return
 			}
 		}

@@ -41,7 +41,7 @@ func StartCashService(db *sql.DB, port string) {
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
-		
+
 		logger.LogError("failed to connect to pgxpool DB: %v", err)
 		return
 	}
@@ -212,6 +212,7 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/sweep-config-v2/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkApproveSweepConfigurationsV2(pgxPool)))
 	mux.Handle("/cash/sweep-config-v2/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkRejectSweepConfigurationsV2(pgxPool)))
 	mux.Handle("/cash/sweep-config-v2/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkRequestDeleteSweepConfigurationsV2(pgxPool)))
+	mux.Handle("/cash/sweep-config-v2/audit", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepConfigAuditHandler(pgxPool)))
 	mux.Handle("/cash/sweep-planning/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ListSweepPlanningAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/sweep-planning/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.UploadSweepPlanningAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/sweep-planning/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.DownloadSweepPlanningAdditionalFileHandler(pgxPool)))
@@ -231,6 +232,7 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/sweep-initiation/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkApproveSweepInitiations(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkRejectSweepInitiations(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkDeleteSweepInitiations(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/audit", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepInitiationAuditHandler(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ListSweepInitiationAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/additional-files/upload", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.UploadSweepInitiationAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.DownloadSweepInitiationAdditionalFileHandler(pgxPool)))
@@ -334,8 +336,32 @@ func StartCashService(db *sql.DB, port string) {
 	})
 	mux.Handle("/cash/metrics", observability.MetricsHandler(serviceName))
 	logger.LogInfo("Cash Service started on :%s", port)
-	err = http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
+	err = http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, cashJSONActionResponses(mux)))
 	if err != nil {
 		logger.LogError("Cash Service failed: %v", err)
 	}
+}
+
+func cashJSONActionResponses(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isCashJSONActionRoute(r.URL.Path) {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isCashJSONActionRoute(path string) bool {
+	if !strings.HasPrefix(path, "/cash/") {
+		return false
+	}
+
+	for _, segment := range strings.Split(strings.Trim(path, "/"), "/") {
+		if strings.Contains(segment, "audit") ||
+			strings.Contains(segment, "approve") ||
+			strings.Contains(segment, "delete") {
+			return true
+		}
+	}
+	return false
 }

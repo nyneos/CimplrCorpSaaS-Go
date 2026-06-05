@@ -192,6 +192,8 @@ func StartFXService(db *sql.DB, port string) {
 		mux.Handle("/fx/forwards/create-forward-rollover", middlewares.PreValidationMiddleware(pgxPool)(forwards.RolloverForwardBooking(db)))
 		mux.Handle("/fx/forwards/pending-cancellations", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetPendingCancellations(db)))
 		mux.Handle("/fx/forwards/pending-rollovers", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetPendingRollovers(db)))
+		mux.Handle("/fx/forwards/cancel-roll/all", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetAllCancellationRollovers(db)))
+		mux.Handle("/fx/forwards/cancel-roll/action", middlewares.PreValidationMiddleware(pgxPool)(forwards.CancellationRolloverAction(db)))
 		// Checker (approval) routes
 		mux.Handle("/fx/forwards/cancellation-status-request", middlewares.PreValidationMiddleware(pgxPool)(forwards.CancellationStatusRequest(db)))
 		mux.Handle("/fx/forwards/rollover-status-request", middlewares.PreValidationMiddleware(pgxPool)(forwards.RolloverStatusRequest(db)))

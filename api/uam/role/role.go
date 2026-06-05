@@ -30,7 +30,7 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 // 500 message to the client so DB internals are never exposed.
 func respondWithInternalError(w http.ResponseWriter, err error) {
 	log.Println("[ERROR] role:", err)
-	respondWithError(w, http.StatusInternalServerError, "Internal server error")
+	respondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 }
 
 // Handler: Create role

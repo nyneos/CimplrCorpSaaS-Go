@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"CimplrCorpSaas/api/approvalengine"
 )
 
 // reconcileResultDetail mirrors one row from /reconcile/results for the linked result_id.
@@ -106,6 +107,24 @@ func GetExceptionDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		checkerApproved := hasVarianceCheckerApproval(ctx, pool, req.ExceptionID)
 
+		var approvalWorkflow *approvalengine.RichInstanceDetail
+		var instanceID string
+		_ = pool.QueryRow(ctx, `
+			SELECT instance_id
+			FROM uam.approval_instance
+			WHERE record_id = $1
+			  AND module_code = 'FIXED_DEPOSIT'
+			  AND status = 'PENDING'
+			  AND is_deleted = false
+			LIMIT 1`, req.ExceptionID).Scan(&instanceID)
+		if instanceID != "" {
+			if richDetail, err := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, req.UserID); err == nil {
+				approvalWorkflow = richDetail
+			} else {
+				api.LogError("[FDReceipt] GetRichInstanceDetail failed exception=%s: %v", req.ExceptionID, err)
+			}
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":           true,
@@ -116,6 +135,7 @@ func GetExceptionDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			"reconcile_result":  result,
 			"receipt":           receipt,
 			"reconcile_run":     run,
+			"approval_workflow": approvalWorkflow,
 			"checker_approved":  checkerApproved,
 			"allowed_actions":   varianceAllowedActions(hdr.WorkflowStatus, checkerApproved),
 			"resolve_form":      exceptionResolveFormOptions(),

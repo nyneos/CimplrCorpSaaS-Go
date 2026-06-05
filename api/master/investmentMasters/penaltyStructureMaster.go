@@ -1671,6 +1671,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		var validInputs []PenaltyStructureInput
+		seenKeysInFile := make(map[string]int)
 
 		// sendFail sends a concise human-readable fail-fast response
 		sendFail := func(row int, msg string) {
@@ -1779,6 +1780,22 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Check unique constraint pre-insert to provide friendly error
+			
+			// in-file duplicate check
+			minAmtVal, maxAmtVal := "null", "null"
+			if input.MinAmountRange != nil { minAmtVal = fmt.Sprintf("%v", *input.MinAmountRange) }
+			if input.MaxAmountRange != nil { maxAmtVal = fmt.Sprintf("%v", *input.MaxAmountRange) }
+			minHeldVal, maxHeldVal := "null", "null"
+			if input.MinHeldDays != nil { minHeldVal = fmt.Sprintf("%v", *input.MinHeldDays) }
+			if input.MaxHeldDays != nil { maxHeldVal = fmt.Sprintf("%v", *input.MaxHeldDays) }
+			
+			key := fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%s|%f|%s", input.BankCode, minAmtVal, maxAmtVal, input.MinTenorDays, input.MaxTenorDays, minHeldVal, maxHeldVal, strings.ToUpper(input.PenaltyType), input.PenaltyValue, input.CalculationMethod)
+			if prevRow, dup := seenKeysInFile[key]; dup {
+				sendFail(rowIdx+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching unique keys)", rowIdx+2, prevRow))
+				return
+			}
+			seenKeysInFile[key] = rowIdx + 2
+			
 			if conflict, err := penaltyStructureFindConflict(ctx, pgxPool, input); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 				return

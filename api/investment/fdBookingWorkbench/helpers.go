@@ -202,7 +202,7 @@ func buildFDDynamicInsert(tableName string, columns map[string]bool, preferredCo
 	}
 
 	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s)",
+		constants.ErrInsertFailed,
 		tableName,
 		strings.Join(insertColumns, ","),
 		buildFDPlaceholders(len(insertColumns)),
