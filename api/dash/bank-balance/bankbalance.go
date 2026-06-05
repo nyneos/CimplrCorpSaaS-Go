@@ -137,7 +137,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND upper(trim(COALESCE(lab.currency_code, ''))) = ANY($4)
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -320,7 +320,7 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY e.entity_name, b.bank_name, lab.account_no;
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -550,7 +550,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM latest_per_account;
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -720,7 +720,7 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			GROUP BY e.entity_short_name, mb.bank_name, mb.currency_code;
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()

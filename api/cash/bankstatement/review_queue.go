@@ -61,7 +61,9 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 				t.value_date,
 				bs.entity_id,
 				COALESCE(mba.account_nickname, bs.account_number),
-				COALESCE(mc.category_name, '')
+				COALESCE(mc.category_name, ''),
+				COALESCE(t.classification_step, ''),
+				COALESCE(t.confidence_score::FLOAT8, 0)
 			FROM cimplrcorpsaas.categorization_review_queue q
 			JOIN cimplrcorpsaas.bank_statement_transactions t
 			    ON t.transaction_id = q.transaction_id
@@ -100,15 +102,55 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			var withdrawal, deposit *float64
 			var valueDate *time.Time
 			var entityID, accountNickname, suggestedCatName string
+			var txnClassStep string
+			var txnConfidence float64
 
 			if err := rows.Scan(
 				&queueID, &txnID, &suggestedCat, &confidence, &step, &status, &createdAt,
 				&accountNumber, &description, &narrationClean, &narrationRef, &paymentChannel,
 				&withdrawal, &deposit, &valueDate,
 				&entityID, &accountNickname, &suggestedCatName,
+				&txnClassStep, &txnConfidence,
 			); err != nil {
 				fmt.Printf("[REVIEW-QUEUE] scan error: %v\n", err)
 				continue
+			}
+
+			// If the transaction has not yet been through narration processing
+			// (e.g. uploaded before the advisory-lock fix), derive narration
+			// in-memory so the queue always returns a useful narration_clean.
+			if narrationClean == "" && description != "" {
+				nr := cat.ProcessNarration(description)
+				narrationClean = nr.Clean
+				if narrationRef == "" {
+					narrationRef = nr.Ref
+				}
+				if paymentChannel == "" {
+					paymentChannel = string(nr.Channel)
+				}
+				// Persist asynchronously so subsequent fetches already have it.
+				go func(txID int64, nc, ns, ref string, pc cat.IndianBankChannel) {
+					_, _ = pool.Exec(context.Background(), `
+						UPDATE cimplrcorpsaas.bank_statement_transactions
+						SET narration_clean=$1, narration_stemmed=$2,
+						    narration_ref=$3, payment_channel=$4
+						WHERE transaction_id=$5
+						  AND (narration_clean IS NULL OR narration_clean = '')
+					`, nc, ns, ref, string(pc), txID)
+				}(txnID, nr.Clean, nr.Stemmed, nr.Ref, nr.Channel)
+			}
+
+			// current_step / current_confidence reflect the transaction's
+			// actual latest classification — not the frozen queue snapshot.
+			// After a manual CORRECTION or CONFIRMATION, these will differ
+			// from q.step / q.confidence and the UI should use them for display.
+			currentStep := txnClassStep
+			if currentStep == "" {
+				currentStep = step // fall back to queue snapshot
+			}
+			currentConf := txnConfidence
+			if currentConf == 0 && confidence != nil {
+				currentConf = *confidence // fall back to queue snapshot
 			}
 
 			row := map[string]interface{}{
@@ -118,6 +160,8 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 				"suggested_cat_name": suggestedCatName,
 				"confidence":         confidence,
 				"step":               step,
+				"current_step":       currentStep,
+				"current_confidence": currentConf,
 				"status":             status,
 				"created_at":         createdAt.Format(time.RFC3339),
 				"account_number":     accountNumber,
@@ -208,27 +252,38 @@ func ReviewActionHandler(pool *pgxpool.Pool) http.Handler {
 
 		switch req.Action {
 		case "CONFIRM":
-			// Fetch the engine's suggested category from the queue so we can
-			// commit it to the transaction and write an audit row.
-			var suggestedCat *string
-			var suggestedConf *float64
-			var suggestedStep string
-			fetchErr := pool.QueryRow(ctx, `
-				SELECT suggested_cat, confidence::FLOAT8, COALESCE(step,'')
-				FROM cimplrcorpsaas.categorization_review_queue
-				WHERE transaction_id = $1
-			`, req.TransactionID).Scan(&suggestedCat, &suggestedConf, &suggestedStep)
-			if fetchErr != nil {
-				writeErrJSON(w, "failed to fetch queue entry: "+fetchErr.Error(), http.StatusInternalServerError)
-				return
-			}
-			if suggestedCat == nil || *suggestedCat == "" {
-				writeErrJSON(w, "no suggested category to confirm", http.StatusBadRequest)
-				return
-			}
+			// If the caller supplies a category_id (e.g. the UI is applying an
+			// AI bulk-suggest result), skip reading from the queue and use the
+			// provided category directly with standard human-confirmation confidence.
+			catToConfirm := req.CategoryID
 			conf := 0.90
-			if suggestedConf != nil {
-				conf = *suggestedConf
+			sourceRef := "analyst_confirm"
+
+			if catToConfirm == "" {
+				// Classic confirm: read the engine's suggestion from the queue.
+				var suggestedCat *string
+				var suggestedConf *float64
+				var suggestedStep string
+				fetchErr := pool.QueryRow(ctx, `
+					SELECT suggested_cat, confidence::FLOAT8, COALESCE(step,'')
+					FROM cimplrcorpsaas.categorization_review_queue
+					WHERE transaction_id = $1
+				`, req.TransactionID).Scan(&suggestedCat, &suggestedConf, &suggestedStep)
+				if fetchErr != nil {
+					writeErrJSON(w, "failed to fetch queue entry: "+fetchErr.Error(), http.StatusInternalServerError)
+					return
+				}
+				if suggestedCat == nil || *suggestedCat == "" {
+					writeErrJSON(w, "no suggested category to confirm", http.StatusBadRequest)
+					return
+				}
+				catToConfirm = *suggestedCat
+				if suggestedConf != nil && *suggestedConf > conf {
+					conf = *suggestedConf
+				}
+			} else {
+				// AI-assisted confirm: user applied an AI suggestion.
+				sourceRef = "ai_assisted_confirm"
 			}
 
 			confirmTx, txErr := pool.Begin(ctx)
@@ -246,7 +301,7 @@ func ReviewActionHandler(pool *pgxpool.Pool) http.Handler {
 				    classification_step='CONFIRMATION',
 				    confidence_score=$2
 				WHERE transaction_id=$3
-			`, *suggestedCat, conf, req.TransactionID); opErr != nil {
+			`, catToConfirm, conf, req.TransactionID); opErr != nil {
 				break
 			}
 			if confirmTag.RowsAffected() == 0 {
@@ -257,14 +312,16 @@ func ReviewActionHandler(pool *pgxpool.Pool) http.Handler {
 			if _, opErr = confirmTx.Exec(ctx, `
 				INSERT INTO cimplrcorpsaas.classification_audit_log
 				    (transaction_id, category_id, confidence, classification_step, source_ref, classified_by)
-				VALUES ($1, $2, $3, 'CONFIRMATION', 'analyst_confirm', $4)
-			`, req.TransactionID, *suggestedCat, conf, reviewedBy); opErr != nil {
+				VALUES ($1, $2, $3, 'CONFIRMATION', $4, $5)
+			`, req.TransactionID, catToConfirm, conf, sourceRef, reviewedBy); opErr != nil {
 				break
 			}
-			// 3. Mark queue entry confirmed
+			// 3. Mark queue entry confirmed; also update step so the frozen
+			//    snapshot stays in sync with the transaction's actual state.
 			_, opErr = confirmTx.Exec(ctx, `
 				UPDATE cimplrcorpsaas.categorization_review_queue
-				SET status='CONFIRMED', reviewed_by=$1, reviewed_at=now()
+				SET status='CONFIRMED', step='CONFIRMATION',
+				    reviewed_by=$1, reviewed_at=now()
 				WHERE transaction_id=$2
 			`, reviewedBy, req.TransactionID)
 			if opErr == nil {
@@ -467,10 +524,12 @@ func applyCorrection(ctx context.Context, pool *pgxpool.Pool, txnID int64, categ
 		return fmt.Errorf("audit log: %w", err)
 	}
 
-	// 4. Update review queue if the transaction is in it
+	// 4. Update review queue if the transaction is in it; also update step so
+	// the frozen snapshot stays in sync with the transaction's actual state.
 	_, _ = tx.Exec(ctx, `
 		UPDATE cimplrcorpsaas.categorization_review_queue
-		SET status='CORRECTED', reviewed_by=$1, reviewed_at=now()
+		SET status='CORRECTED', step='CORRECTION',
+		    reviewed_by=$1, reviewed_at=now()
 		WHERE transaction_id=$2
 	`, correctedBy, txnID)
 

@@ -24,7 +24,7 @@ type projectionAuditRequest struct {
 func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -152,6 +152,7 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Standardize: always return 'rows' as the array field
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":    true,
 			"audit_logs": payload,

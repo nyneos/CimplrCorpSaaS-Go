@@ -24,13 +24,13 @@ type bankStatementDownloadAuditRequest struct {
 func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		var body bankStatementAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			http.Error(w, constants.ErrMissingUserIDOrBankStatementID, http.StatusBadRequest)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingUserIDOrBankStatementID)
 			return
 		}
 
@@ -98,6 +98,7 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 		}
 
 		// Standardize: always return 'rows' as the array field
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":    true,
 			"audit_logs": payload,
@@ -108,13 +109,13 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		var body bankStatementDownloadAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			http.Error(w, constants.ErrMissingUserIDOrBankStatementID, http.StatusBadRequest)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingUserIDOrBankStatementID)
 			return
 		}
 
@@ -172,6 +173,7 @@ func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 		}
 
 		// Standardize: always return 'rows' as the array field
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":    true,
 			"audit_logs": payload,
@@ -182,13 +184,13 @@ func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 func GetBankStatementBalanceImpactAuditHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		var body bankStatementAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			http.Error(w, constants.ErrMissingUserIDOrBankStatementID, http.StatusBadRequest)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingUserIDOrBankStatementID)
 			return
 		}
 
@@ -245,6 +247,7 @@ func GetBankStatementBalanceImpactAuditHandler(db *sql.DB) http.Handler {
 		}
 
 		// Standardize: always return 'rows' as the array field
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":    true,
 			"audit_logs": payload,
@@ -255,13 +258,13 @@ func GetBankStatementBalanceImpactAuditHandler(db *sql.DB) http.Handler {
 func GetBankStatementTransactionAuditHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		var body bankStatementAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			http.Error(w, constants.ErrMissingUserIDOrBankStatementID, http.StatusBadRequest)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingUserIDOrBankStatementID)
 			return
 		}
 
@@ -322,6 +325,7 @@ func GetBankStatementTransactionAuditHandler(db *sql.DB) http.Handler {
 		}
 
 		// Standardize: always return 'rows' as the array field
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":    true,
 			"audit_logs": payload,

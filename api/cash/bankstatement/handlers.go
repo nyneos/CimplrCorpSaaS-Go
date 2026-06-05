@@ -86,6 +86,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 											INNER JOIN (
 												SELECT bankstatementid, MAX(action_id) AS max_action_id
 												FROM cimplrcorpsaas.auditactionbankstatement
+												WHERE COALESCE(actiontype, '') <> 'UPLOAD_FILE'
 												GROUP BY bankstatementid
 											) b ON a.bankstatementid = b.bankstatementid AND a.action_id = b.max_action_id
 										)
@@ -835,7 +836,14 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					SELECT actiontype, processing_status FROM cimplrcorpsaas.auditactionbankstatement
 					WHERE bankstatementid = $1
 					  AND actiontype IN ('CREATE', 'EDIT', 'RECAT')
-					ORDER BY requested_at DESC, action_id DESC LIMIT 1
+					ORDER BY
+						CASE
+							WHEN actiontype = 'RECAT' AND processing_status = 'PENDING_EDIT_APPROVAL' THEN 0
+							ELSE 1
+						END,
+						requested_at DESC,
+						action_id DESC
+					LIMIT 1
 				`, bsid).Scan(&actionType, &processingStatus)
 				if err != nil {
 					results = append(results, map[string]interface{}{
@@ -1105,7 +1113,13 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 						WHERE bankstatementid = $1
 						  AND actiontype IN ('CREATE', 'EDIT', 'RECAT')
 						  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL')
-						ORDER BY requested_at DESC, action_id DESC
+						ORDER BY
+							CASE
+								WHEN actiontype = 'RECAT' AND processing_status = 'PENDING_EDIT_APPROVAL' THEN 0
+								ELSE 1
+							END,
+							requested_at DESC,
+							action_id DESC
 						LIMIT 1
 					)
 				`, bsid, actorName, body.Comment)
@@ -1116,6 +1130,39 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 						"error":             err.Error(),
 					})
 					continue
+				}
+				var hasMainStatus bool
+				err = tx.QueryRowContext(ctx, `
+					SELECT EXISTS (
+						SELECT 1
+						FROM information_schema.columns
+						WHERE table_schema = 'cimplrcorpsaas'
+						  AND table_name = 'bank_statements'
+						  AND column_name = 'status'
+					)
+				`).Scan(&hasMainStatus)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+				if hasMainStatus {
+					_, err = tx.Exec(`
+						UPDATE cimplrcorpsaas.bank_statements
+						SET status = 'APPROVED'
+						WHERE bank_statement_id = $1
+					`, bsid)
+					if err != nil {
+						results = append(results, map[string]interface{}{
+							"bank_statement_id": bsid,
+							"success":           false,
+							"error":             err.Error(),
+						})
+						continue
+					}
 				}
 
 				if err := tx.Commit(); err != nil {

@@ -70,21 +70,23 @@ type MainUploadAuditPayload struct {
 }
 
 type Config struct {
-	Module                string
-	AuditSource           string
-	AuditTableName        string
-	ParentIDField         string
-	FolderName            string
-	List                  func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]FileRecord, error)
-	Create                func(ctx context.Context, tx pgx.Tx, input CreateInput) error
-	CreateReturning       func(ctx context.Context, tx pgx.Tx, input CreateInput) (string, error)
-	GetOne                func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*FileRecord, error)
-	GetAnyFile            func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*FileRecord, error)
-	GetMany               func(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]FileRecord, []string, error)
-	DuplicateExists       func(ctx context.Context, pool *pgxpool.Pool, parentID, fileHash string) (bool, error)
-	SoftDelete            func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error)
-	SoftDeleteTx          func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error)
-	RecordMainUploadAudit func(ctx context.Context, tx pgx.Tx, parentID string, payload MainUploadAuditPayload) error
+	Module                  string
+	AuditSource             string
+	AuditTableName          string
+	ParentIDField           string
+	FolderName              string
+	List                    func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]FileRecord, error)
+	Create                  func(ctx context.Context, tx pgx.Tx, input CreateInput) error
+	CreateReturning         func(ctx context.Context, tx pgx.Tx, input CreateInput) (string, error)
+	GetOne                  func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*FileRecord, error)
+	GetAnyFile              func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*FileRecord, error)
+	GetMany                 func(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]FileRecord, []string, error)
+	DuplicateExists         func(ctx context.Context, pool *pgxpool.Pool, parentID, fileHash string) (bool, error)
+	SoftDelete              func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error)
+	SoftDeleteTx            func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error)
+	RecordMainUploadAudit   func(ctx context.Context, tx pgx.Tx, parentID string, payload MainUploadAuditPayload) error
+	RecordMainDownloadAudit func(ctx context.Context, exec auditExecutor, parentID string, payload MainUploadAuditPayload) error
+	RequireMainUploadAudit  bool
 }
 
 type downloadRequest struct {
@@ -291,6 +293,15 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 					return
 				}
 			}
+			if err := recordMainDownloadAuditSafely(r.Context(), pool, cfg, parentID, MainUploadAuditPayload{
+				FileID:     strings.TrimSpace(record.FileID),
+				FileName:   strings.TrimSpace(record.StoredFileName),
+				UploadedBy: performedBy,
+				UploadedAt: time.Now().UTC(),
+			}); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 		}
 
 		writeSuccess(w, map[string]interface{}{
@@ -357,6 +368,15 @@ func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc
 						})
 						continue
 					}
+					failedIDs = append(failedIDs, record.FileID)
+					continue
+				}
+				if auditErr := recordMainDownloadAuditSafely(r.Context(), pool, cfg, parentID, MainUploadAuditPayload{
+					FileID:     strings.TrimSpace(record.FileID),
+					FileName:   strings.TrimSpace(record.StoredFileName),
+					UploadedBy: performedBy,
+					UploadedAt: time.Now().UTC(),
+				}); auditErr != nil {
 					failedIDs = append(failedIDs, record.FileID)
 					continue
 				}
@@ -502,6 +522,19 @@ func NewAuditHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		if len(events) == 0 {
+			uploadedAt := record.UploadedAt
+			events = append(events, fileAuditEvent{
+				EntityID:         record.FileID,
+				ModuleKey:        cfg.Module,
+				ParentRecordID:   parentID,
+				FileID:           record.FileID,
+				ActionType:       fileAuditCreateAction,
+				ProcessingStatus: fileAuditCompletedStatus,
+				RequestedBy:      record.UploadedBy,
+				RequestedAt:      &uploadedAt,
+			})
 		}
 
 		writeAuditSuccess(w, events)
@@ -920,13 +953,26 @@ func recordMainUploadAuditSafely(ctx context.Context, tx pgx.Tx, cfg Config, par
 
 	if err := cfg.RecordMainUploadAudit(ctx, savepoint, parentID, payload); err != nil {
 		_ = savepoint.Rollback(ctx)
-		if isUndefinedTableError(err) || isCheckViolationError(err) {
+		if isUndefinedTableError(err) || (!cfg.RequireMainUploadAudit && isCheckViolationError(err)) {
 			return nil
 		}
 		return err
 	}
 
 	return savepoint.Commit(ctx)
+}
+
+func recordMainDownloadAuditSafely(ctx context.Context, exec auditExecutor, cfg Config, parentID string, payload MainUploadAuditPayload) error {
+	if cfg.RecordMainDownloadAudit == nil {
+		return nil
+	}
+	if err := cfg.RecordMainDownloadAudit(ctx, exec, parentID, payload); err != nil {
+		if isUndefinedTableError(err) || isCheckViolationError(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func auditEnabled(cfg Config) bool {
@@ -1051,6 +1097,15 @@ func recordCreateAuditTx(ctx context.Context, exec auditExecutor, cfg Config, pa
 
 func recordDownloadAudit(ctx context.Context, exec auditExecutor, cfg Config, parentID string, file FileRecord, requestedBy string) error {
 	requestedAt := time.Now().UTC()
+	reason, err := MainDownloadAuditReasonJSON(MainUploadAuditPayload{
+		FileID:     file.FileID,
+		FileName:   file.StoredFileName,
+		UploadedBy: requestedBy,
+		UploadedAt: requestedAt,
+	})
+	if err != nil {
+		return err
+	}
 	return insertAuditEvent(ctx, exec, cfg, fileAuditEvent{
 		EntityID:         file.FileID,
 		ModuleKey:        cfg.Module,
@@ -1060,6 +1115,7 @@ func recordDownloadAudit(ctx context.Context, exec auditExecutor, cfg Config, pa
 		ProcessingStatus: fileAuditCompletedStatus,
 		RequestedBy:      requestedBy,
 		RequestedAt:      &requestedAt,
+		Reason:           reason,
 	})
 }
 
@@ -1120,6 +1176,24 @@ func MainUploadAuditReasonJSON(payload MainUploadAuditPayload) (string, error) {
 		"file_name":   strings.TrimSpace(payload.FileName),
 		"uploaded_by": strings.TrimSpace(payload.UploadedBy),
 		"uploaded_at": payload.UploadedAt.UTC().Format(time.RFC3339),
+	}
+	if fileID := strings.TrimSpace(payload.FileID); fileID != "" {
+		reasonPayload["file_id"] = fileID
+	}
+
+	out, err := json.Marshal(reasonPayload)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func MainDownloadAuditReasonJSON(payload MainUploadAuditPayload) (string, error) {
+	reasonPayload := map[string]interface{}{
+		"event_type":    "ADDITIONAL_FILE_DOWNLOAD",
+		"file_name":     strings.TrimSpace(payload.FileName),
+		"downloaded_by": strings.TrimSpace(payload.UploadedBy),
+		"downloaded_at": payload.UploadedAt.UTC().Format(time.RFC3339),
 	}
 	if fileID := strings.TrimSpace(payload.FileID); fileID != "" {
 		reasonPayload["file_id"] = fileID

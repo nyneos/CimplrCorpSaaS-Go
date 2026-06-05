@@ -3,6 +3,7 @@ package fdMaturityAndRollover
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -187,6 +188,25 @@ func RunCimplrAutoMaturityDue(ctx context.Context, pool *pgxpool.Pool) (processe
 	}
 	api.LogInfo("[CimplrAutoMaturity] sweep summary candidates=%d processed=%d skipped=%d failed=%d",
 		candidateCount, processed, skipped, failed)
+	go func(candidates, okCount, skipCount, failCount int) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				api.LogError("[CimplrAutoMaturity] notification panic: %v", rec)
+			}
+		}()
+		notifcatalog.TriggerNotification(context.Background(), pool,
+			"/investment/fd/closure/auto-maturity/run",
+			fmt.Sprintf("FD-CLOSURE-AUTO-%d", time.Now().UnixNano()),
+			map[string]interface{}{
+				"record_id":   "AUTO_MATURITY",
+				"event":       "FD_CLOSURE_AUTO_MATURITY_RUN",
+				"actor_email": "system@cimplr.auto",
+				"candidates":  candidates,
+				"processed":   okCount,
+				"skipped":     skipCount,
+				"failed":      failCount,
+			})
+	}(candidateCount, processed, skipped, failed)
 	return processed, skipped, failed
 }
 

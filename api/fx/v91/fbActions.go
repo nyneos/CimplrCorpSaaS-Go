@@ -78,7 +78,7 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 				RETURNING exposure_header_id
 			`
 
-			oldValues := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.exposure_headers", "exposure_header_id", p.ExposureHeaderID)
+			oldValues := auditutil.FetchRowSnapshotPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", p.ExposureHeaderID)
 			row := pool.QueryRow(ctx, q, dt, requester, p.ExposureHeaderID)
 
 			var id string
@@ -88,7 +88,7 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			updated = append(updated, id)
-			newValues := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.exposure_headers", "exposure_header_id", id)
+			newValues := auditutil.FetchRowSnapshotPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", id)
 			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: requester, OldValues: oldValues, NewValues: newValues})
 		}
 		api.RespondWithPayload(w, true, "value_date updated successfully", updated)
@@ -297,10 +297,7 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		// rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), rejector, req.ExposureIDs)
 		q := `
 			UPDATE public.exposure_headers
-			SET exposure_creation_status = CASE
-					WHEN exposure_creation_status = 'PENDING_DELETE_APPROVAL' THEN 'Approved'
-					ELSE 'Rejected'
-				END,
+			SET exposure_creation_status = 'Rejected',
 			    updated_at = now()
 			WHERE exposure_header_id = ANY($1)
 			RETURNING exposure_header_id

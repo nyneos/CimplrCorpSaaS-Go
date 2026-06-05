@@ -232,6 +232,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var validInputs []DayCountConventionInput
 		var validSourceRows []int
 		seenCodesInFile := make(map[string]int) // code -> first data row number (1-based sheet row)
+		seenNamesInFile := make(map[string]int) // name -> first data row number
 
 		// helper to fetch by normalized name
 		get := func(row []string, col string) string { return getColumnValue(row, colMap, normalize(col)) }
@@ -253,10 +254,17 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			if prevRow, dup := seenCodesInFile[normCode]; dup {
-				sendFail(sheetRow, fmt.Sprintf("Duplicate day_count_code in file (same as row %d).", prevRow))
+				sendFail(sheetRow, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching day_count_code: %s)", sheetRow, prevRow, normCode))
 				return
 			}
 			seenCodesInFile[normCode] = sheetRow
+			
+			normName := strings.ToUpper(strings.TrimSpace(get(row, "day_count_name")))
+			if prevRow, dup := seenNamesInFile[normName]; dup && normName != "" {
+				sendFail(sheetRow, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching day_count_name: %s)", sheetRow, prevRow, get(row, "day_count_name")))
+				return
+			}
+			seenNamesInFile[normName] = sheetRow
 
 			input := DayCountConventionInput{
 				DayCountCode:   normCode,

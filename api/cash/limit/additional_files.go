@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,6 +34,18 @@ func DeleteLimitAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, limitAdditionalFilesConfig())
 }
 
+func AuditLimitAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, limitAdditionalFilesConfig())
+}
+
+func ApproveLimitAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, limitAdditionalFilesConfig())
+}
+
+func RejectLimitAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, limitAdditionalFilesConfig())
+}
+
 func ListUtilizationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewListHandler(pool, utilizationAdditionalFilesConfig())
 }
@@ -53,29 +66,47 @@ func DeleteUtilizationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc
 	return additionalfiles.NewDeleteHandler(pool, utilizationAdditionalFilesConfig())
 }
 
+func AuditUtilizationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewAuditHandler(pool, utilizationAdditionalFilesConfig())
+}
+
+func ApproveUtilizationAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewApproveDeleteHandler(pool, utilizationAdditionalFilesConfig())
+}
+
+func RejectUtilizationAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewRejectDeleteHandler(pool, utilizationAdditionalFilesConfig())
+}
+
 func limitAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:        "limit-position",
-		ParentIDField: "limit_id",
-		FolderName:    additionalfiles.AdditionalFilesFolder(),
-		List:          listLimitAdditionalFiles,
-		Create:        createLimitAdditionalFile,
-		GetOne:        getLimitAdditionalFile,
-		GetMany:       getLimitAdditionalFiles,
-		SoftDelete:    deleteLimitAdditionalFile,
+		Module:          "limit-position",
+		AuditSource:     "LIMIT_POSITION",
+		ParentIDField:   "limit_id",
+		FolderName:      additionalfiles.AdditionalFilesFolder(),
+		List:            listLimitAdditionalFiles,
+		CreateReturning: createLimitAdditionalFile,
+		GetOne:          getLimitAdditionalFile,
+		GetAnyFile:      getAnyLimitAdditionalFile,
+		GetMany:         getLimitAdditionalFiles,
+		SoftDelete:      deleteLimitAdditionalFile,
+		SoftDeleteTx:    deleteLimitAdditionalFileTx,
 	}
 }
 
 func utilizationAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:        "limit-utilization",
-		ParentIDField: "utilization_id",
-		FolderName:    additionalfiles.AdditionalFilesFolder(),
-		List:          listUtilizationAdditionalFiles,
-		Create:        createUtilizationAdditionalFile,
-		GetOne:        getUtilizationAdditionalFile,
-		GetMany:       getUtilizationAdditionalFiles,
-		SoftDelete:    deleteUtilizationAdditionalFile,
+		Module:          "limit-utilization",
+		AuditSource:     "LIMIT_UTILIZATION",
+		ParentIDField:   "utilization_id",
+		FolderName:      additionalfiles.AdditionalFilesFolder(),
+		List:            listUtilizationAdditionalFiles,
+		CreateReturning: createUtilizationAdditionalFile,
+		GetOne:          getUtilizationAdditionalFile,
+		GetAnyFile:      getAnyUtilizationAdditionalFile,
+		GetMany:         getUtilizationAdditionalFiles,
+		SoftDelete:      deleteUtilizationAdditionalFile,
+		SoftDeleteTx:    deleteUtilizationAdditionalFileTx,
 	}
 }
 
@@ -89,10 +120,10 @@ func listLimitAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID 
 	return additionalfiles.QueryFiles(ctx, pool, query, args...)
 }
 
-func createLimitAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
+func createLimitAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
 	entityClause, entityArgs := limitEntityScope(ctx, "l", 9)
 	args := append([]interface{}{input.ParentID}, entityArgs...)
-	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "cimplrcorpsaas.bank_limit_files", "limit_id", input, `
+	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "cimplrcorpsaas.bank_limit_files", "limit_id", input, `
 		SELECT l.limit_id AS parent_id
 		FROM cimplrcorpsaas.bank_limit l
 		WHERE l.limit_id = $8
@@ -101,10 +132,22 @@ func createLimitAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalf
 }
 
 func getLimitAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getLimitAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnyLimitAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getLimitAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getLimitAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
+	}
 	query, args := limitFilesQuery(ctx, `
 		WHERE f.limit_id = $1
 		  AND f.file_id = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  `+deletedClause+`
 		  AND COALESCE(l.is_deleted, FALSE) = FALSE
 	`, parentID, fileID)
 	return additionalfiles.FirstFile(ctx, pool, query, args...)
@@ -128,6 +171,18 @@ func getLimitAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID s
 }
 
 func deleteLimitAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteLimitAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteLimitAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteLimitAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+type limitFileExec interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+}
+
+func deleteLimitAdditionalFileExec(ctx context.Context, exec limitFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	entityClause, entityArgs := limitEntityScope(ctx, "l", 5)
 	query := `
 		UPDATE cimplrcorpsaas.bank_limit_files f
@@ -144,7 +199,7 @@ func deleteLimitAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID
 
 	args := []interface{}{parentID, fileID, deletedBy, deletedAt}
 	args = append(args, entityArgs...)
-	result, err := pool.Exec(ctx, query, args...)
+	result, err := exec.Exec(ctx, query, args...)
 	if err != nil {
 		return false, err
 	}
@@ -162,10 +217,10 @@ func listUtilizationAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, par
 	return additionalfiles.QueryFiles(ctx, pool, query, args...)
 }
 
-func createUtilizationAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) error {
+func createUtilizationAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
 	entityClause, entityArgs := limitEntityScope(ctx, "l", 9)
 	args := append([]interface{}{input.ParentID}, entityArgs...)
-	return additionalfiles.InsertAdditionalFileRow(ctx, tx, "cimplrcorpsaas.bank_limit_utilization_files", "utilization_id", input, `
+	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "cimplrcorpsaas.bank_limit_utilization_files", "utilization_id", input, `
 		SELECT u.utilization_id AS parent_id
 		FROM cimplrcorpsaas.bank_limit_utilization u
 		JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
@@ -176,10 +231,22 @@ func createUtilizationAdditionalFile(ctx context.Context, tx pgx.Tx, input addit
 }
 
 func getUtilizationAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getUtilizationAdditionalFileWithDeleted(ctx, pool, parentID, fileID, false)
+}
+
+func getAnyUtilizationAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*additionalfiles.FileRecord, error) {
+	return getUtilizationAdditionalFileWithDeleted(ctx, pool, parentID, fileID, true)
+}
+
+func getUtilizationAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
+	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	if includeDeleted {
+		deletedClause = ""
+	}
 	query, args := utilizationFilesQuery(ctx, `
 		WHERE f.utilization_id = $1
 		  AND f.file_id = $2
-		  AND COALESCE(f.is_deleted, FALSE) = FALSE
+		  `+deletedClause+`
 		  AND COALESCE(u.is_deleted, FALSE) = FALSE
 		  AND COALESCE(l.is_deleted, FALSE) = FALSE
 	`, parentID, fileID)
@@ -205,6 +272,14 @@ func getUtilizationAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, pare
 }
 
 func deleteUtilizationAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteUtilizationAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteUtilizationAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	return deleteUtilizationAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+func deleteUtilizationAdditionalFileExec(ctx context.Context, exec limitFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	entityClause, entityArgs := limitEntityScope(ctx, "l", 5)
 	query := `
 		UPDATE cimplrcorpsaas.bank_limit_utilization_files f
@@ -223,7 +298,7 @@ func deleteUtilizationAdditionalFile(ctx context.Context, pool *pgxpool.Pool, pa
 
 	args := []interface{}{parentID, fileID, deletedBy, deletedAt}
 	args = append(args, entityArgs...)
-	result, err := pool.Exec(ctx, query, args...)
+	result, err := exec.Exec(ctx, query, args...)
 	if err != nil {
 		return false, err
 	}

@@ -39,6 +39,7 @@ type fdAuditDashRequest struct {
 	Period     string `json:"period"`     // "Today" | "This Week" | "This Month" | "CUSTOM"
 	StartDate  string `json:"start_date"` // ISO date for CUSTOM
 	EndDate    string `json:"end_date"`
+	AsOnDate   string `json:"as_on_date"` // optional snapshot upper-bound override
 	FDID       string `json:"fd_id"`       // optional — activates transaction_trace
 	ActionType string `json:"action_type"` // optional filter: CREATE/EDIT/DELETE/ACTIVATE/STATUS_CHANGE
 }
@@ -61,11 +62,24 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
+		// Use as_on_date as the reference date so period calculations and
+		// the default 30-day window are relative to the requested snapshot date.
+		if asOn, ok := parseFDDate(req.AsOnDate); ok {
+			now = asOn
+		}
 		entityFilter := req.EntityID
 		fdFilter := req.FDID
 		actionFilter := req.ActionType
 
 		// ── resolve period start/end for audit date range (end is exclusive for SQL) ──
+		// When no period or custom dates are supplied, default to last 30 days so
+		// the dashboard always shows recent audit history on first load instead of
+		// an empty result (which happens when "THIS MONTH" = today only).
+		if req.Period == "" && req.StartDate == "" && req.EndDate == "" {
+			req.StartDate = now.AddDate(0, 0, -30).Format(constants.DateFormat)
+			req.EndDate = now.Format(constants.DateFormat)
+			req.Period = "CUSTOM"
+		}
 		periodBounds := resolveFDPeriodBounds(req.Period, req.StartDate, req.EndDate, now)
 		startDate := periodBounds.StartStr
 		endDate := auditPeriodExclusiveEnd(periodBounds)
@@ -73,6 +87,14 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			startDate = now.AddDate(0, 0, -30).Format(constants.DateFormat)
 		}
 		if endDate == "" {
+			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
+		}
+
+		// Guard: if the resolved range is a single day (e.g. "This Month" on the
+		// 1st of the month), automatically extend back 30 days so the audit log
+		// is never empty on first load.
+		if periodBounds.StartStr == periodBounds.EndStr && req.StartDate == "" && req.EndDate == "" {
+			startDate = now.AddDate(0, 0, -30).Format(constants.DateFormat)
 			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
 		}
 		ctx := r.Context()

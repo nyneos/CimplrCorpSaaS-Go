@@ -623,6 +623,9 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var inputs []map[string]interface{}
 		var errorsList []map[string]interface{}
+		
+		seenCodesInFile := make(map[string]int)
+		seenNamesInFile := make(map[string]int)
 
 		// helper to send a concise fail-fast response
 		sendFail := func(row int, errMsg string) {
@@ -641,6 +644,22 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				sendFail(ri+2, "Missing required columns")
 				return
 			}
+			
+			// in-file duplicate check
+			normCode := strings.ToUpper(strings.TrimSpace(code))
+			if prevRow, dup := seenCodesInFile[normCode]; dup {
+				sendFail(ri+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching tds_plan_code: %s)", ri+2, prevRow, code))
+				return
+			}
+			seenCodesInFile[normCode] = ri + 2
+
+			normName := strings.ToUpper(strings.TrimSpace(name))
+			if prevRow, dup := seenNamesInFile[normName]; dup {
+				sendFail(ri+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching tds_plan_name: %s)", ri+2, prevRow, name))
+				return
+			}
+			seenNamesInFile[normName] = ri + 2
+
 			rate := 0.0
 			if parsed, err := parseFloatPtr(rateStr); err == nil {
 				rate = *parsed

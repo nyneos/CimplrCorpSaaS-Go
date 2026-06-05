@@ -40,6 +40,8 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			SystemTransactionID string                 `json:"system_transaction_id"`
 			Fields              map[string]interface{} `json:"fields"`
+			UserID              string                 `json:"user_id"`
+			Reason              string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SystemTransactionID == "" || len(req.Fields) == 0 {
 			w.WriteHeader(http.StatusBadRequest)
@@ -76,8 +78,8 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 				updateFields[k] = v
 			}
 		}
-		// Always set processing_status to pending
-		updateFields["processing_status"] = constants.FwdProcessingStatusPending
+		// Edits require checker approval before becoming approved again.
+		updateFields["processing_status"] = constants.FwdProcessingStatusPendingEditApproval
 		if len(updateFields) == 0 {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "No valid fields to update"})
@@ -109,7 +111,11 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to parse updated forward booking"})
 			return
 		}
-		auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: req.SystemTransactionID, ActionType: constants.FwdActionTypeEdit, Status: constants.FwdProcessingStatusPendingEditApproval, Reason: "", RequestedBy: auditutil.ActorFromContext(r.Context()), OldValues: oldValues, NewValues: result})
+		requestedBy := auditutil.Actor(req.UserID)
+		if strings.TrimSpace(requestedBy) == "" {
+			requestedBy = auditutil.ActorFromContext(r.Context())
+		}
+		auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: req.SystemTransactionID, ActionType: constants.FwdActionTypeEdit, Status: constants.FwdProcessingStatusPendingEditApproval, Reason: strings.TrimSpace(req.Reason), RequestedBy: requestedBy, OldValues: oldValues, NewValues: result})
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": result})
@@ -143,16 +149,17 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
+		actor := auditutil.Actor(req.UserID)
 		// Find which records are delete-approval and accessible
-delRows, err := db.Query(`
-    SELECT system_transaction_id, entity_level_0
-    FROM forward_bookings
-    WHERE system_transaction_id = ANY($1)
-      AND processing_status IN ($2, $3)
-`, pq.Array(req.SystemTransactionIDs),
-    constants.FwdProcessingStatusDeleteApproval,
-    constants.FwdProcessingStatusPendingDeleteApproval,
-)
+		delRows, err := db.Query(`
+			SELECT system_transaction_id, entity_level_0
+			FROM forward_bookings
+			WHERE system_transaction_id = ANY($1)
+			  AND processing_status IN ($2, $3)
+		`, pq.Array(req.SystemTransactionIDs),
+			constants.FwdProcessingStatusDeleteApproval,
+			constants.FwdProcessingStatusPendingDeleteApproval,
+		)
 
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -160,6 +167,7 @@ delRows, err := db.Query(`
 			return
 		}
 		var deletedIds []string
+		var deletedRows []map[string]interface{}
 		for delRows.Next() {
 			var id, entityLevel0 string
 			if err := delRows.Scan(&id, &entityLevel0); err == nil {
@@ -174,7 +182,7 @@ delRows, err := db.Query(`
 		delRows.Close()
 		// Only approved delete requests should soft-delete the booking.
 		if len(deletedIds) > 0 && req.ProcessingStatus == constants.FwdProcessingStatusApproved {
-			_, err := db.Exec(`
+			rows, err := db.Query(`
 				UPDATE forward_bookings
 				SET processing_status = $3,
 				    is_deleted = TRUE,
@@ -182,25 +190,59 @@ delRows, err := db.Query(`
 				    deleted_by = $2
 				WHERE system_transaction_id = ANY($1)
 				  AND UPPER(COALESCE(processing_status, '')) IN ('DELETE-APPROVAL', 'PENDING_DELETE_APPROVAL')
+				RETURNING *
 			`, pq.Array(deletedIds), req.UserID, constants.FwdProcessingStatusApproved)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 				return
 			}
+			cols, _ := rows.Columns()
+			for rows.Next() {
+				vals := make([]interface{}, len(cols))
+				valPtrs := make([]interface{}, len(cols))
+				for i := range vals {
+					valPtrs[i] = &vals[i]
+				}
+				if err := rows.Scan(valPtrs...); err == nil {
+					rowMap := make(map[string]interface{})
+					for i, col := range cols {
+						rowMap[col] = vals[i]
+					}
+					deletedRows = append(deletedRows, rowMap)
+				}
+			}
+			rows.Close()
 		}
 		if len(deletedIds) > 0 && req.ProcessingStatus == constants.FwdProcessingStatusRejected {
-			_, err := db.Exec(`
+			rows, err := db.Query(`
 				UPDATE forward_bookings
 				SET processing_status = $2
 				WHERE system_transaction_id = ANY($1)
 				  AND UPPER(COALESCE(processing_status, '')) IN ('DELETE-APPROVAL', 'PENDING_DELETE_APPROVAL')
-			`, pq.Array(deletedIds), constants.FwdProcessingStatusApproved)
+				RETURNING *
+			`, pq.Array(deletedIds), constants.FwdProcessingStatusRejected)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 				return
 			}
+			cols, _ := rows.Columns()
+			for rows.Next() {
+				vals := make([]interface{}, len(cols))
+				valPtrs := make([]interface{}, len(cols))
+				for i := range vals {
+					valPtrs[i] = &vals[i]
+				}
+				if err := rows.Scan(valPtrs...); err == nil {
+					rowMap := make(map[string]interface{})
+					for i, col := range cols {
+						rowMap[col] = vals[i]
+					}
+					deletedRows = append(deletedRows, rowMap)
+				}
+			}
+			rows.Close()
 		}
 		// The rest are eligible for update
 		updateIds := []string{}
@@ -269,6 +311,9 @@ delRows, err := db.Query(`
 		}
 		if len(updatedRows) > 0 || len(deletedIds) > 0 {
 			decisionStatus := strings.ToUpper(req.ProcessingStatus)
+			if req.ProcessingStatus == constants.FwdProcessingStatusRejected {
+				decisionStatus = constants.StatusRejected
+			}
 			decisionComment := strings.TrimSpace(req.Comment)
 			if decisionComment == "" && req.ProcessingStatus == constants.FwdProcessingStatusApproved {
 				decisionComment = strings.TrimSpace(req.ApprovalComment)
@@ -276,13 +321,17 @@ delRows, err := db.Query(`
 			if decisionComment == "" && req.ProcessingStatus == constants.FwdProcessingStatusRejected {
 				decisionComment = strings.TrimSpace(req.RejectionComment)
 			}
-			for _, id := range deletedIds {
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: id, Status: decisionStatus, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
+			for _, row := range deletedRows {
+				id := normalizeForwardSystemTransactionID(row["system_transaction_id"])
+				if id == "" {
+					continue
+				}
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: id, Status: decisionStatus, CheckerBy: actor, Comment: decisionComment})
 			}
 			for _, row := range updatedRows {
 				if id, ok := row["system_transaction_id"]; ok {
 					if normalizedID := normalizeForwardSystemTransactionID(id); normalizedID != "" {
-						auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: normalizedID, Status: decisionStatus, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
+						auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: normalizedID, Status: decisionStatus, CheckerBy: actor, Comment: decisionComment})
 					}
 				}
 			}
@@ -302,6 +351,8 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID               string   `json:"user_id"`
 			SystemTransactionIDs []string `json:"system_transaction_ids"`
+			Reason               string   `json:"reason"`
+			Comment              string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -344,6 +395,10 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "No matching forward bookings found"})
 			return
 		}
+		oldValuesByID := make(map[string]map[string]interface{}, len(eligibleIds))
+		for _, id := range eligibleIds {
+			oldValuesByID[id] = auditutil.FetchRowSnapshot(r.Context(), db, "public.forward_bookings", "system_transaction_id", id)
+		}
 		updateQuery := `
 			UPDATE forward_bookings
 			SET processing_status = $2
@@ -373,7 +428,11 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 				updated = append(updated, rowMap)
 				if id, ok := rowMap["system_transaction_id"]; ok {
 					if normalizedID := normalizeForwardSystemTransactionID(id); normalizedID != "" {
-						auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: normalizedID, ActionType: constants.FwdActionTypeDelete, Status: constants.FwdProcessingStatusPendingDeleteApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: nil})
+						reason := strings.TrimSpace(req.Reason)
+						if reason == "" {
+							reason = strings.TrimSpace(req.Comment)
+						}
+						auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: normalizedID, ActionType: constants.FwdActionTypeDelete, Status: constants.FwdProcessingStatusPendingDeleteApproval, Reason: reason, RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValuesByID[normalizedID], NewValues: rowMap})
 					}
 				}
 			}

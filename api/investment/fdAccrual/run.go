@@ -388,6 +388,11 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"Accrual execution failed: "+friendlyAccrualError(err, "accrual execution"))
 			return
 		}
+		_, _ = pgxPool.Exec(ctx, `
+			INSERT INTO investment.fd_accrual_run_audit (
+				run_id, action_type, processing_status, requested_by, requested_at
+			) VALUES ($1, 'EXECUTE', 'COMPUTED', $2, now())`,
+			req.RunID, userEmail)
 		if calculated == 0 && failed == 0 {
 			api.RespondWithError(w, http.StatusBadRequest,
 				fmt.Sprintf(
@@ -932,6 +937,28 @@ func GetAccrualCalculationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			result["rows"] = ledgerRows
 		}
+
+		if req.RunID != "" {
+			var approvalWorkflow *approvalengine.RichInstanceDetail
+			var instanceID string
+			_ = pgxPool.QueryRow(ctx, `
+				SELECT instance_id
+				FROM uam.approval_instance
+				WHERE record_id = $1
+				  AND module_code = 'FIXED_DEPOSIT'
+				  AND status = 'PENDING'
+				  AND is_deleted = false
+				LIMIT 1`, req.RunID).Scan(&instanceID)
+			if instanceID != "" {
+				if richDetail, err := approvalengine.GetRichInstanceDetail(ctx, pgxPool, instanceID, req.UserID); err == nil {
+					approvalWorkflow = richDetail
+				} else {
+					api.LogError("[FDAccrual] GetRichInstanceDetail failed run=%s: %v", req.RunID, err)
+				}
+			}
+			result["approval_workflow"] = approvalWorkflow
+		}
+
 		api.RespondWithPayload(w, true, "", result)
 	}
 }
@@ -1008,7 +1035,7 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       eID,
-				TransactionType:  "FD_ACCRUAL_APPROVE",
+				TransactionType:  "FD_ACCRUAL_RUN",
 				RecordID:         runID,
 				RecordTable:      "investment.fd_accrual_run",
 				AuditTable:       "investment.fd_accrual_run_audit",
@@ -1386,8 +1413,24 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				r.submitted_at,
 				r.posting_completed_at,
 				(SELECT COUNT(*) FROM investment.fd_accrual_ledger l
-				 WHERE l.run_id = r.run_id AND COALESCE(l.is_deleted,false) = false) AS ledger_count
+				 WHERE l.run_id = r.run_id AND COALESCE(l.is_deleted,false) = false) AS ledger_count,
+				COALESCE(ai.instance_id,'')        AS approval_instance_id,
+				COALESCE(ai.status,'')             AS approval_engine_status,
+				COALESCE(aie.instance_eye_id,'')   AS current_eye_id,
+				COALESCE(aie.position::text,'')    AS current_eye_position,
+				COALESCE(aie.approvals_required,0) AS approvals_required,
+				COALESCE(aie.approvals_received,0) AS approvals_received,
+				aie.sla_deadline                   AS sla_deadline,
+				COALESCE(aie.is_escalated,false)   AS is_escalated
 			FROM investment.fd_accrual_run r
+			LEFT JOIN uam.approval_instance ai
+				ON ai.record_id = r.run_id
+				AND ai.module_code = 'FIXED_DEPOSIT'
+				AND ai.status = 'PENDING'
+				AND ai.is_deleted = false
+			LEFT JOIN uam.approval_instance_eye aie
+				ON aie.instance_id = ai.instance_id
+				AND aie.status = 'ACTIVE'
 			WHERE COALESCE(r.is_deleted, false) = false`
 		args := []interface{}{}
 		argIdx := 1
@@ -2149,6 +2192,53 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ledgerID,
 		)
 
+		go func(lID, eID, uID, uEmail string, amount float64) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDAccrual] ProposeOverride engine panic for ledger %s: %v", lID, rec)
+				}
+			}()
+			bgCtx := context.Background()
+			if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", lID, uEmail); err != nil {
+				api.LogError("[FDAccrual] ProposeOverride CancelPendingInstances failed ledger=%s: %v", lID, err)
+			}
+			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+				ModuleCode:       "FIXED_DEPOSIT",
+				EntityCode:       eID,
+				TransactionType:  "FD_ACCRUAL_OVERRIDE",
+				RecordID:         lID,
+				RecordTable:      "investment.fd_accrual_ledger",
+				AuditTable:       "investment.fd_accrual_ledger_audit",
+				AuditIDColumn:    "ledger_id",
+				ActionType:       "EDIT",
+				Amount:           amount,
+				SubmittedBy:      uID,
+				SubmittedByEmail: uEmail,
+			})
+			if err != nil {
+				api.LogError("[FDAccrual] ProposeOverride CreateInstance failed ledger=%s: %v", lID, err)
+				return
+			}
+			api.LogInfo("[FDAccrual] ProposeOverride engine instance %s for ledger %s", instID, lID)
+		}(ledgerID, entityID, req.UserID, userEmail, req.OverrideAmount)
+
+		go func(lID, eID, runID, fdID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDAccrual] ProposeOverride notification panic for ledger %s: %v", lID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				"/investment/fd/accrual/override/propose", lID, map[string]interface{}{
+					"entity_id":   eID,
+					"record_id":   lID,
+					"run_id":      runID,
+					"fd_id":       fdID,
+					"event":       "FD_ACCRUAL_OVERRIDE_PROPOSED",
+					"actor_email": uEmail,
+				})
+		}(ledgerID, entityID, req.RunID, req.FDID, userEmail)
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"run_id":                  req.RunID,
 			"fd_id":                   req.FDID,
@@ -2254,6 +2344,28 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+			ModuleCode: "FIXED_DEPOSIT", RecordID: ledgerID,
+			UserID: req.UserID, UserEmail: userEmail, RoleID: "",
+			Action: approvalengine.ActionApproved, Comment: req.Comment,
+		})
+		if actionErr != nil {
+			api.LogError("[FDAccrual] ApproveOverride engine error ledger=%s: %v", ledgerID, actionErr)
+		}
+		if !actionRes.Acted {
+			if !actionRes.CancelledStale && actionRes.Reason != "" {
+				api.RespondWithError(w, http.StatusForbidden, actionRes.Reason)
+				return
+			}
+		} else if actionRes.InstanceStatus != approvalengine.InstStatusApproved {
+			// Engine acted but not final eye — multi-level approval in progress
+			api.RespondWithPayload(w, true, "", map[string]interface{}{
+				"run_id": req.RunID, "fd_id": req.FDID,
+				"override_status": actionRes.InstanceStatus,
+			})
+			return
+		}
+
 		// ── Write audit row (proposed figures become the "old" snapshot) ──────
 		_, _ = pgxPool.Exec(ctx, `
 			INSERT INTO investment.fd_accrual_ledger_audit (
@@ -2313,6 +2425,23 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			    ledger_updated_at = now()
 			WHERE ledger_id = $3 AND exception_status = 'OVERRIDE_PROPOSED'`,
 			userEmail, nullIfEmpty(req.Comment), ledgerID)
+
+		go func(lID, eID, runID, fdID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDAccrual] ApproveOverride notification panic for ledger %s: %v", lID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				"/investment/fd/accrual/override/approve", lID, map[string]interface{}{
+					"entity_id":   eID,
+					"record_id":   lID,
+					"run_id":      runID,
+					"fd_id":       fdID,
+					"event":       "FD_ACCRUAL_OVERRIDE_APPROVED",
+					"actor_email": uEmail,
+				})
+		}(ledgerID, entityID, req.RunID, req.FDID, userEmail)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"run_id":                  req.RunID,
@@ -2401,6 +2530,20 @@ func RejectOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&proposedBy,
 		); err != nil {
 			api.RespondWithError(w, http.StatusNotFound, "No PROPOSED override found for this run/fd")
+			return
+		}
+
+		// ── Engine path (best-effort; fallthrough to direct on no-matrix) ──────
+		rejectActionRes, rejectActionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+			ModuleCode: "FIXED_DEPOSIT", RecordID: ledgerID,
+			UserID: req.UserID, UserEmail: userEmail, RoleID: "",
+			Action: approvalengine.ActionRejected, Comment: req.Comment,
+		})
+		if rejectActionErr != nil {
+			api.LogError("[FDAccrual] RejectOverride engine error ledger=%s: %v", ledgerID, rejectActionErr)
+		}
+		if !rejectActionRes.Acted && !rejectActionRes.CancelledStale && rejectActionRes.Reason != "" {
+			api.RespondWithError(w, http.StatusForbidden, rejectActionRes.Reason)
 			return
 		}
 
@@ -2512,6 +2655,23 @@ func RejectOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			    checker_comment  = $2
 			WHERE run_id = $3 AND fd_id = $4 AND exception_status = 'OVERRIDE_PROPOSED'`,
 			userEmail, nullIfEmpty(req.Comment), req.RunID, req.FDID)
+
+		go func(lID, eID, runID, fdID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDAccrual] RejectOverride notification panic for ledger %s: %v", lID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				"/investment/fd/accrual/override/reject", lID, map[string]interface{}{
+					"entity_id":   eID,
+					"record_id":   lID,
+					"run_id":      runID,
+					"fd_id":       fdID,
+					"event":       "FD_ACCRUAL_OVERRIDE_REJECTED",
+					"actor_email": uEmail,
+				})
+		}(ledgerID, entityID, req.RunID, req.FDID, userEmail)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"run_id":                   req.RunID,
@@ -3232,7 +3392,8 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 	return calculated, failed, nil
 }
 
-// submitAccrualRunForApproval updates status and fires CreateInstance.
+// submitAccrualRunForApproval updates scheduler-generated runs and emits an
+// auto notification only. Scheduler jobs must not create approval instances.
 func submitAccrualRunForApproval(ctx context.Context, pool *pgxpool.Pool, runID string, submittedBy string) error {
 	var entityID string
 	var totalNet float64
@@ -3251,33 +3412,6 @@ func submitAccrualRunForApproval(ctx context.Context, pool *pgxpool.Pool, runID 
 	if err != nil {
 		return fmt.Errorf("submitAccrualRunForApproval: update status: %w", err)
 	}
-
-	go func() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				api.LogError("[FDAccrual] submitAccrualRunForApproval engine goroutine panic for run %s: %v", runID, rec)
-			}
-		}()
-		bgCtx := context.Background()
-		instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "FIXED_DEPOSIT",
-			EntityCode:       entityID,
-			TransactionType:  "FD_ACCRUAL_APPROVE",
-			RecordID:         runID,
-			RecordTable:      "investment.fd_accrual_run",
-			AuditTable:       "investment.fd_accrual_run_audit",
-			AuditIDColumn:    "run_id",
-			ActionType:       "CREATE",
-			Amount:           totalNet,
-			SubmittedBy:      submittedBy,
-			SubmittedByEmail: "system@internal",
-		})
-		if instErr != nil {
-			api.LogError("[FDAccrual] Scheduler CreateInstance failed for run %s: %v", runID, instErr)
-			return
-		}
-		api.LogInfo("[FDAccrual] Scheduler CreateInstance %s → run %s PENDING_APPROVAL", instID, runID)
-	}()
 
 	go func(rID, eID, by string, amount float64) {
 		defer func() {
@@ -3678,6 +3812,21 @@ func RecomputeAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"recomputed": len(results),
 			"results":    results,
 		})
+		for _, runID := range req.RunIDs {
+			go func(id, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDAccrual] RecomputeAccrualRun notification panic for %s: %v", id, rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+					"/investment/fd/accrual/run/recompute", id, map[string]interface{}{
+						"record_id":   id,
+						"event":       "FD_ACCRUAL_RUN_RECOMPUTED",
+						"actor_email": uEmail,
+					})
+			}(runID, userEmail)
+		}
 	}
 }
 
@@ -3877,6 +4026,25 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"total_failed":     totalFailed,
 			"results":          monthResults,
 		})
+		for _, mr := range monthResults {
+			if mr.RunID == "" || mr.Skipped {
+				continue
+			}
+			go func(id, eID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDAccrual] BulkGenerateMonthlyAccruals notification panic for %s: %v", id, rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+					"/investment/fd/accrual/run/bulk-generate", id, map[string]interface{}{
+						"entity_id":   eID,
+						"record_id":   id,
+						"event":       "FD_ACCRUAL_AUTO_GENERATED",
+						"actor_email": uEmail,
+					})
+			}(mr.RunID, req.EntityID, userEmail)
+		}
 		api.LogInfo("[FDAccrual] BulkGenerateMonthlyAccruals: entity=%s %s→%s processed=%d skipped=%d",
 			req.EntityID, req.StartMonth, req.EndMonth, len(monthResults), skipped)
 	}
