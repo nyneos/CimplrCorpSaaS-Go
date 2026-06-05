@@ -1056,6 +1056,7 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 			RecordID            string `json:"record_id"`
 			InternalReferenceID string `json:"internal_reference_id"`
 			UploadBatchID       string `json:"upload_batch_id"`
+			UploadS3Key         string `json:"upload_s3_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
@@ -1081,8 +1082,11 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 		}
 
 		var uploadS3Key sql.NullString
+		if directS3Key := strings.TrimSpace(req.UploadS3Key); directS3Key != "" {
+			uploadS3Key = sql.NullString{String: directS3Key, Valid: true}
+		}
 
-		if recordID != "" {
+		if strings.TrimSpace(uploadS3Key.String) == "" && recordID != "" {
 			err := db.QueryRowContext(r.Context(), `
 				SELECT COALESCE(NULLIF(confirmation_upload_s3_key, ''), NULLIF(upload_s3_key, ''), '')
 				FROM forward_bookings

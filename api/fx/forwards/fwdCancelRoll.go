@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lib/pq"
@@ -27,10 +28,34 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 			CancellationRate   float64            `json:"cancellation_rate"`
 			RealizedGainLoss   float64            `json:"realized_gain_loss"`
 			CancellationReason string             `json:"cancellation_reason"`
+			Status             string             `json:"status"`
+			RejectionComment   string             `json:"rejection_comment"`
+			Comment            string             `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BookingAmounts) == 0 || req.CancellationDate == "" || req.CancellationRate == 0 {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "user_id, booking_amounts (map), cancellation_date, and cancellation_rate are required"})
+			return
+		}
+		if strings.EqualFold(strings.TrimSpace(req.Status), constants.FwdProcessingStatusRejected) {
+			comment := strings.TrimSpace(req.Comment)
+			if comment == "" {
+				comment = strings.TrimSpace(req.RejectionComment)
+			}
+			for bid := range req.BookingAmounts {
+				_, err := db.Exec(`UPDATE forward_cancellations SET status = 'Rejected' WHERE booking_id = $1 AND cancellation_date = $2 AND status = 'Pending'`, bid, req.CancellationDate)
+				if err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to reject cancellation request"})
+					return
+				}
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: comment})
+			}
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: true,
+				"message":              "Forward Cancellation Request Rejected Successfully",
+			})
 			return
 		}
 		for bid, amtCancelled := range req.BookingAmounts {
@@ -546,11 +571,41 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID         string             `json:"user_id"`
-			BookingAmounts map[string]float64 `json:"booking_amounts"` // booking_id: amount_cancelled
+			UserID           string             `json:"user_id"`
+			BookingAmounts   map[string]float64 `json:"booking_amounts"` // booking_id: amount_cancelled
+			RolloverDates    map[string]string  `json:"rollover_dates"`
+			Status           string             `json:"status"`
+			RejectionComment string             `json:"rejection_comment"`
+			Comment          string             `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BookingAmounts) == 0 {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
+			return
+		}
+		if strings.EqualFold(strings.TrimSpace(req.Status), constants.FwdProcessingStatusRejected) {
+			comment := strings.TrimSpace(req.Comment)
+			if comment == "" {
+				comment = strings.TrimSpace(req.RejectionComment)
+			}
+			for bid := range req.BookingAmounts {
+				rolloverDate := strings.TrimSpace(req.RolloverDates[bid])
+				var err error
+				if rolloverDate != "" {
+					_, err = db.Exec(`UPDATE forward_rollovers SET status = 'Rejected' WHERE booking_id = $1 AND rollover_date = $2 AND status = 'Pending'`, bid, rolloverDate)
+				} else {
+					_, err = db.Exec(`UPDATE forward_rollovers SET status = 'Rejected' WHERE booking_id = $1 AND status = 'Pending'`, bid)
+				}
+				if err != nil {
+					respondWithError(w, http.StatusInternalServerError, "Failed to reject rollover request")
+					return
+				}
+				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: comment})
+			}
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: true,
+				"message":              "Forward Rollover Request Rejected Successfully",
+			})
 			return
 		}
 		for bid, amtCancelled := range req.BookingAmounts {
