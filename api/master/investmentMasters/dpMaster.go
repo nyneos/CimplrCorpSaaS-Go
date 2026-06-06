@@ -1026,11 +1026,11 @@ func GetDPsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT 
 					dp_id,
 					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM investment.auditactiondp
 				GROUP BY dp_id
 			)
@@ -1040,9 +1040,9 @@ func GetDPsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
 				COALESCE(l.requested_by,'') AS requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 				COALESCE(h.created_by,'') AS created_by,

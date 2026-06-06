@@ -294,9 +294,9 @@ func buildGetLimitUtilizationQuery(_ []string) string {
 				processing_status AS limit_processing_status,
 				reason AS limit_reason,
 				requested_by AS limit_requested_by,
-				TO_CHAR(requested_at, 'YYYY-MM-DD HH24:MI:SS') AS limit_requested_at,
+				TO_CHAR(requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS limit_requested_at,
 				checker_by AS limit_checker_by,
-				TO_CHAR(checker_at, 'YYYY-MM-DD HH24:MI:SS') AS limit_checker_at,
+				TO_CHAR(checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS limit_checker_at,
 				checker_comment AS limit_checker_comment
 			FROM cimplrcorpsaas.auditactionbanklimit
 			ORDER BY limit_id, requested_at DESC
@@ -308,9 +308,9 @@ func buildGetLimitUtilizationQuery(_ []string) string {
 				processing_status,
 				reason,
 				requested_by,
-				TO_CHAR(requested_at, 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 				checker_by,
-				TO_CHAR(checker_at, 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				checker_comment
 			FROM cimplrcorpsaas.auditactionbanklimitutilization
 			ORDER BY utilization_id, requested_at DESC
@@ -322,8 +322,8 @@ func buildGetLimitUtilizationQuery(_ []string) string {
 			l.core_limit_type AS limit_core_limit_type,
 			l.limit_type AS limit_limit_type,
 			COALESCE(l.limit_sub_type, '') AS limit_limit_sub_type,
-			TO_CHAR(l.sanction_date, 'YYYY-MM-DD HH24:MI:SS') AS limit_sanction_date,
-			TO_CHAR(l.effective_date, 'YYYY-MM-DD HH24:MI:SS') AS limit_effective_date,
+			TO_CHAR(l.sanction_date, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS limit_sanction_date,
+			TO_CHAR(l.effective_date, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS limit_effective_date,
 			l.currency_code AS limit_currency_code,
 			l.sanctioned_amount AS limit_sanctioned_amount,
 			l.fungibility_type AS limit_fungibility_type,

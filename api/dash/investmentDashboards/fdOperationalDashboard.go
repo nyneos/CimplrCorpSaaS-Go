@@ -406,7 +406,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(ae.exception_type,'Accrual Exception') AS exception_type,
 				  COALESCE(ae.exception_status,'Open')            AS status,
 				  COALESCE(ae.reason_required,false)              AS reason_required,
-				  COALESCE(TO_CHAR(ae.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS created_at
+				  COALESCE(TO_CHAR(ae.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS created_at
 				FROM investment.fd_accrual_exception ae
 				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
@@ -459,7 +459,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(vl.module_code,'')                                  AS module_code,
 				  COALESCE(vl.status,'OPEN')                                   AS status,
 				  COALESCE(vl.is_exception,false)                              AS reason_required,
-				  COALESCE(TO_CHAR(vl.created_at,'YYYY-MM-DD HH24:MI:SS'),'')  AS created_at
+				  COALESCE(TO_CHAR(vl.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')  AS created_at
 				FROM public.variance_log vl
 				LEFT JOIN investment.fd_master m ON m.fd_id = vl.record_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id OR b.booking_id = vl.record_id
@@ -761,10 +761,10 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(la.processing_status,'')           AS processing_status,
 				  COALESCE(la.action_type,'')                 AS action_type,
 				  COALESCE(la.requested_by,'')                AS requested_by,
-				  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 				  COALESCE(la.checker_by,'')                  AS checker_by,
-				  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
-				  COALESCE(TO_CHAR(ir.created_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS created_at
+				  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
+				  COALESCE(TO_CHAR(ir.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS created_at
 				FROM investment.fd_interest_receipt ir
 				LEFT JOIN investment.fd_master m ON m.fd_id = ir.fd_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
@@ -874,10 +874,10 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(la.processing_status,'')           AS processing_status,
 				  COALESCE(la.action_type,'')                 AS action_type,
 				  COALESCE(la.requested_by,'')                AS requested_by,
-				  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 				  COALESCE(la.checker_by,'')                  AS checker_by,
-				  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
-				  COALESCE(TO_CHAR(t.created_at,'YYYY-MM-DD HH24:MI:SS'),'')    AS created_at
+				  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
+				  COALESCE(TO_CHAR(t.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')    AS created_at
 				FROM investment.fd_tds_receipt t
 				LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND m.is_deleted = false
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id

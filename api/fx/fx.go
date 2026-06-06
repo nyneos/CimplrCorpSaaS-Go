@@ -50,53 +50,17 @@ func StartFXService(db *sql.DB, port string) {
 			logger.LogError("FX: failed to verify pgxpool DB connectivity at startup: %v", err)
 		}
 
-		// wrapper calls the v91 handler using the shared pool
-		v91Wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			h := v91.BatchUploadStagingData(pgxPool)
-			h.ServeHTTP(w, r)
-		})
-
-		v91DashAll := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			v91.GetAllExposures(pgxPool).ServeHTTP(w, r)
-		})
-
-		v91DashByYear := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			v91.GetExposuresByYear(pgxPool).ServeHTTP(w, r)
-		})
-
-		v91BulkUpdate := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			v91.BulkUpdateValueDates(pgxPool).ServeHTTP(w, r)
-		})
-
-		v91BulkApprove := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			v91.BulkApproveExposures(pgxPool).ServeHTTP(w, r)
-		})
-
-		v91BulkReject := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			v91.BulkRejectExposures(pgxPool).ServeHTTP(w, r)
-		})
-
-		v91BulkDelete := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			v91.BulkDeleteExposures(pgxPool).ServeHTTP(w, r)
-		})
-
-		v91BatchesMinimal := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			v91.GetExposureUploadBatchesMinimal(pgxPool).ServeHTTP(w, r)
-		})
-
-		v91Download := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			h := v91.GetExposureDownloadURL(pgxPool)
-			h.ServeHTTP(w, r)
-		})
-
-		v91BulkDownload := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			h := v91.GetExposureBulkDownloadURL(pgxPool)
-			h.ServeHTTP(w, r)
-		})
-
-		v91EditAllocation := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			v91.EditAllocationsHandler(pgxPool).ServeHTTP(w, r)
-		})
+		v91Wrapper := v91.BatchUploadStagingData(pgxPool)
+		v91DashAll := v91.GetAllExposures(pgxPool)
+		v91DashByYear := v91.GetExposuresByYear(pgxPool)
+		v91BulkUpdate := v91.BulkUpdateValueDates(pgxPool)
+		v91BulkApprove := v91.BulkApproveExposures(pgxPool)
+		v91BulkReject := v91.BulkRejectExposures(pgxPool)
+		v91BulkDelete := v91.BulkDeleteExposures(pgxPool)
+		v91BatchesMinimal := v91.GetExposureUploadBatchesMinimal(pgxPool)
+		v91Download := v91.GetExposureDownloadURL(pgxPool)
+		v91BulkDownload := v91.GetExposureBulkDownloadURL(pgxPool)
+		v91EditAllocation := v91.EditAllocationsHandler(pgxPool)
 
 		mux.Handle("/fx/exposures/upload/v91", middlewares.PreValidationMiddleware(pgxPool)(v91Wrapper))
 		mux.Handle("/fx/exposures/dashboard/all/v91", middlewares.PreValidationMiddleware(pgxPool)(v91DashAll))

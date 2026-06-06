@@ -2458,9 +2458,9 @@ func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
     COALESCE(aa.actiontype, '') AS action_type,
     COALESCE(aa.action_id::text, '') AS action_id,
     COALESCE(aa.requested_by, '') AS requested_by,
-    COALESCE(to_char(aa.requested_at,'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+    COALESCE(to_char(aa.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS requested_at,
     COALESCE(aa.checker_by, '') AS checker_by,
-    COALESCE(to_char(aa.checker_at,'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+    COALESCE(to_char(aa.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS checker_at,
     COALESCE(aa.checker_comment, '') AS checker_comment,
     COALESCE(aa.reason, '') AS reason
 FROM masterbankaccount a

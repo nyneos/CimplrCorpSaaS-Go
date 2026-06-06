@@ -55,9 +55,9 @@ func GetAccrualRunAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.processing_status,
 				COALESCE(a.reason, '')                                              AS reason,
 				COALESCE(a.requested_by, '')                                        AS requested_by,
-				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '')      AS requested_at,
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')      AS requested_at,
 				COALESCE(a.checker_by, '')                                          AS checker_by,
-				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '')        AS checker_at,
+				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')        AS checker_at,
 				COALESCE(a.checker_comment, '')                                     AS checker_comment,
 				COALESCE(a.old_run_status, '')                                      AS old_run_status,
 				COALESCE(a.old_run_mode, '')                                        AS old_run_mode,
@@ -108,9 +108,9 @@ func GetAccrualRunAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.processing_status, '') AS processing_status,
 				COALESCE(a.reason, '') AS reason,
 				COALESCE(a.requested_by, '') AS requested_by,
-				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS requested_at,
 				COALESCE(a.checker_by, '') AS checker_by,
-				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS checker_at,
 				COALESCE(a.checker_comment, '') AS checker_comment
 			FROM investment.additional_file_audit a
 			JOIN investment.fd_accrual_run_files f ON f.file_id = a.file_id AND f.run_id::text = a.parent_record_id
@@ -171,9 +171,9 @@ func GetAccrualLedgerAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.action_type,
 				a.processing_status,
 				COALESCE(a.requested_by, '')                                      AS requested_by,
-				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '')    AS requested_at,
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')    AS requested_at,
 				COALESCE(a.checker_by, '')                                        AS checker_by,
-				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '')      AS checker_at,
+				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')      AS checker_at,
 				COALESCE(a.checker_comment, '')                                   AS checker_comment,
 				COALESCE(a.principal_amount, 0)                                   AS principal_amount,
 				COALESCE(a.interest_rate, 0)                                      AS interest_rate,
@@ -241,9 +241,9 @@ func GetAccrualLedgerAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(a.processing_status, '') AS processing_status,
 					COALESCE(a.reason, '') AS reason,
 					COALESCE(a.requested_by, '') AS requested_by,
-					COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+					COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS requested_at,
 					COALESCE(a.checker_by, '') AS checker_by,
-					COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+					COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS checker_at,
 					COALESCE(a.checker_comment, '') AS checker_comment
 				FROM investment.additional_file_audit a
 				JOIN investment.fd_accrual_ledger_files f ON f.file_id = a.file_id AND f.ledger_id::text = a.parent_record_id
@@ -301,9 +301,9 @@ func GetScheduleConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				processing_status,
 				COALESCE(reason, '')                                              AS reason,
 				COALESCE(requested_by, '')                                        AS requested_by,
-				COALESCE(TO_CHAR(requested_at, 'YYYY-MM-DD HH24:MI:SS'), '')      AS requested_at,
+				COALESCE(TO_CHAR(requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')      AS requested_at,
 				COALESCE(checker_by, '')                                          AS checker_by,
-				COALESCE(TO_CHAR(checker_at, 'YYYY-MM-DD HH24:MI:SS'), '')        AS checker_at,
+				COALESCE(TO_CHAR(checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')        AS checker_at,
 				COALESCE(checker_comment, '')                                     AS checker_comment,
 				COALESCE(old_schedule_frequency, '')                              AS old_schedule_frequency,
 				COALESCE(old_run_day_of_month, 0)                                 AS old_run_day_of_month,
@@ -336,9 +336,9 @@ func GetScheduleConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.processing_status, '') AS processing_status,
 				COALESCE(a.reason, '') AS reason,
 				COALESCE(a.requested_by, '') AS requested_by,
-				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS requested_at,
 				COALESCE(a.checker_by, '') AS checker_by,
-				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS checker_at,
 				COALESCE(a.checker_comment, '') AS checker_comment
 			FROM investment.additional_file_audit a
 			JOIN investment.fd_accrual_schedule_config_files f ON f.file_id = a.file_id AND f.config_id::text = a.parent_record_id

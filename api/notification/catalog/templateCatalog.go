@@ -756,11 +756,11 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					template_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by  END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by  END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by  END) AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM notification_svc.audit_template
 				GROUP BY template_id
 			)
@@ -781,9 +781,9 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.body_text,'')                                      AS body_text,
 				COALESCE(l.body_html,'')                                      AS body_html,
 				COALESCE(l.is_html_enabled,false)                             AS is_html_enabled,
-				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 				COALESCE(l.requested_by,'')                                   AS requested_by,
-				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
 				COALESCE(l.checker_by,'')                                     AS checker_by,
 				COALESCE(l.checker_comment,'')                                AS checker_comment,
 				COALESCE(l.change_note,'')                                    AS change_note,
@@ -915,11 +915,11 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					template_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by  END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by  END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by  END) AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM notification_svc.audit_template
 				GROUP BY template_id
 			)
@@ -940,9 +940,9 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.body_text,'')                                      AS body_text,
 				COALESCE(a.body_html,'')                                      AS body_html,
 				COALESCE(a.is_html_enabled,false)                             AS is_html_enabled,
-				COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 				COALESCE(a.requested_by,'')                                   AS requested_by,
-				COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+				COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
 				COALESCE(a.checker_by,'')                                     AS checker_by,
 				COALESCE(a.checker_comment,'')                                AS checker_comment,
 				COALESCE(a.change_note,'')                                    AS change_note,
@@ -1267,8 +1267,8 @@ func GetTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					'subject', COALESCE(a.subject,''), 'body_text', COALESCE(a.body_text,''), 'body_html', COALESCE(a.body_html,''),
 					'is_html_enabled', COALESCE(a.is_html_enabled,false),
 					'formula_steps', a.formula_steps, 'version_label', COALESCE(a.version_label,''),
-					'requested_by', COALESCE(a.requested_by,''), 'requested_at', TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),
-					'checker_by', COALESCE(a.checker_by,''), 'checker_at', TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),
+					'requested_by', COALESCE(a.requested_by,''), 'requested_at', TO_CHAR(a.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+					'checker_by', COALESCE(a.checker_by,''), 'checker_at', TO_CHAR(a.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 					'checker_comment', COALESCE(a.checker_comment,''),
 					'old_recipients', COALESCE(a.old_recipients, '{}')
 				) ORDER BY a.requested_at DESC) FROM notification_svc.audit_template a WHERE a.template_id = t.template_id AND COALESCE(a.is_deleted, false) = false), '[]'::json) AS audits,

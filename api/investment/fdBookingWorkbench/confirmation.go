@@ -2275,7 +2275,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					confirmation_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at
 				FROM investment.fd_audit_confirmation
 				GROUP BY confirmation_id
 			)
@@ -2305,7 +2305,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.variance_action,'')                                         AS variance_action,
 				COALESCE(c.variance_remarks,'')                                        AS variance_remarks,
 				COALESCE(c.variance_resolved_by,'')                                    AS variance_resolved_by,
-				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD HH24:MI:SS'),'') AS variance_resolved_at,
+				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS variance_resolved_at,
 				COALESCE(c.confirmation_status,'')                                     AS confirmation_status,
 				COALESCE(c.penalty_id,'')                                              AS penalty_id,
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
@@ -2353,15 +2353,15 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(bc.quarter_definition,'')                                     AS quarter_definition,
 				%s,
 				COALESCE(c.is_deleted,false)                                           AS is_deleted,
-				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')           AS record_created_at,
+				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')           AS record_created_at,
 
 				COALESCE(l.audit_id::text,'')                                          AS audit_id,
 				COALESCE(l.action_type,'')                                             AS action_type,
 				COALESCE(l.processing_status,'')                                       AS processing_status,
 				COALESCE(l.requested_by,'')                                            AS requested_by,
-				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')          AS requested_at,
+				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')          AS requested_at,
 				COALESCE(l.checker_by,'')                                              AS checker_by,
-				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')            AS checker_at,
+				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')            AS checker_at,
 				COALESCE(l.checker_comment,'')                                         AS checker_comment,
 				COALESCE(l.reason,'')                                                  AS reason,
 				COALESCE(l.old_confirmation_status,'')                                 AS old_confirmation_status,
@@ -2454,9 +2454,9 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					a.audit_id::text, a.confirmation_id, a.action_type, a.processing_status,
 					COALESCE(a.requested_by,'') AS requested_by,
-					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
-					COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+					COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 					COALESCE(a.checker_comment,'') AS checker_comment,
 					COALESCE(a.reason,'') AS reason,
 					COALESCE(a.old_confirmation_status,'') AS old_confirmation_status,
@@ -2487,9 +2487,9 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					a.audit_id::text, a.confirmation_id, a.action_type, a.processing_status,
 					COALESCE(a.requested_by,'') AS requested_by,
-					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
-					COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+					COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 					COALESCE(a.checker_comment,'') AS checker_comment,
 					COALESCE(a.reason,'') AS reason,
 					COALESCE(a.old_confirmation_status,'') AS old_confirmation_status,
@@ -2744,14 +2744,14 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.variance_action,'')                                         AS variance_action,
 				COALESCE(c.variance_remarks,'')                                        AS variance_remarks,
 				COALESCE(c.variance_resolved_by,'')                                    AS variance_resolved_by,
-				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD HH24:MI:SS'),'')  AS variance_resolved_at,
+				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')  AS variance_resolved_at,
 				COALESCE(c.confirmation_status,'')                                     AS confirmation_status,
 				COALESCE(c.is_deleted,false)                                           AS is_deleted,
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
 				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')        AS first_capitalization_date,
 				%s,
 				%s,
-				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')            AS record_created_at
+				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')            AS record_created_at
 			FROM investment.fd_confirmation c
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false`, bookingAccountExpr, bankReferenceNumberSQL, extraSelect, uploadKeyExpr),
@@ -2930,9 +2930,9 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.action_type,
 				a.processing_status,
 				COALESCE(a.requested_by,'')                                        AS requested_by,
-				COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
+				COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')      AS requested_at,
 				COALESCE(a.checker_by,'')                                          AS checker_by,
-				COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
+				COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')        AS checker_at,
 				COALESCE(a.checker_comment,'')                                     AS checker_comment,
 				COALESCE(a.reason,'')                                                      AS reason,
 				COALESCE(a.old_confirmation_status,'')                                     AS old_confirmation_status,
