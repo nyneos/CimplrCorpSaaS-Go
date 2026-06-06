@@ -57,6 +57,31 @@ func decodeForwardDownloadID(raw string) string {
 	return decodedID
 }
 
+func forwardDownloadKeyExpr(downloadType string) string {
+	switch strings.ToUpper(strings.TrimSpace(downloadType)) {
+	case "BOOKING":
+		return "COALESCE(NULLIF(upload_s3_key, ''), '')"
+	case "CONFIRMATION":
+		return "COALESCE(NULLIF(confirmation_upload_s3_key, ''), '')"
+	default:
+		return "COALESCE(NULLIF(confirmation_upload_s3_key, ''), NULLIF(upload_s3_key, ''), '')"
+	}
+}
+
+func forwardDownloadAuditType(downloadType string, s3Key string) string {
+	switch strings.ToUpper(strings.TrimSpace(downloadType)) {
+	case "CONFIRMATION":
+		return "CONFIRMATION"
+	case "BOOKING":
+		return "BOOKING"
+	default:
+		if strings.Contains(strings.ToLower(s3Key), "confirmation") {
+			return "CONFIRMATION"
+		}
+		return "BOOKING"
+	}
+}
+
 func existingForwardBookingUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT DISTINCT upload_s3_key
@@ -1105,12 +1130,7 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 		}
 
 		if systemTransactionID != "" {
-			selectExpr := "COALESCE(NULLIF(confirmation_upload_s3_key, ''), NULLIF(upload_s3_key, ''), '')"
-			if downloadType == "BOOKING" {
-				selectExpr = "COALESCE(NULLIF(upload_s3_key, ''), '')"
-			} else if downloadType == "CONFIRMATION" {
-				selectExpr = "COALESCE(NULLIF(confirmation_upload_s3_key, ''), '')"
-			}
+			selectExpr := forwardDownloadKeyExpr(downloadType)
 			err := db.QueryRowContext(r.Context(), fmt.Sprintf(`
 				SELECT %s
 				FROM forward_bookings
@@ -1124,13 +1144,14 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 		}
 
 		if strings.TrimSpace(uploadS3Key.String) == "" && recordID != "" {
-			err := db.QueryRowContext(r.Context(), `
-				SELECT COALESCE(NULLIF(confirmation_upload_s3_key, ''), NULLIF(upload_s3_key, ''), '')
+			selectExpr := forwardDownloadKeyExpr(downloadType)
+			err := db.QueryRowContext(r.Context(), fmt.Sprintf(`
+				SELECT %s
 				FROM forward_bookings
 				WHERE internal_reference_id = $1
 				ORDER BY add_date DESC
 				LIMIT 1
-			`, recordID).Scan(&uploadS3Key)
+			`, selectExpr), recordID).Scan(&uploadS3Key)
 			if err != nil && err != sql.ErrNoRows {
 				respondWithError(w, http.StatusInternalServerError, "failed to fetch forward booking")
 				return
@@ -1170,7 +1191,7 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 			_ = db.QueryRowContext(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 LIMIT 1`, recordID).Scan(&systemTransactionID)
 		}
 		if systemTransactionID != "" {
-			auditutil.RecordDownload(r.Context(), db, auditutil.DownloadParams{TableName: auditutil.TableForwardDownloads, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, RequestedBy: auditutil.ActorFromContext(r.Context()), UploadS3Key: s3Key, ExtraColumns: map[string]string{"download_type": "BOOKING"}})
+			auditutil.RecordDownload(r.Context(), db, auditutil.DownloadParams{TableName: auditutil.TableForwardDownloads, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, RequestedBy: auditutil.ActorFromContext(r.Context()), UploadS3Key: s3Key, ExtraColumns: map[string]string{"download_type": forwardDownloadAuditType(downloadType, s3Key)}})
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

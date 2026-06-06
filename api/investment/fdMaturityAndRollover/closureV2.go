@@ -3912,14 +3912,38 @@ func loadCimplrDownloadFiles(ctx context.Context, pool *pgxpool.Pool, fileID, in
 		args = append(args, v)
 		where = append(where, fmt.Sprintf(cond, len(args)))
 	}
+	initiateID = strings.TrimSpace(initiateID)
+	confirmID = strings.TrimSpace(confirmID)
 	if strings.TrimSpace(fileID) != "" {
 		add("file_id=$%d::uuid", strings.TrimSpace(fileID))
 	}
-	if strings.TrimSpace(initiateID) != "" {
-		add("closure_initiate_id=$%d", strings.TrimSpace(initiateID))
+	if initiateID != "" && confirmID == "" {
+		confirmIDs, err := cimplrConfirmIDsForInitiate(ctx, pool, initiateID)
+		if err != nil {
+			return nil, err
+		}
+		if len(confirmIDs) > 0 {
+			args = append(args, initiateID, confirmIDs)
+			where = append(where, fmt.Sprintf("(closure_initiate_id=$%d OR closure_confirm_id=ANY($%d::text[]))", len(args)-1, len(args)))
+		} else {
+			add("closure_initiate_id=$%d", initiateID)
+		}
 	}
-	if strings.TrimSpace(confirmID) != "" {
-		add("closure_confirm_id=$%d", strings.TrimSpace(confirmID))
+	if confirmID != "" && initiateID == "" {
+		linkedInitiateID, err := cimplrInitiateIDForConfirm(ctx, pool, confirmID)
+		if err != nil {
+			return nil, err
+		}
+		if linkedInitiateID != "" {
+			args = append(args, confirmID, linkedInitiateID)
+			where = append(where, fmt.Sprintf("(closure_confirm_id=$%d OR closure_initiate_id=$%d)", len(args)-1, len(args)))
+		} else {
+			add("closure_confirm_id=$%d", confirmID)
+		}
+	}
+	if initiateID != "" && confirmID != "" {
+		add("closure_initiate_id=$%d", initiateID)
+		add("closure_confirm_id=$%d", confirmID)
 	}
 	if strings.TrimSpace(fileType) != "" {
 		add("file_type=$%d", strings.ToUpper(strings.TrimSpace(fileType)))
@@ -3954,6 +3978,42 @@ func loadCimplrDownloadFiles(ctx context.Context, pool *pgxpool.Pool, fileID, in
 		})
 	}
 	return files, rows.Err()
+}
+
+func cimplrInitiateIDForConfirm(ctx context.Context, pool *pgxpool.Pool, confirmID string) (string, error) {
+	var initiateID string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(closure_initiate_id, '')
+		FROM cimplr.fd_closure_confirm
+		WHERE closure_confirm_id=$1 AND COALESCE(is_deleted,false)=false
+		LIMIT 1`, confirmID).Scan(&initiateID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return strings.TrimSpace(initiateID), err
+}
+
+func cimplrConfirmIDsForInitiate(ctx context.Context, pool *pgxpool.Pool, initiateID string) ([]string, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT closure_confirm_id
+		FROM cimplr.fd_closure_confirm
+		WHERE closure_initiate_id=$1 AND COALESCE(is_deleted,false)=false`, initiateID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		id = strings.TrimSpace(id)
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
 }
 
 type approvalInstanceRequest struct {
