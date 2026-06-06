@@ -605,6 +605,10 @@ func StartGateway(port string, pathPrefix string) {
 
 	// Debug endpoint to show .env file contents and effective environment values
 	mux.HandleFunc("/debug/env", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if !isDevMode() {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusNotFound)
+			return
+		}
 		if r.Method != http.MethodGet {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
