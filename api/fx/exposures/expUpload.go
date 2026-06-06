@@ -396,6 +396,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 				lineFields[k] = v
 			}
 		}
+		delete(headerFields, "approval_status")
 		if val, ok := headerFields["document_date"]; ok {
 			headerFields["value_date"] = val
 			delete(headerFields, "document_date")
@@ -411,7 +412,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 				values = append(values, v)
 				i++
 			}
-			setParts = append(setParts, "approval_status = 'Pending'")
+			setParts = append(setParts, fmt.Sprintf("approval_status = '%s'", constants.StatusPendingEditApproval))
 			values = append(values, exposureHeaderID)
 
 			query := fmt.Sprintf(
@@ -421,6 +422,16 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			)
 			if _, err := db.Exec(query, values...); err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Header update failed: "+err.Error())
+				return
+			}
+		}
+		if len(headerFields) == 0 && len(lineFields) > 0 {
+			if _, err := db.Exec(
+				`UPDATE exposure_headers SET approval_status = $1 WHERE exposure_header_id = $2`,
+				constants.StatusPendingEditApproval,
+				exposureHeaderID,
+			); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Header status update failed: "+err.Error())
 				return
 			}
 		}
@@ -579,6 +590,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 				h.amount_in_local_currency, h.posting_date, h.text,
 				h.gl_account, h.reference, h.additional_header_details,
 				h.exposure_category, h.exposure_creation_status, h.batch_id,
+				h.upload_s3_key,
 				l.line_item_id, l.line_number, l.product_id, l.product_description,
 				l.quantity, l.unit_of_measure, l.unit_price, l.line_item_amount,
 				l.plant_code, l.delivery_date, l.payment_terms, l.inco_terms,
@@ -689,6 +701,7 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 				h.amount_in_local_currency, h.posting_date, h.text,
 				h.gl_account, h.reference, h.additional_header_details,
 				h.exposure_category, h.exposure_creation_status, h.batch_id,
+				h.upload_s3_key,
 				l.line_item_id, l.line_number, l.product_id, l.product_description,
 				l.quantity, l.unit_of_measure, l.unit_price, l.line_item_amount,
 				l.plant_code, l.delivery_date, l.payment_terms, l.inco_terms,
@@ -2153,7 +2166,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 						ParentID:     exposureHeaderID,
 						ActionType:   "CREATE",
 						Status:       constants.StatusPendingApproval,
-						Reason:       "Uploaded file: " + filename,
+						Reason:       "",
 						RequestedBy:  uploadedBy,
 						OldValues:    nil,
 						NewValues:    newValues,

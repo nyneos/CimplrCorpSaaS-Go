@@ -331,6 +331,7 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 			RealizedGainLoss   float64            `json:"realized_gain_loss"`
 			CancellationReason string             `json:"cancellation_reason"`
 			Status             string             `json:"status"`
+			RejectionComment   string             `json:"rejection_comment"`
 			Comment            string             `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BookingAmounts) == 0 || req.CancellationRate == 0 {
@@ -1191,9 +1192,9 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 			RolloverDates    map[string]string  `json:"rollover_dates"`
 			RolloverDate     string             `json:"rollover_date"`
 			Status           string             `json:"status"`
+			RejectionComment string             `json:"rejection_comment"`
 			Comment          string             `json:"comment"`
 			ApprovalComment  string             `json:"approval_comment"`
-			RejectionComment string             `json:"rejection_comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BookingAmounts) == 0 {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)

@@ -287,6 +287,9 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 				rows.Close()
 				return nil, scanErr
 			}
+			if shouldHideFXAuditActionRow(cfg.Source, entry) {
+				continue
+			}
 			entry["source"] = cfg.Source
 			entry["id_column"] = attempt.idAliasCol
 			payload = append(payload, entry)
@@ -300,6 +303,15 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 	}
 
 	return nil, lastErr
+}
+
+func shouldHideFXAuditActionRow(source string, entry map[string]interface{}) bool {
+	switch source {
+	case "FX_FORWARD_CANCELLATION", "FX_FORWARD_ROLLOVER":
+		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(entry["action_type"])), constants.AuditActionReject)
+	default:
+		return false
+	}
 }
 
 func buildFXAuditParentFilter(columnName, parentID string) (string, []interface{}) {
