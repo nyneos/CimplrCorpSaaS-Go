@@ -476,15 +476,15 @@ func GetDividendsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(d.reinvest_units,0) AS reinvest_units,
 				COALESCE(d.old_reinvest_units,0) AS old_reinvest_units,
 				d.is_deleted,
-				TO_CHAR(NULLIF(d.updated_at::text, '')::timestamp, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(NULLIF(d.updated_at::text, '')::timestamp, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 				
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
 				COALESCE(l.requested_by,'') AS audit_requested_by,
-				TO_CHAR(NULLIF(l.requested_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(NULLIF(l.requested_at::text, '')::timestamp,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(NULLIF(l.checker_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(NULLIF(l.checker_at::text, '')::timestamp,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason
 			FROM investment.accounting_dividend d

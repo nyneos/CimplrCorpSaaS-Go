@@ -538,9 +538,9 @@ func GetCcpCsdAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			history AS (
 				SELECT ccp_csd_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at
 				FROM apibox.audit_ccp_csd
 				GROUP BY ccp_csd_id
 			)
@@ -553,9 +553,9 @@ func GetCcpCsdAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.action_type,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.requested_by,'') AS requested_by,
-				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 				COALESCE(l.old_entity_sub_type,'') AS old_entity_sub_type,
@@ -604,8 +604,8 @@ func GetCcpCsdAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		id := r.URL.Query().Get("ccp_csd_id")
 		q := `SELECT audit_id, ccp_csd_id, action_type, processing_status, reason,
-			         requested_by, TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS'),
-			         COALESCE(checker_by,''), COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),''),
+			         requested_by, TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			         COALESCE(checker_by,''), COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
 			         COALESCE(checker_comment,'')
 			  FROM apibox.audit_ccp_csd`
 		var args []interface{}

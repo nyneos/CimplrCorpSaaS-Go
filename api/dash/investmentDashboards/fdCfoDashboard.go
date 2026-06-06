@@ -336,7 +336,7 @@ func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilt
 		  COALESCE(TO_CHAR(r.accrual_period_end,'YYYY-MM-DD'), ''),
 		  COALESCE(r.run_status,''),
 		  COALESCE(la.requested_by, r.submitted_by, r.created_by,''),
-		  COALESCE(TO_CHAR(COALESCE(la.requested_at, r.submitted_at, r.created_at),'YYYY-MM-DD HH24:MI:SS'), ''),
+		  COALESCE(TO_CHAR(COALESCE(la.requested_at, r.submitted_at, r.created_at),'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
 		  COALESCE(NULLIF(la.processing_status,''), 'PENDING_APPROVAL') AS processing_status
 		FROM investment.fd_accrual_run r
 		LEFT JOIN latest_audit la ON la.run_id = r.run_id
@@ -413,7 +413,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  COALESCE(b.booking_status,''),
 		  COALESCE(la.processing_status,''),
 		  COALESCE(la.requested_by, b.created_by,''),
-		  COALESCE(TO_CHAR(COALESCE(la.requested_at, b.created_at),'YYYY-MM-DD HH24:MI:SS'),'')
+		  COALESCE(TO_CHAR(COALESCE(la.requested_at, b.created_at),'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')
 		FROM investment.fd_booking_request b
 		LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 		LEFT JOIN LATERAL (
@@ -443,7 +443,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  COALESCE(b.principal_amount,0), COALESCE(b.interest_rate, m.interest_rate, 0),
 		  COALESCE(TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'), TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
 		  COALESCE(c.confirmation_status,''),
-		  COALESCE(c.created_by,''), COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')
+		  COALESCE(c.created_by,''), COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')
 		FROM investment.fd_confirmation c
 		JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 		LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
@@ -463,7 +463,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  COALESCE(m.principal_amount, b.principal_amount,0), COALESCE(m.interest_rate, b.interest_rate, 0),
 		  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
 		  COALESCE(m.fd_status,''),
-		  COALESCE(m.created_by,''), COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD HH24:MI:SS'),'')
+		  COALESCE(m.created_by,''), COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')
 		FROM investment.fd_master m
 		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 		WHERE COALESCE(m.is_deleted,false)=false
@@ -489,7 +489,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		    COALESCE(TO_CHAR(ci.maturity_date, 'YYYY-MM-DD'), TO_CHAR(m.maturity_date, 'YYYY-MM-DD'), '') AS maturity_date,
 		    COALESCE(la.processing_status, ci.closure_status, 'PENDING_APPROVAL') AS status,
 		    COALESCE(la.requested_by, '') AS created_by,
-		    COALESCE(TO_CHAR(la.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS created_at,
+		    COALESCE(TO_CHAR(la.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS created_at,
 		    -- cimplr.fd_closure_initiate has no created_at column; fall back to
 		    -- NOW() so brand-new initiate rows without an audit entry still sort
 		    -- to the top instead of erroring out the whole query.
@@ -522,7 +522,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		             TO_CHAR(m.maturity_date, 'YYYY-MM-DD'), '') AS maturity_date,
 		    COALESCE(lca.processing_status, cc.closure_status, 'PENDING_APPROVAL') AS status,
 		    COALESCE(lca.requested_by, '') AS created_by,
-		    COALESCE(TO_CHAR(lca.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS created_at,
+		    COALESCE(TO_CHAR(lca.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS created_at,
 		    COALESCE(lca.requested_at, NOW()) AS sort_ts
 		  FROM cimplr.fd_closure_confirm cc
 		  LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id AND m.is_deleted = false
@@ -547,7 +547,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		    COALESCE(m.principal_amount, b.principal_amount, 0), COALESCE(m.interest_rate, b.interest_rate, 0),
 		    COALESCE(TO_CHAR(m.maturity_date, 'YYYY-MM-DD'), ''),
 		    COALESCE(cr.closure_status, ''),
-		    COALESCE(cr.created_by, ''), COALESCE(TO_CHAR(cr.created_at, 'YYYY-MM-DD HH24:MI:SS'), ''),
+		    COALESCE(cr.created_by, ''), COALESCE(TO_CHAR(cr.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
 		    cr.created_at
 		  FROM investment.fd_closure_request cr
 		  LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id AND m.is_deleted = false

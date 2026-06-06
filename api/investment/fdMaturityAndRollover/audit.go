@@ -53,7 +53,7 @@ func GetClosureAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(performed_by, '')                                              AS performed_by,
 				COALESCE(performed_by_email, '')                                        AS performed_by_email,
 				COALESCE(action_reason, '')                                             AS action_reason,
-				COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS'), '')             AS created_at,
+				COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')             AS created_at,
 				COALESCE(old_closure_status, '')                                        AS old_closure_status,
 				COALESCE(old_bank_id, '')                                               AS old_bank_id,
 				COALESCE(old_bank_name, '')                                             AS old_bank_name,
@@ -114,9 +114,9 @@ func GetClosureAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.requested_by, '') AS performed_by,
 				COALESCE(a.requested_by, '') AS performed_by_email,
 				COALESCE(a.reason, '') AS action_reason,
-				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS created_at,
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS created_at,
 				COALESCE(a.checker_by, '') AS checker_by,
-				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS checker_at,
 				COALESCE(a.checker_comment, '') AS checker_comment
 			FROM investment.additional_file_audit a
 			LEFT JOIN investment.fd_closure_request_files cf ON cf.file_id = a.file_id AND cf.closure_request_id::text = a.parent_record_id

@@ -190,7 +190,7 @@ func UpsertNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ON CONFLICT (event_id, channel) DO UPDATE SET %s
 			RETURNING config_id, event_id, channel, is_enabled, retry_max, retry_backoff_secs, priority_level,
 			          COALESCE(updated_by,'') AS updated_by,
-			          TO_CHAR(updated_at,'YYYY-MM-DD HH24:MI:SS') AS updated_at
+			          TO_CHAR(updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at
 		`,
 			pos, pos+1, pos+2, pos+3, pos+4, pos+5, pos+6,
 			strings.Join(sets, ", "),
@@ -286,14 +286,14 @@ func GetNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				nc.retry_backoff_secs,
 				COALESCE(nc.priority_level, 3)     AS priority_level,
 				COALESCE(nc.updated_by,'')         AS updated_by,
-				TO_CHAR(nc.updated_at,'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(nc.updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 				-- latest audit row for this config
 				COALESCE(la_cfg.processing_status,'') AS processing_status,
 				COALESCE(la_cfg.action_type,'')       AS audit_action_type,
 				COALESCE(la_cfg.requested_by,'')      AS audit_requested_by,
-				TO_CHAR(la_cfg.requested_at,'YYYY-MM-DD HH24:MI:SS') AS audit_requested_at,
+				TO_CHAR(la_cfg.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS audit_requested_at,
 				COALESCE(la_cfg.checker_by,'')        AS audit_checker_by,
-				TO_CHAR(la_cfg.checker_at,'YYYY-MM-DD HH24:MI:SS')   AS audit_checker_at,
+				TO_CHAR(la_cfg.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"')   AS audit_checker_at,
 				COALESCE(la_cfg.checker_comment,'')   AS audit_checker_comment,
 				-- has_template: true if at least one approved, non-archived template exists
 				EXISTS (

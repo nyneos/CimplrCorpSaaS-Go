@@ -1262,11 +1262,11 @@ history AS (
   SELECT
     receipt_id,
     MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at_audit,
     MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
     MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
   FROM investment.fd_interest_receipt_audit
   GROUP BY receipt_id
 )
@@ -1299,9 +1299,9 @@ SELECT
   COALESCE(l.action_type,'')           AS action_type,
   COALESCE(l.audit_id::text,'')        AS audit_id,
   COALESCE(l.requested_by,'')          AS requested_by,
-  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
   COALESCE(l.checker_by,'')            AS checker_by,
-  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
   COALESCE(l.checker_comment,'')       AS checker_comment,
   COALESCE(l.reason,'')                AS reason,
   COALESCE(l.old_receipt_status,'')    AS old_receipt_status,
@@ -1437,11 +1437,11 @@ history AS (
   SELECT
     receipt_id,
     MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at_audit,
     MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
     MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
   FROM investment.fd_interest_receipt_audit
   GROUP BY receipt_id
 )
@@ -1463,9 +1463,9 @@ SELECT
   COALESCE(r.reconcile_status,'')      AS reconcile_status,
   COALESCE(r.reconcile_run_id,'')      AS reconcile_run_id,
   COALESCE(l.requested_by,'')          AS requested_by,
-  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
   COALESCE(l.checker_by,'')            AS checker_by,
-  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
   COALESCE(l.processing_status,'')     AS processing_status,
   COALESCE(h.created_by_audit,'')      AS created_by_audit,
   COALESCE(h.created_at_audit,'')      AS created_at_audit,
@@ -1562,11 +1562,11 @@ history AS (
   SELECT
     tds_id,
     MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at_audit,
     MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
     MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
   FROM investment.fd_tds_receipt_audit
   GROUP BY tds_id
 )
@@ -1582,9 +1582,9 @@ SELECT
   COALESCE(t.tds_deducted_actual,0)    AS actual_amount,
   COALESCE(t.tds_status,'')            AS tds_status,
   COALESCE(l.requested_by,'')          AS requested_by,
-  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
   COALESCE(l.checker_by,'')            AS checker_by,
-  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
   COALESCE(l.processing_status,'')     AS processing_status,
   COALESCE(h.created_by_audit,'')      AS created_by_audit,
   COALESCE(h.created_at_audit,'')      AS created_at_audit,
@@ -1685,11 +1685,11 @@ history AS (
   SELECT
     tds_id,
     MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at_audit,
     MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
     MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
   FROM investment.fd_tds_receipt_audit
   GROUP BY tds_id
 )
@@ -1728,9 +1728,9 @@ SELECT
 	COALESCE(la.processing_status,'')      AS processing_status,
 	COALESCE(la.action_type,'')            AS action_type,
 	COALESCE(la.requested_by,'')           AS requested_by,
-	COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+	COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 	COALESCE(la.checker_by,'')             AS checker_by,
-	COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+	COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
 	COALESCE(la.checker_comment,'')        AS checker_comment,
 	COALESCE(la.reason,'')                 AS reason,
 	-- history pivot
@@ -2874,9 +2874,9 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(la.processing_status,'')          AS audit_processing_status,
 				COALESCE(la.action_type,'')                AS audit_action_type,
 				COALESCE(la.requested_by,'')               AS audit_requested_by,
-				COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS audit_requested_at,
+				COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS audit_requested_at,
 				COALESCE(la.checker_by,'')                 AS audit_checker_by,
-				COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS audit_checker_at,
+				COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS audit_checker_at,
 				COALESCE(la.checker_comment,'')            AS audit_checker_comment,
 				COALESCE(la.reason,'')                     AS audit_reason
 			FROM investment.fd_receipt_reconcile_result rr
@@ -3160,9 +3160,9 @@ SELECT
   COALESCE(la.processing_status,'')     AS audit_processing_status,
   COALESCE(la.action_type,'')           AS audit_action_type,
   COALESCE(la.requested_by,'')          AS audit_requested_by,
-  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS audit_requested_at,
+  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS audit_requested_at,
   COALESCE(la.checker_by,'')            AS audit_checker_by,
-  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS audit_checker_at,
+  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS audit_checker_at,
   COALESCE(la.checker_comment,'')       AS audit_checker_comment,
   COALESCE(la.reason,'')               AS audit_reason
 FROM investment.fd_interest_receipt r
@@ -3258,9 +3258,9 @@ SELECT
   COALESCE(la.processing_status,'')     AS audit_processing_status,
   COALESCE(la.action_type,'')           AS audit_action_type,
   COALESCE(la.requested_by,'')          AS audit_requested_by,
-  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS audit_requested_at,
+  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS audit_requested_at,
   COALESCE(la.checker_by,'')            AS audit_checker_by,
-  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS audit_checker_at,
+  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS audit_checker_at,
   COALESCE(la.checker_comment,'')       AS audit_checker_comment,
   COALESCE(la.reason,'')               AS audit_reason
 FROM investment.fd_tds_receipt t
