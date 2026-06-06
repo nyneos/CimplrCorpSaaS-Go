@@ -1001,7 +1001,7 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (activity_id) action_id, activity_id, actiontype, processing_status
 			FROM investment.auditactionaccountingactivity
 			WHERE activity_id = ANY($1)
-			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
+			  AND UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 			ORDER BY activity_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ActivityIDs)
@@ -1225,7 +1225,7 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (activity_id) action_id, activity_id, processing_status
 			FROM investment.auditactionaccountingactivity
 			WHERE activity_id = ANY($1)
-			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
+			  AND UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 			ORDER BY activity_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ActivityIDs)
@@ -1308,7 +1308,7 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactionaccountingactivity a
-				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
+				WHERE UPPER(COALESCE(a.actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 				ORDER BY a.activity_id, a.requested_at DESC
 			),
 			history AS (
@@ -1517,7 +1517,7 @@ func GetApprovedActivities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					activity_id,
 					processing_status
 				FROM investment.auditactionaccountingactivity
-				WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
+				WHERE UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 				ORDER BY activity_id, requested_at DESC
 			)
 			SELECT

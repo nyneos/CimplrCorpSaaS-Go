@@ -886,7 +886,7 @@ func GetMTMWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactionaccountingactivity a
-				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
+				WHERE UPPER(COALESCE(a.actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 				ORDER BY a.activity_id, a.requested_at DESC
 			)
 			SELECT
