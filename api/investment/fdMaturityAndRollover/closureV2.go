@@ -1824,9 +1824,23 @@ func CimplrClosureDownload(pool *pgxpool.Pool) http.HandlerFunc {
 			ClosureInitiateID string `json:"closure_initiate_id"`
 			ClosureConfirmID  string `json:"closure_confirm_id"`
 			FileType          string `json:"file_type"`
+			UploadS3Key       string `json:"upload_s3_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if isCimplrPrematureClosureRoute(r.URL.Path) {
+			files, err := loadCimplrPrematureMainDownloadFiles(r.Context(), pool, req.ClosureConfirmID, req.UploadS3Key)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "download lookup failed: "+err.Error())
+				return
+			}
+			if len(files) == 0 {
+				api.RespondWithPayload(w, false, "No file available", map[string]interface{}{"files": []map[string]interface{}{}})
+				return
+			}
+			api.RespondWithPayload(w, true, "", map[string]interface{}{"files": files})
 			return
 		}
 		files, err := loadCimplrDownloadFiles(r.Context(), pool, req.FileID, req.ClosureInitiateID, req.ClosureConfirmID, req.FileType)
@@ -1867,6 +1881,30 @@ func CimplrClosureUpload(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.FileType == "" || req.StoredFileName == "" || req.UploadS3Key == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "file_type, stored_file_name and upload_s3_key are required")
+			return
+		}
+		if isCimplrPrematureClosureRoute(r.URL.Path) {
+			if req.ClosureConfirmID == "" {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
+				return
+			}
+			tag, err := pool.Exec(r.Context(), `
+				UPDATE cimplr.fd_closure_confirm
+				SET upload_s3_key=$1
+				WHERE closure_confirm_id=$2
+				  AND closure_type='PREMATURE'
+				  AND COALESCE(is_deleted,false)=false`,
+				req.UploadS3Key, req.ClosureConfirmID,
+			)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "file upload metadata failed: "+err.Error())
+				return
+			}
+			if tag.RowsAffected() == 0 {
+				api.RespondWithError(w, http.StatusNotFound, constants.ConfirmRecordNotFound)
+				return
+			}
+			api.RespondWithPayload(w, true, "", map[string]interface{}{"upload_s3_key": req.UploadS3Key})
 			return
 		}
 		var fileID string
@@ -1934,7 +1972,14 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 	parentID := firstNonEmpty(closureConfirmID, closureInitiateID)
 	storedFileName := s3storage.BuildUploadedFilename(header.Filename, userEmail, uploadedAt)
 	module := "fd-closure-additional"
-	if closureConfirmID != "" {
+	isPrematureMainUpload := isCimplrPrematureClosureRoute(r.URL.Path)
+	if isPrematureMainUpload {
+		if closureConfirmID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
+			return
+		}
+		module = "fd-premature-closure-main"
+	} else if closureConfirmID != "" {
 		module = "fd-rollover-additional"
 	}
 	s3Key := s3storage.BuildNamedS3Key(s3storage.GetStoragePrefix(module), parentID, storedFileName)
@@ -1947,6 +1992,33 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 		return
 	}
 	fileHash := s3storage.ContentHashHex(body)
+	if isPrematureMainUpload {
+		tag, err := pool.Exec(r.Context(), `
+			UPDATE cimplr.fd_closure_confirm
+			SET upload_s3_key=$1
+			WHERE closure_confirm_id=$2
+			  AND closure_type='PREMATURE'
+			  AND COALESCE(is_deleted,false)=false`,
+			s3Key, closureConfirmID,
+		)
+		if err != nil {
+			_ = s3storage.DeleteFromS3(r.Context(), s3Key)
+			api.RespondWithError(w, http.StatusInternalServerError, "file upload metadata failed: "+err.Error())
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			_ = s3storage.DeleteFromS3(r.Context(), s3Key)
+			api.RespondWithError(w, http.StatusNotFound, constants.ConfirmRecordNotFound)
+			return
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"upload_s3_key":    s3Key,
+			"stored_file_name": storedFileName,
+			"file_hash":        fileHash,
+			"file_size":        len(body),
+		})
+		return
+	}
 	var fileID string
 	err = pool.QueryRow(r.Context(), `
 		INSERT INTO cimplr.fd_closure_files (
@@ -3978,6 +4050,51 @@ func loadCimplrDownloadFiles(ctx context.Context, pool *pgxpool.Pool, fileID, in
 		})
 	}
 	return files, rows.Err()
+}
+
+func isCimplrPrematureClosureRoute(path string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(path)), "/closure/premature/")
+}
+
+func loadCimplrPrematureMainDownloadFiles(ctx context.Context, pool *pgxpool.Pool, confirmID, uploadS3Key string) ([]map[string]interface{}, error) {
+	confirmID = strings.TrimSpace(confirmID)
+	uploadS3Key = strings.TrimSpace(uploadS3Key)
+	if uploadS3Key == "" && confirmID != "" {
+		err := pool.QueryRow(ctx, `
+			SELECT COALESCE(upload_s3_key,'')
+			FROM cimplr.fd_closure_confirm
+			WHERE closure_confirm_id=$1
+			  AND closure_type='PREMATURE'
+			  AND COALESCE(is_deleted,false)=false
+			LIMIT 1`, confirmID).Scan(&uploadS3Key)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return []map[string]interface{}{}, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		uploadS3Key = strings.TrimSpace(uploadS3Key)
+	}
+	if uploadS3Key == "" {
+		return []map[string]interface{}{}, nil
+	}
+	storedFileName := uploadS3Key
+	if idx := strings.LastIndex(uploadS3Key, "/"); idx >= 0 && idx < len(uploadS3Key)-1 {
+		storedFileName = uploadS3Key[idx+1:]
+	}
+	url, err := s3storage.GetDownloadPresignedURL(ctx, uploadS3Key, 15*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	return []map[string]interface{}{
+		{
+			"closure_confirm_id": confirmID,
+			"file_type":          "PREMATURE_CLOSURE_EVIDENCE",
+			"stored_file_name":   storedFileName,
+			"download_url":       url,
+			"expires_in_minutes": 15,
+		},
+	}, nil
 }
 
 func cimplrInitiateIDForConfirm(ctx context.Context, pool *pgxpool.Pool, confirmID string) (string, error) {

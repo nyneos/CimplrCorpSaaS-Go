@@ -232,6 +232,7 @@ var moduleDefaultPrefixes = map[string]string{
 	"fd-bank-confirmation-capture":             "fd/bank-confirmation-capture/",
 	"fd-maturity-payout-processing":            "fd/maturity-payout-processing/",
 	"fd-premature-closure":                     "fd/premature-closure/",
+	"fd-premature-closure-main":                "investment/prematureclosure/",
 	"fd-booking-additional":                    "fd/fd-booking/",
 	"fd-confirmation-additional":               "fd/fd-confirmation/",
 	"fd-master-additional":                     "fd/fd-master/",
