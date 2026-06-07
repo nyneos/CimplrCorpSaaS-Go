@@ -324,8 +324,8 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 		for bsID := range affectedBS {
 			pgxBatch.Queue(`
 				INSERT INTO cimplrcorpsaas.auditactionbankstatement
-				    (bankstatementid, actiontype, processing_status, requested_by, requested_at)
-				VALUES ($1, 'RECAT', 'PENDING_EDIT_APPROVAL', 'system', now())
+				    (bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip)
+				VALUES ($1, 'RECAT', 'PENDING_EDIT_APPROVAL', 'system', now(), NULL::text)
 				ON CONFLICT DO NOTHING
 			`, bsID)
 		}

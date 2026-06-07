@@ -116,8 +116,8 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		auditQ := `INSERT INTO auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
-		if _, err := tx.Exec(ctx, auditQ, sweepID, nullifyEmpty(req.Reason), requestedBy); err != nil {
+		auditQ := `INSERT INTO auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now(),$4)`
+		if _, err := tx.Exec(ctx, auditQ, sweepID, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
 			api.RespondWithResult(w, false, "failed to create audit action: "+err.Error())
 			return
 		}
@@ -278,8 +278,8 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		auditQ := `INSERT INTO auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())`
-		if _, err := tx.Exec(ctx, auditQ, req.SweepID, nullifyEmpty(req.Reason), requestedBy); err != nil {
+		auditQ := `INSERT INTO auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4)`
+		if _, err := tx.Exec(ctx, auditQ, req.SweepID, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
 			api.RespondWithResult(w, false, "failed to create audit action: "+err.Error())
 			return
 		}
@@ -368,10 +368,10 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			auditLatest := `SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionsweepconfiguration WHERE sweep_id = $1 ORDER BY requested_at DESC LIMIT 1`
-			var processingStatusPtr, requestedByPtr, actionTypePtr, actionIDPtr, checkerByPtr, checkerCommentPtr, reasonPtr *string
+			auditLatest := `SELECT processing_status, requested_by, requested_at, requested_ip, actiontype, action_id, checker_by, checker_at, checker_ip, checker_comment, reason FROM auditactionsweepconfiguration WHERE sweep_id = $1 ORDER BY requested_at DESC LIMIT 1`
+			var processingStatusPtr, requestedByPtr, requestedIPPtr, actionTypePtr, actionIDPtr, checkerByPtr, checkerIPPtr, checkerCommentPtr, reasonPtr *string
 			var requestedAtPtr, checkerAtPtr *time.Time
-			_ = pgxPool.QueryRow(ctx, auditLatest, sweepID).Scan(&processingStatusPtr, &requestedByPtr, &requestedAtPtr, &actionTypePtr, &actionIDPtr, &checkerByPtr, &checkerAtPtr, &checkerCommentPtr, &reasonPtr)
+			_ = pgxPool.QueryRow(ctx, auditLatest, sweepID).Scan(&processingStatusPtr, &requestedByPtr, &requestedAtPtr, &requestedIPPtr, &actionTypePtr, &actionIDPtr, &checkerByPtr, &checkerAtPtr, &checkerIPPtr, &checkerCommentPtr, &reasonPtr)
 
 			// Then fetch recent CREATE/EDIT/DELETE entries to build created/edited/deleted summary (use api.GetAuditInfo)
 			auditDetailsQuery := `SELECT actiontype, requested_by, requested_at FROM auditactionsweepconfiguration WHERE sweep_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC`
@@ -455,6 +455,18 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}(),
 				"checker_by": api.GetAuditInfo("", checkerByPtr, checkerAtPtr).CreatedBy,
 				"checker_at": api.GetAuditInfo("", checkerByPtr, checkerAtPtr).CreatedAt,
+				"requested_ip": func() string {
+					if requestedIPPtr != nil {
+						return *requestedIPPtr
+					}
+					return ""
+				}(),
+				"checker_ip": func() string {
+					if checkerIPPtr != nil {
+						return *checkerIPPtr
+					}
+					return ""
+				}(),
 				"checker_comment": func() string {
 					if checkerCommentPtr != nil {
 						return *checkerCommentPtr
@@ -551,8 +563,8 @@ func BulkApproveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		upd := `UPDATE auditactionsweepconfiguration SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
-		if _, err := tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
+		upd := `UPDATE auditactionsweepconfiguration SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
+		if _, err := tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
 			api.RespondWithResult(w, false, "failed to approve actions: "+err.Error())
 			return
 		}
@@ -635,8 +647,8 @@ func BulkRejectSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		upd := `UPDATE auditactionsweepconfiguration SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
-		if _, err := pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), actionIDs); err != nil {
+		upd := `UPDATE auditactionsweepconfiguration SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
+		if _, err := pgxPool.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
 			api.RespondWithResult(w, false, "failed to reject actions: "+err.Error())
 			return
 		}
@@ -682,9 +694,9 @@ func BulkRequestDeleteSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFun
 			}
 		}()
 
-		ins := `INSERT INTO auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
+		ins := `INSERT INTO auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4)`
 		for _, id := range req.SweepIDs {
-			if _, err := tx.Exec(ctx, ins, id, nullifyEmpty(req.Reason), requestedBy); err != nil {
+			if _, err := tx.Exec(ctx, ins, id, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
 				api.RespondWithResult(w, false, "failed to create delete audit: "+err.Error())
 				return
 			}

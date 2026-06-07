@@ -258,7 +258,7 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		// Insert audit actions for each proposal_id
-		q := `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
+		q := `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4)`
 		for _, pid := range req.ProposalIDs {
 			if strings.TrimSpace(pid) == "" {
 				continue
@@ -275,7 +275,7 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithResult(w, false, "delete request already pending for proposal: "+pid)
 				return
 			}
-			if _, err := tx.Exec(ctx, q, pid, req.Reason, requestedBy); err != nil {
+			if _, err := tx.Exec(ctx, q, pid, req.Reason, requestedBy, projectionNullIfEmpty(api.ClientIPFromRequest(r))); err != nil {
 				api.RespondWithResult(w, false, "Failed to insert audit for proposal "+pid+": "+err.Error())
 				return
 			}
@@ -375,8 +375,8 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Update to REJECTED
-		upd := `UPDATE cimplrcorpsaas.audit_action_cashflow_proposal SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
-		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, actionIDs); err != nil {
+		upd := `UPDATE cimplrcorpsaas.audit_action_cashflow_proposal SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
+		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, projectionNullIfEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
 			api.RespondWithResult(w, false, "Failed to update audit rows: "+err.Error())
 			return
 		}
@@ -490,10 +490,11 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
     SET processing_status='APPROVED', 
         checker_by=$1, 
         checker_at=now(), 
-        checker_comment=$2 
-    WHERE action_id = ANY($3)
+        checker_comment=$2,
+        checker_ip=$3
+    WHERE action_id = ANY($4)
 	`
-		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, actionIDs); err != nil {
+		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, projectionNullIfEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
 			api.RespondWithResult(w, false, "Failed to update audit rows: "+err.Error())
 			return
 		}
@@ -767,8 +768,8 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// audit - one per proposal
-		auditQ := `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
-		if _, err := tx.Exec(ctx, auditQ, proposalID, "Imported", createdBy); err != nil {
+		auditQ := `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now(), $4)`
+		if _, err := tx.Exec(ctx, auditQ, proposalID, "Imported", createdBy, projectionNullIfEmpty(api.ClientIPFromRequest(r))); err != nil {
 			api.RespondWithResult(w, false, "Failed to create audit: "+err.Error())
 			return
 		}
@@ -1173,15 +1174,15 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		actions := make([]map[string]interface{}, 0)
-		aq := `SELECT action_id, proposal_id, action_type, processing_status, reason, requested_by, requested_at, checker_by, checker_at, checker_comment FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = $1 ORDER BY requested_at DESC`
+		aq := `SELECT action_id, proposal_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip, checker_comment FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = $1 ORDER BY requested_at DESC`
 		if aRows, aErr := pgxPool.Query(ctx, aq, req.ProposalID); aErr == nil {
 			defer aRows.Close()
 			for aRows.Next() {
 				var (
-					actionID                                                                                                         string
-					proposalID, actionType, processingStatus, reason, requestedBy, requestedAt, checkerBy, checkerAt, checkerComment interface{}
+					actionID                                                                                                                                 string
+					proposalID, actionType, processingStatus, reason, requestedBy, requestedAt, requestedIP, checkerBy, checkerAt, checkerIP, checkerComment interface{}
 				)
-				if err := aRows.Scan(&actionID, &proposalID, &actionType, &processingStatus, &reason, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment); err != nil {
+				if err := aRows.Scan(&actionID, &proposalID, &actionType, &processingStatus, &reason, &requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment); err != nil {
 					continue
 				}
 				a := map[string]interface{}{
@@ -1192,8 +1193,10 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"reason":            ifaceToString(reason),
 					"requested_by":      ifaceToString(requestedBy),
 					"requested_at":      ifaceToTimeString(requestedAt),
+					"requested_ip":      ifaceToString(requestedIP),
 					"checker_by":        ifaceToString(checkerBy),
 					"checker_at":        ifaceToTimeString(checkerAt),
+					"checker_ip":        ifaceToString(checkerIP),
 					"checker_comment":   ifaceToString(checkerComment),
 				}
 				actions = append(actions, a)
@@ -1662,7 +1665,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now())`, proposalID, req.UserID)
+		_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3)`, proposalID, req.UserID, projectionNullIfEmpty(api.ClientIPFromRequest(r)))
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to insert audit action: "+err.Error())
 			return

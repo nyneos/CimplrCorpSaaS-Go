@@ -129,7 +129,8 @@ func recordSweepInitiationMainUploadAudit(ctx context.Context, tx pgx.Tx, parent
 			processing_status,
 			reason,
 			requested_by,
-			requested_at
+			requested_at,
+			requested_ip
 		)
 		SELECT
 			si.initiation_id,
@@ -138,10 +139,11 @@ func recordSweepInitiationMainUploadAudit(ctx context.Context, tx pgx.Tx, parent
 			'APPROVED',
 			$2,
 			$3,
-			$4
+			$4,
+			$5
 		FROM cimplrcorpsaas.sweep_initiation si
 		WHERE si.initiation_id = $1
-	`, parentID, reason, payload.UploadedBy, payload.UploadedAt)
+	`, parentID, reason, payload.UploadedBy, payload.UploadedAt, nullifyEmpty(payload.RequestedIP))
 	return err
 }
 

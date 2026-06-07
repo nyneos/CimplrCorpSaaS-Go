@@ -582,13 +582,10 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					rows.Close()
 					if len(payableIDs) > 0 {
-						// Bulk insert audit logs
-						var auditValues []string
-						for _, pid := range payableIDs {
-							auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, pid, userName))
-						}
-						auditSQL := "INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
-						_, auditErr := pgxPool.Exec(ctx, auditSQL)
+						_, auditErr := pgxPool.Exec(ctx, `
+							INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+							SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
+						`, payableIDs, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r)))
 						if auditErr != nil {
 							http.Error(w, "Audit log error (payables): "+auditErr.Error(), http.StatusInternalServerError)
 							return
@@ -615,13 +612,10 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					rows.Close()
 					if len(receivableIDs) > 0 {
-						// Bulk insert audit logs
-						var auditValues []string
-						for _, rid := range receivableIDs {
-							auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, rid, userName))
-						}
-						auditSQL := "INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
-						_, auditErr := pgxPool.Exec(ctx, auditSQL)
+						_, auditErr := pgxPool.Exec(ctx, `
+							INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+							SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
+						`, receivableIDs, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r)))
 						if auditErr != nil {
 							http.Error(w, "Audit log error (receivables): "+auditErr.Error(), http.StatusInternalServerError)
 							return

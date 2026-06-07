@@ -326,9 +326,9 @@ func uploadCashflowProposalService(
 
 	if _, err := tx.Exec(ctx, `
 			INSERT INTO audit_action_cashflow_proposal
-			(proposal_id, action_type, processing_status, reason, requested_by, requested_at)
-			VALUES ($1,'CREATE','PENDING_APPROVAL','Imported via uploader',$2,now())
-		`, proposalID, userEmail); err != nil {
+			(proposal_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip)
+			VALUES ($1,'CREATE','PENDING_APPROVAL','Imported via uploader',$2,now(),$3)
+		`, proposalID, userEmail, projectionNullIfEmpty(api.ClientIPFromContext(ctx))); err != nil {
 		return "", 0, http.StatusInternalServerError, errors.New(parseConstraintError(err))
 	}
 

@@ -536,6 +536,7 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
+		requestedIP := api.ClientIPFromRequest(r)
 
 		// Fetch sweep configuration
 		var entityName, sourceBank, sourceAccount, targetBank, targetAccount, sweepType, frequency string
@@ -636,10 +637,10 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Auto-approve the initiation (manual trigger bypasses approval workflow)
 		insAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
 			initiation_id, sweep_id, actiontype, processing_status,
-			requested_by, requested_at, checker_by, checker_at
-		) VALUES ($1, $2, 'CREATE', 'APPROVED', $3, now(), $4, now())`
+			requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip
+		) VALUES ($1, $2, 'CREATE', 'APPROVED', $3, now(), $4, $5, now(), $6)`
 
-		_, err = pgxPool.Exec(ctx, insAudit, initiationID, req.SweepID, requestedBy, requestedBy)
+		_, err = pgxPool.Exec(ctx, insAudit, initiationID, req.SweepID, requestedBy, nullifyEmpty(requestedIP), requestedBy, nullifyEmpty(requestedIP))
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to auto-approve initiation: "+err.Error())
 			return
@@ -703,7 +704,7 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Execute direct sweep (same logic as ExecuteSweepV2Direct from sweep_processorV2.go)
-		result, err := executeDirectSweepV2(ctx, pgxPool, sweepData, requestedBy)
+		result, err := executeDirectSweepV2(ctx, pgxPool, sweepData, requestedBy, requestedIP)
 		if err != nil {
 			api.RespondWithResult(w, false, "Sweep execution failed: "+err.Error())
 			return
@@ -714,7 +715,7 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // executeDirectSweepV2 executes a sweep without initiation (for requires_initiation=false sweeps)
-func executeDirectSweepV2(ctx context.Context, pgxPool *pgxpool.Pool, sweep interface{}, requestedBy string) (map[string]interface{}, error) {
+func executeDirectSweepV2(ctx context.Context, pgxPool *pgxpool.Pool, sweep interface{}, requestedBy, requestedIP string) (map[string]interface{}, error) {
 	// Type assertion to extract fields (using reflection-like approach)
 	type SweepData struct {
 		sweepID       string
@@ -841,13 +842,13 @@ func executeDirectSweepV2(ctx context.Context, pgxPool *pgxpool.Pool, sweep inte
 	// Create audit for source (APPROVED by system)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
 		)
-		SELECT balance_id, 'EDIT', 'APPROVED', $1, $2, NOW()
+		SELECT balance_id, 'EDIT', 'APPROVED', $1, $2, NOW(), $4
 		FROM bank_balances_manual
 		WHERE account_no = $3
 		LIMIT 1
-	`, fmt.Sprintf("Manual sweep V2 execution (direct): %s", s.sweepID), requestedBy, s.sourceAccount)
+	`, fmt.Sprintf("Manual sweep V2 execution (direct): %s", s.sweepID), requestedBy, s.sourceAccount, nullifyEmpty(requestedIP))
 
 	if err != nil {
 		return nil, fmt.Errorf(constants.ErrAuditInsertFailedUser)
@@ -876,13 +877,13 @@ func executeDirectSweepV2(ctx context.Context, pgxPool *pgxpool.Pool, sweep inte
 	// Create audit for target (APPROVED by system)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
 		)
-		SELECT balance_id, 'EDIT', 'APPROVED', $1, $2, NOW()
+		SELECT balance_id, 'EDIT', 'APPROVED', $1, $2, NOW(), $4
 		FROM bank_balances_manual
 		WHERE account_no = $3
 		LIMIT 1
-	`, fmt.Sprintf("Manual sweep V2 receipt (direct): %s", s.sweepID), requestedBy, s.targetAccount)
+	`, fmt.Sprintf("Manual sweep V2 receipt (direct): %s", s.sweepID), requestedBy, s.targetAccount, nullifyEmpty(requestedIP))
 
 	if err != nil {
 		return nil, fmt.Errorf(constants.ErrAuditInsertFailedUser)
@@ -955,6 +956,7 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
+		requestedIP := api.ClientIPFromRequest(r)
 
 		// Fetch sweep configuration
 		var entityName, sourceBank, sourceAccount, targetBank, targetAccount, sweepType string
@@ -1042,10 +1044,10 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Auto-approve the manual initiation (manual triggers bypass approval workflow)
 		insAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
 			initiation_id, sweep_id, actiontype, processing_status, 
-			requested_by, requested_at, checker_by, checker_at
-		) VALUES ($1, $2, 'CREATE', 'APPROVED', $3, now(), $4, now())`
+			requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip
+		) VALUES ($1, $2, 'CREATE', 'APPROVED', $3, now(), $4, $5, now(), $6)`
 
-		_, err = pgxPool.Exec(ctx, insAudit, initiationID, req.SweepID, requestedBy, requestedBy)
+		_, err = pgxPool.Exec(ctx, insAudit, initiationID, req.SweepID, requestedBy, nullifyEmpty(api.ClientIPFromRequest(r)), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to auto-approve manual initiation: "+err.Error())
 			return
@@ -1062,6 +1064,7 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SweepAmount:      sweepAmount,
 			OverriddenAmount: req.OverriddenAmount,
 			RequestedBy:      requestedBy,
+			RequestedIP:      requestedIP,
 		}
 		result, err := executeSweepV2WithInitiation(ctx, pgxPool, params)
 
@@ -1098,6 +1101,7 @@ func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, pa
 	sweepAmount := params.SweepAmount
 	overriddenAmount := params.OverriddenAmount
 	requestedBy := params.RequestedBy
+	requestedIP := params.RequestedIP
 
 	// Get current balance for source account
 	var balanceID string
@@ -1254,9 +1258,9 @@ func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, pa
 	// Create audit for source (APPROVED by system)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
-		) VALUES ($1, 'EDIT', 'APPROVED', $2, $3, NOW())
-	`, balanceID, fmt.Sprintf("Sweep V2 execution (initiation: %s): %s", initiationID, sweepID), requestedBy)
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
+		) VALUES ($1, 'EDIT', 'APPROVED', $2, $3, NOW(), $4)
+	`, balanceID, fmt.Sprintf("Sweep V2 execution (initiation: %s): %s", initiationID, sweepID), requestedBy, nullifyEmpty(requestedIP))
 
 	if err != nil {
 		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
@@ -1313,9 +1317,9 @@ func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, pa
 	// Create audit for target (APPROVED by system)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
-		) VALUES ($1, 'EDIT', 'APPROVED', $2, $3, NOW())
-	`, targetBalanceID, fmt.Sprintf("Sweep V2 receipt (initiation: %s): %s", initiationID, sweepID), requestedBy)
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
+		) VALUES ($1, 'EDIT', 'APPROVED', $2, $3, NOW(), $4)
+	`, targetBalanceID, fmt.Sprintf("Sweep V2 receipt (initiation: %s): %s", initiationID, sweepID), requestedBy, nullifyEmpty(requestedIP))
 
 	if err != nil {
 		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
@@ -1538,14 +1542,16 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 				// AUTO-APPROVE sweep config (bypass approval workflow)
 				insConfigAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (
 					sweep_id, actiontype, processing_status, reason, 
-					requested_by, requested_at, checker_by, checker_at
-				) VALUES ($1, 'CREATE', 'APPROVED', $2, $3, now(), $4, now())`
+					requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip
+				) VALUES ($1, 'CREATE', 'APPROVED', $2, $3, now(), $4, $5, now(), $6)`
 
 				_, err = tx.Exec(ctx, insConfigAudit,
 					sweepID,
 					nullifyEmpty(fmt.Sprintf("Super admin bulk trigger: %s", sweep.Reason)),
 					requestedBy,
+					nullifyEmpty(api.ClientIPFromRequest(r)),
 					requestedBy, // Auto-approved by same user
+					nullifyEmpty(api.ClientIPFromRequest(r)),
 				)
 
 				if err != nil {
@@ -1636,14 +1642,16 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 			// AUTO-APPROVE initiation (bypass approval workflow)
 			insInitiationAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
 				initiation_id, sweep_id, actiontype, processing_status, 
-				requested_by, requested_at, checker_by, checker_at
-			) VALUES ($1, $2, 'CREATE', 'APPROVED', $3, now(), $4, now())`
+				requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip
+			) VALUES ($1, $2, 'CREATE', 'APPROVED', $3, now(), $4, $5, now(), $6)`
 
 			_, err = tx.Exec(ctx, insInitiationAudit,
 				initiationID,
 				sweepID,
 				requestedBy,
+				nullifyEmpty(api.ClientIPFromRequest(r)),
 				requestedBy, // Auto-approved by same user
+				nullifyEmpty(api.ClientIPFromRequest(r)),
 			)
 
 			if err != nil {
