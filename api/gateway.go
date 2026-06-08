@@ -105,6 +105,14 @@ func extractClientIP(r *http.Request) string {
 	return ClientIPFromRequest(r)
 }
 
+func SystemIfBlank(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "system"
+	}
+	return value
+}
+
 func withCORS(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)

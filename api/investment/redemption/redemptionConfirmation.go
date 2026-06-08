@@ -369,9 +369,9 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		// Create audit trail
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, requested_by, requested_at)
-			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
-		`, confirmID, userEmail); err != nil {
+			INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+		`, confirmID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 			cleanupUpload()
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
@@ -524,9 +524,9 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				if _, err := tx.Exec(ctx, `
-					INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, requested_by, requested_at)
-					VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
-				`, confirmID, userEmail); err != nil {
+					INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+					VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+				`, confirmID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
 					return
 				}
@@ -658,9 +658,9 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Audit
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, reason, requested_by, requested_at)
-			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
-		`, req.RedemptionConfirmID, req.Reason, userEmail); err != nil {
+			INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now(), $4)
+		`, req.RedemptionConfirmID, req.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
@@ -786,9 +786,9 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				if _, err := tx.Exec(ctx, `
-				INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, reason, requested_by, requested_at)
-				VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
-			`, row.RedemptionConfirmID, row.Reason, userEmail); err != nil {
+				INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+				VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now(), $4)
+			`, row.RedemptionConfirmID, row.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
 					return
 				}
@@ -856,9 +856,9 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, id := range req.RedemptionConfirmIDs {
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, reason, requested_by, requested_at)
-				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())
-			`, id, req.Reason, requestedBy); err != nil {
+				INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now(), $4)
+			`, id, req.Reason, api.SystemIfBlank(requestedBy), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 				return
 			}
@@ -961,9 +961,9 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		if len(toApprove) > 0 {
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.auditactionredemptionconfirmation
-				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id = ANY($3)
-			`, checkerBy, req.Comment, toApprove); err != nil {
+				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				WHERE action_id = ANY($4)
+			`, api.SystemIfBlank(checkerBy), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), toApprove); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "approve failed: "+err.Error())
 				return
 			}
@@ -982,9 +982,9 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		if len(toDeleteActionIDs) > 0 {
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.auditactionredemptionconfirmation
-				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id = ANY($3)
-			`, checkerBy, req.Comment, toDeleteActionIDs); err != nil {
+				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				WHERE action_id = ANY($4)
+			`, api.SystemIfBlank(checkerBy), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), toDeleteActionIDs); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "delete action update failed: "+err.Error())
 				return
 			}
@@ -1240,9 +1240,9 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 
 		if _, err := tx.Exec(ctx, `
 			UPDATE investment.auditactionredemptionconfirmation
-			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE action_id = ANY($3)
-		`, checkerBy, req.Comment, actionIDs); err != nil {
+			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+			WHERE action_id = ANY($4)
+		`, api.SystemIfBlank(checkerBy), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionIDs); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}

@@ -121,9 +121,9 @@ func CreateMTMSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Create audit trail
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
-			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
-		`, activityID, userEmail); err != nil {
+			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+		`, activityID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
@@ -727,9 +727,9 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Create single audit trail for batch
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
-			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
-		`, activityID, userEmail); err != nil {
+			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+		`, activityID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 			logger.LogError("CreateMTMBulk: failed to insert audit row for activity_id=%s: %v", activityID, err)
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
@@ -845,9 +845,9 @@ func UpdateMTM(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Audit
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at)
-			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
-		`, activityID, req.Reason, userEmail); err != nil {
+			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now(), $4)
+		`, activityID, req.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
@@ -1619,9 +1619,9 @@ func CommitMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Create single audit trail for batch
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
-			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
-		`, activityID, userEmail); err != nil {
+			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+		`, activityID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}

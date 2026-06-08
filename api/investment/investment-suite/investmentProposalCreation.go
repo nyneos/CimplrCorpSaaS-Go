@@ -1719,10 +1719,10 @@ func syncProposalAllocations(ctx context.Context, tx pgx.Tx, proposalID string, 
 func insertProposalAudit(ctx context.Context, tx pgx.Tx, proposalID, requestedBy, reason, actionType, processingStatus string) error {
 	const auditSQL = `
 		INSERT INTO investment.auditactionproposal
-			(proposal_id, actiontype, processing_status, requested_by, requested_at, reason)
-		VALUES ($1,$2,$3,$4,now(),$5)
+			(proposal_id, actiontype, processing_status, requested_by, requested_at, reason, requested_ip)
+		VALUES ($1,$2,$3,$4,now(),$5,$6)
 	`
-	_, err := tx.Exec(ctx, auditSQL, proposalID, actionType, processingStatus, requestedBy, nullIfEmpty(reason))
+	_, err := tx.Exec(ctx, auditSQL, proposalID, actionType, processingStatus, api.SystemIfBlank(requestedBy), nullIfEmpty(reason), api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 	return err
 }
 
@@ -1839,9 +1839,10 @@ func updateAuditStatuses(ctx context.Context, tx pgx.Tx, actionIDs []string, sta
 		SET processing_status=$1,
 			checker_by=$2,
 			checker_at=now(),
-			checker_comment=$3
-		WHERE action_id = ANY($4)
-	`, status, checkerBy, nullIfEmpty(comment), actionIDs)
+			checker_comment=$3,
+			checker_ip=$4
+		WHERE action_id = ANY($5)
+	`, status, api.SystemIfBlank(checkerBy), nullIfEmpty(comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionIDs)
 	return err
 }
 
