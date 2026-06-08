@@ -928,7 +928,7 @@ func ListFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		idKind, err := cimplrClosureAdditionalIDKind(r.Context(), pool, parentID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "parent lookup failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
 			return
 		}
 		if idKind == "" {
@@ -965,7 +965,7 @@ func UploadFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc 
 
 		idKind, err := cimplrClosureAdditionalIDKind(r.Context(), pool, parentID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "parent lookup failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
 			return
 		}
 		if idKind == "" {
@@ -1198,7 +1198,7 @@ func DownloadFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc
 		}
 		idKind, err := cimplrClosureAdditionalIDKind(r.Context(), pool, parentID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "parent lookup failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
 			return
 		}
 		if idKind == "" {

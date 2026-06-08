@@ -1897,7 +1897,7 @@ func CimplrClosureUpload(pool *pgxpool.Pool) http.HandlerFunc {
 				req.UploadS3Key, req.ClosureConfirmID,
 			)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "file upload metadata failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErruploadMetaFail+err.Error())
 				return
 			}
 			if tag.RowsAffected() == 0 {
@@ -1918,7 +1918,7 @@ func CimplrClosureUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			req.ContentType, req.FileSize, req.FileHash, req.UploadS3Key, userEmail,
 		).Scan(&fileID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "file upload metadata failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErruploadMetaFail+err.Error())
 			return
 		}
 		_, _ = pool.Exec(r.Context(), `
@@ -2003,7 +2003,7 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 		)
 		if err != nil {
 			_ = s3storage.DeleteFromS3(r.Context(), s3Key)
-			api.RespondWithError(w, http.StatusInternalServerError, "file upload metadata failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErruploadMetaFail+err.Error())
 			return
 		}
 		if tag.RowsAffected() == 0 {
@@ -2030,7 +2030,7 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 		contentType, int64(len(body)), fileHash, s3Key, userEmail,
 	).Scan(&fileID)
 	if err != nil {
-		api.RespondWithError(w, http.StatusInternalServerError, "file upload metadata failed: "+err.Error())
+		api.RespondWithError(w, http.StatusInternalServerError, constants.ErruploadMetaFail+err.Error())
 		return
 	}
 	_, _ = pool.Exec(r.Context(), `

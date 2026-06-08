@@ -44,6 +44,8 @@ const (
 	ErrPendingCancellationNotUpdated = "pending cancellation was not updated"
 	ErrInsertFailed                  = "INSERT INTO %s (%s) VALUES (%s)"
 	ErrDateInterval                  = "'::date + INTERVAL '1 day'"
+	ErrParentLookupFailed            = "parent lookup failed: "
+	ErruploadMetaFail                = "file upload metadata failed: "
 )
 
 // General internal/server/upload error messages
