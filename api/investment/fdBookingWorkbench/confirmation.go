@@ -534,24 +534,53 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(cID, uID, uEmail, eID string, amount float64) {
-			defer func() { recover() }() //nolint:errcheck
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] CaptureConfirmation engine panic for %s: %v", cID, rec)
+				}
+			}()
 			bgCtx := context.Background()
-			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", cID, uEmail)
-			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode: "FIXED_DEPOSIT", EntityCode: eID,
-				TransactionType: "FD_CONFIRMATION_CREATE", RecordID: cID,
-				RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
-				AuditIDColumn: "confirmation_id", ActionType: "CREATE",
-				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
+			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+				ModuleCode:       "FIXED_DEPOSIT",
+				EntityCode:       eID,
+				TransactionType:  "FD_CONFIRMATION_CREATE",
+				RecordID:         cID,
+				RecordTable:      constants.QuerryConfirmation,
+				AuditTable:       constants.QuerryAuditConfirmation,
+				AuditIDColumn:    "confirmation_id",
+				ActionType:       "CREATE",
+				Amount:           amount,
+				SubmittedBy:      uID,
+				SubmittedByEmail: uEmail,
 			})
+			if err != nil {
+				api.LogError("[FDBooking] CaptureConfirmation CreateInstance failed for %s: %v", cID, err)
+				return
+			}
+			if instID != "" {
+				if _, uerr := pgxPool.Exec(bgCtx,
+					`UPDATE investment.fd_confirmation SET confirmation_status = 'APPROVAL_PENDING' WHERE confirmation_id = $1`,
+					cID); uerr != nil {
+					api.LogError("[FDBooking] CaptureConfirmation status→APPROVAL_PENDING failed for %s: %v", cID, uerr)
+				}
+			}
 		}(confirmationID, req.UserID, userEmail, entityID, req.ConfirmedPrincipalAmount)
 
 		go func(cID, bID, eID, uEmail string, amount float64) {
-			defer func() { recover() }() //nolint:errcheck
-			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/capture", cID, map[string]interface{}{
-				"entity_id": eID, "record_id": cID, "booking_id": bID,
-				"event": "FD_CONFIRMATION_CAPTURED", "actor_email": uEmail, "amount": amount,
-			})
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] CaptureConfirmation notification panic for %s: %v", cID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				"/investment/fd/confirmation/capture", cID, map[string]interface{}{
+					"entity_id":   eID,
+					"record_id":   cID,
+					"booking_id":  bID,
+					"event":       "FD_CONFIRMATION_CAPTURED",
+					"actor_email": uEmail,
+					"amount":      amount,
+				})
 		}(confirmationID, req.BookingID, entityID, userEmail, req.ConfirmedPrincipalAmount)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -1099,6 +1128,27 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}(confirmationID, req.UserID, userEmail, entityID, req.ConfirmedPrincipalAmount, isUpdate)
 
+		go func(cID, bID, eID, uEmail string, hasVar bool) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] VarianceResolve notification panic for %s: %v", cID, rec)
+				}
+			}()
+			event := "FD_CONFIRMATION_VARIANCE_RESOLVED"
+			if hasVar {
+				event = "FD_CONFIRMATION_VARIANCE_PENDING"
+			}
+			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				"/investment/fd/confirmation/variance-resolve", cID, map[string]interface{}{
+					"entity_id":    eID,
+					"record_id":    cID,
+					"booking_id":   bID,
+					"event":        event,
+					"actor_email":  uEmail,
+					"has_variance": hasVar,
+				})
+		}(confirmationID, bookingID, entityID, userEmail, hasVariance)
+
 		// Build variance items response
 		varOut := make([]map[string]interface{}, 0, len(varItems))
 		for _, v := range varItems {
@@ -1596,6 +1646,23 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}(req.ConfirmationID, req.UserID, userEmail, entityID, updateAmount)
 
+		go func(cID, bID, eID, uEmail string, hasVar bool) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] EditConfirmation notification panic for %s: %v", cID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				"/investment/fd/confirmation/edit", cID, map[string]interface{}{
+					"entity_id":    eID,
+					"record_id":    cID,
+					"booking_id":   bID,
+					"event":        "FD_CONFIRMATION_EDIT_SUBMITTED",
+					"actor_email":  uEmail,
+					"has_variance": hasVar,
+				})
+		}(req.ConfirmationID, bookingID, entityID, userEmail, hasVariance)
+
 		// Build variance items response — return ALL fields so UI can render full comparison table
 		varOut := make([]map[string]interface{}, 0, len(varItems))
 		for _, v := range varItems {
@@ -1804,6 +1871,22 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
 			})
 		}(req.ConfirmationID, req.UserID, userEmail, entityID, confPrincipal)
+
+		go func(cID, bID, eID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] VarianceException notification panic for %s: %v", cID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				"/investment/fd/confirmation/variance-exception", cID, map[string]interface{}{
+					"entity_id":   eID,
+					"record_id":   cID,
+					"booking_id":  bID,
+					"event":       "FD_CONFIRMATION_VARIANCE_EXCEPTION_RAISED",
+					"actor_email": uEmail,
+				})
+		}(req.ConfirmationID, bookingID, entityID, userEmail)
 
 		api.RespondWithPayload(w, true, "Variance accepted as exception — confirmation ready for approval", map[string]interface{}{
 			"confirmation_id":     req.ConfirmationID,
@@ -2236,7 +2319,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					confirmation_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at
 				FROM investment.fd_audit_confirmation
 				GROUP BY confirmation_id
 			)
@@ -2266,7 +2349,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.variance_action,'')                                         AS variance_action,
 				COALESCE(c.variance_remarks,'')                                        AS variance_remarks,
 				COALESCE(c.variance_resolved_by,'')                                    AS variance_resolved_by,
-				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD HH24:MI:SS'),'') AS variance_resolved_at,
+				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS variance_resolved_at,
 				COALESCE(c.confirmation_status,'')                                     AS confirmation_status,
 				COALESCE(c.penalty_id,'')                                              AS penalty_id,
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
@@ -2314,15 +2397,15 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(bc.quarter_definition,'')                                     AS quarter_definition,
 				%s,
 				COALESCE(c.is_deleted,false)                                           AS is_deleted,
-				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')           AS record_created_at,
+				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')           AS record_created_at,
 
 				COALESCE(l.audit_id::text,'')                                          AS audit_id,
 				COALESCE(l.action_type,'')                                             AS action_type,
 				COALESCE(l.processing_status,'')                                       AS processing_status,
 				COALESCE(l.requested_by,'')                                            AS requested_by,
-				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')          AS requested_at,
+				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')          AS requested_at,
 				COALESCE(l.checker_by,'')                                              AS checker_by,
-				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')            AS checker_at,
+				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')            AS checker_at,
 				COALESCE(l.checker_comment,'')                                         AS checker_comment,
 				COALESCE(l.reason,'')                                                  AS reason,
 				COALESCE(l.old_confirmation_status,'')                                 AS old_confirmation_status,
@@ -2415,9 +2498,9 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					a.audit_id::text, a.confirmation_id, a.action_type, a.processing_status,
 					COALESCE(a.requested_by,'') AS requested_by,
-					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
-					COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+					COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 					COALESCE(a.checker_comment,'') AS checker_comment,
 					COALESCE(a.reason,'') AS reason,
 					COALESCE(a.old_confirmation_status,'') AS old_confirmation_status,
@@ -2448,9 +2531,9 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					a.audit_id::text, a.confirmation_id, a.action_type, a.processing_status,
 					COALESCE(a.requested_by,'') AS requested_by,
-					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
-					COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+					COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 					COALESCE(a.checker_comment,'') AS checker_comment,
 					COALESCE(a.reason,'') AS reason,
 					COALESCE(a.old_confirmation_status,'') AS old_confirmation_status,
@@ -2705,14 +2788,14 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.variance_action,'')                                         AS variance_action,
 				COALESCE(c.variance_remarks,'')                                        AS variance_remarks,
 				COALESCE(c.variance_resolved_by,'')                                    AS variance_resolved_by,
-				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD HH24:MI:SS'),'')  AS variance_resolved_at,
+				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')  AS variance_resolved_at,
 				COALESCE(c.confirmation_status,'')                                     AS confirmation_status,
 				COALESCE(c.is_deleted,false)                                           AS is_deleted,
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
 				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')        AS first_capitalization_date,
 				%s,
 				%s,
-				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')            AS record_created_at
+				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')            AS record_created_at
 			FROM investment.fd_confirmation c
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false`, bookingAccountExpr, bankReferenceNumberSQL, extraSelect, uploadKeyExpr),
@@ -2891,9 +2974,9 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.action_type,
 				a.processing_status,
 				COALESCE(a.requested_by,'')                                        AS requested_by,
-				COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
+				COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')      AS requested_at,
 				COALESCE(a.checker_by,'')                                          AS checker_by,
-				COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
+				COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')        AS checker_at,
 				COALESCE(a.checker_comment,'')                                     AS checker_comment,
 				COALESCE(a.reason,'')                                                      AS reason,
 				COALESCE(a.old_confirmation_status,'')                                     AS old_confirmation_status,
@@ -3141,7 +3224,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					TransactionType: "FD_CONFIRMATION_DELETE", RecordID: cID,
 					RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 					AuditIDColumn: "confirmation_id", ActionType: "DELETE",
-					Amount: 0, SubmittedBy: uID, SubmittedByEmail: uEmail,
+					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
 				})
 				if err != nil {
 					api.LogError("[FDBooking] CreateInstance(DELETE) failed for confirmation %s: %v", cID, err)

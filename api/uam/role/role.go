@@ -30,7 +30,7 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 // 500 message to the client so DB internals are never exposed.
 func respondWithInternalError(w http.ResponseWriter, err error) {
 	log.Println("[ERROR] role:", err)
-	respondWithError(w, http.StatusInternalServerError, "Internal server error")
+	respondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 }
 
 // Handler: Create role
@@ -160,40 +160,40 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 		//     return
 		// }
 
-		// Get role_id from user_roles for user_id
 		rolesPerms := map[string]interface{}{}
-		var roleId int
-		err := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 AND COALESCE(is_deleted, false) = false LIMIT 1", req.UserID).Scan(&roleId)
+		permRows, err := db.Query(`
+			SELECT p.page_name, p.tab_name, p.action,
+			       bool_or(rp.allowed) AS allowed
+			FROM role_permissions rp
+			JOIN permissions p ON rp.permission_id = p.id
+			JOIN user_roles ur ON rp.role_id = ur.role_id
+			WHERE ur.user_id = $1
+			  AND COALESCE(ur.is_deleted, false) = false
+			  AND (rp.status = 'Approved' OR rp.status = 'approved')
+			GROUP BY p.page_name, p.tab_name, p.action
+		`, req.UserID)
 		if err == nil {
-			permRows, err := db.Query(`
-                SELECT p.page_name, p.tab_name, p.action, rp.allowed
-                FROM role_permissions rp
-                JOIN permissions p ON rp.permission_id = p.id
-                WHERE rp.role_id = $1 AND (rp.status = 'Approved' OR rp.status = 'approved')
-            `, roleId)
-			if err == nil {
-				defer permRows.Close()
-				pagePermissions := map[string]interface{}{}
-				tabs := map[string]map[string]interface{}{}
-				for permRows.Next() {
-					var pageName, tabName, action string
-					var allowed interface{}
-					permRows.Scan(&pageName, &tabName, &action, &allowed)
-					if pageName != "roles" {
-						continue
-					}
-					if tabName == "" {
-						pagePermissions[action] = allowed
-					} else {
-						if _, ok := tabs[tabName]; !ok {
-							tabs[tabName] = map[string]interface{}{}
-						}
-						tabs[tabName][action] = allowed
-					}
+			defer permRows.Close()
+			pagePermissions := map[string]interface{}{}
+			tabs := map[string]map[string]interface{}{}
+			for permRows.Next() {
+				var pageName, tabName, action string
+				var allowed interface{}
+				permRows.Scan(&pageName, &tabName, &action, &allowed)
+				if pageName != "roles" {
+					continue
 				}
-				rolesPerms["pagePermissions"] = pagePermissions
-				rolesPerms["tabs"] = tabs
+				if tabName == "" {
+					pagePermissions[action] = allowed
+				} else {
+					if _, ok := tabs[tabName]; !ok {
+						tabs[tabName] = map[string]interface{}{}
+					}
+					tabs[tabName][action] = allowed
+				}
 			}
+			rolesPerms["pagePermissions"] = pagePermissions
+			rolesPerms["tabs"] = tabs
 		}
 
 		// Pagination
@@ -592,40 +592,40 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Get role_id from user_roles for user_id
 		rolesPerms := map[string]interface{}{}
-		var roleId int
-		err := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 AND COALESCE(is_deleted, false) = false LIMIT 1", req.UserID).Scan(&roleId)
+		permRows, err := db.Query(`
+			SELECT p.page_name, p.tab_name, p.action,
+			       bool_or(rp.allowed) AS allowed
+			FROM role_permissions rp
+			JOIN permissions p ON rp.permission_id = p.id
+			JOIN user_roles ur ON rp.role_id = ur.role_id
+			WHERE ur.user_id = $1
+			  AND COALESCE(ur.is_deleted, false) = false
+			  AND (rp.status = 'Approved' OR rp.status = 'approved')
+			GROUP BY p.page_name, p.tab_name, p.action
+		`, req.UserID)
 		if err == nil {
-			permRows, err := db.Query(`
-                SELECT p.page_name, p.tab_name, p.action, rp.allowed
-                FROM role_permissions rp
-                JOIN permissions p ON rp.permission_id = p.id
-                WHERE rp.role_id = $1 AND (rp.status = 'Approved' OR rp.status = 'approved')
-            `, roleId)
-			if err == nil {
-				defer permRows.Close()
-				pagePermissions := map[string]interface{}{}
-				tabs := map[string]map[string]interface{}{}
-				for permRows.Next() {
-					var pageName, tabName, action string
-					var allowed interface{}
-					permRows.Scan(&pageName, &tabName, &action, &allowed)
-					if pageName != "roles" {
-						continue
-					}
-					if tabName == "" {
-						pagePermissions[action] = allowed
-					} else {
-						if _, ok := tabs[tabName]; !ok {
-							tabs[tabName] = map[string]interface{}{}
-						}
-						tabs[tabName][action] = allowed
-					}
+			defer permRows.Close()
+			pagePermissions := map[string]interface{}{}
+			tabs := map[string]map[string]interface{}{}
+			for permRows.Next() {
+				var pageName, tabName, action string
+				var allowed interface{}
+				permRows.Scan(&pageName, &tabName, &action, &allowed)
+				if pageName != "roles" {
+					continue
 				}
-				rolesPerms["pagePermissions"] = pagePermissions
-				rolesPerms["tabs"] = tabs
+				if tabName == "" {
+					pagePermissions[action] = allowed
+				} else {
+					if _, ok := tabs[tabName]; !ok {
+						tabs[tabName] = map[string]interface{}{}
+					}
+					tabs[tabName][action] = allowed
+				}
 			}
+			rolesPerms["pagePermissions"] = pagePermissions
+			rolesPerms["tabs"] = tabs
 		}
 
 		// Pagination for pending roles

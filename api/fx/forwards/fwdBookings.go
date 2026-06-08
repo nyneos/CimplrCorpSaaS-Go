@@ -36,6 +36,52 @@ var ErrForwardConfirmationFileAlreadyUploaded = errors.New("forward confirmation
 
 const duplicateForwardConfirmationUploadMessage = "This forward confirmation file was already uploaded earlier. Please upload a different file."
 
+func decodeForwardDownloadID(raw string) string {
+	id := strings.TrimSpace(raw)
+	if id == "" {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(id)
+	if err != nil {
+		return id
+	}
+	decodedID := strings.TrimSpace(string(decoded))
+	if decodedID == "" {
+		return id
+	}
+	for _, r := range decodedID {
+		if r < 32 || r == 127 {
+			return id
+		}
+	}
+	return decodedID
+}
+
+func forwardDownloadKeyExpr(downloadType string) string {
+	switch strings.ToUpper(strings.TrimSpace(downloadType)) {
+	case "BOOKING":
+		return "COALESCE(NULLIF(upload_s3_key, ''), '')"
+	case "CONFIRMATION":
+		return "COALESCE(NULLIF(confirmation_upload_s3_key, ''), '')"
+	default:
+		return "COALESCE(NULLIF(confirmation_upload_s3_key, ''), NULLIF(upload_s3_key, ''), '')"
+	}
+}
+
+func forwardDownloadAuditType(downloadType string, s3Key string) string {
+	switch strings.ToUpper(strings.TrimSpace(downloadType)) {
+	case "CONFIRMATION":
+		return "CONFIRMATION"
+	case "BOOKING":
+		return "BOOKING"
+	default:
+		if strings.Contains(strings.ToLower(s3Key), "confirmation") {
+			return "CONFIRMATION"
+		}
+		return "BOOKING"
+	}
+}
+
 func existingForwardBookingUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT DISTINCT upload_s3_key
@@ -726,7 +772,7 @@ func recordForwardUploadAudit(ctx context.Context, db *sql.DB, uploadS3Key, uplo
 	for rows.Next() {
 		var systemTransactionID string
 		if err := rows.Scan(&systemTransactionID); err == nil {
-			auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "Imported via uploader", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": uploadS3Key}})
+			auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": uploadS3Key}})
 		}
 	}
 }
@@ -1021,7 +1067,7 @@ func recordForwardConfirmationUploadAudit(ctx context.Context, db *sql.DB, uploa
 	for rows.Next() {
 		var systemTransactionID string
 		if err := rows.Scan(&systemTransactionID); err == nil {
-			auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionConfirm, Status: constants.StatusPendingEditApproval, Reason: "Imported via confirmation uploader", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": uploadS3Key}})
+			auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": uploadS3Key}})
 		}
 	}
 }
@@ -1059,41 +1105,57 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			RecordID            string `json:"record_id"`
 			InternalReferenceID string `json:"internal_reference_id"`
+			SystemTransactionID string `json:"system_transaction_id"`
+			DownloadType        string `json:"download_type"`
 			UploadBatchID       string `json:"upload_batch_id"`
+			UploadS3Key         string `json:"upload_s3_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
-		recordID := strings.TrimSpace(req.InternalReferenceID)
+		recordID := decodeForwardDownloadID(req.InternalReferenceID)
 		if recordID == "" {
-			recordID = strings.TrimSpace(req.RecordID)
+			recordID = decodeForwardDownloadID(req.RecordID)
 		}
-		// Handle base64-encoded IDs (sent by frontend)
-		if decoded, err := base64.StdEncoding.DecodeString(recordID); err == nil {
-			recordID = string(decoded)
-		}
-		uploadBatchID := strings.TrimSpace(req.UploadBatchID)
-		if decoded, err := base64.StdEncoding.DecodeString(uploadBatchID); err == nil {
-			uploadBatchID = string(decoded)
-		}
+		systemTransactionID := decodeForwardDownloadID(req.SystemTransactionID)
+		downloadType := strings.ToUpper(strings.TrimSpace(req.DownloadType))
+		uploadBatchID := decodeForwardDownloadID(req.UploadBatchID)
 
-		if recordID == "" && uploadBatchID == "" {
-			respondWithError(w, http.StatusBadRequest, "internal_reference_id or upload_batch_id is required")
+		if recordID == "" && systemTransactionID == "" && uploadBatchID == "" {
+			respondWithError(w, http.StatusBadRequest, "system_transaction_id, internal_reference_id, or upload_batch_id is required")
 			return
 		}
 
 		var uploadS3Key sql.NullString
+		if directS3Key := strings.TrimSpace(req.UploadS3Key); directS3Key != "" {
+			uploadS3Key = sql.NullString{String: directS3Key, Valid: true}
+		}
 
-		if recordID != "" {
-			err := db.QueryRowContext(r.Context(), `
-				SELECT COALESCE(NULLIF(confirmation_upload_s3_key, ''), NULLIF(upload_s3_key, ''), '')
+		if systemTransactionID != "" {
+			selectExpr := forwardDownloadKeyExpr(downloadType)
+			err := db.QueryRowContext(r.Context(), fmt.Sprintf(`
+				SELECT %s
+				FROM forward_bookings
+				WHERE system_transaction_id = $1
+				LIMIT 1
+			`, selectExpr), systemTransactionID).Scan(&uploadS3Key)
+			if err != nil && err != sql.ErrNoRows {
+				respondWithError(w, http.StatusInternalServerError, "failed to fetch forward booking")
+				return
+			}
+		}
+
+		if strings.TrimSpace(uploadS3Key.String) == "" && recordID != "" {
+			selectExpr := forwardDownloadKeyExpr(downloadType)
+			err := db.QueryRowContext(r.Context(), fmt.Sprintf(`
+				SELECT %s
 				FROM forward_bookings
 				WHERE internal_reference_id = $1
 				ORDER BY add_date DESC
 				LIMIT 1
-			`, recordID).Scan(&uploadS3Key)
+			`, selectExpr), recordID).Scan(&uploadS3Key)
 			if err != nil && err != sql.ErrNoRows {
 				respondWithError(w, http.StatusInternalServerError, "failed to fetch forward booking")
 				return
@@ -1129,10 +1191,11 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "failed to generate download url")
 			return
 		}
-		if recordID != "" {
-			var systemTransactionID string
+		if systemTransactionID == "" && recordID != "" {
 			_ = db.QueryRowContext(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 LIMIT 1`, recordID).Scan(&systemTransactionID)
-			auditutil.RecordDownload(r.Context(), db, auditutil.DownloadParams{TableName: auditutil.TableForwardDownloads, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, RequestedBy: auditutil.ActorFromContext(r.Context()), UploadS3Key: s3Key, ExtraColumns: map[string]string{"download_type": "BOOKING"}})
+		}
+		if systemTransactionID != "" {
+			auditutil.RecordDownload(r.Context(), db, auditutil.DownloadParams{TableName: auditutil.TableForwardDownloads, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, RequestedBy: auditutil.ActorFromContext(r.Context()), UploadS3Key: s3Key, ExtraColumns: map[string]string{"download_type": forwardDownloadAuditType(downloadType, s3Key)}})
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -1153,10 +1216,7 @@ func normalizeBulkIDs(ids []string) []string {
 		if id == "" {
 			continue
 		}
-		// Handle base64-encoded IDs (sent by frontend)
-		if decoded, err := base64.StdEncoding.DecodeString(id); err == nil {
-			id = string(decoded)
-		}
+		id = decodeForwardDownloadID(id)
 		if _, ok := seen[id]; ok {
 			continue
 		}

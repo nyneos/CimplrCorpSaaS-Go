@@ -464,7 +464,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ot.scheme_id,
 				ot.folio_id,
 				ot.demat_id,
-				TO_CHAR(ot.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+				TO_CHAR(ot.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
 				COALESCE(ot.blocked_units, 0) AS blocked_units
 			FROM investment.onboard_transaction ot
 			WHERE LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription')

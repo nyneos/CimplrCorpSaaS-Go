@@ -239,6 +239,9 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		var validInputs []InterestTypeInput
 		var validSourceRows []int
+		
+		seenCodesInFile := make(map[string]int)
+		seenNamesInFile := make(map[string]int)
 
 		// helper to send concise fail-fast response
 		sendFail := func(row int, errMsg string) {
@@ -260,6 +263,22 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				InterestTypeName:  get("interest_type_name"),
 				CalculationMethod: strings.ToUpper(get("calculation_method")),
 			}
+			
+			// in-file duplicate check
+			normCode := strings.ToUpper(strings.TrimSpace(input.InterestTypeCode))
+			if prevRow, dup := seenCodesInFile[normCode]; dup && normCode != "" {
+				sendFail(rowIdx+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching interest_type_code: %s)", rowIdx+2, prevRow, input.InterestTypeCode))
+				return
+			}
+			seenCodesInFile[normCode] = rowIdx + 2
+
+			normName := strings.ToUpper(strings.TrimSpace(input.InterestTypeName))
+			if prevRow, dup := seenNamesInFile[normName]; dup && normName != "" {
+				sendFail(rowIdx+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching interest_type_name: %s)", rowIdx+2, prevRow, input.InterestTypeName))
+				return
+			}
+			seenNamesInFile[normName] = rowIdx + 2
+
 
 			// Parse optional fields with detailed error handling
 			var fieldErrors []string
@@ -1699,11 +1718,11 @@ func GetInterestTypesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT 
 					interest_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT' THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM investment.fd_audit_interest_type
 				GROUP BY interest_id
 			)
@@ -1731,9 +1750,9 @@ func GetInterestTypesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.action_type,'') AS action_type,
 				COALESCE(l.audit_id::text,'') AS audit_id,
 				COALESCE(l.requested_by,'') AS requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 

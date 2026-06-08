@@ -587,9 +587,9 @@ func GetBankAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			history AS (
 				SELECT bank_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at
 				FROM apibox.audit_bank_master
 				GROUP BY bank_id
 			)
@@ -597,8 +597,8 @@ func GetBankAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				b.bank_id, b.counterparty_id, b.bank_code, b.bank_name, b.bank_type,
 				b.routing_number, b.entity_code,
 				la.audit_id, la.action_type, la.processing_status,
-				la.requested_by, TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				la.checker_by, TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				la.requested_by, TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
+				la.checker_by, TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				la.checker_comment, la.reason,
 				la.old_bank_code, la.old_bank_name, la.old_bank_type, la.old_entity_code,
 				h.created_by, h.created_at AS history_created_at,
@@ -645,8 +645,8 @@ func GetBankAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		baseQ := `
 			SELECT audit_id, bank_id, action_type, processing_status, reason,
-				requested_by, TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				checker_by, TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				requested_by, TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
+				checker_by, TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				checker_comment, old_bank_code, old_bank_name, old_bank_type, old_entity_code
 			FROM apibox.audit_bank_master`
 
@@ -756,8 +756,8 @@ func GetBankDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				b.bank_type, b.routing_number, b.entity_code,
 				(SELECT row_to_json(a) FROM (
 					SELECT audit_id, action_type, processing_status, reason,
-						requested_by, TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-						checker_by, TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+						requested_by, TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
+						checker_by, TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 						checker_comment
 					FROM apibox.audit_bank_master
 					WHERE bank_id = b.bank_id

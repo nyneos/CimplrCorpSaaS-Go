@@ -1235,11 +1235,11 @@ func fetchRedemptionInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, i
 			SELECT 
 				redemption_id,
 				MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
-				MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+				MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 				MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
-				MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+				MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 				MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
-				MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+				MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 			FROM investment.auditactionredemption
 			GROUP BY redemption_id
 		),
@@ -1304,15 +1304,15 @@ func fetchRedemptionInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, i
 			COALESCE(s.method, 'FIFO') AS method,
 			COALESCE(s.method, 'FIFO') AS old_method,
 			m.is_deleted,
-			TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+			TO_CHAR(m.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 			
 			COALESCE(l.actiontype,'') AS action_type,
 			COALESCE(l.processing_status,'') AS processing_status,
 			COALESCE(l.action_id::text,'') AS action_id,
 			COALESCE(l.requested_by,'') AS audit_requested_by,
-			TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+			TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 			COALESCE(l.checker_by,'') AS checker_by,
-			TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+			TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 			COALESCE(l.checker_comment,'') AS checker_comment,
 			COALESCE(l.reason,'') AS reason,
 			
@@ -1577,9 +1577,9 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
 				COALESCE(l.requested_by,'') AS audit_requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS audit_requested_at,
+				TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS audit_requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason
 			FROM investment.redemption_initiation m
@@ -1994,7 +1994,7 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(ot.demat_acc_number,'') AS demat_acc_number,
 				COALESCE(ot.demat_id,'') AS demat_id,
 				COALESCE(ot.entity_name,'') AS entity_name,
-				TO_CHAR(ot.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
+				TO_CHAR(ot.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
 			FROM investment.onboard_transaction ot
 			LEFT JOIN investment.portfolio_snapshot ps ON ps.batch_id = ot.batch_id
 			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
@@ -2066,8 +2066,8 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(rc.tds,0),
 				COALESCE(rc.net_credited,0),
 				COALESCE(rc.confirmed_by,''),
-				COALESCE(TO_CHAR(rc.confirmed_at, 'YYYY-MM-DD HH24:MI:SS'),''),
-				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'),'') AS created_at
+				COALESCE(TO_CHAR(rc.confirmed_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS created_at
 			FROM investment.redemption_confirmation rc
 			LEFT JOIN (
 				SELECT DISTINCT ON (redemption_confirm_id) 

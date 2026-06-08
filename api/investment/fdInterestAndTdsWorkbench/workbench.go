@@ -215,7 +215,7 @@ func GetTDSWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			       COALESCE(severity,'') AS severity,
 			       COALESCE(variance_amount,0) AS variance_amount,
 			       COALESCE(exception_status,'') AS exception_status,
-			       TO_CHAR(raised_at,'YYYY-MM-DD HH24:MI:SS') AS raised_at
+			       TO_CHAR(raised_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS raised_at
 			FROM investment.fd_receipt_exception
 			WHERE is_deleted=false ORDER BY raised_at DESC LIMIT 10`)
 		if err != nil {
@@ -266,8 +266,8 @@ func GetReconciliationDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			       COALESCE(receipts_unmatched,0) AS unmatched_count,
 			       COALESCE(receipts_exception,0) AS exception_count,
 			       COALESCE(receipts_processed,0) AS total_processed,
-			       TO_CHAR(triggered_at,'YYYY-MM-DD HH24:MI:SS') AS triggered_at,
-			       TO_CHAR(completed_at,'YYYY-MM-DD HH24:MI:SS') AS completed_at
+			       TO_CHAR(triggered_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS triggered_at,
+			       TO_CHAR(completed_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS completed_at
 			FROM investment.fd_receipt_reconcile_run`
 		runArgs := []interface{}{}
 		if req.EntityID != "" {

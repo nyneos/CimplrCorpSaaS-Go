@@ -165,7 +165,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       entID,
-				TransactionType:  "FD_ACCRUAL_SCHEDULE_APPROVE",
+				TransactionType:  "FD_ACCRUAL_SCHEDULE_CREATE",
 				RecordID:         cfgID,
 				RecordTable:      constants.QuerryAccrualScheduleConfig,
 				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
@@ -325,7 +325,7 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       entID,
-				TransactionType:  "FD_ACCRUAL_SCHEDULE_APPROVE",
+				TransactionType:  "FD_ACCRUAL_SCHEDULE_EDIT",
 				RecordID:         cfgID,
 				RecordTable:      constants.QuerryAccrualScheduleConfig,
 				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
@@ -607,6 +607,21 @@ func ApproveScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"errors":              errors,
 			"checker":             userEmail,
 		})
+		for _, id := range approved {
+			go func(cfgID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDAccrual] ApproveScheduleConfig notification panic for %s: %v", cfgID, rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+					"/investment/fd/accrual/schedule/approve", cfgID, map[string]interface{}{
+						"record_id":   cfgID,
+						"event":       "FD_ACCRUAL_SCHEDULE_APPROVED",
+						"actor_email": uEmail,
+					})
+			}(id, userEmail)
+		}
 		api.LogInfo("[FDAccrual] ApproveScheduleConfig: approved=%d deleted=%d by=%s", len(approved), len(deleted), userEmail)
 	}
 }
@@ -701,6 +716,21 @@ func RejectScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"errors":              errors,
 			"checker":             userEmail,
 		})
+		for _, id := range rejected {
+			go func(cfgID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDAccrual] RejectScheduleConfig notification panic for %s: %v", cfgID, rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+					"/investment/fd/accrual/schedule/reject", cfgID, map[string]interface{}{
+						"record_id":   cfgID,
+						"event":       "FD_ACCRUAL_SCHEDULE_REJECTED",
+						"actor_email": uEmail,
+					})
+			}(id, userEmail)
+		}
 		api.LogInfo("[FDAccrual] RejectScheduleConfig: count=%d errors=%d by=%s", len(rejected), len(errors), userEmail)
 	}
 }
@@ -933,7 +963,7 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       entID,
-				TransactionType:  "FD_ACCRUAL_SCHEDULE_APPROVE",
+				TransactionType:  "FD_ACCRUAL_SCHEDULE_DELETE",
 				RecordID:         cfgID,
 				RecordTable:      constants.QuerryAccrualScheduleConfig,
 				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
@@ -1603,11 +1633,11 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT
 				config_id,
 				MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by,
-				MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+				MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 				MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-				MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+				MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 				MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-				MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+				MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 			FROM investment.fd_accrual_schedule_config_audit
 			GROUP BY config_id
 		)
@@ -1626,22 +1656,22 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			COALESCE(c.period_coverage,'RUN')           AS period_coverage,
 			COALESCE(c.last_run_id,'')                  AS last_run_id,
 			COALESCE(c.last_run_status,'')              AS last_run_status,
-			COALESCE(TO_CHAR(c.last_run_at,'YYYY-MM-DD HH24:MI:SS'),'') AS last_run_at,
-			COALESCE(TO_CHAR(c.next_run_at,'YYYY-MM-DD HH24:MI:SS'),'') AS next_run_at,
+			COALESCE(TO_CHAR(c.last_run_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS last_run_at,
+			COALESCE(TO_CHAR(c.next_run_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS next_run_at,
 			c.is_active,
 			COALESCE(c.is_deleted,false)                AS is_deleted,
-			COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS record_created_at,
+			COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS record_created_at,
 			COALESCE(c.created_by,'')                   AS record_created_by,
-			COALESCE(TO_CHAR(c.updated_at,'YYYY-MM-DD HH24:MI:SS'),'') AS record_updated_at,
+			COALESCE(TO_CHAR(c.updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS record_updated_at,
 			COALESCE(c.updated_by,'')                   AS record_updated_by,
 			COALESCE(l.audit_id::text,'')                 AS audit_id,
 			COALESCE(l.action_type,'')                  AS action_type,
 			COALESCE(l.processing_status,'')            AS processing_status,
 			COALESCE(l.processing_status,'')            AS approval_status,
 			COALESCE(l.requested_by,'')                 AS requested_by,
-			COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+			COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 			COALESCE(l.checker_by,'')                   AS checker_by,
-			COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+			COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 			COALESCE(l.checker_comment,'')              AS checker_comment,
 			COALESCE(l.reason,'')                       AS reason,
 			COALESCE(h.created_by,'')                   AS created_by,
@@ -1728,6 +1758,24 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
+		var approvalWorkflow *approvalengine.RichInstanceDetail
+		var instanceID string
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT instance_id
+			FROM uam.approval_instance
+			WHERE record_id = $1
+			  AND module_code = 'FIXED_DEPOSIT'
+			  AND status = 'PENDING'
+			  AND is_deleted = false
+			LIMIT 1`, req.ConfigID).Scan(&instanceID)
+		if instanceID != "" {
+			if richDetail, err := approvalengine.GetRichInstanceDetail(ctx, pgxPool, instanceID, req.UserID); err == nil {
+				approvalWorkflow = richDetail
+			} else {
+				api.LogError("[FDAccrual] GetRichInstanceDetail failed config=%s: %v", req.ConfigID, err)
+			}
+		}
+
 		// ── 1. Config base data with audit ──────────────────────────────────
 		var configData map[string]interface{}
 		configRow := pgxPool.QueryRow(ctx, `
@@ -1748,11 +1796,11 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					config_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at_audit,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM investment.fd_accrual_schedule_config_audit
 				WHERE config_id = $1
 				GROUP BY config_id
@@ -1851,6 +1899,7 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"edited_at":                histEditedAt,
 			"deleted_by":               histDeletedBy,
 			"deleted_at":               histDeletedAt,
+			"approval_workflow":        approvalWorkflow,
 		}
 
 		// ── 2. All runs created by this schedule ────────────────────────────

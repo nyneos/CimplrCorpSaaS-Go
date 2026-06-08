@@ -462,6 +462,7 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			summary := fmt.Sprintf("BankConfig upload aborted: row %d failed validation: %s", row, msg)
 			api.RespondWithPayload(w, false, summary, nil)
 		}
+		seenKeysInFile := make(map[string]int)
 
 		for i, row := range data[1:] {
 			if len(row) == 0 {
@@ -579,6 +580,30 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// uniqueness pre-check (fail-fast)
+			
+			// in-file duplicate check
+			ptVal := "null"
+			if input.ProductType != nil { ptVal = *input.ProductType }
+			minAmtVal := "null"
+			if input.MinimumAmount != nil { minAmtVal = fmt.Sprintf("%v", *input.MinimumAmount) }
+			maxAmtVal := "null"
+			if input.MaximumAmount != nil { maxAmtVal = fmt.Sprintf("%v", *input.MaximumAmount) }
+			efToVal := "null"
+			if input.EffectiveTo != nil { efToVal = *input.EffectiveTo }
+
+			key := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
+				input.BankCode, ptVal, minAmtVal, maxAmtVal, input.DayCountCode, input.CapitalizationScheduleType,
+				input.CapitalizationDateAdjustment, input.AccrualStartConvention, input.AccrualEndConvention,
+				input.PeriodBoundaryDefinition, input.HolidayCalendarCode, input.BrokenPeriodMethod,
+				input.BrokenPeriodLocation, input.RoundingMethod, input.RoundingFrequency,
+				input.TdsDeductionTiming, input.EffectiveFrom, efToVal)
+			
+			if prevRow, dup := seenKeysInFile[key]; dup {
+				sendFail(i+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching unique keys)", i+2, prevRow))
+				return
+			}
+			seenKeysInFile[key] = i + 2
+			
 			if exists, existingID, err := bankConfigExists(ctx, pgxPool, input); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 				return
@@ -1763,11 +1788,11 @@ func GetBankConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					config_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM investment.fd_audit_bank_config
 				GROUP BY config_id
 			)
@@ -1835,9 +1860,9 @@ func GetBankConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.action_type,'')                             AS action_type,
 				COALESCE(l.audit_id::text,'')                          AS audit_id,
 				COALESCE(l.requested_by,'')                            AS requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS')        AS requested_at,
+				TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"')        AS requested_at,
 				COALESCE(l.checker_by,'')                              AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS')          AS checker_at,
+				TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"')          AS checker_at,
 				COALESCE(l.checker_comment,'')                         AS checker_comment,
 				COALESCE(l.reason,'')                                  AS reason,
 

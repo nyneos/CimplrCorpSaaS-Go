@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
 	"fmt"
+	"os"
 )
 
 type CashService struct {
@@ -20,7 +21,10 @@ func (s *CashService) Name() string {
 }
 
 func (s *CashService) Start() error {
-	port := "6143"
+	port := os.Getenv("CASH_PORT")
+	if port == "" {
+		port = "6143"
+	}
 	if s.config != nil {
 		if v, ok := s.config["port"]; ok {
 			switch t := v.(type) {

@@ -267,12 +267,14 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 			sheet := xl.GetSheetName(0)
 			xRows, err := xl.GetRows(sheet)
 			if err != nil || len(xRows) < 1 {
+				xl.Close()
 				results = append(results, map[string]interface{}{
 					"filename":           fileHeader.Filename,
 					constants.ValueError: "No data in Excel file",
 				})
 				continue
 			}
+			xl.Close()
 			headers := xRows[0]
 			for _, row := range xRows[1:] {
 				obj := map[string]interface{}{}
@@ -556,7 +558,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 		})
 		for _, row := range validRows {
 			if len(row) > 0 {
-				auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: fmt.Sprint(row[0]), ActionType: "CREATE", Status: constants.StatusPendingApproval, Reason: "Imported via uploader", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": s3Key}})
+				auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: fmt.Sprint(row[0]), ActionType: "CREATE", Status: constants.StatusPendingApproval, Reason: "", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": s3Key}})
 			}
 		}
 	}
@@ -1073,7 +1075,7 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB) http.HandlerFunc {
 				updated = append(updated, collectMTMRows(resultRows)...)
 				resultRows.Close()
 			} else {
-				setClauses := []string{"status = 'Approved'"}
+				setClauses := []string{"status = 'Rejected'"}
 				if forwardMTMHasProcessingStatusColumn(r.Context(), db) {
 					setClauses = append(setClauses, "processing_status = 'REJECTED'")
 				}

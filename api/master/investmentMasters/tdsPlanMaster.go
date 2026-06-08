@@ -624,6 +624,9 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var inputs []map[string]interface{}
 		var errorsList []map[string]interface{}
+		
+		seenCodesInFile := make(map[string]int)
+		seenNamesInFile := make(map[string]int)
 
 		// helper to send a concise fail-fast response
 		sendFail := func(row int, errMsg string) {
@@ -642,6 +645,22 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				sendFail(ri+2, "Missing required columns")
 				return
 			}
+			
+			// in-file duplicate check
+			normCode := strings.ToUpper(strings.TrimSpace(code))
+			if prevRow, dup := seenCodesInFile[normCode]; dup {
+				sendFail(ri+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching tds_plan_code: %s)", ri+2, prevRow, code))
+				return
+			}
+			seenCodesInFile[normCode] = ri + 2
+
+			normName := strings.ToUpper(strings.TrimSpace(name))
+			if prevRow, dup := seenNamesInFile[normName]; dup {
+				sendFail(ri+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching tds_plan_name: %s)", ri+2, prevRow, name))
+				return
+			}
+			seenNamesInFile[normName] = ri + 2
+
 			rate := 0.0
 			if parsed, err := parseFloatPtr(rateStr); err == nil {
 				rate = *parsed
@@ -1035,11 +1054,11 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT 
 					tds_plan_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT' THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM investment.fd_audit_tds_plan
 				GROUP BY tds_plan_id
 			)
@@ -1075,9 +1094,9 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.action_type,'') AS action_type,
 				COALESCE(l.audit_id::text,'') AS audit_id,
 				COALESCE(l.requested_by,'') AS requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 

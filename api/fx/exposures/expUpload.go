@@ -120,6 +120,54 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	})
 }
 
+func fetchExposurePermissions(db *sql.DB, userID string) map[string]interface{} {
+	result := map[string]interface{}{}
+	var roleId int
+	if err := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", userID).Scan(&roleId); err != nil {
+		return result
+	}
+	rows, err := db.Query(`
+		SELECT p.page_name, p.tab_name, p.action, rp.allowed
+		FROM role_permissions rp
+		JOIN permissions p ON rp.permission_id = p.id
+		WHERE rp.role_id = $1 AND (rp.status = 'Approved' OR rp.status = 'approved')
+	`, roleId)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pageName, tabName, action string
+		var allowed bool
+		if err := rows.Scan(&pageName, &tabName, &action, &allowed); err != nil {
+			continue
+		}
+		if pageName != constants.ExposureUpload {
+			continue
+		}
+		if result[constants.ExposureUpload] == nil {
+			result[constants.ExposureUpload] = map[string]interface{}{}
+		}
+		perms := result[constants.ExposureUpload].(map[string]interface{})
+		if tabName == "" {
+			if perms["pagePermissions"] == nil {
+				perms["pagePermissions"] = map[string]interface{}{}
+			}
+			perms["pagePermissions"].(map[string]interface{})[action] = allowed
+		} else {
+			if perms["tabs"] == nil {
+				perms["tabs"] = map[string]interface{}{}
+			}
+			tabs := perms["tabs"].(map[string]interface{})
+			if tabs[tabName] == nil {
+				tabs[tabName] = map[string]interface{}{}
+			}
+			tabs[tabName].(map[string]interface{})[action] = allowed
+		}
+	}
+	return result
+}
+
 // Helper: check if string in slice
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
@@ -351,11 +399,12 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 				lineFields[k] = v
 			}
 		}
+		delete(headerFields, "approval_status")
 		if val, ok := headerFields["document_date"]; ok {
 			headerFields["value_date"] = val
 			delete(headerFields, "document_date")
 		}
-		oldValues := auditutil.FetchRowSnapshot(r.Context(), db, "public.exposure_headers", "exposure_header_id", exposureHeaderID)
+		oldValues := auditutil.FetchRowSnapshot(r.Context(), db, constants.ExposureHeaders, "exposure_header_id", exposureHeaderID)
 		// Update header if needed
 		if len(headerFields) > 0 {
 			setParts := []string{}
@@ -366,7 +415,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 				values = append(values, v)
 				i++
 			}
-			setParts = append(setParts, "approval_status = 'Pending'")
+			setParts = append(setParts, fmt.Sprintf("approval_status = '%s'", constants.StatusPendingEditApproval))
 			values = append(values, exposureHeaderID)
 
 			query := fmt.Sprintf(
@@ -376,6 +425,16 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			)
 			if _, err := db.Exec(query, values...); err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Header update failed: "+err.Error())
+				return
+			}
+		}
+		if len(headerFields) == 0 && len(lineFields) > 0 {
+			if _, err := db.Exec(
+				`UPDATE exposure_headers SET approval_status = $1 WHERE exposure_header_id = $2`,
+				constants.StatusPendingEditApproval,
+				exposureHeaderID,
+			); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Header status update failed: "+err.Error())
 				return
 			}
 		}
@@ -463,7 +522,47 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// Handler: GetExposureHeadersLineItems - returns joined exposure_headers and exposure_line_items filtered by entity
+// normalizeDateFields - shared helper, replaces the inline date loop in both handlers
+func normalizeDateFields(rowMap map[string]interface{}) {
+	for k, v := range rowMap {
+		lk := strings.ToLower(k)
+		if !strings.Contains(lk, "date") && !strings.HasSuffix(lk, "_at") {
+			continue
+		}
+		switch tv := v.(type) {
+		case string:
+			if nd := NormalizeDate(tv); nd != "" {
+				layouts := []string{constants.DateFormat, time.RFC3339, constants.DateFormatISO, constants.DateTimeFormat}
+				parsed := false
+				for _, l := range layouts {
+					if t, err := time.Parse(l, nd); err == nil {
+						rowMap[k] = t.Format(constants.DateFormatAlt)
+						parsed = true
+						break
+					}
+				}
+				if !parsed {
+					parts := strings.Split(nd, "-")
+					if len(parts) == 3 && len(parts[0]) == 4 {
+						rowMap[k] = parts[2] + "-" + parts[1] + "-" + parts[0]
+					} else {
+						rowMap[k] = nd
+					}
+				}
+			}
+		case time.Time:
+			rowMap[k] = tv.Format(constants.DateFormatAlt)
+		case *time.Time:
+			if tv != nil {
+				rowMap[k] = tv.Format(constants.DateFormatAlt)
+			} else {
+				rowMap[k] = ""
+			}
+		}
+	}
+}
+
+// Handler: GetExposureHeadersLineItems
 func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -474,7 +573,6 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Prefer prevalidation context if available (middleware sets entity names/ids)
 		ctx := r.Context()
 		scope := ctxutil.FromContext(ctx)
 		buNames := scope.EntityNames
@@ -483,20 +581,36 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Join exposure_headers and exposure_line_items filtered by entity
-		joinRows, err := db.Query(`
-			SELECT h.*, l.*
+		joinRows, err := db.QueryContext(ctx, `
+			SELECT
+				h.exposure_header_id, h.company_code, h.entity, h.entity1, h.entity2, h.entity3,
+				h.exposure_type, h.document_id, h.document_date, h.counterparty_type,
+				h.counterparty_code, h.counterparty_name, h.currency,
+				h.total_original_amount, h.total_open_amount, h.value_date,
+				h.status, h.is_active, h.created_at, h.updated_at,
+				h.approval_status, h.approval_comment, h.approved_by,
+				h.delete_comment, h.requested_by, h.rejection_comment,
+				h.approved_at, h.rejected_by, h.rejected_at,
+				h.amount_in_local_currency, h.posting_date, h.text,
+				h.gl_account, h.reference, h.additional_header_details,
+				h.exposure_category, h.exposure_creation_status, h.batch_id,
+				h.upload_s3_key,
+				l.line_item_id, l.line_number, l.product_id, l.product_description,
+				l.quantity, l.unit_of_measure, l.unit_price, l.line_item_amount,
+				l.plant_code, l.delivery_date, l.payment_terms, l.inco_terms,
+				l.additional_line_details, l.created_at AS line_created_at
 			FROM exposure_headers h
-			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
+			JOIN exposure_line_items l ON l.exposure_header_id = h.exposure_header_id
 			WHERE h.entity = ANY($1)
-			  AND lower(coalesce(h.exposure_creation_status, '')) = 'approved'
-			  AND COALESCE(h.is_deleted, false) = false
+			  AND h.exposure_creation_status = 'Approved'
+			  AND h.is_deleted IS NOT TRUE
 		`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure headers/line items")
 			return
 		}
 		defer joinRows.Close()
+
 		joinCols, _ := joinRows.Columns()
 		joinData := []map[string]interface{}{}
 		for joinRows.Next() {
@@ -515,112 +629,25 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 					if col == "additional_header_details" || col == "additional_line_details" {
 						rowMap[col] = map[string]interface{}{}
 					} else {
-						pv = ""
+						rowMap[col] = ""
 					}
-				} else if s, ok := pv.(string); ok && s == "" {
-					pv = ""
-				}
-				// If column already set and new value is empty, preserve the existing value
-				if _, exists := rowMap[col]; exists && pv == "" {
 					continue
+				}
+				if s, ok := pv.(string); ok && s == "" {
+					if _, exists := rowMap[col]; exists {
+						continue
+					}
 				}
 				rowMap[col] = pv
 			}
-			// Normalize date-like fields for frontend (DD-MM-YYYY)
-			for k, v := range rowMap {
-				lk := strings.ToLower(k)
-				if strings.Contains(lk, "date") || strings.HasSuffix(lk, "_at") {
-					switch tv := v.(type) {
-					case string:
-						if nd := NormalizeDate(tv); nd != "" {
-							// Try to parse the normalized date and reformat to dd-mm-yyyy
-							var perr error
-							layouts := []string{constants.DateFormat, time.RFC3339, constants.DateFormatISO, constants.DateTimeFormat}
-							parsedOK := false
-							var parsed time.Time
-							for _, l := range layouts {
-								parsed, perr = time.Parse(l, nd)
-								if perr == nil {
-									rowMap[k] = parsed.Format(constants.DateFormatAlt)
-									parsedOK = true
-									break
-								}
-							}
-							if !parsedOK {
-								// Fallback: if nd looks like yyyy-mm-dd, swap to dd-mm-yyyy
-								parts := strings.Split(nd, "-")
-								if len(parts) == 3 && len(parts[0]) == 4 {
-									rowMap[k] = parts[2] + "-" + parts[1] + "-" + parts[0]
-								} else {
-									rowMap[k] = nd
-								}
-							}
-						}
-					case time.Time:
-						rowMap[k] = tv.Format(constants.DateFormatAlt)
-					case *time.Time:
-						if tv != nil {
-							rowMap[k] = tv.Format(constants.DateFormatAlt)
-						} else {
-							rowMap[k] = ""
-						}
-					}
-				}
-			}
+			normalizeDateFields(rowMap)
 			joinData = append(joinData, rowMap)
-		}
-
-		// Fetch permissions for 'exposure-upload' page for this role
-		exposureUploadPerms := map[string]interface{}{}
-		var roleId int
-		err = db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
-		if err == nil {
-			permRows, err := db.Query(`
-				SELECT p.page_name, p.tab_name, p.action, rp.allowed
-				FROM role_permissions rp
-				JOIN permissions p ON rp.permission_id = p.id
-				WHERE rp.role_id = $1 AND (rp.status = 'Approved' OR rp.status = 'approved')
-			`, roleId)
-			if err == nil {
-				defer permRows.Close()
-				for permRows.Next() {
-					var pageName, tabName, action string
-					var allowed bool
-					if err := permRows.Scan(&pageName, &tabName, &action, &allowed); err == nil {
-						if pageName != constants.ExposureUpload {
-							continue
-						}
-						if exposureUploadPerms[constants.ExposureUpload] == nil {
-							exposureUploadPerms[constants.ExposureUpload] = map[string]interface{}{}
-						}
-						perms := exposureUploadPerms[constants.ExposureUpload].(map[string]interface{})
-						if tabName == "" {
-							if perms["pagePermissions"] == nil {
-								perms["pagePermissions"] = map[string]interface{}{}
-							}
-							perms["pagePermissions"].(map[string]interface{})[action] = allowed
-						} else {
-							if perms["tabs"] == nil {
-								perms["tabs"] = map[string]interface{}{}
-							}
-							if perms["tabs"].(map[string]interface{})[tabName] == nil {
-								perms["tabs"].(map[string]interface{})[tabName] = map[string]interface{}{}
-							}
-							perms["tabs"].(map[string]interface{})[tabName].(map[string]interface{})[action] = allowed
-						}
-					}
-				}
-			}
 		}
 
 		resp := map[string]interface{}{
 			"buAccessible": buNames,
 			"pageData":     joinData,
 		}
-		if perms, ok := exposureUploadPerms[constants.ExposureUpload]; ok {
-			resp[constants.ExposureUpload] = perms
-		}
-		// Debug: log sizes so we can see why clients receive empty responses
 		logger.LogInfo("[DEBUG] GetExposureHeadersLineItems: buAccessible=%d, pageData=%d", len(buNames), len(joinData))
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		b, jerr := json.Marshal(resp)
@@ -634,7 +661,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// Handler: GetPendingApprovalHeadersLineItems - returns joined exposure_headers and exposure_line_items filtered by entity and approval_status pending
+// Handler: GetPendingApprovalHeadersLineItems
 func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -645,7 +672,6 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Validate session
 		activeSessions := auth.GetActiveSessions()
 		var session *auth.UserSession
 		for _, s := range activeSessions {
@@ -659,7 +685,6 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Prefer prevalidation context if available (middleware sets entity names/ids)
 		ctx := r.Context()
 		scope := ctxutil.FromContext(ctx)
 		buNames := scope.EntityNames
@@ -668,21 +693,37 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Join exposure_headers and exposure_line_items filtered by entity and approval_status pending
-		joinRows, err := db.Query(`
-			SELECT h.*, l.*
+		joinRows, err := db.QueryContext(ctx, `
+			SELECT
+				h.exposure_header_id, h.company_code, h.entity, h.entity1, h.entity2, h.entity3,
+				h.exposure_type, h.document_id, h.document_date, h.counterparty_type,
+				h.counterparty_code, h.counterparty_name, h.currency,
+				h.total_original_amount, h.total_open_amount, h.value_date,
+				h.status, h.is_active, h.created_at, h.updated_at,
+				h.approval_status, h.approval_comment, h.approved_by,
+				h.delete_comment, h.requested_by, h.rejection_comment,
+				h.approved_at, h.rejected_by, h.rejected_at,
+				h.amount_in_local_currency, h.posting_date, h.text,
+				h.gl_account, h.reference, h.additional_header_details,
+				h.exposure_category, h.exposure_creation_status, h.batch_id,
+				h.upload_s3_key,
+				l.line_item_id, l.line_number, l.product_id, l.product_description,
+				l.quantity, l.unit_of_measure, l.unit_price, l.line_item_amount,
+				l.plant_code, l.delivery_date, l.payment_terms, l.inco_terms,
+				l.additional_line_details, l.created_at AS line_created_at
 			FROM exposure_headers h
-			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
+			JOIN exposure_line_items l ON l.exposure_header_id = h.exposure_header_id
 			WHERE h.entity = ANY($1)
-			  AND h.approval_status NOT IN ('Approved', 'approved', 'APPROVED')
-			  AND lower(coalesce(h.exposure_creation_status, '')) = 'approved'
-			  AND COALESCE(h.is_deleted, false) = false
+			  AND h.exposure_creation_status = 'Approved'
+			  AND h.is_deleted IS NOT TRUE
+			  AND upper(h.approval_status) <> 'APPROVED'
 		`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch pending approval headers/line items")
 			return
 		}
 		defer joinRows.Close()
+
 		joinCols, _ := joinRows.Columns()
 		joinData := []map[string]interface{}{}
 		for joinRows.Next() {
@@ -701,110 +742,24 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 					if col == "additional_header_details" || col == "additional_line_details" {
 						rowMap[col] = map[string]interface{}{}
 					} else {
-						pv = ""
+						rowMap[col] = ""
 					}
-				} else if s, ok := pv.(string); ok && s == "" {
-					pv = ""
-				}
-
-				// If column already set and new value is empty, preserve the existing value
-				if _, exists := rowMap[col]; exists && pv == "" {
 					continue
+				}
+				if s, ok := pv.(string); ok && s == "" {
+					if _, exists := rowMap[col]; exists {
+						continue
+					}
 				}
 				rowMap[col] = pv
 			}
-			// Normalize date-like fields for frontend (YYYY-MM-DD)
-			for k, v := range rowMap {
-				lk := strings.ToLower(k)
-				if strings.Contains(lk, "date") || strings.HasSuffix(lk, "_at") {
-					switch tv := v.(type) {
-					case string:
-						if nd := NormalizeDate(tv); nd != "" {
-							// Try to parse the normalized date and reformat to dd-mm-yyyy
-							var perr error
-							layouts := []string{constants.DateFormat, time.RFC3339, constants.DateFormatISO, constants.DateTimeFormat}
-							parsedOK := false
-							var parsed time.Time
-							for _, l := range layouts {
-								parsed, perr = time.Parse(l, nd)
-								if perr == nil {
-									rowMap[k] = parsed.Format(constants.DateFormatAlt)
-									parsedOK = true
-									break
-								}
-							}
-							if !parsedOK {
-								// Fallback: if nd looks like yyyy-mm-dd, swap to dd-mm-yyyy
-								parts := strings.Split(nd, "-")
-								if len(parts) == 3 && len(parts[0]) == 4 {
-									rowMap[k] = parts[2] + "-" + parts[1] + "-" + parts[0]
-								} else {
-									rowMap[k] = nd
-								}
-							}
-						}
-					case time.Time:
-						rowMap[k] = tv.Format(constants.DateFormatAlt)
-					case *time.Time:
-						if tv != nil {
-							rowMap[k] = tv.Format(constants.DateFormatAlt)
-						} else {
-							rowMap[k] = ""
-						}
-					}
-				}
-			}
+			normalizeDateFields(rowMap)
 			joinData = append(joinData, rowMap)
-		}
-		// Fetch permissions for 'exposure-upload' page for this role
-		exposureUploadPerms := map[string]interface{}{}
-		var roleId int
-		err = db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
-		if err == nil {
-			permRows, err := db.Query(`
-				SELECT p.page_name, p.tab_name, p.action, rp.allowed
-				FROM role_permissions rp
-				JOIN permissions p ON rp.permission_id = p.id
-				WHERE rp.role_id = $1 AND (rp.status = 'Approved' OR rp.status = 'approved')
-			`, roleId)
-			if err == nil {
-				defer permRows.Close()
-				for permRows.Next() {
-					var pageName, tabName, action string
-					var allowed bool
-					if err := permRows.Scan(&pageName, &tabName, &action, &allowed); err == nil {
-						if pageName != constants.ExposureUpload {
-							continue
-						}
-						if exposureUploadPerms[constants.ExposureUpload] == nil {
-							exposureUploadPerms[constants.ExposureUpload] = map[string]interface{}{}
-						}
-						perms := exposureUploadPerms[constants.ExposureUpload].(map[string]interface{})
-						if tabName == "" {
-							if perms["pagePermissions"] == nil {
-								perms["pagePermissions"] = map[string]interface{}{}
-							}
-							perms["pagePermissions"].(map[string]interface{})[action] = allowed
-						} else {
-							if perms["tabs"] == nil {
-								perms["tabs"] = map[string]interface{}{}
-							}
-							if perms["tabs"].(map[string]interface{})[tabName] == nil {
-								perms["tabs"].(map[string]interface{})[tabName] = map[string]interface{}{}
-							}
-							perms["tabs"].(map[string]interface{})[tabName].(map[string]interface{})[action] = allowed
-						}
-					}
-				}
-			}
 		}
 
 		resp := map[string]interface{}{
 			"buAccessible": buNames,
 			"pageData":     joinData,
-		}
-		if perms, ok := exposureUploadPerms[constants.ExposureUpload]; ok {
-			resp[constants.ExposureUpload] = perms
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
@@ -913,15 +868,12 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 
 		oldValuesByID := make(map[string]map[string]interface{}, len(req.ExposureHeaderIds))
 		for _, id := range req.ExposureHeaderIds {
-			oldValuesByID[id] = auditutil.FetchRowSnapshot(r.Context(), db, "public.exposure_headers", "exposure_header_id", id)
+			oldValuesByID[id] = auditutil.FetchRowSnapshot(r.Context(), db, constants.ExposureHeaders, "exposure_header_id", id)
 		}
 
 		rows, err := db.Query(
 			`UPDATE exposure_headers
-			 SET approval_status = CASE
-			     	WHEN approval_status = 'PENDING_DELETE_APPROVAL' THEN 'APPROVED'
-			     	ELSE 'REJECTED'
-			     END,
+			 SET approval_status = 'REJECTED',
 			     rejected_by = $1,
 			     rejection_comment = $2,
 			     rejected_at = NOW()
@@ -996,7 +948,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 
 		oldValuesByID := make(map[string]map[string]interface{}, len(req.ExposureHeaderIds))
 		for _, id := range req.ExposureHeaderIds {
-			oldValuesByID[id] = auditutil.FetchRowSnapshot(r.Context(), db, "public.exposure_headers", "exposure_header_id", id)
+			oldValuesByID[id] = auditutil.FetchRowSnapshot(r.Context(), db, constants.ExposureHeaders, "exposure_header_id", id)
 		}
 
 		tx, err := db.Begin()
@@ -1250,13 +1202,13 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		}
 		for _, row := range results["approved"].([]map[string]interface{}) {
 			id := fmt.Sprint(row["exposure_header_id"])
+			// Update the existing pending audit row in place instead of creating a new APPROVE row.
 			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "APPROVE", Status: constants.StatusApproved, Reason: approvalComment, RequestedBy: approvedBy, OldValues: oldValuesByID[id], NewValues: row})
 		}
 		for _, row := range results["deleted"].([]map[string]interface{}) {
 			id := fmt.Sprint(row["exposure_header_id"])
+			// Update the existing pending audit row in place instead of creating a new APPROVE row.
 			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "APPROVE", Status: constants.StatusApproved, Reason: approvalComment, RequestedBy: approvedBy, OldValues: oldValuesByID[id], NewValues: row})
 		}
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1814,7 +1766,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					if len(keys) == 0 {
 						continue
 					}
-					query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", field.TableName, strings.Join(keys, ", "), strings.Join(placeholders, ", "))
+					query := fmt.Sprintf(constants.ErrInsertFailed, field.TableName, strings.Join(keys, ", "), strings.Join(placeholders, ", "))
 					if _, err := tx.ExecContext(ctx, query, vals...); err != nil {
 						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to insert row: " + err.Error()})
 						return
@@ -2213,14 +2165,14 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 				logger.LogInfo("[FX-STAGING] COMMIT SUCCESS for filename=%s", filename)
 				txCommitted = true
 				for _, exposureHeaderID := range createdExposureIDs {
-					newValues := auditutil.FetchRowSnapshot(ctx, db, "public.exposure_headers", "exposure_header_id", exposureHeaderID)
+					newValues := auditutil.FetchRowSnapshot(ctx, db, constants.ExposureHeaders, "exposure_header_id", exposureHeaderID)
 					auditutil.RecordAction(ctx, db, auditutil.ActionParams{
 						TableName:    auditutil.TableExposure,
 						ParentColumn: "exposure_header_id",
 						ParentID:     exposureHeaderID,
 						ActionType:   "CREATE",
 						Status:       constants.StatusPendingApproval,
-						Reason:       "Uploaded file: " + filename,
+						Reason:       "",
 						RequestedBy:  uploadedBy,
 						OldValues:    nil,
 						NewValues:    newValues,

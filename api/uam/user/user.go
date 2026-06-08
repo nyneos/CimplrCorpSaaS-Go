@@ -77,7 +77,7 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 // 500 message to the client so DB internals are never exposed.
 func respondWithInternalError(w http.ResponseWriter, err error) {
 	log.Println("[ERROR] user:", err)
-	respondWithError(w, http.StatusInternalServerError, "Internal server error")
+	respondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 }
 
 // decodeSQLValue converts SQL driver types to JSON-friendly Go values.
@@ -363,7 +363,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		} else if err != sql.ErrNoRows {
 			log.Println("[ERROR] user uniqueness check:", err)
-			respondWithError(w, http.StatusInternalServerError, "Internal server error")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 			return
 		}
 		var userId string
@@ -425,7 +425,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			)
 			if err != nil {
 				log.Println("[ERROR] user entity mapping insert:", err)
-				respondWithError(w, http.StatusInternalServerError, "Internal server error")
+				respondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 				return
 			}
 		}
@@ -1072,7 +1072,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 			)
 			if err != nil {
 				log.Println("[ERROR] delete user_roles:", err)
-				respondWithError(w, http.StatusInternalServerError, "Internal server error")
+				respondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 				return
 			}
 			// Soft delete users (set is_deleted = true)

@@ -721,9 +721,9 @@ func GetERPSystemAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			history AS (
 				SELECT erp_system_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at
 				FROM apibox.audit_erp_system
 				GROUP BY erp_system_id
 			)
@@ -731,12 +731,12 @@ func GetERPSystemAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				e.erp_system_id, e.counterparty_id, e.erp_code, e.erp_type, e.version,
 				e.base_url, e.timezone, e.default_currency,
 				e.status, e.is_active, e.is_deleted,
-				TO_CHAR(e.created_at,'YYYY-MM-DD HH24:MI:SS') AS created_at,
-				TO_CHAR(e.updated_at,'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(e.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
+				TO_CHAR(e.updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 				ac.auth_type, ac.scopes,
 				la.audit_id, la.action_type, la.processing_status,
-				la.requested_by, TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				la.checker_by, TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				la.requested_by, TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
+				la.checker_by, TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				la.checker_comment, la.reason,
 				la.old_erp_type, la.old_base_url, la.old_version,
 				h.created_by, h.created_at AS history_created_at,
@@ -785,8 +785,8 @@ func GetERPSystemAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		baseQ := `
 			SELECT audit_id, erp_system_id, action_type, processing_status, reason,
-				requested_by, TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				checker_by, TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				requested_by, TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
+				checker_by, TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				checker_comment, old_erp_type, old_base_url, old_version
 			FROM apibox.audit_erp_system`
 
@@ -894,13 +894,13 @@ func GetERPSystemDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				e.erp_system_id, e.counterparty_id, e.erp_code, e.erp_type, e.version,
 				e.base_url, e.timezone, e.default_currency,
 				e.status, e.is_active, e.is_deleted,
-				TO_CHAR(e.created_at,'YYYY-MM-DD HH24:MI:SS') AS created_at,
-				TO_CHAR(e.updated_at,'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(e.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
+				TO_CHAR(e.updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 				ac.auth_type, ac.scopes,
 				(SELECT row_to_json(a) FROM (
 					SELECT audit_id, action_type, processing_status, reason,
-						requested_by, TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-						checker_by, TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+						requested_by, TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
+						checker_by, TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 						checker_comment
 					FROM apibox.audit_erp_system
 					WHERE erp_system_id = e.erp_system_id

@@ -619,6 +619,10 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Reuse CreateCompoundingFrequency logic by building rows
 		var inputs []map[string]interface{}
 		var errorsList []map[string]interface{}
+		
+		seenCodesInFile := make(map[string]int)
+		seenNamesInFile := make(map[string]int)
+		
 		// Fail-fast: validate each row and abort on first validation error
 		for ri, row := range data {
 			get := func(col string) string { return getColumnValue(row, colMap, col) }
@@ -629,6 +633,28 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			periodsStr := strings.TrimSpace(get("compounding_periods_per_year"))
 			daysStr := strings.TrimSpace(get("days_per_period"))
 			desc := strings.TrimSpace(get("description"))
+			
+			normCode := strings.ToUpper(code)
+			if prevRow, dup := seenCodesInFile[normCode]; dup && normCode != "" {
+				errorsList = append(errorsList, map[string]interface{}{
+					"frequency_code":       code,
+					constants.ValueSuccess: false,
+					constants.ValueError:   fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching frequency_code: %s)", ri+2, prevRow, code),
+				})
+				continue
+			}
+			seenCodesInFile[normCode] = ri + 2
+
+			normName := strings.ToUpper(name)
+			if prevRow, dup := seenNamesInFile[normName]; dup && normName != "" {
+				errorsList = append(errorsList, map[string]interface{}{
+					"frequency_code":       code,
+					constants.ValueSuccess: false,
+					constants.ValueError:   fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching frequency_name: %s)", ri+2, prevRow, name),
+				})
+				continue
+			}
+			seenNamesInFile[normName] = ri + 2
 
 			// Build map for validation helper
 			var periodsVal interface{} = nil
@@ -952,11 +978,11 @@ func GetCompoundingFrequenciesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				SELECT 
 					frequency_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT' THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM investment.fd_audit_compounding_frequency
 				GROUP BY frequency_id
 			)
@@ -982,9 +1008,9 @@ func GetCompoundingFrequenciesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				COALESCE(l.action_type,'') AS action_type,
 				COALESCE(l.audit_id::text,'') AS audit_id,
 				COALESCE(l.requested_by,'') AS requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 

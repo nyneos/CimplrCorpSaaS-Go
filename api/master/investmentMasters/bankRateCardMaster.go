@@ -311,6 +311,8 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var validInputs []BankRateCardInput
+		seenKeysInFile := make(map[string]int)
+
 		for ri, row := range rows {
 			if len(row) == 0 {
 				continue
@@ -425,6 +427,26 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// uniqueness pre-check
+			
+			// in-file duplicate check
+			minAmtVal, maxAmtVal := "null", "null"
+			if input.MinAmount != nil {
+				minAmtVal = fmt.Sprintf("%v", *input.MinAmount)
+			}
+			if input.MaxAmount != nil {
+				maxAmtVal = fmt.Sprintf("%v", *input.MaxAmount)
+			}
+			efToVal := "null"
+			if input.EffectiveTo != nil {
+				efToVal = *input.EffectiveTo
+			}
+			key := fmt.Sprintf("%s|%s|%d|%d|%s|%s|%s|%s", input.BankCode, input.DepositType, input.MinTenorDays, input.MaxTenorDays, minAmtVal, maxAmtVal, input.EffectiveFrom, efToVal)
+			if prevRow, dup := seenKeysInFile[key]; dup {
+				sendFail(ri+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching unique keys)", ri+2, prevRow))
+				return
+			}
+			seenKeysInFile[key] = ri + 2
+			
 			exists, err := rateCardExists(ctx, pgxPool, input)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
@@ -1487,11 +1509,11 @@ func GetBankRateCardsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					rate_card_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM investment.fd_audit_bank_rate_card
 				GROUP BY rate_card_id
 			)
@@ -1537,9 +1559,9 @@ func GetBankRateCardsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.action_type,'')                    AS action_type,
 				COALESCE(l.audit_id::text,'')                 AS audit_id,
 				COALESCE(l.requested_by,'')                   AS requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 				COALESCE(l.checker_by,'')                     AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS')   AS checker_at,
+				TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"')   AS checker_at,
 				COALESCE(l.checker_comment,'')                AS checker_comment,
 				COALESCE(l.reason,'')                         AS reason,
 

@@ -125,7 +125,50 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 			query: fmt.Sprintf(`
 				SELECT action_id AS audit_row_id,
 				       %s,
+				       action_type,
+				       processing_status,
+				       requested_by,
+				       requested_at,
+				       checker_by,
+				       checker_at,
+				       checker_comment,
+				       reason,
+				       old_values,
+				       new_values,
+				       change_summary
+				FROM %s
+				WHERE %s%s
+				ORDER BY requested_at ASC, action_id ASC
+			`, cfg.ActionParentCol, cfg.ActionTable, parentWhere, extraWhere),
+			args:       args,
+			hasJSON:    true,
+			idAliasCol: "action_id",
+		},
+		{
+			query: fmt.Sprintf(`
+				SELECT action_id AS audit_row_id,
+				       %s,
 				       actiontype,
+				       processing_status,
+				       requested_by,
+				       requested_at,
+				       checker_by,
+				       checker_at,
+				       checker_comment,
+				       reason
+				FROM %s
+				WHERE %s%s
+				ORDER BY requested_at ASC, action_id ASC
+			`, cfg.ActionParentCol, cfg.ActionTable, parentWhere, extraWhere),
+			args:       args,
+			hasJSON:    false,
+			idAliasCol: "action_id",
+		},
+		{
+			query: fmt.Sprintf(`
+				SELECT action_id AS audit_row_id,
+				       %s,
+				       action_type,
 				       processing_status,
 				       requested_by,
 				       requested_at,
@@ -168,7 +211,50 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 			query: fmt.Sprintf(`
 				SELECT audit_id AS audit_row_id,
 				       %s,
+				       action_type,
+				       processing_status,
+				       requested_by,
+				       requested_at,
+				       checker_by,
+				       checker_at,
+				       checker_comment,
+				       reason,
+				       old_values,
+				       new_values,
+				       change_summary
+				FROM %s
+				WHERE %s%s
+				ORDER BY requested_at ASC, audit_id ASC
+			`, cfg.ActionParentCol, cfg.ActionTable, parentWhere, extraWhere),
+			args:       args,
+			hasJSON:    true,
+			idAliasCol: "audit_id",
+		},
+		{
+			query: fmt.Sprintf(`
+				SELECT audit_id AS audit_row_id,
+				       %s,
 				       actiontype,
+				       processing_status,
+				       requested_by,
+				       requested_at,
+				       checker_by,
+				       checker_at,
+				       checker_comment,
+				       reason
+				FROM %s
+				WHERE %s%s
+				ORDER BY requested_at ASC, audit_id ASC
+			`, cfg.ActionParentCol, cfg.ActionTable, parentWhere, extraWhere),
+			args:       args,
+			hasJSON:    false,
+			idAliasCol: "audit_id",
+		},
+		{
+			query: fmt.Sprintf(`
+				SELECT audit_id AS audit_row_id,
+				       %s,
+				       action_type,
 				       processing_status,
 				       requested_by,
 				       requested_at,
@@ -201,6 +287,9 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 				rows.Close()
 				return nil, scanErr
 			}
+			if shouldHideFXAuditActionRow(cfg.Source, entry) {
+				continue
+			}
 			entry["source"] = cfg.Source
 			entry["id_column"] = attempt.idAliasCol
 			payload = append(payload, entry)
@@ -214,6 +303,15 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 	}
 
 	return nil, lastErr
+}
+
+func shouldHideFXAuditActionRow(source string, entry map[string]interface{}) bool {
+	switch source {
+	case "FX_FORWARD_CANCELLATION", "FX_FORWARD_ROLLOVER":
+		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(entry["action_type"])), constants.AuditActionReject)
+	default:
+		return false
+	}
 }
 
 func buildFXAuditParentFilter(columnName, parentID string) (string, []interface{}) {

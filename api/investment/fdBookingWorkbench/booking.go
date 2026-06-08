@@ -1057,7 +1057,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					TransactionType: "FD_BOOKING_DELETE", RecordID: bID,
 					RecordTable: constants.QuerryBookingRequest, AuditTable: constants.QuerryAuditBookingRequest,
 					AuditIDColumn: "booking_id", ActionType: "DELETE",
-					Amount: 0, SubmittedBy: uID, SubmittedByEmail: uEmail,
+					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
 				})
 				if err != nil {
 					api.LogError("[FDBooking] CreateInstance(DELETE) failed for booking %s: %v", bID, err)
@@ -1618,11 +1618,11 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					booking_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM investment.fd_audit_booking_request
 				GROUP BY booking_id
 			)
@@ -1656,16 +1656,16 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(m.offer_valid_till,'YYYY-MM-DD'),'')              AS offer_valid_till,
 				COALESCE(m.booking_status,'')                                       AS booking_status,
 				COALESCE(m.is_deleted,false)                                        AS is_deleted,
-				COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS record_created_at,
+				COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')         AS record_created_at,
 				COALESCE(m.created_by,'')                                           AS record_created_by,
 
 				COALESCE(l.audit_id::text,'')                                       AS audit_id,
 				COALESCE(l.action_type,'')                                          AS action_type,
 				COALESCE(l.processing_status,'')                                    AS processing_status,
 				COALESCE(l.requested_by,'')                                         AS requested_by,
-				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')       AS requested_at,
+				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')       AS requested_at,
 				COALESCE(l.checker_by,'')                                           AS checker_by,
-				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS checker_at,
+				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')         AS checker_at,
 				COALESCE(l.checker_comment,'')                                      AS checker_comment,
 				COALESCE(l.reason,'')                                               AS reason,
 				COALESCE(l.old_principal_amount,0)                                  AS old_principal_amount,
@@ -1843,7 +1843,7 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(TO_CHAR(offer_valid_till,'YYYY-MM-DD'),'')            AS offer_valid_till,
 					COALESCE(booking_status,'')                                    AS booking_status,
 					COALESCE(is_deleted,false)                                     AS is_deleted,
-					COALESCE(TO_CHAR(created_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS record_created_at,
+					COALESCE(TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')      AS record_created_at,
 					COALESCE(created_by,'')                                        AS record_created_by
 				FROM investment.fd_booking_request
 				WHERE booking_id = $1`, accountExpr), bookingID)
@@ -1875,9 +1875,9 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT
 				a.audit_id::text, a.action_type, a.processing_status,
 				COALESCE(a.requested_by,'')                                        AS requested_by,
-				COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
+				COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')      AS requested_at,
 				COALESCE(a.checker_by,'')                                          AS checker_by,
-				COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
+				COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')        AS checker_at,
 				COALESCE(a.checker_comment,'')                                     AS checker_comment,
 				COALESCE(a.reason,'')                                              AS reason,
 				COALESCE(a.old_principal_amount,0)                                 AS old_principal_amount,
@@ -2024,9 +2024,9 @@ func GetBookingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					a.audit_id, a.booking_id, a.action_type, a.processing_status,
 					COALESCE(a.requested_by,'')                                       AS requested_by,
-					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')     AS requested_at,
+					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')     AS requested_at,
 					COALESCE(a.checker_by,'')                                         AS checker_by,
-					COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')       AS checker_at,
+					COALESCE(TO_CHAR(a.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')       AS checker_at,
 					COALESCE(a.checker_comment,'')                                    AS checker_comment,
 					COALESCE(a.reason,'')                                             AS reason,
 					COALESCE(m.entity_id,'')                                          AS entity_id,

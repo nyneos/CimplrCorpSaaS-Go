@@ -387,6 +387,28 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		api.LogInfo("[FDReceipt] Created receipt_id=%s fd=%s gross=%.4f tds=%.4f", receiptID, req.FdID, req.GrossInterestReceived, req.TdsAmountDeducted)
 
+		go func(rID, eID, uEmail string, amount float64) {
+			bgCtx := context.Background()
+			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "FIXED_DEPOSIT",
+				EntityCode:       eID,
+				TransactionType:  "FD_RECEIPT_CREATE",
+				RecordID:         rID,
+				RecordTable:      constants.QuerryInterestReceipt,
+				AuditTable:       constants.QuerryAuditInterestReceipt,
+				AuditIDColumn:    "receipt_id",
+				ActionType:       "CREATE",
+				Amount:           amount,
+				SubmittedBy:      req.UserID,
+				SubmittedByEmail: uEmail,
+			})
+			if instErr != nil {
+				api.LogError("[FDReceipt] CreateInstance CREATE failed: %v", instErr)
+			} else if instID != "" {
+				api.LogInfo("[FDReceipt] CreateInstance CREATE created instance=%s", instID)
+			}
+		}(receiptID, entityID, userEmail, req.GrossInterestReceived)
+
 		go func(rID, fdID, uEmail string, gross float64) {
 			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/create", rID, map[string]interface{}{
 				"record_id":   rID,
@@ -752,7 +774,8 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 					bgCtx := context.Background()
 					// Fetch entity_id for this receipt
 					var eID string
-					pool.QueryRow(bgCtx, `SELECT COALESCE(entity_id,'') FROM investment.fd_interest_receipt WHERE receipt_id=$1`, rid).Scan(&eID) //nolint:errcheck
+					var amount float64
+					pool.QueryRow(bgCtx, `SELECT COALESCE(entity_id,''), COALESCE(gross_interest_received, 0) FROM investment.fd_interest_receipt WHERE receipt_id=$1`, rid).Scan(&eID, &amount) //nolint:errcheck
 					instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 						ModuleCode:       "FIXED_DEPOSIT",
 						EntityCode:       eID,
@@ -762,7 +785,7 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 						AuditTable:       constants.QuerryAuditInterestReceipt,
 						AuditIDColumn:    "receipt_id",
 						ActionType:       "DELETE",
-						Amount:           0,
+						Amount:           amount,
 						SubmittedBy:      req.UserID,
 						SubmittedByEmail: userEmail,
 					})
@@ -893,6 +916,15 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(resp)
+			for _, rID := range req.ReceiptIDs {
+				go func(id, uEmail string) {
+					notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/bulk-approve", id, map[string]interface{}{
+						"record_id":   id,
+						"event":       "FD_RECEIPT_APPROVED",
+						"actor_email": uEmail,
+					})
+				}(rID, userEmail)
+			}
 			return
 		}
 		tx, err := pool.Begin(ctx)
@@ -1106,6 +1138,15 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(resp)
+			for _, rID := range req.ReceiptIDs {
+				go func(id, uEmail string) {
+					notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/bulk-reject", id, map[string]interface{}{
+						"record_id":   id,
+						"event":       "FD_RECEIPT_REJECTED",
+						"actor_email": uEmail,
+					})
+				}(rID, userEmail)
+			}
 			return
 		}
 		tx, err := pool.Begin(ctx)
@@ -1236,11 +1277,11 @@ history AS (
   SELECT
     receipt_id,
     MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at_audit,
     MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
     MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
   FROM investment.fd_interest_receipt_audit
   GROUP BY receipt_id
 )
@@ -1273,9 +1314,9 @@ SELECT
   COALESCE(l.action_type,'')           AS action_type,
   COALESCE(l.audit_id::text,'')        AS audit_id,
   COALESCE(l.requested_by,'')          AS requested_by,
-  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
   COALESCE(l.checker_by,'')            AS checker_by,
-  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
   COALESCE(l.checker_comment,'')       AS checker_comment,
   COALESCE(l.reason,'')                AS reason,
   COALESCE(l.old_receipt_status,'')    AS old_receipt_status,
@@ -1411,11 +1452,11 @@ history AS (
   SELECT
     receipt_id,
     MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at_audit,
     MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
     MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
   FROM investment.fd_interest_receipt_audit
   GROUP BY receipt_id
 )
@@ -1437,9 +1478,9 @@ SELECT
   COALESCE(r.reconcile_status,'')      AS reconcile_status,
   COALESCE(r.reconcile_run_id,'')      AS reconcile_run_id,
   COALESCE(l.requested_by,'')          AS requested_by,
-  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
   COALESCE(l.checker_by,'')            AS checker_by,
-  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
   COALESCE(l.processing_status,'')     AS processing_status,
   COALESCE(h.created_by_audit,'')      AS created_by_audit,
   COALESCE(h.created_at_audit,'')      AS created_at_audit,
@@ -1536,11 +1577,11 @@ history AS (
   SELECT
     tds_id,
     MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at_audit,
     MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
     MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
   FROM investment.fd_tds_receipt_audit
   GROUP BY tds_id
 )
@@ -1556,9 +1597,9 @@ SELECT
   COALESCE(t.tds_deducted_actual,0)    AS actual_amount,
   COALESCE(t.tds_status,'')            AS tds_status,
   COALESCE(l.requested_by,'')          AS requested_by,
-  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
   COALESCE(l.checker_by,'')            AS checker_by,
-  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
   COALESCE(l.processing_status,'')     AS processing_status,
   COALESCE(h.created_by_audit,'')      AS created_by_audit,
   COALESCE(h.created_at_audit,'')      AS created_at_audit,
@@ -1659,11 +1700,11 @@ history AS (
   SELECT
     tds_id,
     MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at_audit,
     MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
     MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
   FROM investment.fd_tds_receipt_audit
   GROUP BY tds_id
 )
@@ -1702,9 +1743,9 @@ SELECT
 	COALESCE(la.processing_status,'')      AS processing_status,
 	COALESCE(la.action_type,'')            AS action_type,
 	COALESCE(la.requested_by,'')           AS requested_by,
-	COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+	COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 	COALESCE(la.checker_by,'')             AS checker_by,
-	COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+	COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
 	COALESCE(la.checker_comment,'')        AS checker_comment,
 	COALESCE(la.reason,'')                 AS reason,
 	-- history pivot
@@ -1864,6 +1905,64 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		defer jeRows.Close()
 		jeData, _ := rowsToMapSlice(jeRows)
 
+		// ── Approval workflow ────────────────────────────────────────────────
+		var approvalWorkflow interface{}
+		{
+			var instanceID string
+			_ = pool.QueryRow(ctx, `
+				SELECT instance_id FROM uam.approval_instance
+				WHERE record_id = $1 AND module_code = 'FIXED_DEPOSIT' AND is_deleted = false
+				ORDER BY submitted_at DESC LIMIT 1`, req.ReceiptID,
+			).Scan(&instanceID)
+
+			if instanceID == "" {
+				var pendingActionType, submittedBy, entityID string
+				var amount float64
+				scanErr := pool.QueryRow(ctx, `
+					SELECT a.action_type, COALESCE(a.requested_by,''),
+					       COALESCE(r.entity_id,''), COALESCE(r.gross_interest_received,0)
+					FROM investment.fd_interest_receipt_audit a
+					JOIN investment.fd_interest_receipt r ON r.receipt_id = a.receipt_id
+					WHERE a.receipt_id = $1 AND a.processing_status LIKE '%PENDING%'
+					ORDER BY a.requested_at DESC LIMIT 1`, req.ReceiptID,
+				).Scan(&pendingActionType, &submittedBy, &entityID, &amount)
+				if scanErr == nil && pendingActionType != "" {
+					txType := map[string]string{
+						"CREATE": "FD_RECEIPT_CREATE",
+						"EDIT":   "FD_RECEIPT_EDIT",
+						"DELETE": "FD_RECEIPT_DELETE",
+					}[pendingActionType]
+					if txType == "" {
+						txType = "FD_RECEIPT_CREATE"
+					}
+					newInstID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+						ModuleCode:       "FIXED_DEPOSIT",
+						EntityCode:       entityID,
+						TransactionType:  txType,
+						RecordID:         req.ReceiptID,
+						RecordTable:      constants.QuerryInterestReceipt,
+						AuditTable:       constants.QuerryAuditInterestReceipt,
+						AuditIDColumn:    "receipt_id",
+						ActionType:       pendingActionType,
+						Amount:           amount,
+						SubmittedBy:      submittedBy,
+						SubmittedByEmail: submittedBy,
+					})
+					if instErr == nil && newInstID != "" {
+						instanceID = newInstID
+					}
+				}
+			}
+
+			viewerUserID := api.GetUserIDFromCtx(ctx)
+			if instanceID != "" {
+				richDetail, richErr := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, viewerUserID)
+				if richErr == nil {
+					approvalWorkflow = richDetail
+				}
+			}
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":           true,
@@ -1872,6 +1971,7 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			"reconcile_results": reconcileData,
 			"exceptions":        exceptionData,
 			"journal_entries":   jeData,
+			"approval_workflow": approvalWorkflow,
 		})
 	}
 }
@@ -2104,6 +2204,15 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 		api.LogInfo("[FDReceipt] ReconcilePreview (no DB write) entity=%s i=%d tds=%d",
 			req.EntityID, preview.Interest.Processed, preview.TDS.Processed)
 
+		go func(eID, email string) {
+			notifcatalog.TriggerNotification(context.Background(), pool,
+				"/investment/fd/reconcile/run", eID, map[string]interface{}{
+					"entity_id":   eID,
+					"event":       "FD_RCPT_RECONCILE",
+					"actor_email": email,
+				})
+		}(req.EntityID, userEmail)
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
@@ -2206,7 +2315,33 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 		}(runID, req.EntityID, userEmail)
 
 		go func(rID, eID, uEmail string) {
-			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/reconcile/ingest", rID, map[string]interface{}{
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDReceipt] IngestReconciliation engine panic run=%s: %v", rID, rec)
+				}
+			}()
+			bgCtx := context.Background()
+			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "FIXED_DEPOSIT",
+				EntityCode:       eID,
+				TransactionType:  "FD_RECONCILE_CREATE",
+				RecordID:         rID,
+				RecordTable:      "investment.fd_receipt_reconcile_run",
+				AuditTable:       "investment.fd_receipt_reconcile_run",
+				AuditIDColumn:    "reconcile_run_id",
+				ActionType:       "CREATE",
+				SubmittedBy:      uEmail,
+				SubmittedByEmail: uEmail,
+			})
+		}(runID, req.EntityID, userEmail)
+
+		go func(rID, eID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDReceipt] IngestReconciliation notification panic run=%s: %v", rID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/reconcile/ingest", rID, map[string]interface{}{
 				"entity_id":   eID,
 				"record_id":   rID,
 				"event":       "FD_RECONCILIATION_INGESTED",
@@ -2754,9 +2889,9 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(la.processing_status,'')          AS audit_processing_status,
 				COALESCE(la.action_type,'')                AS audit_action_type,
 				COALESCE(la.requested_by,'')               AS audit_requested_by,
-				COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS audit_requested_at,
+				COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS audit_requested_at,
 				COALESCE(la.checker_by,'')                 AS audit_checker_by,
-				COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS audit_checker_at,
+				COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS audit_checker_at,
 				COALESCE(la.checker_comment,'')            AS audit_checker_comment,
 				COALESCE(la.reason,'')                     AS audit_reason
 			FROM investment.fd_receipt_reconcile_result rr
@@ -2935,12 +3070,32 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			results = []ResultRow{}
 		}
 
+		var approvalWorkflow *approvalengine.RichInstanceDetail
+		var instanceID string
+		_ = pool.QueryRow(ctx, `
+			SELECT instance_id
+			FROM uam.approval_instance
+			WHERE record_id = $1
+			  AND module_code = 'FIXED_DEPOSIT'
+			  AND status = 'PENDING'
+			  AND is_deleted = false
+			LIMIT 1`, req.ReconcileRunID).Scan(&instanceID)
+		if instanceID != "" {
+			viewerUserID := api.GetUserIDFromCtx(ctx)
+			if richDetail, err := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, viewerUserID); err == nil {
+				approvalWorkflow = richDetail
+			} else {
+				api.LogError("[FDReceipt] GetRichInstanceDetail failed reconcile=%s: %v", req.ReconcileRunID, err)
+			}
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":      true,
-			"run":          run,
-			"result_count": len(results),
-			"results":      results,
+			"success":           true,
+			"run":               run,
+			"result_count":      len(results),
+			"results":           results,
+			"approval_workflow": approvalWorkflow,
 		})
 	}
 }
@@ -3020,9 +3175,9 @@ SELECT
   COALESCE(la.processing_status,'')     AS audit_processing_status,
   COALESCE(la.action_type,'')           AS audit_action_type,
   COALESCE(la.requested_by,'')          AS audit_requested_by,
-  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS audit_requested_at,
+  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS audit_requested_at,
   COALESCE(la.checker_by,'')            AS audit_checker_by,
-  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS audit_checker_at,
+  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS audit_checker_at,
   COALESCE(la.checker_comment,'')       AS audit_checker_comment,
   COALESCE(la.reason,'')               AS audit_reason
 FROM investment.fd_interest_receipt r
@@ -3118,9 +3273,9 @@ SELECT
   COALESCE(la.processing_status,'')     AS audit_processing_status,
   COALESCE(la.action_type,'')           AS audit_action_type,
   COALESCE(la.requested_by,'')          AS audit_requested_by,
-  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS audit_requested_at,
+  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS audit_requested_at,
   COALESCE(la.checker_by,'')            AS audit_checker_by,
-  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS audit_checker_at,
+  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS audit_checker_at,
   COALESCE(la.checker_comment,'')       AS audit_checker_comment,
   COALESCE(la.reason,'')               AS audit_reason
 FROM investment.fd_tds_receipt t
@@ -3317,6 +3472,15 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
+
+		go func(eID, uEmail string) {
+			notifcatalog.TriggerNotification(context.Background(), pool,
+				"/investment/fd/exception/resolve", eID, map[string]interface{}{
+					"record_id":   eID,
+					"event":       "FD_EXCEPTION_RESOLVED",
+					"actor_email": uEmail,
+				})
+		}(req.ExceptionID, userEmail)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3642,10 +3806,13 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 				tds_id, action_type, processing_status, reason, requested_by, requested_at,
 				old_tds_status, old_tds_deducted_actual, old_tds_rate_applied,
 				old_tds_variance, old_exception_raised, old_bank_tds_reference, old_is_active
-			) VALUES ($1,'EDIT','APPROVED',$2,$3,now(),$4,$5,$6,$7,$8,$9,$10)`,
+			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6,$7,$8,$9,$10)`,
 			req.TdsID, req.Reason, userEmail,
 			oldStatus, oldActual, oldRateApplied, oldVariance,
 			oldExceptionRaised, oldBankTDSRef, oldIsActive)
+		var entityID string
+		_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, req.TdsID).Scan(&entityID)
+
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
@@ -3655,6 +3822,57 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
+
+		go func(tID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDReceipt] UpdateTDS engine panic for %s: %v", tID, rec)
+				}
+			}()
+			bgCtx := context.Background()
+			var eID string
+			_ = pool.QueryRow(bgCtx,
+				`SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, tID,
+			).Scan(&eID)
+			if err := approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", tID, uEmail); err != nil {
+				api.LogError("[FDReceipt] UpdateTDS CancelPendingInstances failed tds=%s: %v", tID, err)
+				return
+			}
+			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "FIXED_DEPOSIT",
+				EntityCode:       eID,
+				TransactionType:  "FD_TDS_EDIT",
+				RecordID:         tID,
+				RecordTable:      constants.QuerryTDSReceipt,
+				AuditTable:       constants.QuerryAuditTDSReceipt,
+				AuditIDColumn:    "tds_id",
+				ActionType:       "EDIT",
+				SubmittedBy:      uEmail,
+				SubmittedByEmail: uEmail,
+			})
+			if instErr != nil {
+				api.LogError("[FDReceipt] UpdateTDS CreateInstance failed tds=%s: %v", tID, instErr)
+				return
+			}
+			if instID != "" {
+				api.LogInfo("[FDReceipt] UpdateTDS engine instance %s for tds %s", instID, tID)
+			}
+		}(req.TdsID, userEmail)
+
+		go func(tID, uEmail, eID string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDReceipt] UpdateTDS notification panic for %s: %v", tID, rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.Background(), pool,
+				"/investment/fd/receipt/tds/update", tID, map[string]interface{}{
+					"record_id":   tID,
+					"entity_id":   eID,
+					"event":       "FD_TDS_EDIT_SUBMITTED",
+					"actor_email": uEmail,
+				})
+		}(req.TdsID, userEmail, entityID)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3718,11 +3936,31 @@ func GetTDSDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		defer auditRows.Close()
 		auditData, _ := rowsToMapSlice(auditRows)
 
+		var approvalWorkflow *approvalengine.RichInstanceDetail
+		var instanceID string
+		_ = pool.QueryRow(ctx, `
+			SELECT instance_id
+			FROM uam.approval_instance
+			WHERE record_id = $1
+			  AND module_code = 'FIXED_DEPOSIT'
+			  AND status = 'PENDING'
+			  AND is_deleted = false
+			LIMIT 1`, req.TdsID).Scan(&instanceID)
+		if instanceID != "" {
+			viewerUserID := api.GetUserIDFromCtx(ctx)
+			if richDetail, err := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, viewerUserID); err == nil {
+				approvalWorkflow = richDetail
+			} else {
+				api.LogError("[FDReceipt] GetRichInstanceDetail failed tds=%s: %v", req.TdsID, err)
+			}
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":       true,
-			"tds":           tds,
-			"audit_history": auditData,
+			"success":           true,
+			"tds":               tds,
+			"audit_history":     auditData,
+			"approval_workflow": approvalWorkflow,
 		})
 	}
 }

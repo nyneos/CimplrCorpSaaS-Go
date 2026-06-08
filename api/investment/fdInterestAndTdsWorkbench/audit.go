@@ -58,9 +58,9 @@ func GetTDSReceiptAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.action_type,
 				a.processing_status,
 				COALESCE(a.requested_by, '')                                          AS requested_by,
-				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'), '')        AS requested_at,
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')        AS requested_at,
 				COALESCE(a.checker_by, '')                                            AS checker_by,
-				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD HH24:MI:SS'), '')          AS checker_at,
+				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')          AS checker_at,
 				COALESCE(a.checker_comment, '')                                       AS checker_comment,
 				COALESCE(t.fd_id, '')                                                 AS fd_id,
 				COALESCE(t.fd_ref_no, '')                                             AS fd_ref_no,
@@ -74,9 +74,25 @@ func GetTDSReceiptAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(t.tds_section, '')                                           AS tds_section,
 				COALESCE(TO_CHAR(t.period_start, 'YYYY-MM-DD'), '')                   AS period_start,
 				COALESCE(TO_CHAR(t.period_end, 'YYYY-MM-DD'), '')                     AS period_end,
-				COALESCE(TO_CHAR(t.deduction_date, 'YYYY-MM-DD'), '')                 AS deduction_date
+				COALESCE(TO_CHAR(t.deduction_date, 'YYYY-MM-DD'), '')                 AS deduction_date,
+				COALESCE(ai.instance_id,'')                                           AS approval_instance_id,
+				COALESCE(ai.status,'')                                                AS approval_engine_status,
+				COALESCE(aie.instance_eye_id,'')                                      AS current_eye_id,
+				COALESCE(aie.position::text,'')                                       AS current_eye_position,
+				COALESCE(aie.approvals_required,0)                                    AS approvals_required,
+				COALESCE(aie.approvals_received,0)                                    AS approvals_received,
+				aie.sla_deadline                                                      AS sla_deadline,
+				COALESCE(aie.is_escalated,false)                                      AS is_escalated
 			FROM investment.fd_tds_receipt_audit a
 			LEFT JOIN investment.fd_tds_receipt t ON t.tds_id = a.tds_id
+			LEFT JOIN uam.approval_instance ai
+				ON ai.record_id = a.tds_id
+				AND ai.module_code = 'FIXED_DEPOSIT'
+				AND ai.status = 'PENDING'
+				AND ai.is_deleted = false
+			LEFT JOIN uam.approval_instance_eye aie
+				ON aie.instance_id = ai.instance_id
+				AND aie.status = 'ACTIVE'
 			WHERE 1=1`
 
 		args := make([]interface{}, 0, 2)

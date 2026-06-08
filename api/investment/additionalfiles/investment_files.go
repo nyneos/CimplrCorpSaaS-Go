@@ -1,10 +1,16 @@
 package additionalfiles
 
 import (
+	"CimplrCorpSaas/api"
 	cashfiles "CimplrCorpSaas/api/cash/additionalfiles"
 	"CimplrCorpSaas/api/constants"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
@@ -160,7 +166,7 @@ var (
 		ParentIDField: "tds_id",
 		TableName:     "investment.fd_tds_receipt_files",
 		ParentColumn:  "tds_id",
-		ParentTable:   "investment.fd_tds_receipt",
+		ParentTable:   constants.QuerryTDSReceipt,
 		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdReconcileResultFilesDefinition = investmentFileDefinition{
@@ -175,7 +181,7 @@ var (
 		ParentIDField: "exception_id",
 		TableName:     "investment.fd_receipt_exception_files",
 		ParentColumn:  "exception_id",
-		ParentTable:   "investment.fd_receipt_exception",
+		ParentTable:   constants.QuerryReceiptException,
 		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	varianceExceptionFilesDefinition = investmentFileDefinition{
@@ -183,7 +189,7 @@ var (
 		ParentIDField: "exception_id",
 		TableName:     "investment.fd_receipt_exception_files",
 		ParentColumn:  "exception_id",
-		ParentTable:   "investment.fd_receipt_exception",
+		ParentTable:   constants.QuerryReceiptException,
 		ParentFilter:  constants.FormatDeletedFilter,
 	}
 	fdAccrualRunFilesDefinition = investmentFileDefinition{
@@ -361,7 +367,7 @@ func recordDynamicInvestmentMainUploadAudit(ctx context.Context, tx pgx.Tx, tabl
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 	}
 	query := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s)",
+		constants.ErrInsertFailed,
 		tableName,
 		strings.Join(insertColumns, ", "),
 		strings.Join(placeholders, ", "),
@@ -482,7 +488,7 @@ func recordFDClosureMainUploadAudit(ctx context.Context, tx pgx.Tx, closureReque
 }
 
 func recordFDCashflowMainUploadAudit(ctx context.Context, tx pgx.Tx, fdID string, payload cashfiles.MainUploadAuditPayload) error {
-	return recordDynamicInvestmentMainUploadAudit(ctx, tx, "investment.fd_audit_cashflow_schedule", []string{"fd_id", "master_id"}, fdID, payload, nil)
+	return recordDynamicInvestmentMainUploadAudit(ctx, tx, constants.QuerryAuditCashflowSchedule, []string{"fd_id", "master_id"}, fdID, payload, nil)
 }
 
 func recordFDInterestReceiptMainUploadAudit(ctx context.Context, tx pgx.Tx, receiptID string, payload cashfiles.MainUploadAuditPayload) error {
@@ -913,15 +919,317 @@ func RejectDeleteFDMasterAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerF
 }
 
 func ListFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
-	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	legacyHandler := cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, parentID, err := fdClosureAdditionalJSONParent(r, fdClosureFilesDefinition.ParentIDField)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		idKind, err := cimplrClosureAdditionalIDKind(r.Context(), pool, parentID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
+			return
+		}
+		if idKind == "" {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			legacyHandler(w, r)
+			return
+		}
+		files, err := listCimplrClosureAdditionalFiles(r.Context(), pool, parentID, idKind)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeInvestmentAdditionalSuccess(w, map[string]interface{}{"files": files})
+	}
 }
 
 func UploadFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
-	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	legacyHandler := cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			return
+		}
+		if err := r.ParseMultipartForm(64 << 20); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			return
+		}
+
+		parentID := strings.TrimSpace(r.FormValue(fdClosureFilesDefinition.ParentIDField))
+		if parentID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("%s required", fdClosureFilesDefinition.ParentIDField))
+			return
+		}
+
+		idKind, err := cimplrClosureAdditionalIDKind(r.Context(), pool, parentID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
+			return
+		}
+		if idKind == "" {
+			legacyHandler(w, r)
+			return
+		}
+
+		uploaded, err := uploadCimplrClosureAdditionalFiles(r.Context(), pool, r, parentID, idKind)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"files": uploaded})
+	}
+}
+
+func cimplrClosureAdditionalIDKind(ctx context.Context, pool *pgxpool.Pool, parentID string) (string, error) {
+	var idKind string
+	err := pool.QueryRow(ctx, `
+		SELECT kind
+		FROM (
+			SELECT 'initiate' AS kind
+			FROM cimplr.fd_closure_initiate
+			WHERE closure_initiate_id=$1
+			  AND COALESCE(is_deleted,false)=false
+			UNION ALL
+			SELECT 'confirm' AS kind
+			FROM cimplr.fd_closure_confirm
+			WHERE closure_confirm_id=$1
+			  AND COALESCE(is_deleted,false)=false
+		) s
+		LIMIT 1`, parentID).Scan(&idKind)
+	if err == pgx.ErrNoRows {
+		return "", nil
+	}
+	return strings.TrimSpace(idKind), err
+}
+
+func uploadCimplrClosureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, r *http.Request, parentID, idKind string) ([]cashfiles.FileRecord, error) {
+	fileHeaders := append([]*multipart.FileHeader{}, r.MultipartForm.File["file"]...)
+	fileHeaders = append(fileHeaders, r.MultipartForm.File["files"]...)
+	if len(fileHeaders) == 0 {
+		return nil, fmt.Errorf("no files provided")
+	}
+
+	userID := strings.TrimSpace(r.FormValue("user_id"))
+	uploadedBy := strings.TrimSpace(api.RequestedByFromCtx(r.Context(), userID))
+	if uploadedBy == "" {
+		uploadedBy = userID
+	}
+
+	uploaded := make([]cashfiles.FileRecord, 0, len(fileHeaders))
+	for _, header := range fileHeaders {
+		file, err := header.Open()
+		if err != nil {
+			return nil, fmt.Errorf("open file %s: %w", header.Filename, err)
+		}
+		body, readErr := io.ReadAll(file)
+		_ = file.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read file %s: %w", header.Filename, readErr)
+		}
+		if len(body) == 0 {
+			return nil, fmt.Errorf("uploaded file is empty")
+		}
+
+		uploadedAt := time.Now().UTC()
+		storedFileName := s3storage.BuildUploadedFilename(header.Filename, uploadedBy, uploadedAt)
+		s3Key := s3storage.BuildNamedS3Key(s3storage.GetStoragePrefix(fdClosureFilesDefinition.Module), parentID, storedFileName)
+		contentType := header.Header.Get("Content-Type")
+		if contentType == "" {
+			contentType = s3storage.DetectContentType(body)
+		}
+		fileHash := s3storage.ContentHashHex(body)
+
+		if err := s3storage.PutObjectToS3(ctx, s3Key, body, contentType); err != nil {
+			return nil, fmt.Errorf("failed to upload file to S3: %w", err)
+		}
+
+		var fileID string
+		var insertErr error
+		if idKind == "initiate" {
+			insertErr = pool.QueryRow(ctx, `
+				INSERT INTO cimplr.fd_closure_files (
+					closure_initiate_id, closure_confirm_id, file_type, stored_file_name, original_file_name,
+					content_type, file_size, file_hash, upload_s3_key, uploaded_by
+				) VALUES ($1, NULL, 'SUPPORTING', $2, $3, $4, $5, $6, $7, $8)
+				RETURNING file_id::text`,
+				parentID, storedFileName, header.Filename, contentType, int64(len(body)), fileHash, s3Key, uploadedBy,
+			).Scan(&fileID)
+		} else {
+			insertErr = pool.QueryRow(ctx, `
+				INSERT INTO cimplr.fd_closure_files (
+					closure_initiate_id, closure_confirm_id, file_type, stored_file_name, original_file_name,
+					content_type, file_size, file_hash, upload_s3_key, uploaded_by
+				) VALUES (NULL, $1, 'SUPPORTING', $2, $3, $4, $5, $6, $7, $8)
+				RETURNING file_id::text`,
+				parentID, storedFileName, header.Filename, contentType, int64(len(body)), fileHash, s3Key, uploadedBy,
+			).Scan(&fileID)
+		}
+		if insertErr != nil {
+			_ = s3storage.DeleteFromS3(ctx, s3Key)
+			return nil, fmt.Errorf("file upload metadata failed: %w", insertErr)
+		}
+
+		uploaded = append(uploaded, cashfiles.FileRecord{
+			FileID:           strings.TrimSpace(fileID),
+			StoredFileName:   storedFileName,
+			ContentType:      contentType,
+			FileSize:         int64(len(body)),
+			UploadS3Key:      s3Key,
+			UploadedBy:       uploadedBy,
+			UploadedAt:       uploadedAt,
+			ProcessingStatus: "ACTIVE",
+		})
+	}
+	return uploaded, nil
+}
+
+func fdClosureAdditionalJSONParent(r *http.Request, parentField string) ([]byte, string, error) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read request body: %w", err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, "", fmt.Errorf("%s: %w", constants.ErrInvalidJSONShort, err)
+	}
+	parentID := strings.TrimSpace(fmt.Sprint(payload[parentField]))
+	if parentID == "" || parentID == "<nil>" {
+		return nil, "", fmt.Errorf("%s required", parentField)
+	}
+	return body, parentID, nil
+}
+
+func listCimplrClosureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID, idKind string) ([]cashfiles.FileRecord, error) {
+	parentColumn := "closure_confirm_id"
+	if idKind == "initiate" {
+		parentColumn = "closure_initiate_id"
+	}
+	rows, err := pool.Query(ctx, fmt.Sprintf(`
+		SELECT file_id::text, stored_file_name, COALESCE(content_type,''), COALESCE(file_size,0),
+		       upload_s3_key, COALESCE(uploaded_by,''), uploaded_at
+		FROM cimplr.fd_closure_files
+		WHERE %s=$1
+		  AND COALESCE(is_deleted,false)=false
+		ORDER BY uploaded_at DESC`, parentColumn), parentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	files := []cashfiles.FileRecord{}
+	for rows.Next() {
+		var file cashfiles.FileRecord
+		if err := rows.Scan(
+			&file.FileID,
+			&file.StoredFileName,
+			&file.ContentType,
+			&file.FileSize,
+			&file.UploadS3Key,
+			&file.UploadedBy,
+			&file.UploadedAt,
+		); err != nil {
+			return nil, err
+		}
+		file.ProcessingStatus = "ACTIVE"
+		files = append(files, file)
+	}
+	return files, rows.Err()
+}
+
+func getCimplrClosureAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, idKind, fileID string) (*cashfiles.FileRecord, error) {
+	parentColumn := "closure_confirm_id"
+	if idKind == "initiate" {
+		parentColumn = "closure_initiate_id"
+	}
+	where := fmt.Sprintf("%s=$1", parentColumn)
+	args := []interface{}{parentID}
+	if strings.TrimSpace(fileID) != "" {
+		where += " AND file_id=$2::uuid"
+		args = append(args, strings.TrimSpace(fileID))
+	}
+	rows, err := pool.Query(ctx, fmt.Sprintf(`
+		SELECT file_id::text, stored_file_name, COALESCE(content_type,''), COALESCE(file_size,0),
+		       upload_s3_key, COALESCE(uploaded_by,''), uploaded_at
+		FROM cimplr.fd_closure_files
+		WHERE %s
+		  AND COALESCE(is_deleted,false)=false
+		ORDER BY uploaded_at DESC
+		LIMIT 1`, where), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	var file cashfiles.FileRecord
+	if err := rows.Scan(
+		&file.FileID,
+		&file.StoredFileName,
+		&file.ContentType,
+		&file.FileSize,
+		&file.UploadS3Key,
+		&file.UploadedBy,
+		&file.UploadedAt,
+	); err != nil {
+		return nil, err
+	}
+	file.ProcessingStatus = "ACTIVE"
+	return &file, rows.Err()
+}
+
+func writeInvestmentAdditionalSuccess(w http.ResponseWriter, data interface{}) {
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"data":    data,
+	})
 }
 
 func DownloadFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
-	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	legacyHandler := cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, parentID, err := fdClosureAdditionalJSONParent(r, fdClosureFilesDefinition.ParentIDField)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		idKind, err := cimplrClosureAdditionalIDKind(r.Context(), pool, parentID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
+			return
+		}
+		if idKind == "" {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			legacyHandler(w, r)
+			return
+		}
+
+		var req struct {
+			FileID string `json:"file_id"`
+		}
+		_ = json.Unmarshal(body, &req)
+		record, err := getCimplrClosureAdditionalFile(r.Context(), pool, parentID, idKind, req.FileID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if record == nil || strings.TrimSpace(record.UploadS3Key) == "" {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			return
+		}
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), record.UploadS3Key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to generate download url: "+err.Error())
+			return
+		}
+		writeInvestmentAdditionalSuccess(w, map[string]interface{}{
+			"download_url": downloadURL,
+			"file_id":      record.FileID,
+		})
+	}
 }
 
 func DownloadSelectedFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {

@@ -194,13 +194,15 @@ func StartFXService(db *sql.DB, port string) {
 		mux.Handle("/fx/forwards/mtm/additional-files/delete/approve", midFX(forwards.ApproveMTMAdditionalFileDeleteHandler(pgxPool)))
 		mux.Handle("/fx/forwards/mtm/additional-files/delete/reject", midFX(forwards.RejectMTMAdditionalFileDeleteHandler(pgxPool)))
 
-		// Forward cancel/roll endpoints
 		mux.Handle("/fx/forwards/forward-booking-list", midFX(forwards.GetForwardBookingList(db)))
 		mux.Handle("/fx/forwards/exposures-by-booking-ids", midFX(forwards.GetExposuresByBookingIds(db)))
 		mux.Handle("/fx/forwards/create-forward-cancellations", midFX(forwards.CreateForwardCancellations(db)))
 		mux.Handle("/fx/forwards/create-forward-rollover", midFX(forwards.RolloverForwardBooking(db)))
 		mux.Handle("/fx/forwards/pending-cancellations", midFX(forwards.GetPendingCancellations(db)))
 		mux.Handle("/fx/forwards/pending-rollovers", midFX(forwards.GetPendingRollovers(db)))
+		mux.Handle("/fx/forwards/cancel-roll/all", midFX(forwards.GetAllCancellationRollovers(db)))
+		mux.Handle("/fx/forwards/cancel-roll/action", midFX(forwards.CancellationRolloverAction(db)))
+
 		// Checker (approval) routes
 		mux.Handle("/fx/forwards/cancellation-status-request", midFX(forwards.CancellationStatusRequest(db)))
 		mux.Handle("/fx/forwards/rollover-status-request", midFX(forwards.RolloverStatusRequest(db)))

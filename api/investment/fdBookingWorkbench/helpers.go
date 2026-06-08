@@ -164,7 +164,7 @@ func fdTimestampTextExpr(columns map[string]bool, tableAlias string, fallback st
 	if columnName == "" {
 		return fallback
 	}
-	return fmt.Sprintf("COALESCE(TO_CHAR(%s.%s,'YYYY-MM-DD HH24:MI:SS'),'')", tableAlias, columnName)
+	return fmt.Sprintf("COALESCE(TO_CHAR(%s.%s,'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),'')", tableAlias, columnName)
 }
 
 func buildFDPlaceholders(count int) string {
@@ -202,7 +202,7 @@ func buildFDDynamicInsert(tableName string, columns map[string]bool, preferredCo
 	}
 
 	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s)",
+		constants.ErrInsertFailed,
 		tableName,
 		strings.Join(insertColumns, ","),
 		buildFDPlaceholders(len(insertColumns)),

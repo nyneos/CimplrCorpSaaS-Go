@@ -580,9 +580,9 @@ func GetPaymentNetworkAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			history AS (
 				SELECT payment_network_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at
 				FROM apibox.audit_payment_network
 				GROUP BY payment_network_id
 			)
@@ -591,11 +591,11 @@ func GetPaymentNetworkAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				p.bic_code, p.routing_number, p.iban_supported, p.settlement_currencies,
 				p.cut_off_time, p.timezone, p.api_endpoint_kms_ref,
 				p.status, p.is_active, p.is_deleted,
-				TO_CHAR(p.created_at,'YYYY-MM-DD HH24:MI:SS') AS created_at,
-				TO_CHAR(p.updated_at,'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(p.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
+				TO_CHAR(p.updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 				la.audit_id, la.action_type, la.processing_status,
-				la.requested_by, TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				la.checker_by, TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				la.requested_by, TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
+				la.checker_by, TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				la.checker_comment, la.reason,
 				la.old_network_type, la.old_routing_number, la.old_bic_code,
 				h.created_by, h.created_at AS history_created_at,
@@ -643,8 +643,8 @@ func GetPaymentNetworkAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		baseQ := `
 			SELECT audit_id, payment_network_id, action_type, processing_status, reason,
-				requested_by, TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				checker_by, TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				requested_by, TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
+				checker_by, TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				checker_comment, old_network_type, old_routing_number, old_bic_code
 			FROM apibox.audit_payment_network`
 
@@ -753,12 +753,12 @@ func GetPaymentNetworkDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				p.bic_code, p.routing_number, p.iban_supported, p.settlement_currencies,
 				p.cut_off_time, p.timezone, p.api_endpoint_kms_ref,
 				p.status, p.is_active, p.is_deleted,
-				TO_CHAR(p.created_at,'YYYY-MM-DD HH24:MI:SS') AS created_at,
-				TO_CHAR(p.updated_at,'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(p.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
+				TO_CHAR(p.updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 				(SELECT row_to_json(a) FROM (
 					SELECT audit_id, action_type, processing_status, reason,
-						requested_by, TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-						checker_by, TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+						requested_by, TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
+						checker_by, TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 						checker_comment
 					FROM apibox.audit_payment_network
 					WHERE payment_network_id = p.payment_network_id

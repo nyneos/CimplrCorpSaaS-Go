@@ -1519,11 +1519,11 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					penalty_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT' THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM investment.fd_audit_penalty_structure
 				GROUP BY penalty_id
 			)
@@ -1567,9 +1567,9 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.action_type,'') AS action_type,
 				COALESCE(l.audit_id::text,'') AS audit_id,
 				COALESCE(l.requested_by,'') AS requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 
@@ -1707,6 +1707,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		var validInputs []PenaltyStructureInput
+		seenKeysInFile := make(map[string]int)
 
 		// sendFail sends a concise human-readable fail-fast response
 		sendFail := func(row int, msg string) {
@@ -1815,6 +1816,22 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Check unique constraint pre-insert to provide friendly error
+			
+			// in-file duplicate check
+			minAmtVal, maxAmtVal := "null", "null"
+			if input.MinAmountRange != nil { minAmtVal = fmt.Sprintf("%v", *input.MinAmountRange) }
+			if input.MaxAmountRange != nil { maxAmtVal = fmt.Sprintf("%v", *input.MaxAmountRange) }
+			minHeldVal, maxHeldVal := "null", "null"
+			if input.MinHeldDays != nil { minHeldVal = fmt.Sprintf("%v", *input.MinHeldDays) }
+			if input.MaxHeldDays != nil { maxHeldVal = fmt.Sprintf("%v", *input.MaxHeldDays) }
+			
+			key := fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%s|%f|%s", input.BankCode, minAmtVal, maxAmtVal, input.MinTenorDays, input.MaxTenorDays, minHeldVal, maxHeldVal, strings.ToUpper(input.PenaltyType), input.PenaltyValue, input.CalculationMethod)
+			if prevRow, dup := seenKeysInFile[key]; dup {
+				sendFail(rowIdx+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching unique keys)", rowIdx+2, prevRow))
+				return
+			}
+			seenKeysInFile[key] = rowIdx + 2
+			
 			if conflict, err := penaltyStructureFindConflict(ctx, pgxPool, input); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 				return
