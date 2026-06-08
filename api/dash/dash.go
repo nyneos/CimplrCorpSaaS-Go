@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	bankbalance "CimplrCorpSaas/api/dash/bank-balance"
 	benchmarks "CimplrCorpSaas/api/dash/benchmarks"
+	dashboardbuilder "CimplrCorpSaas/api/dash/dashboard-builder"
 	"CimplrCorpSaas/api/dash/buCurrExpDash"
 	cashflowforecast "CimplrCorpSaas/api/dash/cashflowforecast"
 	categorywisedata "CimplrCorpSaas/api/dash/categorywiseData"
@@ -226,6 +227,13 @@ func StartDashService(db *sql.DB, port string) {
 
 	// Planned Inflow/Outflow Dashboard
 	mux.Handle("/dash/planned-inflow-outflow", middlewares.PreValidationMiddleware(pgxPool)(plannedinflowoutflowdash.GetPlannedIODash(pgxPool)))
+
+	// ── Dashboard Builder ─────────────────────────────────────────────────────
+	mux.Handle("/dash/builder/dashboard/save",   middlewares.PreValidationMiddleware(pgxPool)(dashboardbuilder.SaveDashboard(pgxPool)))
+	mux.Handle("/dash/builder/dashboard/list",   middlewares.PreValidationMiddleware(pgxPool)(dashboardbuilder.ListDashboards(pgxPool)))
+	mux.Handle("/dash/builder/dashboard/get",    middlewares.PreValidationMiddleware(pgxPool)(dashboardbuilder.GetDashboardByID(pgxPool)))
+	mux.Handle("/dash/builder/dashboard/delete", middlewares.PreValidationMiddleware(pgxPool)(dashboardbuilder.DeleteDashboard(pgxPool)))
+	mux.Handle("/dash/builder/data",             middlewares.PreValidationMiddleware(pgxPool)(dashboardbuilder.GetDataSource(pgxPool)))
 
 	// ── Notification Dashboard ────────────────────────────────────────────────
 	mux.Handle("/dash/notification/kpi", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetKPI(pgxPool)))
