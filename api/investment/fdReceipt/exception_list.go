@@ -48,8 +48,10 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 			COALESCE(la.reason,''),
 			COALESCE(la.requested_by,''),
 			COALESCE(la.requested_at::text,''),
+			COALESCE(la.requested_ip,''),
 			COALESCE(la.checker_by,''),
 			COALESCE(la.checker_at::text,''),
+			COALESCE(la.checker_ip,''),
 			COALESCE(la.checker_comment,''),
 			COALESCE(la.old_exception_status,''),
 			COALESCE(la.old_proposed_resolution,''),
@@ -136,6 +138,7 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 			proposedResolution, reasonCode, resolutionRemarks, attachment        string
 			raisedBy, raisedAt, auditID, actionType, auditProcessingStatus       string
 			reason, requestedBy, requestedAt, checkerBy, checkerAt               string
+			requestedIP, checkerIP                                               string
 			checkerComment                                                       string
 			oldExceptionStatus, oldProposedResolution, oldReasonCode             string
 			oldResolutionRemarks, oldAttachment, oldCaseType, oldVarianceOutcome string
@@ -144,7 +147,7 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 			expectedAmount, receivedAmount, varianceAmount                       float64
 			isActive, isDeleted                                                  bool
 			approvalInstanceID, approvalEngineStatus                             string
-			currentEyeID, currentEyePosition                                    string
+			currentEyeID, currentEyePosition                                     string
 			approvalsRequired, approvalsReceived                                 int
 			slaDeadline                                                          interface{}
 			isEscalated                                                          bool
@@ -158,7 +161,8 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 			&raisedBy, &raisedAt, &isActive, &isDeleted,
 			&auditID, &actionType, &auditProcessingStatus,
 			&reason, &requestedBy, &requestedAt,
-			&checkerBy, &checkerAt, &checkerComment,
+			&requestedIP,
+			&checkerBy, &checkerAt, &checkerIP, &checkerComment,
 			&oldExceptionStatus, &oldProposedResolution, &oldReasonCode,
 			&oldResolutionRemarks, &oldAttachment, &oldCaseType, &oldVarianceOutcome,
 			&createdAt, &createdBy, &editedAt, &editedBy,
@@ -221,8 +225,10 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 			"action_type":             actionType,
 			"requested_at":            requestedAt,
 			"requested_by":            requestedBy,
+			"requested_ip":            requestedIP,
 			"checker_by":              checkerBy,
 			"checker_at":              checkerAt,
+			"checker_ip":              checkerIP,
 			"checker_comment":         checkerComment,
 			"reason":                  reason,
 			"old_exception_status":    oldExceptionStatus,

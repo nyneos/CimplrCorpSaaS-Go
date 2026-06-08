@@ -316,8 +316,8 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		// Audit
 		_, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_interest_receipt_audit (
-				receipt_id, action_type, processing_status, requested_by, requested_at
-			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, receiptID, userEmail)
+				receipt_id, action_type, processing_status, requested_by, requested_at, requested_ip
+			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, receiptID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
@@ -364,8 +364,8 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 			_, err = tx.Exec(ctx, `
 				INSERT INTO investment.fd_tds_receipt_audit (
-					tds_id, action_type, processing_status, requested_by, requested_at
-				) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, tdsID, userEmail)
+					tds_id, action_type, processing_status, requested_by, requested_at, requested_ip
+				) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, tdsID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "TDS audit insert failed: "+err.Error())
 				return
@@ -628,14 +628,14 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		// Audit with all old_* fields
 		_, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_interest_receipt_audit (
-				receipt_id, action_type, processing_status, reason, requested_by, requested_at,
+				receipt_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip,
 				old_receipt_status, old_receipt_date, old_period_start, old_period_end,
 				old_gross_interest_received, old_tds_amount_deducted, old_other_charges,
 				old_net_amount_received, old_bank_reference_no, old_narration,
 				old_is_active
-			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),
-				$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-			req.ReceiptID, req.Reason, userEmail,
+			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,
+				$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+			req.ReceiptID, req.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			oldStatus, oldReceiptDate, oldPeriodStart, oldPeriodEnd,
 			oldGross, oldTds, oldOther, oldNet,
 			oldBankRef, oldNarration, oldIsActive)
@@ -740,8 +740,8 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			for _, rid := range validIDs {
 				_, err = tx.Exec(ctx, `
 					INSERT INTO investment.fd_interest_receipt_audit (
-						receipt_id, action_type, processing_status, reason, requested_by, requested_at
-					) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`, rid, req.Reason, userEmail)
+						receipt_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+					) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4)`, rid, req.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 				if err != nil {
 					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 					return
@@ -936,9 +936,9 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			)
 			UPDATE investment.fd_interest_receipt_audit a
 			SET processing_status='APPROVED', checker_by=$1,
-			    checker_at=now(), checker_comment=$2
+			    checker_at=now(), checker_comment=$2, checker_ip=$4
 			FROM latest_pending lp
-			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, directReceiptIDs)
+			WHERE a.audit_id = lp.audit_id`, api.SystemIfBlank(userEmail), req.Comment, directReceiptIDs, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit update failed: "+err.Error())
 			return
@@ -990,9 +990,9 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			)
 			UPDATE investment.fd_tds_receipt_audit a
 			SET processing_status='APPROVED', checker_by=$1,
-			    checker_at=now(), checker_comment=$2
+			    checker_at=now(), checker_comment=$2, checker_ip=$4
 			FROM latest_pending_tds lp
-			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, directReceiptIDs)
+			WHERE a.audit_id = lp.audit_id`, api.SystemIfBlank(userEmail), req.Comment, directReceiptIDs, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "TDS audit update failed: "+err.Error())
 			return
@@ -1157,9 +1157,9 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			)
 			UPDATE investment.fd_interest_receipt_audit a
 			SET processing_status='REJECTED', checker_by=$1,
-			    checker_at=now(), checker_comment=$2
+			    checker_at=now(), checker_comment=$2, checker_ip=$4
 			FROM latest_pending lp
-			WHERE a.audit_id = lp.audit_id`, userEmail, req.Comment, directReceiptIDs)
+			WHERE a.audit_id = lp.audit_id`, api.SystemIfBlank(userEmail), req.Comment, directReceiptIDs, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit update failed: "+err.Error())
 			return
@@ -1245,8 +1245,8 @@ func GetReceiptsWithAudit(pool *pgxpool.Pool) http.HandlerFunc {
 WITH latest_audit AS (
   SELECT DISTINCT ON (a.receipt_id)
     a.receipt_id, a.action_type, a.processing_status,
-    a.audit_id, a.requested_by, a.requested_at,
-    a.checker_by, a.checker_at, a.checker_comment, a.reason,
+    a.audit_id, a.requested_by, a.requested_at, a.requested_ip,
+    a.checker_by, a.checker_at, a.checker_ip, a.checker_comment, a.reason,
     a.old_receipt_status, a.old_gross_interest_received,
     a.old_tds_amount_deducted, a.old_net_amount_received,
     a.old_receipt_date
@@ -1300,8 +1300,10 @@ SELECT
   COALESCE(l.audit_id::text,'')        AS audit_id,
   COALESCE(l.requested_by,'')          AS requested_by,
   COALESCE(TO_CHAR((l.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+  COALESCE(l.requested_ip,'')          AS requested_ip,
   COALESCE(l.checker_by,'')            AS checker_by,
   COALESCE(TO_CHAR((l.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+  COALESCE(l.checker_ip,'')            AS checker_ip,
   COALESCE(l.checker_comment,'')       AS checker_comment,
   COALESCE(l.reason,'')                AS reason,
   COALESCE(l.old_receipt_status,'')    AS old_receipt_status,
@@ -3788,11 +3790,11 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 
 		_, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_tds_receipt_audit (
-				tds_id, action_type, processing_status, reason, requested_by, requested_at,
+				tds_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip,
 				old_tds_status, old_tds_deducted_actual, old_tds_rate_applied,
 				old_tds_variance, old_exception_raised, old_bank_tds_reference, old_is_active
-			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6,$7,$8,$9,$10)`,
-			req.TdsID, req.Reason, userEmail,
+			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6,$7,$8,$9,$10,$11)`,
+			req.TdsID, req.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			oldStatus, oldActual, oldRateApplied, oldVariance,
 			oldExceptionRaised, oldBankTDSRef, oldIsActive)
 		var entityID string

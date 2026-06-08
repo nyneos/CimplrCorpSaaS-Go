@@ -493,13 +493,13 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_audit_confirmation (
 				confirmation_id, action_type, processing_status,
-				requested_by, requested_at,
+				requested_by, requested_at, requested_ip,
 				old_actual_principal, old_confirmed_rate,
 				old_actual_start_date, old_actual_maturity_date,
 				old_confirmation_status,
 				old_tenor_type, old_tenor_days, old_tenor_months, old_tenor_years
-			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,NULLIF($9,0),NULLIF($10,0),NULLIF($11,0))`,
-			confirmationID, userEmail,
+			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,NULLIF($10,0),NULLIF($11,0),NULLIF($12,0))`,
+			confirmationID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			bookedPrincipal, bookedRate,
 			coerceDateValue(bookedValueDate), coerceDateValue(bookedMaturityDate), bookingStatus,
 			tenorType, req.ConfirmedTenorDays, req.ConfirmedTenorMonths, req.ConfirmedTenorYears,
@@ -972,12 +972,12 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err = tx.Exec(ctx, `
 				INSERT INTO investment.fd_audit_confirmation (
 					confirmation_id, action_type, processing_status,
-					requested_by, requested_at, reason,
+					requested_by, requested_at, requested_ip, reason,
 					old_actual_principal, old_confirmed_rate,
 					old_confirmation_status,
 					old_tenor_type, old_tenor_days, old_penalty_id
-				) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9)`,
-				confirmationID, userEmail, req.Notes,
+				) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10)`,
+				confirmationID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.Notes,
 				oldPrincipal, oldRate, oldStatus, oldTenorType, oldTenorDays, oldPenaltyID,
 			); err != nil {
 				msg, status := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)
@@ -1055,13 +1055,13 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err = tx.Exec(ctx, `
 				INSERT INTO investment.fd_audit_confirmation (
 					confirmation_id, action_type, processing_status,
-					requested_by, requested_at, reason,
+					requested_by, requested_at, requested_ip, reason,
 					old_actual_principal, old_confirmed_rate,
 					old_actual_start_date, old_actual_maturity_date,
 					old_confirmation_status,
 					old_tenor_type, old_tenor_days
-				) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10)`,
-				confirmationID, userEmail, req.Notes,
+				) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+				confirmationID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.Notes,
 				bookedPrincipal, bookedRate,
 				coerceDateValue(bookedValueDate), coerceDateValue(bookedMaturityDate), bookingStatus,
 				tenorType, req.ConfirmedTenorDays,
@@ -1569,12 +1569,12 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_audit_confirmation (
 				confirmation_id, action_type, processing_status,
-				requested_by, requested_at, reason,
+				requested_by, requested_at, requested_ip, reason,
 				old_actual_principal, old_confirmed_rate,
 				old_confirmation_status,
 				old_tenor_type, old_tenor_days, old_penalty_id
-			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9)`,
-			req.ConfirmationID, userEmail, req.Reason,
+			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10)`,
+			req.ConfirmationID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.Reason,
 			oldPrincipal, oldRate, currentStatus, oldTenorType, oldTenorDays, oldPenaltyID,
 		); err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)
@@ -1796,10 +1796,10 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_audit_confirmation (
 				confirmation_id, action_type, processing_status,
-				requested_by, requested_at, reason,
+				requested_by, requested_at, requested_ip, reason,
 				old_confirmation_status, old_variance_action
-			) VALUES ($1,'EDIT','PENDING_APPROVAL',$2,now(),$3,$4,'PENDING')`,
-			req.ConfirmationID, userEmail, req.Reason, currentStatus,
+			) VALUES ($1,'EDIT','PENDING_APPROVAL',$2,now(),$3,$4,$5,'PENDING')`,
+			req.ConfirmationID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.Reason, currentStatus,
 		); err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
@@ -1999,11 +1999,11 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				tag1, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_confirmation a
-					SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2,
+					SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3,
 					    old_confirmation_status=c.confirmation_status
 					FROM investment.fd_confirmation c
-					WHERE a.confirmation_id=c.confirmation_id AND a.confirmation_id=$3
-					  AND a.processing_status LIKE '%PENDING%'`, userEmail, req.Comment, cID)
+					WHERE a.confirmation_id=c.confirmation_id AND a.confirmation_id=$4
+					  AND a.processing_status LIKE '%PENDING%'`, api.SystemIfBlank(userEmail), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), cID)
 				_, err2 := tx.Exec(ctx, `UPDATE investment.fd_confirmation SET confirmation_status='CONFIRMED'
 					WHERE confirmation_id=$1
 					  AND confirmation_status NOT IN ('VARIANCE_REJECTED','CONFIRMED')`, cID)
@@ -2174,11 +2174,11 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				tag1, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_confirmation a
-					SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2,
+					SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3,
 					    old_confirmation_status=c.confirmation_status
 					FROM investment.fd_confirmation c
-					WHERE a.confirmation_id=c.confirmation_id AND a.confirmation_id=$3
-					  AND a.processing_status LIKE '%PENDING%'`, userEmail, req.Comment, cID)
+					WHERE a.confirmation_id=c.confirmation_id AND a.confirmation_id=$4
+					  AND a.processing_status LIKE '%PENDING%'`, api.SystemIfBlank(userEmail), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), cID)
 				_, err2 := tx.Exec(ctx, `UPDATE investment.fd_confirmation SET confirmation_status='REJECTED',
 					variance_action = 'REJECTED'
 					WHERE confirmation_id=$1
@@ -3139,14 +3139,14 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		auditVals := make([]string, len(validIDs))
-		auditArgs := make([]interface{}, 0, len(validIDs)*3)
+		auditArgs := make([]interface{}, 0, len(validIDs)*4)
 		for i, id := range validIDs {
-			auditVals[i] = fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,$%d,now())", i*3+1, i*3+2, i*3+3)
-			auditArgs = append(auditArgs, id, userEmail, req.Reason)
+			auditVals[i] = fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,$%d,now(),$%d)", i*4+1, i*4+2, i*4+3, i*4+4)
+			auditArgs = append(auditArgs, id, api.SystemIfBlank(userEmail), req.Reason, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 		}
 		auditQ := fmt.Sprintf(`
 			INSERT INTO investment.fd_audit_confirmation
-				(confirmation_id, action_type, processing_status, requested_by, reason, requested_at)
+				(confirmation_id, action_type, processing_status, requested_by, reason, requested_at, requested_ip)
 			VALUES %s`, strings.Join(auditVals, ","))
 		if _, err = tx.Exec(ctx, auditQ, auditArgs...); err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)

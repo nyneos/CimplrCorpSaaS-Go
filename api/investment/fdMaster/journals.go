@@ -1,6 +1,7 @@
 package fdMaster
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	accountingworkbench "CimplrCorpSaas/api/investment/accountingWorkbench"
 	"context"
@@ -127,9 +128,9 @@ func CreateFDAccountingActivity(ctx context.Context, exec queryExecutor, fdID st
 
 	if _, err := exec.Exec(ctx, `
 		INSERT INTO investment.auditactionaccountingactivity (
-			activity_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
-		) VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
-	`, activityID, userEmail, fmt.Sprintf(constants.FormatFDActivation, fdID)); err != nil {
+			activity_id, actiontype, processing_status, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip, checker_comment
+		) VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $3, $2, now(), $3, $4)
+	`, activityID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), fmt.Sprintf(constants.FormatFDActivation, fdID)); err != nil {
 		return "", fmt.Errorf("create accounting activity audit: %w", err)
 	}
 

@@ -207,9 +207,9 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_audit_booking_request
-				(booking_id, action_type, processing_status, requested_by, requested_at)
-			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`,
-			bookingID, userEmail,
+				(booking_id, action_type, processing_status, requested_by, requested_at, requested_ip)
+			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`,
+			bookingID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 		); err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
@@ -491,9 +491,9 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if _, err = tx.Exec(ctx, `
 				INSERT INTO investment.fd_audit_booking_request
-					(booking_id, action_type, processing_status, requested_by, requested_at)
-				VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`,
-				bookingID, userEmail,
+					(booking_id, action_type, processing_status, requested_by, requested_at, requested_ip)
+				VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`,
+				bookingID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			); err != nil {
 				tx.Rollback(ctx) //nolint:errcheck
 				msg, _ := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)
@@ -758,11 +758,11 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_audit_booking_request (
-				booking_id, action_type, processing_status, requested_by, requested_at, reason,
+				booking_id, action_type, processing_status, requested_by, requested_at, requested_ip, reason,
 				old_principal_amount, old_interest_rate, old_interest_type_id, old_tenure_days, old_tenor_type, old_tenure_years,
 				old_value_date, old_expected_maturity_date, old_source_account_id
-			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-			req.BookingID, userEmail, req.Reason,
+			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+			req.BookingID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.Reason,
 			oldPrincipal, oldRate, nullIfEmpty(oldInterestTypeID), oldTenorDays, nullIfEmpty(oldTenorType), oldTenureYears,
 			coerceDateValue(oldValueDate), coerceDateValue(oldMaturityDate),
 			oldBankAccountID,
@@ -929,14 +929,14 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		auditVals := make([]string, len(validIDs))
-		auditArgs := make([]interface{}, 0, len(validIDs)*3)
+		auditArgs := make([]interface{}, 0, len(validIDs)*4)
 		for i, id := range validIDs {
-			auditVals[i] = fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,$%d,now())", i*3+1, i*3+2, i*3+3)
-			auditArgs = append(auditArgs, id, userEmail, req.Reason)
+			auditVals[i] = fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,$%d,now(),$%d)", i*4+1, i*4+2, i*4+3, i*4+4)
+			auditArgs = append(auditArgs, id, api.SystemIfBlank(userEmail), req.Reason, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 		}
 		auditQ := fmt.Sprintf(`
 			INSERT INTO investment.fd_audit_booking_request
-				(booking_id, action_type, processing_status, requested_by, reason, requested_at)
+				(booking_id, action_type, processing_status, requested_by, reason, requested_at, requested_ip)
 			VALUES %s`, strings.Join(auditVals, ","))
 		if _, err = tx.Exec(ctx, auditQ, auditArgs...); err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)
@@ -1312,9 +1312,9 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				tag1, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_booking_request
-					SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-					WHERE booking_id=$3 AND processing_status LIKE '%PENDING%'`,
-					userEmail, req.Comment, bID)
+					SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+					WHERE booking_id=$4 AND processing_status LIKE '%PENDING%'`,
+					api.SystemIfBlank(userEmail), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), bID)
 				_, err2 := tx.Exec(ctx, `UPDATE investment.fd_booking_request SET booking_status='SENT_TO_BANK'
 					WHERE booking_id=$1 AND booking_status NOT IN ('SENT_TO_BANK','APPROVED')`, bID)
 				_, err3 := tx.Exec(ctx, `UPDATE investment.fd_booking_request SET is_deleted=true
@@ -1429,9 +1429,9 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				tag1, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_booking_request
-					SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-					WHERE booking_id=$3 AND processing_status LIKE '%PENDING%'`,
-					userEmail, req.Comment, bID)
+					SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+					WHERE booking_id=$4 AND processing_status LIKE '%PENDING%'`,
+					api.SystemIfBlank(userEmail), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), bID)
 				_, err2 := tx.Exec(ctx, `UPDATE investment.fd_booking_request SET booking_status='REJECTED'
 					WHERE booking_id=$1 AND booking_status NOT IN ('SENT_TO_BANK','APPROVED')`, bID)
 				if err1 != nil || err2 != nil {
@@ -2234,11 +2234,11 @@ func MarkAsSentToBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_audit_booking_request
-				(booking_id, action_type, processing_status, requested_by, requested_at, old_booking_status)
-			SELECT booking_id, 'EDIT', 'APPROVED', $1, now(), 'APPROVED'
+				(booking_id, action_type, processing_status, requested_by, requested_at, requested_ip, old_booking_status)
+			SELECT booking_id, 'EDIT', 'APPROVED', $1, now(), $3, 'APPROVED'
 			FROM investment.fd_booking_request
 			WHERE booking_id = ANY($2::text[]) AND booking_status = 'SENT_TO_BANK'`,
-			userEmail, req.BookingIDs,
+			api.SystemIfBlank(userEmail), req.BookingIDs, api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 		); err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)

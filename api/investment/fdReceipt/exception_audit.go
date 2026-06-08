@@ -1,6 +1,7 @@
 package fdReceipt
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"errors"
@@ -55,8 +56,10 @@ type varianceAuditRow struct {
 	Reason                string `json:"reason"`
 	RequestedBy           string `json:"requested_by"`
 	RequestedAt           string `json:"requested_at"`
+	RequestedIP           string `json:"requested_ip"`
 	CheckerBy             string `json:"checker_by"`
 	CheckerAt             string `json:"checker_at"`
+	CheckerIP             string `json:"checker_ip"`
 	CheckerComment        string `json:"checker_comment"`
 	OldExceptionStatus    string `json:"old_exception_status"`
 	OldProposedResolution string `json:"old_proposed_resolution"`
@@ -134,8 +137,10 @@ func loadLatestVarianceAudit(ctx context.Context, pool *pgxpool.Pool, exceptionI
 			COALESCE(reason,''),
 			COALESCE(NULLIF(req_user.employee_name, ''), requested_by),
 			requested_at::text,
+			COALESCE(requested_ip,''),
 			COALESCE(NULLIF(check_user.employee_name, ''), checker_by, ''),
 			COALESCE(checker_at::text,''),
+			COALESCE(checker_ip,''),
 			COALESCE(checker_comment,''),
 			COALESCE(old_exception_status,''),
 			COALESCE(old_proposed_resolution,''),
@@ -158,7 +163,9 @@ func loadLatestVarianceAudit(ctx context.Context, pool *pgxpool.Pool, exceptionI
 	).Scan(
 		&r.AuditID, &r.ExceptionID, &r.ActionType, &r.ProcessingStatus,
 		&r.Reason, &r.RequestedBy, &r.RequestedAt,
+		&r.RequestedIP,
 		&r.CheckerBy, &r.CheckerAt, &r.CheckerComment,
+		&r.CheckerIP,
 		&r.OldExceptionStatus, &r.OldProposedResolution, &r.OldReasonCode,
 		&r.OldResolutionRemarks, &r.OldAttachment, &r.OldCaseType, &r.OldVarianceOutcome,
 	)
@@ -244,8 +251,10 @@ func loadVarianceAuditTrail(ctx context.Context, pool *pgxpool.Pool, exceptionID
 			COALESCE(reason,''),
 			COALESCE(NULLIF(req_user.employee_name, ''), requested_by),
 			requested_at::text,
+			COALESCE(requested_ip,''),
 			COALESCE(NULLIF(check_user.employee_name, ''), checker_by, ''),
 			COALESCE(checker_at::text,''),
+			COALESCE(checker_ip,''),
 			COALESCE(checker_comment,''),
 			COALESCE(old_exception_status,''),
 			COALESCE(old_proposed_resolution,''),
@@ -276,7 +285,9 @@ func loadVarianceAuditTrail(ctx context.Context, pool *pgxpool.Pool, exceptionID
 		if err := rows.Scan(
 			&r.AuditID, &r.ExceptionID, &r.ActionType, &r.ProcessingStatus,
 			&r.Reason, &r.RequestedBy, &r.RequestedAt,
+			&r.RequestedIP,
 			&r.CheckerBy, &r.CheckerAt, &r.CheckerComment,
+			&r.CheckerIP,
 			&r.OldExceptionStatus, &r.OldProposedResolution, &r.OldReasonCode,
 			&r.OldResolutionRemarks, &r.OldAttachment, &r.OldCaseType, &r.OldVarianceOutcome,
 		); err != nil {
@@ -291,16 +302,16 @@ func insertVarianceAudit(ctx context.Context, tx pgx.Tx, exceptionID string, in 
 	_, err := tx.Exec(ctx, `
 		INSERT INTO investment.fd_receipt_exception_audit (
 			exception_id, action_type, processing_status, reason,
-			requested_by, checker_by, checker_at, checker_comment,
+			requested_by, requested_ip, checker_by, checker_at, checker_ip, checker_comment,
 			old_exception_status, old_proposed_resolution, old_reason_code,
 			old_resolution_remarks, old_attachment, old_case_type, old_variance_outcome
 		) VALUES (
-			$1,$2,$3,NULLIF($4,''),$5,
-			NULLIF($6,''), CASE WHEN $6 <> '' THEN now() ELSE NULL END, NULLIF($7,''),
-			$8,$9,$10,$11,$12,$13,$14
+			$1,$2,$3,NULLIF($4,''),$5,$6,
+			NULLIF($7,''), CASE WHEN $7 <> '' THEN now() ELSE NULL END, CASE WHEN $7 <> '' THEN $8 ELSE NULL END, NULLIF($9,''),
+			$10,$11,$12,$13,$14,$15,$16
 		)`,
-		exceptionID, in.ActionType, in.ProcessingStatus, in.Reason, in.RequestedBy,
-		in.CheckerBy, in.CheckerComment,
+		exceptionID, in.ActionType, in.ProcessingStatus, in.Reason, api.SystemIfBlank(in.RequestedBy), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
+		in.CheckerBy, api.SystemIfBlank(api.ClientIPFromContext(ctx)), in.CheckerComment,
 		in.Old.ExceptionStatus, in.Old.ProposedResolution, in.Old.ReasonCode,
 		in.Old.ResolutionRemarks, in.Old.Attachment, in.Old.CaseType, in.Old.VarianceOutcome,
 	)
@@ -345,9 +356,9 @@ type varianceAuditParams struct {
 func insertVarianceRaisedAudit(ctx context.Context, pool *pgxpool.Pool, exceptionID, actor string, _ varianceAuditParams) {
 	_, _ = pool.Exec(ctx, `
 		INSERT INTO investment.fd_receipt_exception_audit (
-			exception_id, action_type, processing_status, requested_by
-		) VALUES ($1,'CREATE','PENDING_APPROVAL',$2)`,
-		exceptionID, actor,
+			exception_id, action_type, processing_status, requested_by, requested_ip
+		) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3)`,
+		exceptionID, api.SystemIfBlank(actor), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 	)
 }
 

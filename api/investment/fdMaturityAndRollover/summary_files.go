@@ -47,8 +47,10 @@ type fdSummaryFileRecord struct {
 	UploadedAt         time.Time  `json:"uploaded_at"`
 	ProcessingStatus   string     `json:"processing_status,omitempty"`
 	DeleteRequestedBy  string     `json:"delete_requested_by,omitempty"`
+	DeleteRequestedIP  string     `json:"delete_requested_ip,omitempty"`
 	DeleteRequestedAt  *time.Time `json:"delete_requested_at,omitempty"`
 	CheckerBy          string     `json:"checker_by,omitempty"`
+	CheckerIP          string     `json:"checker_ip,omitempty"`
 	CheckerAt          *time.Time `json:"checker_at,omitempty"`
 	CheckerComment     string     `json:"checker_comment,omitempty"`
 	SourceModule       string     `json:"source_module"`
@@ -65,8 +67,10 @@ type fdSummaryFileAuditEvent struct {
 	ActionType       string     `json:"action_type"`
 	ProcessingStatus string     `json:"processing_status"`
 	RequestedBy      string     `json:"requested_by,omitempty"`
+	RequestedIP      string     `json:"requested_ip,omitempty"`
 	RequestedAt      *time.Time `json:"requested_at,omitempty"`
 	CheckerBy        string     `json:"checker_by,omitempty"`
+	CheckerIP        string     `json:"checker_ip,omitempty"`
 	CheckerAt        *time.Time `json:"checker_at,omitempty"`
 	CheckerComment   string     `json:"checker_comment,omitempty"`
 	Reason           string     `json:"reason,omitempty"`
@@ -406,8 +410,8 @@ func listGenericFDMaturitySummaryFiles(ctx context.Context, pool *pgxpool.Pool, 
 	query := fmt.Sprintf(`
 		SELECT f.file_id::text, COALESCE(f.stored_file_name,''), COALESCE(f.content_type,''), COALESCE(f.file_size,0),
 		       COALESCE(f.upload_s3_key,''), COALESCE(f.uploaded_by,''), f.uploaded_at,
-		       COALESCE(a.processing_status,'ACTIVE'), COALESCE(a.requested_by,''), a.requested_at,
-		       COALESCE(a.checker_by,''), a.checker_at, COALESCE(a.checker_comment,'')
+		       COALESCE(a.processing_status,'ACTIVE'), COALESCE(a.requested_by,''), COALESCE(a.requested_ip,''), a.requested_at,
+		       COALESCE(a.checker_by,''), COALESCE(a.checker_ip,''), a.checker_at, COALESCE(a.checker_comment,'')
 		FROM %s f
 		LEFT JOIN LATERAL (
 			SELECT *
@@ -434,8 +438,8 @@ func listCimplrFDMaturitySummaryFiles(ctx context.Context, pool *pgxpool.Pool, s
 	query := fmt.Sprintf(`
 		SELECT f.file_id::text, COALESCE(f.stored_file_name,''), COALESCE(f.content_type,''), COALESCE(f.file_size,0),
 		       COALESCE(f.upload_s3_key,''), COALESCE(f.uploaded_by,''), f.uploaded_at,
-		       COALESCE(a.processing_status,'ACTIVE'), COALESCE(a.requested_by,''), a.requested_at,
-		       COALESCE(a.checker_by,''), a.checker_at, COALESCE(a.checker_comment,'')
+		       COALESCE(a.processing_status,'ACTIVE'), COALESCE(a.requested_by,''), COALESCE(a.requested_ip,''), a.requested_at,
+		       COALESCE(a.checker_by,''), COALESCE(a.checker_ip,''), a.checker_at, COALESCE(a.checker_comment,'')
 		FROM cimplr.fd_closure_files f
 		LEFT JOIN LATERAL (
 			SELECT *
@@ -460,7 +464,7 @@ func scanFDMaturitySummaryFiles(rows pgx.Rows, source fdSummaryFileSource) ([]fd
 		var rec fdSummaryFileRecord
 		var uploadedAt sql.NullTime
 		var requestedAt, checkerAt sql.NullTime
-		var deleteRequestedBy string
+		var deleteRequestedBy, deleteRequestedIP string
 		if err := rows.Scan(
 			&rec.FileID,
 			&rec.StoredFileName,
@@ -471,8 +475,10 @@ func scanFDMaturitySummaryFiles(rows pgx.Rows, source fdSummaryFileSource) ([]fd
 			&uploadedAt,
 			&rec.ProcessingStatus,
 			&deleteRequestedBy,
+			&deleteRequestedIP,
 			&requestedAt,
 			&rec.CheckerBy,
+			&rec.CheckerIP,
 			&checkerAt,
 			&rec.CheckerComment,
 		); err != nil {
@@ -484,6 +490,7 @@ func scanFDMaturitySummaryFiles(rows pgx.Rows, source fdSummaryFileSource) ([]fd
 		rec.ProcessingStatus = normalizeFDMaturitySummaryFileStatus(rec.ProcessingStatus)
 		if strings.EqualFold(rec.ProcessingStatus, "PENDING_DELETE_APPROVAL") {
 			rec.DeleteRequestedBy = deleteRequestedBy
+			rec.DeleteRequestedIP = deleteRequestedIP
 			if requestedAt.Valid {
 				t := requestedAt.Time
 				rec.DeleteRequestedAt = &t
@@ -582,9 +589,9 @@ func insertFDMaturitySummaryFileMetadata(ctx context.Context, pool *pgxpool.Pool
 			_, err = tx.Exec(ctx, `
 				INSERT INTO cimplr.fd_closure_files_audit (
 					file_id, closure_initiate_id, closure_confirm_id, action_type, processing_status,
-					reason, requested_by
-				) VALUES ($1::uuid, NULLIF($2,''), NULLIF($3,''), 'CREATE', 'APPROVED', $4, $5)`,
-				fileID, initiateID, confirmID, "File uploaded from FD Maturity Summary", params.UserEmail,
+					reason, requested_by, requested_at, requested_ip
+				) VALUES ($1::uuid, NULLIF($2,''), NULLIF($3,''), 'CREATE', 'APPROVED', $4, $5, $6, $7)`,
+				fileID, initiateID, confirmID, "File uploaded from FD Maturity Summary", params.UserEmail, params.UploadedAt, api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			)
 		}
 	} else {
@@ -604,9 +611,9 @@ func insertFDMaturitySummaryFileMetadata(ctx context.Context, pool *pgxpool.Pool
 			_, err = tx.Exec(ctx, `
 				INSERT INTO investment.additional_file_audit (
 					module_key, parent_record_id, file_id, action_type, processing_status,
-					requested_by, requested_at, reason
-				) VALUES ($1, $2, $3, 'CREATE', 'APPROVED', $4, $5, $6)`,
-				params.Target.Module, params.Target.RecordID, fileID, params.UserEmail, params.UploadedAt, "File uploaded from FD Maturity Summary",
+					requested_by, requested_at, requested_ip, reason
+				) VALUES ($1, $2, $3, 'CREATE', 'APPROVED', $4, $5, $6, $7)`,
+				params.Target.Module, params.Target.RecordID, fileID, params.UserEmail, params.UploadedAt, api.SystemIfBlank(api.ClientIPFromContext(ctx)), "File uploaded from FD Maturity Summary",
 			)
 		}
 	}
@@ -648,18 +655,18 @@ func recordFDMaturitySummaryDownloadAudit(ctx context.Context, pool *pgxpool.Poo
 		_, err := pool.Exec(ctx, `
 			INSERT INTO cimplr.fd_closure_files_audit (
 				file_id, closure_initiate_id, closure_confirm_id, action_type, processing_status,
-				reason, requested_by, requested_at
-			) VALUES ($1::uuid, NULLIF($2,''), NULLIF($3,''), 'DOWNLOAD', 'COMPLETED', $4, $5, $6)`,
-			file.FileID, initiateID, confirmID, "File downloaded from FD Maturity Summary", userEmail, now,
+				reason, requested_by, requested_at, requested_ip
+			) VALUES ($1::uuid, NULLIF($2,''), NULLIF($3,''), 'DOWNLOAD', 'COMPLETED', $4, $5, $6, $7)`,
+			file.FileID, initiateID, confirmID, "File downloaded from FD Maturity Summary", userEmail, now, api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 		)
 		return err
 	}
 	_, err := pool.Exec(ctx, `
 		INSERT INTO investment.additional_file_audit (
 			module_key, parent_record_id, file_id, action_type, processing_status,
-			requested_by, requested_at, reason
-		) VALUES ($1, $2, $3, 'DOWNLOAD', 'COMPLETED', $4, $5, $6)`,
-		file.SourceModule, file.SourceRecordID, file.FileID, userEmail, now, "File downloaded from FD Maturity Summary",
+			requested_by, requested_at, requested_ip, reason
+		) VALUES ($1, $2, $3, 'DOWNLOAD', 'COMPLETED', $4, $5, $6, $7)`,
+		file.SourceModule, file.SourceRecordID, file.FileID, userEmail, now, api.SystemIfBlank(api.ClientIPFromContext(ctx)), "File downloaded from FD Maturity Summary",
 	)
 	return err
 }
@@ -670,7 +677,7 @@ func listFDMaturitySummaryFileAudit(ctx context.Context, pool *pgxpool.Pool, fil
 	}
 	rows, err := pool.Query(ctx, `
 		SELECT file_id, action_type, processing_status, requested_by, requested_at,
-		       checker_by, checker_at, checker_comment, reason
+		       COALESCE(requested_ip, ''), checker_by, checker_at, COALESCE(checker_ip, ''), checker_comment, reason
 		FROM investment.additional_file_audit
 		WHERE module_key=$1 AND parent_record_id=$2 AND file_id=$3
 		ORDER BY requested_at ASC NULLS LAST, audit_id ASC`,
@@ -686,7 +693,7 @@ func listFDMaturitySummaryFileAudit(ctx context.Context, pool *pgxpool.Pool, fil
 func listCimplrFDMaturitySummaryFileAudit(ctx context.Context, pool *pgxpool.Pool, file fdSummaryFileRecord) ([]fdSummaryFileAuditEvent, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT file_id::text, action_type, processing_status, requested_by, requested_at,
-		       checker_by, checker_at, checker_comment, reason
+		       COALESCE(requested_ip, ''), checker_by, checker_at, COALESCE(checker_ip, ''), checker_comment, reason
 		FROM cimplr.fd_closure_files_audit
 		WHERE file_id=$1::uuid
 		ORDER BY requested_at ASC NULLS LAST, audit_id ASC`, file.FileID)
@@ -701,7 +708,7 @@ func scanFDMaturitySummaryAudit(rows pgx.Rows, file fdSummaryFileRecord) ([]fdSu
 	out := []fdSummaryFileAuditEvent{}
 	for rows.Next() {
 		var ev fdSummaryFileAuditEvent
-		var requestedBy, checkerBy, checkerComment, reason sql.NullString
+		var requestedBy, requestedIP, checkerBy, checkerIP, checkerComment, reason sql.NullString
 		var requestedAt, checkerAt sql.NullTime
 		if err := rows.Scan(
 			&ev.FileID,
@@ -709,8 +716,10 @@ func scanFDMaturitySummaryAudit(rows pgx.Rows, file fdSummaryFileRecord) ([]fdSu
 			&ev.ProcessingStatus,
 			&requestedBy,
 			&requestedAt,
+			&requestedIP,
 			&checkerBy,
 			&checkerAt,
+			&checkerIP,
 			&checkerComment,
 			&reason,
 		); err != nil {
@@ -720,11 +729,13 @@ func scanFDMaturitySummaryAudit(rows pgx.Rows, file fdSummaryFileRecord) ([]fdSu
 		ev.SourceModule = file.SourceModule
 		ev.SourceRecordID = file.SourceRecordID
 		ev.RequestedBy = strings.TrimSpace(requestedBy.String)
+		ev.RequestedIP = strings.TrimSpace(requestedIP.String)
 		if requestedAt.Valid {
 			t := requestedAt.Time
 			ev.RequestedAt = &t
 		}
 		ev.CheckerBy = strings.TrimSpace(checkerBy.String)
+		ev.CheckerIP = strings.TrimSpace(checkerIP.String)
 		if checkerAt.Valid {
 			t := checkerAt.Time
 			ev.CheckerAt = &t

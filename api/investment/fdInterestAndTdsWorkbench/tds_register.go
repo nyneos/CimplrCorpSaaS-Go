@@ -210,8 +210,8 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		// Create audit entry
 		_, auditErr := pool.Exec(ctx, `
 			INSERT INTO investment.fd_tds_receipt_audit (
-				tds_id, action_type, processing_status, requested_by, requested_at
-			) VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())`, tdsID, userEmail)
+				tds_id, action_type, processing_status, requested_by, requested_at, requested_ip
+			) VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)`, tdsID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 		if auditErr != nil {
 			api.LogError("[TDSRegister] Audit insert failed for %s: %v", tdsID, auditErr)
 			// Don't fail the request — audit is non-critical for workbench entries
@@ -635,10 +635,11 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			SET processing_status = 'APPROVED',
 			    checker_by        = $1,
 			    checker_at        = now(),
-			    checker_comment   = $2
-			WHERE tds_id = $3
+			    checker_comment   = $2,
+			    checker_ip        = $3
+			WHERE tds_id = $4
 			  AND processing_status = 'PENDING_APPROVAL'`,
-			userEmail, nullIfEmpty(req.Comment), req.TDSID); err != nil {
+			api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.TDSID); err != nil {
 			api.LogError("[TDSApprove] audit update failed for %s: %v", req.TDSID, err)
 		}
 
@@ -795,9 +796,9 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx.Exec(ctx, `
 			INSERT INTO investment.fd_tds_receipt_audit
-				(tds_id, action_type, processing_status, requested_by, requested_at, checker_comment)
-			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, now(), $3)`,
-			req.TDSID, userEmail, nullIfEmpty(req.Reason)) //nolint:errcheck
+				(tds_id, action_type, processing_status, requested_by, requested_at, requested_ip, checker_comment)
+			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, now(), $3, $4)`,
+			req.TDSID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), nullIfEmpty(req.Reason)) //nolint:errcheck
 
 		if err = tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
@@ -908,9 +909,9 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			tx.Exec(ctx, `
 				UPDATE investment.fd_tds_receipt_audit
 				SET processing_status = 'APPROVED', checker_by = $1,
-				    checker_at = now(), checker_comment = $2
-				WHERE tds_id = $3 AND processing_status = 'PENDING_APPROVAL'`,
-				userEmail, nullIfEmpty(req.Comment), tdsID) //nolint:errcheck
+				    checker_at = now(), checker_comment = $2, checker_ip = $3
+				WHERE tds_id = $4 AND processing_status = 'PENDING_APPROVAL'`,
+				api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), tdsID) //nolint:errcheck
 			if err = tx.Commit(ctx); err != nil {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: "commit failed"})
 				continue
@@ -998,9 +999,9 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			tx.Exec(ctx, `
 				UPDATE investment.fd_tds_receipt_audit
 				SET processing_status = 'REJECTED', checker_by = $1,
-				    checker_at = now(), checker_comment = $2
-				WHERE tds_id = $3 AND processing_status = 'PENDING_APPROVAL'`,
-				userEmail, nullIfEmpty(req.Comment), tdsID) //nolint:errcheck
+				    checker_at = now(), checker_comment = $2, checker_ip = $3
+				WHERE tds_id = $4 AND processing_status = 'PENDING_APPROVAL'`,
+				api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), tdsID) //nolint:errcheck
 			if err = tx.Commit(ctx); err != nil {
 				continue
 			}
@@ -1088,10 +1089,11 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			SET processing_status = 'REJECTED',
 			    checker_by        = $1,
 			    checker_at        = now(),
-			    checker_comment   = $2
-			WHERE tds_id = $3
+			    checker_comment   = $2,
+			    checker_ip        = $3
+			WHERE tds_id = $4
 			  AND processing_status = 'PENDING_APPROVAL'`,
-			userEmail, nullIfEmpty(req.Comment), req.TDSID) //nolint:errcheck
+			api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.TDSID) //nolint:errcheck
 
 		if err = tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)

@@ -300,6 +300,9 @@ func recordDynamicInvestmentMainUploadAudit(ctx context.Context, tx pgx.Tx, tabl
 	if requestedByColumn := firstInvestmentAuditColumn(columns, "requested_by", "performed_by", "uploaded_by"); requestedByColumn != "" {
 		values[requestedByColumn] = payload.UploadedBy
 	}
+	if _, ok := columns["requested_ip"]; ok {
+		values["requested_ip"] = api.SystemIfBlank(payload.RequestedIP)
+	}
 	if _, ok := columns["performed_by_email"]; ok {
 		values["performed_by_email"] = payload.UploadedBy
 	}
@@ -331,6 +334,7 @@ func recordDynamicInvestmentMainUploadAudit(ctx context.Context, tx pgx.Tx, tabl
 		"reason",
 		"action_reason",
 		"requested_by",
+		"requested_ip",
 		"performed_by",
 		"performed_by_email",
 		"requested_at",
@@ -474,14 +478,16 @@ func recordFDClosureMainUploadAudit(ctx context.Context, tx pgx.Tx, closureReque
 			action_reason,
 			performed_by,
 			performed_by_email,
+			requested_ip,
 			created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		closureRequestID,
 		"UPLOAD_FILE",
 		"COMPLETED",
 		reason,
 		payload.UploadedBy,
 		payload.UploadedBy,
+		api.SystemIfBlank(payload.RequestedIP),
 		payload.UploadedAt,
 	)
 	return err
@@ -504,14 +510,16 @@ func recordFDInterestReceiptMainUploadAudit(ctx context.Context, tx pgx.Tx, rece
 			processing_status,
 			reason,
 			requested_by,
-			requested_at
-		) VALUES ($1, $2, $3, $4, $5, $6)`,
+			requested_at,
+			requested_ip
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		receiptID,
 		"EDIT",
 		constants.StatusApproved,
 		reason,
 		payload.UploadedBy,
 		payload.UploadedAt,
+		api.SystemIfBlank(payload.RequestedIP),
 	)
 	return err
 }
@@ -529,14 +537,16 @@ func recordFDTDSReceiptMainUploadAudit(ctx context.Context, tx pgx.Tx, tdsID str
 			processing_status,
 			reason,
 			requested_by,
-			requested_at
-		) VALUES ($1, $2, $3, $4, $5, $6)`,
+			requested_at,
+			requested_ip
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		tdsID,
 		"EDIT",
 		constants.StatusApproved,
 		reason,
 		payload.UploadedBy,
 		payload.UploadedAt,
+		api.SystemIfBlank(payload.RequestedIP),
 	)
 	return err
 }
@@ -558,14 +568,16 @@ func recordFDReceiptExceptionMainUploadAudit(ctx context.Context, tx pgx.Tx, exc
 			processing_status,
 			reason,
 			requested_by,
-			requested_at
-		) VALUES ($1, $2, $3, $4, $5, $6)`,
+			requested_at,
+			requested_ip
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		exceptionID,
 		"UPLOAD_FILE",
 		"APPROVED",
 		reason,
 		payload.UploadedBy,
 		payload.UploadedAt,
+		api.SystemIfBlank(payload.RequestedIP),
 	)
 	return err
 }
@@ -1045,10 +1057,16 @@ func uploadCimplrClosureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool,
 			return nil, fmt.Errorf("failed to upload file to S3: %w", err)
 		}
 
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			_ = s3storage.DeleteFromS3(ctx, s3Key)
+			return nil, fmt.Errorf("file upload metadata failed: %w", err)
+		}
+
 		var fileID string
 		var insertErr error
 		if idKind == "initiate" {
-			insertErr = pool.QueryRow(ctx, `
+			insertErr = tx.QueryRow(ctx, `
 				INSERT INTO cimplr.fd_closure_files (
 					closure_initiate_id, closure_confirm_id, file_type, stored_file_name, original_file_name,
 					content_type, file_size, file_hash, upload_s3_key, uploaded_by
@@ -1057,7 +1075,7 @@ func uploadCimplrClosureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool,
 				parentID, storedFileName, header.Filename, contentType, int64(len(body)), fileHash, s3Key, uploadedBy,
 			).Scan(&fileID)
 		} else {
-			insertErr = pool.QueryRow(ctx, `
+			insertErr = tx.QueryRow(ctx, `
 				INSERT INTO cimplr.fd_closure_files (
 					closure_initiate_id, closure_confirm_id, file_type, stored_file_name, original_file_name,
 					content_type, file_size, file_hash, upload_s3_key, uploaded_by
@@ -1067,8 +1085,37 @@ func uploadCimplrClosureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool,
 			).Scan(&fileID)
 		}
 		if insertErr != nil {
+			_ = tx.Rollback(ctx)
 			_ = s3storage.DeleteFromS3(ctx, s3Key)
 			return nil, fmt.Errorf("file upload metadata failed: %w", insertErr)
+		}
+
+		initiateID, confirmID := "", ""
+		if idKind == "initiate" {
+			initiateID = parentID
+		} else {
+			confirmID = parentID
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO cimplr.fd_closure_files_audit (
+				file_id, closure_initiate_id, closure_confirm_id, action_type, processing_status,
+				reason, requested_by, requested_at, requested_ip
+			) VALUES ($1::uuid, NULLIF($2,''), NULLIF($3,''), 'CREATE', 'APPROVED', $4, $5, $6, $7)`,
+			fileID,
+			initiateID,
+			confirmID,
+			"File uploaded from FD Closure additional files",
+			api.SystemIfBlank(uploadedBy),
+			uploadedAt,
+			api.SystemIfBlank(api.ClientIPFromRequest(r)),
+		); err != nil {
+			_ = tx.Rollback(ctx)
+			_ = s3storage.DeleteFromS3(ctx, s3Key)
+			return nil, fmt.Errorf("file upload audit failed: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			_ = s3storage.DeleteFromS3(ctx, s3Key)
+			return nil, fmt.Errorf("file upload metadata failed: %w", err)
 		}
 
 		uploaded = append(uploaded, cashfiles.FileRecord{

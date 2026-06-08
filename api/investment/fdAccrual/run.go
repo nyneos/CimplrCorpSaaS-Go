@@ -211,9 +211,9 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		)
 		_, _ = pgxPool.Exec(ctx, `
 			INSERT INTO investment.fd_accrual_run_audit (
-				run_id, action_type, processing_status, requested_by, requested_at
-			) VALUES ($1, 'CREATE', 'DRAFT', $2, now())`,
-			runID, userEmail)
+				run_id, action_type, processing_status, requested_by, requested_at, requested_ip
+			) VALUES ($1, 'CREATE', 'DRAFT', $2, now(), $3)`,
+			runID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"run": createdRun,
@@ -390,9 +390,9 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		_, _ = pgxPool.Exec(ctx, `
 			INSERT INTO investment.fd_accrual_run_audit (
-				run_id, action_type, processing_status, requested_by, requested_at
-			) VALUES ($1, 'EXECUTE', 'COMPUTED', $2, now())`,
-			req.RunID, userEmail)
+				run_id, action_type, processing_status, requested_by, requested_at, requested_ip
+			) VALUES ($1, 'EXECUTE', 'COMPUTED', $2, now(), $3)`,
+			req.RunID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 		if calculated == 0 && failed == 0 {
 			api.RespondWithError(w, http.StatusBadRequest,
 				fmt.Sprintf(
@@ -1021,9 +1021,9 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		_, _ = pgxPool.Exec(ctx, `
 			INSERT INTO investment.fd_accrual_run_audit (
-				run_id, action_type, processing_status, requested_by, requested_at
-			) VALUES ($1, 'SUBMIT', 'PENDING_APPROVAL', $2, now())`,
-			req.RunID, userEmail)
+				run_id, action_type, processing_status, requested_by, requested_at, requested_ip
+			) VALUES ($1, 'SUBMIT', 'PENDING_APPROVAL', $2, now(), $3)`,
+			req.RunID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 
 		go func(runID, uID, uEmail, eID string, amount float64) {
 			defer func() {
@@ -1137,14 +1137,14 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				_, _ = pgxPool.Exec(ctx, `
 					INSERT INTO investment.fd_accrual_run_audit (
 						run_id, action_type, processing_status, reason,
-						requested_by, requested_at,
-						checker_by, checker_at, checker_comment,
+						requested_by, requested_at, requested_ip,
+						checker_by, checker_at, checker_ip, checker_comment,
 						old_run_status, old_run_mode, old_day_count_convention,
 						old_rounding_rule, old_precision_decimals,
 						old_accrual_period_start, old_accrual_period_end,
 						old_financial_period, old_fd_status_filter, old_fd_inclusion_method
-					) VALUES ($1,'EDIT','APPROVED',$2,$3,now(),$3,now(),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-					runID, req.Comment, userEmail, req.Comment,
+					) VALUES ($1,'EDIT','APPROVED',$2,$3,now(),$4,$3,now(),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+					runID, req.Comment, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.Comment,
 					oldStatus, oldMode, oldDcc, oldRound, oldPrec,
 					oldPeriodStart, oldPeriodEnd, oldFinPeriod, oldFdFilter, oldInclusion)
 
@@ -1328,14 +1328,14 @@ func BulkRejectAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				_, _ = pgxPool.Exec(ctx, `
 					INSERT INTO investment.fd_accrual_run_audit (
 						run_id, action_type, processing_status, reason,
-						requested_by, requested_at,
-						checker_by, checker_at, checker_comment,
+						requested_by, requested_at, requested_ip,
+						checker_by, checker_at, checker_ip, checker_comment,
 						old_run_status, old_run_mode, old_day_count_convention,
 						old_rounding_rule, old_precision_decimals,
 						old_accrual_period_start, old_accrual_period_end,
 						old_financial_period, old_fd_status_filter, old_fd_inclusion_method
-					) VALUES ($1,'EDIT','REJECTED',$2,$3,now(),$3,now(),$2,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-					runID, req.Comment, userEmail,
+					) VALUES ($1,'EDIT','REJECTED',$2,$3,now(),$4,$3,now(),$4,$2,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+					runID, req.Comment, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 					oldStatus, oldMode, oldDcc, oldRound, oldPrec,
 					oldPeriodStart, oldPeriodEnd, oldFinPeriod, oldFdFilter, oldInclusion)
 
@@ -2088,7 +2088,7 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ledger_id, run_id, fd_id,
 				fd_ref_no, bank_id, bank_name, entity_id,
 				principal_amount, interest_rate, accrual_days,
-				action_type, processing_status, requested_by, requested_at,
+				action_type, processing_status, requested_by, requested_at, requested_ip,
 				old_period_interest_accrued, old_closing_accrued_balance,
 				old_tds_deducted_in_period, old_net_interest_in_period,
 				old_ledger_row_status, old_formula_used,
@@ -2099,15 +2099,15 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				$1,$2,$3,
 				$4,$5,$6,$7,
 				$8,$9,$10,
-				'EDIT','PENDING_APPROVAL',$11,now(),
-				$12,$13,$14,$15,$16,$17,
-				$18,$19,$20,$21,$22,$23,
-				$24,$25,$26
+				'EDIT','PENDING_APPROVAL',$11,now(),$12,
+				$13,$14,$15,$16,$17,$18,
+				$19,$20,$21,$22,$23,$24,
+				$25,$26,$27
 			)`,
 			ledgerID, req.RunID, req.FDID,
 			fdRefNo, bankID, bankName, entityID,
 			principal, interestRate, accrualDays,
-			userEmail,
+			api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			oldPeriodInterest, oldClosingBal, oldTDS, oldNetInterest, oldRowStatus, oldFormula,
 			oldIsOverridden, oldOverrideAmt, oldOverrideAdj, oldOverrideCode, oldOverrideText, oldOverrideStatus,
 			oldOpeningBal, oldInterestReceived, oldTDSApplicable)
@@ -2372,8 +2372,8 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ledger_id, run_id, fd_id,
 				fd_ref_no, bank_id, bank_name, entity_id,
 				principal_amount, interest_rate, accrual_days,
-				action_type, processing_status, requested_by, requested_at,
-				checker_by, checker_at, checker_comment,
+				action_type, processing_status, requested_by, requested_at, requested_ip,
+				checker_by, checker_at, checker_ip, checker_comment,
 				old_period_interest_accrued, old_closing_accrued_balance,
 				old_tds_deducted_in_period, old_net_interest_in_period,
 				old_ledger_row_status, old_formula_used,
@@ -2384,17 +2384,17 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				$1,$2,$3,
 				$4,$5,$6,$7,
 				$8,$9,$10,
-				'OVERRIDE_APPROVE','APPROVED',$11,now(),
-				$12,now(),$13,
-				$14,$15,$16,$17,$18,$19,
-				$20,$21,$22,$23,$24,$25,
-				$26,$27,$28
+				'OVERRIDE_APPROVE','APPROVED',$11,now(),$12,
+				$13,now(),$14,$15,
+				$16,$17,$18,$19,$20,$21,
+				$22,$23,$24,$25,$26,$27,
+				$28,$29,$30
 			)`,
 			ledgerID, req.RunID, req.FDID,
 			fdRefNo, bankID, bankName, entityID,
 			principal, interestRate, accrualDays,
-			proposedBy,
-			userEmail, nullIfEmpty(req.Comment),
+			api.SystemIfBlank(proposedBy), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
+			api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), nullIfEmpty(req.Comment),
 			curPeriodInterest, curClosingBal, curTDS, curNetInterest, curRowStatus, curFormula,
 			curIsOverridden, curOverrideAmt, curOverrideAdj, curOverrideCode, curOverrideText, curOverrideStatus,
 			curOpeningBal, curInterestReceived, curTDSApplicable)
@@ -2553,8 +2553,8 @@ func RejectOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ledger_id, run_id, fd_id,
 				fd_ref_no, bank_id, bank_name, entity_id,
 				principal_amount, interest_rate, accrual_days,
-				action_type, processing_status, requested_by, requested_at,
-				checker_by, checker_at, checker_comment,
+				action_type, processing_status, requested_by, requested_at, requested_ip,
+				checker_by, checker_at, checker_ip, checker_comment,
 				old_period_interest_accrued, old_closing_accrued_balance,
 				old_tds_deducted_in_period, old_net_interest_in_period,
 				old_ledger_row_status, old_formula_used,
@@ -2565,17 +2565,17 @@ func RejectOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				$1,$2,$3,
 				$4,$5,$6,$7,
 				$8,$9,$10,
-				'OVERRIDE_REJECT','REJECTED',$11,now(),
-				$12,now(),$13,
-				$14,$15,$16,$17,$18,$19,
-				$20,$21,$22,$23,$24,$25,
-				$26,$27,$28
+				'OVERRIDE_REJECT','REJECTED',$11,now(),$12,
+				$13,now(),$14,$15,
+				$16,$17,$18,$19,$20,$21,
+				$22,$23,$24,$25,$26,$27,
+				$28,$29,$30
 			)`,
 			ledgerID, req.RunID, req.FDID,
 			fdRefNo, bankID, bankName, entityID,
 			principal, interestRate, accrualDays,
-			proposedBy,
-			userEmail, nullIfEmpty(req.Comment),
+			api.SystemIfBlank(proposedBy), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
+			api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), nullIfEmpty(req.Comment),
 			curPeriodInterest, curClosingBal, curTDS, curNetInterest, curRowStatus, curFormula,
 			curIsOverridden, curOverrideAmt, curOverrideAdj, curOverrideCode, curOverrideText, curOverrideStatus,
 			curOpeningBal, curInterestReceived, curTDSApplicable)
@@ -3323,7 +3323,7 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 					ledger_id, run_id, fd_id,
 					fd_ref_no, bank_id, bank_name, entity_id,
 					principal_amount, interest_rate, accrual_days,
-					action_type, processing_status, requested_by, requested_at,
+					action_type, processing_status, requested_by, requested_at, requested_ip,
 					old_period_interest_accrued, old_closing_accrued_balance,
 					old_tds_deducted_in_period, old_net_interest_in_period,
 					old_ledger_row_status, old_formula_used,
@@ -3334,15 +3334,15 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 					$1,$2,$3,
 					$4,$5,$6,$7,
 					$8,$9,$10,
-					'CALCULATE','CALCULATED',$11,now(),
-					$12,$13,$14,$15,$16,$17,
-					$18,$19,$20,$21,$22,$23,
-					$24,$25,$26
+					'CALCULATE','CALCULATED',$11,now(),$12,
+					$13,$14,$15,$16,$17,$18,
+					$19,$20,$21,$22,$23,$24,
+					$25,$26,$27
 				)`,
 				ledgerID, runID, fd.FDID,
 				fd.FdRefNo, fd.BankID, fd.BankName, fd.EntityID,
 				fd.PrincipalAmount, fd.InterestRate, lastResult.AccrualDays,
-				executedBy,
+				api.SystemIfBlank(executedBy), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 				prevPeriodInterest, prevClosingBal, prevTDS, prevNetInterest, prevStatus, prevFormula,
 				prevIsOverridden, prevOverrideAmt, prevOverrideAdj, prevOverrideCode, prevOverrideText, prevOverrideStatus,
 				prevOpeningBal, prevInterestReceived, prevTDSApplicable)
@@ -3647,8 +3647,8 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 				ledger_id, run_id, fd_id,
 				fd_ref_no, bank_id, bank_name, entity_id,
 				principal_amount, interest_rate, accrual_days,
-				action_type, processing_status, requested_by, requested_at,
-				checker_by, checker_at, checker_comment,
+				action_type, processing_status, requested_by, requested_at, requested_ip,
+				checker_by, checker_at, checker_ip, checker_comment,
 				old_period_interest_accrued, old_closing_accrued_balance,
 				old_tds_deducted_in_period, old_net_interest_in_period,
 				old_ledger_row_status, old_formula_used,
@@ -3659,16 +3659,16 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 				$1,$2,$3,
 				$4,$5,$6,$7,
 				$8,$9,$10,
-				'EDIT','POSTED',$11,now(),
-				$11,now(),'Journal posted',
-				$12,$13,$14,$15,'CALCULATED',$16,
-				$17,$18,$19,$20,$21,$22,
-				$23,$24,$25
+				'EDIT','POSTED',$11,now(),$12,
+				$11,now(),$12,'Journal posted',
+				$13,$14,$15,$16,'CALCULATED',$17,
+				$18,$19,$20,$21,$22,$23,
+				$24,$25,$26
 			)`,
 			lr.LedgerID, runID, lr.FDID,
 			aFdRefNo, aBankID, aBankName, aEntityID,
 			aPrincipal, aRate, aAccrualDays,
-			userEmail,
+			api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			lr.PeriodInterest, lr.ClosingBalance, lr.TDS, lr.GrossInterest, lr.FormulaUsed,
 			aOldIsOverridden, aOldOverrideAmt, aOldOverrideAdj, aOldOverrideCode, aOldOverrideText, aOldOverrideStatus,
 			aOldOpeningBal, aOldIntReceived, aOldTDSApplicable)
