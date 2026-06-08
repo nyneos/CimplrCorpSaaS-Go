@@ -411,7 +411,7 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 				auditFileID,
 				sql.NullString{String: strings.TrimSpace(body.BankStatementID), Valid: strings.TrimSpace(body.BankStatementID) != ""},
 				requestedBy,
-				r.RemoteAddr,
+				apictx.ClientIPFromRequest(r),
 				entityName,
 			); err != nil {
 				logger.LogError("failed to insert bank statement download audit for %s: %v", body.BankStatementID, err)
@@ -491,7 +491,7 @@ func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 					auditFileID,
 					sql.NullString{String: strings.TrimSpace(bankStatementID), Valid: strings.TrimSpace(bankStatementID) != ""},
 					requestedBy,
-					r.RemoteAddr,
+					apictx.ClientIPFromRequest(r),
 					entityName,
 				); err != nil {
 					logger.LogError("failed to insert bank statement bulk download audit for %s: %v", bankStatementID, err)
@@ -873,7 +873,8 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					SET processing_status = 'APPROVED',
 						checker_by = $2,
 						checker_at = now(),
-						checker_comment = $3
+						checker_comment = $3,
+						checker_ip = $4
 					WHERE action_id = (
 						SELECT action_id
 						FROM cimplrcorpsaas.auditactionbankstatement
@@ -883,7 +884,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 						ORDER BY requested_at DESC, action_id DESC
 						LIMIT 1
 					)
-				`, bsid, actorName, body.Comment)
+				`, bsid, actorName, body.Comment, nullIfBlank(apictx.ClientIPFromRequest(r)))
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1108,7 +1109,8 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					SET processing_status = 'APPROVED',
 						checker_by = $2,
 						checker_at = now(),
-						checker_comment = $3
+						checker_comment = $3,
+						checker_ip = $4
 					WHERE action_id = (
 						SELECT action_id
 						FROM cimplrcorpsaas.auditactionbankstatement
@@ -1124,7 +1126,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 							action_id DESC
 						LIMIT 1
 					)
-				`, bsid, actorName, body.Comment)
+				`, bsid, actorName, body.Comment, nullIfBlank(apictx.ClientIPFromRequest(r)))
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1257,17 +1259,24 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 				SET processing_status = 'REJECTED',
 					checker_by = $2,
 					checker_at = now(),
-					checker_comment = $3
+					checker_comment = $3,
+					checker_ip = $4
 				WHERE action_id = (
 					SELECT action_id
 					FROM cimplrcorpsaas.auditactionbankstatement
 					WHERE bankstatementid = $1
-					  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+					  AND actiontype IN ('CREATE', 'EDIT', 'DELETE', 'RECAT')
 					  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
-					ORDER BY requested_at DESC, action_id DESC
+					ORDER BY
+						CASE
+							WHEN actiontype = 'RECAT' AND processing_status = 'PENDING_EDIT_APPROVAL' THEN 0
+							ELSE 1
+						END,
+						requested_at DESC,
+						action_id DESC
 					LIMIT 1
 				)
-			`, bsid, actorName, body.Comment)
+			`, bsid, actorName, body.Comment, nullIfBlank(apictx.ClientIPFromRequest(r)))
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,

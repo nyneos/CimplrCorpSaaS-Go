@@ -17,19 +17,15 @@ func ClientIPFromRequest(r *http.Request) string {
 	if forwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwardedFor != "" {
 		parts := strings.Split(forwardedFor, ",")
 		if first := strings.TrimSpace(parts[0]); first != "" {
-			return first
+			return NormalizeClientIP(first)
 		}
 	}
 
 	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-		return realIP
+		return NormalizeClientIP(realIP)
 	}
 
-	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
-		return host
-	}
-
-	return strings.TrimSpace(r.RemoteAddr)
+	return NormalizeClientIP(r.RemoteAddr)
 }
 
 func ClientIPFromContext(ctx context.Context) string {
@@ -40,4 +36,17 @@ func ClientIPFromContext(ctx context.Context) string {
 		return strings.TrimSpace(ip)
 	}
 	return ""
+}
+
+func NormalizeClientIP(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+
+	if host, _, err := net.SplitHostPort(trimmed); err == nil {
+		return strings.TrimSpace(host)
+	}
+
+	return trimmed
 }

@@ -725,7 +725,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		logger.LogInfo("[BANK-PREVIEW] /cash/preview start: remote=%s method=%s", r.RemoteAddr, r.Method)
+		logger.LogInfo("[BANK-PREVIEW] /cash/preview start: remote=%s method=%s", api.ClientIPFromRequest(r), r.Method)
 
 		// parse multipart form (support file field named "file")
 		if err := r.ParseMultipartForm(50 << 20); err != nil {
@@ -2118,8 +2118,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 				}
 			}
 		}
-		// client IP
-		ip := r.RemoteAddr
+		ip := api.ClientIPFromRequest(r)
 		go func() {
 			// best-effort; log on error
 			if err := insertDownloadAudit(r.Context(), db, sql.NullString{String: strings.TrimSpace(id), Valid: strings.TrimSpace(id) != ""}, sql.NullString{}, userID, ip, entityName); err != nil {

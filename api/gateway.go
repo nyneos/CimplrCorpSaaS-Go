@@ -102,10 +102,7 @@ func SetAuthService(svc *auth.AuthService) {
 }
 
 func extractClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return xff
-	}
-	return r.RemoteAddr
+	return ClientIPFromRequest(r)
 }
 
 func withCORS(h http.HandlerFunc) http.HandlerFunc {
@@ -514,7 +511,7 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 		if r.URL.Path == "/events" {
 			// SSE endpoints don't need wrapped response writers
 			// Just log the connection and pass through
-			fmt.Printf("[GATEWAY] Incoming SSE connection request from %s query=%s\n", r.RemoteAddr, r.URL.RawQuery)
+			fmt.Printf("[GATEWAY] Incoming SSE connection request from %s query=%s\n", ClientIPFromRequest(r), r.URL.RawQuery)
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -828,7 +825,7 @@ func StartGateway(port string, pathPrefix string) {
 
 	mux.HandleFunc("/", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		logr := logger.GlobalLogger
-		msg := "[Gateway] [Error] " + r.URL.Path + " from " + r.RemoteAddr + " (route not found)"
+		msg := "[Gateway] [Error] " + r.URL.Path + " from " + ClientIPFromRequest(r) + " (route not found)"
 		if logr != nil {
 			logr.LogAudit(msg)
 		} else {
