@@ -28,12 +28,23 @@ func fdCrossStageUnion(module, deletedClause string) (string, bool) {
 	case fdBookingFilesDefinition.Module:
 		return fmt.Sprintf(`
 			SELECT %s FROM investment.fd_booking_request_files f WHERE f.booking_id::text = $1 %s
+			/*
+			Disabled for one-way FD DMS visibility.
 			UNION ALL
 			SELECT %s FROM investment.fd_confirmation_files f
 			  WHERE f.confirmation_id IN (
 			    SELECT c.confirmation_id FROM investment.fd_confirmation c
 			    WHERE c.booking_id::text = $1 AND COALESCE(c.is_deleted, FALSE) = FALSE
-			  ) %s`, c, d, c, d), true
+			  ) %s
+			UNION ALL
+			SELECT %s FROM investment.fd_closure_request_files f
+			  WHERE f.closure_request_id IN (
+			    SELECT r.closure_request_id FROM investment.fd_closure_request r
+			    JOIN investment.fd_master m ON m.fd_id = r.fd_id
+			    WHERE m.booking_id::text = $1 AND COALESCE(m.is_deleted, FALSE) = FALSE AND COALESCE(r.is_deleted, FALSE) = FALSE
+			  ) %s
+			*/
+			`, c, d, c, d, c, d), true
 
 	case fdConfirmationFilesDefinition.Module:
 		return fmt.Sprintf(`
@@ -44,22 +55,54 @@ func fdCrossStageUnion(module, deletedClause string) (string, bool) {
 			    SELECT c.booking_id FROM investment.fd_confirmation c
 			    WHERE c.confirmation_id::text = $1 AND COALESCE(c.is_deleted, FALSE) = FALSE
 			  ) %s
+
+
+			/*
+			Disabled for one-way FD DMS visibility.
+
 			UNION ALL
 			SELECT %s FROM investment.fd_master_files f
 			  WHERE f.fd_id IN (
 			    SELECT m.fd_id FROM investment.fd_master m
 			    WHERE m.confirmation_id::text = $1 AND COALESCE(m.is_deleted, FALSE) = FALSE
-			  ) %s`, c, d, c, d, c, d), true
+			  ) %s
+			UNION ALL
+			SELECT %s FROM investment.fd_closure_request_files f
+			  WHERE f.closure_request_id IN (
+			    SELECT r.closure_request_id FROM investment.fd_closure_request r
+			    JOIN investment.fd_master m ON m.fd_id = r.fd_id
+			    WHERE m.confirmation_id::text = $1 AND COALESCE(m.is_deleted, FALSE) = FALSE AND COALESCE(r.is_deleted, FALSE) = FALSE
+			  ) %s
+			*/
+			`, c, d, c, d, c, d, c, d), true
 
 	case fdMasterFilesDefinition.Module:
 		return fmt.Sprintf(`
 			SELECT %s FROM investment.fd_master_files f WHERE f.fd_id::text = $1 %s
 			UNION ALL
+			SELECT %s FROM investment.fd_booking_request_files f
+			  WHERE f.booking_id IN (
+			    SELECT m.booking_id FROM investment.fd_master m
+			    WHERE m.fd_id::text = $1 AND COALESCE(m.is_deleted, FALSE) = FALSE
+			  ) %s
+			UNION ALL
 			SELECT %s FROM investment.fd_confirmation_files f
 			  WHERE f.confirmation_id IN (
 			    SELECT m.confirmation_id FROM investment.fd_master m
 			    WHERE m.fd_id::text = $1 AND COALESCE(m.is_deleted, FALSE) = FALSE
-			  ) %s`, c, d, c, d), true
+			  ) %s
+
+			  
+			/*
+			Disabled for one-way FD DMS visibility.
+			UNION ALL
+			SELECT %s FROM investment.fd_closure_request_files f
+			  WHERE f.closure_request_id IN (
+			    SELECT r.closure_request_id FROM investment.fd_closure_request r
+			    WHERE r.fd_id::text = $1 AND COALESCE(r.is_deleted, FALSE) = FALSE
+			  ) %s
+			*/
+			`, c, d, c, d, c, d, c, d), true
 
 	case fdClosureFilesDefinition.Module:
 		return fmt.Sprintf(`

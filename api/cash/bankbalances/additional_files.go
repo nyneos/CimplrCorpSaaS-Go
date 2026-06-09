@@ -49,7 +49,7 @@ func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func bankBalanceAdditionalFilesConfig() additionalfiles.Config {
-	return additionalfiles.Config{
+	return additionalfiles.WithCashCrossStageVisibility(additionalfiles.Config{
 		Module:                "bankbalance",
 		AuditSource:           "BANK_BALANCE",
 		ParentIDField:         "balance_id",
@@ -61,7 +61,7 @@ func bankBalanceAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteBankBalanceAdditionalFile,
 		SoftDeleteTx:          deleteBankBalanceAdditionalFileTx,
 		RecordMainUploadAudit: recordBankBalanceMainUploadAudit,
-	}
+	})
 }
 
 func recordBankBalanceMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {

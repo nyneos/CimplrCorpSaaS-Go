@@ -1703,6 +1703,29 @@ func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Con
 		}
 	}
 
+	if isMFCrossStageModule(def.Module) {
+		module := def.Module
+		cfg.AuditByFileIDOnly = true
+		cfg.List = func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]cashfiles.FileRecord, error) {
+			return listMFCrossStageFiles(ctx, pool, module, parentID)
+		}
+		cfg.GetOne = func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*cashfiles.FileRecord, error) {
+			return getMFCrossStageFile(ctx, pool, module, parentID, fileID, false)
+		}
+		cfg.GetAnyFile = func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*cashfiles.FileRecord, error) {
+			return getMFCrossStageFile(ctx, pool, module, parentID, fileID, true)
+		}
+		cfg.GetMany = func(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]cashfiles.FileRecord, []string, error) {
+			return getMFCrossStageFiles(ctx, pool, module, parentID, fileIDs)
+		}
+		cfg.SoftDelete = func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+			return softDeleteMFCrossStageFile(ctx, pool, fileID, deletedBy, deletedAt)
+		}
+		cfg.SoftDeleteTx = func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+			return softDeleteMFCrossStageFile(ctx, tx, fileID, deletedBy, deletedAt)
+		}
+	}
+
 	return cfg
 }
 

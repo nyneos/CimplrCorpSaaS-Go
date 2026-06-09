@@ -79,7 +79,7 @@ func RejectUtilizationAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.Handl
 }
 
 func limitAdditionalFilesConfig() additionalfiles.Config {
-	return additionalfiles.Config{
+	return additionalfiles.WithCashCrossStageVisibility(additionalfiles.Config{
 		Module:          "limit-position",
 		AuditSource:     "LIMIT_POSITION",
 		ParentIDField:   "limit_id",
@@ -91,11 +91,11 @@ func limitAdditionalFilesConfig() additionalfiles.Config {
 		GetMany:         getLimitAdditionalFiles,
 		SoftDelete:      deleteLimitAdditionalFile,
 		SoftDeleteTx:    deleteLimitAdditionalFileTx,
-	}
+	})
 }
 
 func utilizationAdditionalFilesConfig() additionalfiles.Config {
-	return additionalfiles.Config{
+	return additionalfiles.WithCashCrossStageVisibility(additionalfiles.Config{
 		Module:          "limit-utilization",
 		AuditSource:     "LIMIT_UTILIZATION",
 		ParentIDField:   "utilization_id",
@@ -107,7 +107,7 @@ func utilizationAdditionalFilesConfig() additionalfiles.Config {
 		GetMany:         getUtilizationAdditionalFiles,
 		SoftDelete:      deleteUtilizationAdditionalFile,
 		SoftDeleteTx:    deleteUtilizationAdditionalFileTx,
-	}
+	})
 }
 
 func listLimitAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
