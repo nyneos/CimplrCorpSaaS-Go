@@ -1,6 +1,7 @@
 package api
 
 import (
+	"CimplrCorpSaas/api/auth"
 	"context"
 	"net"
 	"net/http"
@@ -33,7 +34,12 @@ func ClientIPFromContext(ctx context.Context) string {
 		return ""
 	}
 	if ip, ok := ctx.Value(ClientIPContextKey).(string); ok {
-		return strings.TrimSpace(ip)
+		if normalized := NormalizeClientIP(ip); normalized != "" {
+			return normalized
+		}
+	}
+	if session, ok := ctx.Value("session").(*auth.UserSession); ok && session != nil {
+		return NormalizeClientIP(session.ClientIP)
 	}
 	return ""
 }
