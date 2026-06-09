@@ -622,15 +622,15 @@ func GetCounterpartyAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.notes,'')                AS notes,
 				COALESCE(c.is_deleted,false)        AS is_deleted,
 				COALESCE(c.created_by,'')           AS created_by,
-				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS created_at,
+				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS created_at,
 				-- latest audit (LATERAL to avoid DISTINCT ON + GROUP BY conflict)
 				COALESCE(la.audit_id::text,'')      AS audit_id,
 				COALESCE(la.action_type,'')         AS action_type,
 				COALESCE(la.processing_status,'')   AS processing_status,
 				COALESCE(la.requested_by,'')        AS requested_by,
-				COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 				COALESCE(la.checker_by,'')          AS checker_by,
-				COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')  AS checker_at,
+				COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')  AS checker_at,
 				COALESCE(la.checker_comment,'')     AS checker_comment,
 				COALESCE(la.reason,'')              AS reason
 			FROM apibox_svc.counterparty c
@@ -1481,9 +1481,9 @@ func GetCounterpartyDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				TO_CHAR(effective_from,'YYYY-MM-DD') AS effective_from,
 				is_deleted,
 				COALESCE(created_by,'') AS created_by,
-				COALESCE(TO_CHAR(created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS created_at,
+				COALESCE(TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS created_at,
 				COALESCE(updated_by,'') AS updated_by,
-				COALESCE(TO_CHAR(updated_at,'YYYY-MM-DD HH24:MI:SS'),'') AS updated_at
+				COALESCE(TO_CHAR(updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS updated_at
 			FROM apibox_svc.counterparty WHERE counterparty_id=$1`, cpID)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)

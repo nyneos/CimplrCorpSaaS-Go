@@ -981,9 +981,9 @@ func GetCounterpartyMasterAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			history AS (
 				SELECT counterparty_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at
 				FROM apibox.audit_counterparty_master
 				GROUP BY counterparty_id
 			)
@@ -1009,9 +1009,9 @@ func GetCounterpartyMasterAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.action_type,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.requested_by,'') AS requested_by,
-				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 				COALESCE(l.old_counterparty_code,'') AS old_counterparty_code,
@@ -1106,9 +1106,9 @@ func GetCounterpartyMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		base := `
 			SELECT audit_id, counterparty_id, action_type, processing_status,
 				reason, requested_by,
-				TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 				COALESCE(checker_by,'') AS checker_by,
-				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 				COALESCE(checker_comment,'') AS checker_comment,
 				COALESCE(old_counterparty_code,'') AS old_counterparty_code,
 				COALESCE(old_counterparty_name,'') AS old_counterparty_name,
@@ -1227,9 +1227,9 @@ func GetCounterpartyMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.is_active,true) AS is_active,
 				COALESCE(m.is_deleted,false) AS is_deleted,
 				COALESCE(m.created_by,'') AS created_by,
-				COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS created_at,
+				COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS created_at,
 				COALESCE(m.updated_by,'') AS updated_by,
-				COALESCE(TO_CHAR(m.updated_at,'YYYY-MM-DD HH24:MI:SS'),'') AS updated_at
+				COALESCE(TO_CHAR(m.updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS updated_at
 			FROM apibox.counterparty_master m
 			WHERE m.counterparty_id=$1`, cpID)
 		if err != nil {
@@ -1266,9 +1266,9 @@ func GetCounterpartyMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				audit_id::text, counterparty_id, action_type, processing_status,
 				COALESCE(reason,'') AS reason,
 				COALESCE(requested_by,'') AS requested_by,
-				COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 				COALESCE(checker_by,'') AS checker_by,
-				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 				COALESCE(checker_comment,'') AS checker_comment,
 				COALESCE(old_counterparty_code,'') AS old_counterparty_code,
 				COALESCE(old_counterparty_name,'') AS old_counterparty_name,

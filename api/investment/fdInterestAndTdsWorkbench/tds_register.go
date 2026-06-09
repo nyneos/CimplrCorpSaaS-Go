@@ -306,11 +306,11 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 			  SELECT
 			    tds_id,
 			    MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-			    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+			    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at_audit,
 			    MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-			    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+			    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 			    MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-			    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+			    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 			  FROM investment.fd_tds_receipt_audit
 			  GROUP BY tds_id
 			)
@@ -335,9 +335,9 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(la.processing_status,'')      AS processing_status,
 				COALESCE(la.action_type,'')            AS action_type,
 				COALESCE(la.requested_by,'')           AS requested_by,
-				COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 				COALESCE(la.checker_by,'')             AS checker_by,
-				COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+				COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')   AS checker_at,
 				COALESCE(la.checker_comment,'')        AS checker_comment,
 				COALESCE(h.created_by_audit,'')        AS created_by_audit,
 				COALESCE(h.created_at_audit,'')        AS created_at_audit,
@@ -1204,7 +1204,7 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 				TO_CHAR(je.entry_date, 'YYYY-MM-DD') AS entry_date,
 				je.accounting_period, je.entry_type, je.description,
 				je.total_debit, je.total_credit, je.status,
-				TO_CHAR(je.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+				TO_CHAR(je.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
 				je.created_by,
 				jl.line_id, jl.line_number, jl.account_number, jl.account_name,
 				jl.account_type, jl.debit_amount, jl.credit_amount, jl.narration,

@@ -1231,11 +1231,11 @@ func GetApprovalMatrixAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT
 				matrix_id,
 				MAX(CASE WHEN action_type='CREATE' THEN requested_by  END) AS created_by,
-				MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+				MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 				MAX(CASE WHEN action_type='EDIT'   THEN requested_by  END) AS edited_by,
-				MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+				MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 				MAX(CASE WHEN action_type='DELETE' THEN requested_by  END) AS deleted_by,
-				MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+				MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 			FROM uam.audit_approval_matrix_master
 			GROUP BY matrix_id
 		),
@@ -1243,9 +1243,9 @@ func GetApprovalMatrixAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (matrix_id)
 				matrix_id, processing_status, action_type,
 				audit_id::text AS audit_id,
-				requested_by, TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				requested_by, TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 				COALESCE(checker_by,'')    AS checker_by,
-				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 				COALESCE(checker_comment,'') AS checker_comment,
 				COALESCE(reason,'')        AS reason,
 				old_module_code, old_entity_code, old_transaction_type,
@@ -1393,17 +1393,17 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH audit_history AS (
 				SELECT
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM uam.audit_approval_matrix_master WHERE matrix_id=$1
 			),
 			latest_audit AS (
 				SELECT processing_status,
 					COALESCE(checker_by,'') AS checker_by,
-					COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+					COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 					COALESCE(checker_comment,'') AS checker_comment,
 					old_module_code, old_entity_code, old_transaction_type,
 					old_min_amount, old_max_amount, old_description,
@@ -1464,9 +1464,9 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH eye_history AS (
 				SELECT eye_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at
 				FROM uam.audit_approval_matrix_eye WHERE matrix_id=$1
 				GROUP BY eye_id
 			),
@@ -1474,7 +1474,7 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT DISTINCT ON (eye_id)
 					eye_id, processing_status,
 					COALESCE(checker_by,'') AS checker_by,
-					COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+					COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 					old_eye_count, old_position, old_sla_hours, old_is_active
 				FROM uam.audit_approval_matrix_eye WHERE matrix_id=$1
 				ORDER BY eye_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamptz),COALESCE(checker_at,'1970-01-01'::timestamptz)) DESC
@@ -1524,9 +1524,9 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WITH member_history AS (
 					SELECT member_id,
 						MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-						MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+						MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 						MAX(CASE WHEN action_type='EDIT'   THEN requested_by END) AS edited_by,
-						MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at
+						MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at
 					FROM uam.audit_approval_matrix_eye_member WHERE matrix_id=$1
 					GROUP BY member_id
 				),
@@ -1534,7 +1534,7 @@ func GetApprovalMatrixDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					SELECT DISTINCT ON (member_id)
 						member_id, processing_status,
 						COALESCE(checker_by,'') AS checker_by,
-						COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+						COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 						old_member_type, old_assignment_type, old_role_id, old_user_id, old_slot_order, old_is_active
 					FROM uam.audit_approval_matrix_eye_member WHERE matrix_id=$1
 					ORDER BY member_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamptz),COALESCE(checker_at,'1970-01-01'::timestamptz)) DESC
@@ -1668,9 +1668,9 @@ func GetApprovalMatrixAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT audit_id::text, action_type, processing_status,
 				COALESCE(reason,''),
 				COALESCE(requested_by,''),
-				COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS'),''),
+				COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
 				COALESCE(checker_by,''),
-				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),''),
+				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
 				COALESCE(checker_comment,''),
 				old_module_code, old_entity_code, old_transaction_type,
 				old_min_amount, old_max_amount, old_description,
@@ -1715,9 +1715,9 @@ func GetApprovalMatrixAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		eyeAuditRows, err := pgxPool.Query(ctx, `
 			SELECT audit_id::text, eye_id::text, action_type, processing_status,
 				COALESCE(requested_by,''),
-				COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS'),''),
+				COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
 				COALESCE(checker_by,''),
-				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),''),
+				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
 				old_eye_count, old_position, old_sla_hours, old_is_active
 			FROM uam.audit_approval_matrix_eye
 			WHERE matrix_id=$1
@@ -1764,9 +1764,9 @@ func GetApprovalMatrixAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT audit_id::text, eye_id::text, member_id::text,
 				action_type, processing_status,
 				COALESCE(requested_by,''),
-				COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS'),''),
+				COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
 				COALESCE(checker_by,''),
-				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),''),
+				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
 				old_member_type, old_assignment_type,
 				old_role_id::text, old_user_id::text,
 				old_slot_order, old_is_active
@@ -1953,9 +1953,9 @@ func GetApprovedActiveMatrices(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					  AND e.sla_hours IS NOT NULL
 				)) AS sla_hours, m.is_active,
 				MAX(CASE WHEN a.action_type='CREATE' THEN a.requested_by END) AS created_by,
-				MAX(CASE WHEN a.action_type='CREATE' THEN TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+				MAX(CASE WHEN a.action_type='CREATE' THEN TO_CHAR(a.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 				MAX(CASE WHEN a.action_type='EDIT'   THEN a.requested_by END) AS edited_by,
-				MAX(CASE WHEN a.action_type='EDIT'   THEN TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at
+				MAX(CASE WHEN a.action_type='EDIT'   THEN TO_CHAR(a.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at
 			FROM uam.approval_matrix_master m
 			INNER JOIN uam.audit_approval_matrix_master a ON a.matrix_id=m.matrix_id
 			LEFT JOIN public.masterentitycash me ON me.entity_id = m.entity_code

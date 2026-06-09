@@ -80,6 +80,7 @@ func WrapHTTP(service string, next http.Handler) http.Handler {
 
 		ctx := context.WithValue(r.Context(), requestIDKey, requestID)
 		ctx = context.WithValue(ctx, traceIDKey, traceID)
+		ctx = logger.WithTraceID(ctx, traceID)
 		r = r.WithContext(ctx)
 
 		r.Header.Set(headerRequestID, requestID)
@@ -92,8 +93,9 @@ func WrapHTTP(service string, next http.Handler) http.Handler {
 
 		duration := time.Since(start)
 		recordMetric(service, r.Method, r.URL.Path, rw.statusCode, rw.bytes, duration)
-		logger.LogInfo(
-			"[HTTP] service=%s method=%s path=%s status=%d duration_ms=%d bytes=%d request_id=%s trace_id=%s remote=%s",
+		logger.LogInfoCtx(
+			r.Context(),
+			"[HTTP] service=%s method=%s path=%s status=%d duration_ms=%d bytes=%d request_id=%s remote=%s",
 			service,
 			r.Method,
 			r.URL.Path,
@@ -101,7 +103,6 @@ func WrapHTTP(service string, next http.Handler) http.Handler {
 			duration.Milliseconds(),
 			rw.bytes,
 			requestID,
-			traceID,
 			r.RemoteAddr,
 		)
 	})

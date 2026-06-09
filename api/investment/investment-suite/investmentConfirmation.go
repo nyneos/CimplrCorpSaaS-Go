@@ -77,6 +77,11 @@ func GetConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		_, _ = pgxPool.Exec(r.Context(), `
+			INSERT INTO investment.auditactioninvestmentconfirmation (confirmation_id, actiontype, processing_status, requested_by, requested_at)
+			VALUES ($1, 'DOWNLOAD', 'APPROVED', $2, now())
+		`, req.ConfirmationID, api.GetUserNameFromCtx(r.Context()))
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -132,6 +137,10 @@ func GetConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				failedIDs = append(failedIDs, confirmationID)
 				continue
 			}
+			_, _ = pgxPool.Exec(r.Context(), `
+				INSERT INTO investment.auditactioninvestmentconfirmation (confirmation_id, actiontype, processing_status, requested_by, requested_at)
+				VALUES ($1, 'DOWNLOAD', 'APPROVED', $2, now())
+			`, confirmationID, api.GetUserNameFromCtx(r.Context()))
 			files = append(files, map[string]string{
 				"confirmation_id": confirmationID,
 				"download_url":    downloadURL,
@@ -825,7 +834,7 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (confirmation_id) action_id, confirmation_id, actiontype, processing_status
 			FROM investment.auditactioninvestmentconfirmation
 			WHERE confirmation_id = ANY($1)
-			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
+			  AND UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 			ORDER BY confirmation_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ConfirmationIDs)
@@ -1010,7 +1019,7 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (confirmation_id) action_id, confirmation_id, processing_status
 			FROM investment.auditactioninvestmentconfirmation
 			WHERE confirmation_id = ANY($1)
-			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
+			  AND UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 			ORDER BY confirmation_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ConfirmationIDs)
@@ -1116,18 +1125,18 @@ func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []str
 				a.checker_comment,
 				a.reason
 			FROM investment.auditactioninvestmentconfirmation a
-			WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
+			WHERE UPPER(COALESCE(a.actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 			ORDER BY a.confirmation_id, a.requested_at DESC
 		),
 		history AS (
 			SELECT 
 				confirmation_id,
 				MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
-				MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+				MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 				MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
-				MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+				MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 				MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
-				MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+				MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 			FROM investment.auditactioninvestmentconfirmation
 			GROUP BY confirmation_id
 		)
@@ -1163,9 +1172,9 @@ func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []str
 			m.old_status,
 			COALESCE(m.upload_s3_key, '') AS upload_s3_key,
 			m.confirmed_by,
-			TO_CHAR(m.confirmed_at, 'YYYY-MM-DD HH24:MI:SS') AS confirmed_at,
+			TO_CHAR(m.confirmed_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS confirmed_at,
 			m.is_deleted,
-			TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+			TO_CHAR(m.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 
 			-- initiation fields
 			TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
@@ -1183,9 +1192,9 @@ func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []str
 			COALESCE(l.processing_status,'') AS processing_status,
 			COALESCE(l.action_id::text,'') AS action_id,
 			COALESCE(l.requested_by,'') AS requested_by,
-			TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+			TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 			COALESCE(l.checker_by,'') AS checker_by,
-			TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+			TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 			COALESCE(l.checker_comment,'') AS checker_comment,
 			COALESCE(l.reason,'') AS reason,
 			
@@ -1301,18 +1310,18 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactioninvestmentconfirmation a
-				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
+				WHERE UPPER(COALESCE(a.actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 				ORDER BY a.confirmation_id, a.requested_at DESC
 			),
 			history AS (
 				SELECT 
 					confirmation_id,
 					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
 					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM investment.auditactioninvestmentconfirmation
 				GROUP BY confirmation_id
 			)
@@ -1347,9 +1356,9 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.status,
 				m.old_status,
 				m.confirmed_by,
-				TO_CHAR(m.confirmed_at, 'YYYY-MM-DD HH24:MI:SS') AS confirmed_at,
+				TO_CHAR(m.confirmed_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS confirmed_at,
 				m.is_deleted,
-				TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(m.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 
 				-- initiation fields
 				TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
@@ -1367,9 +1376,9 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
 				COALESCE(l.requested_by,'') AS requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 
@@ -1475,7 +1484,7 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					confirmation_id,
 					processing_status
 				FROM investment.auditactioninvestmentconfirmation
-				WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
+				WHERE UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 				ORDER BY confirmation_id, requested_at DESC
 			)
 			SELECT
