@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,9 +20,28 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
+func registerMasterAdditionalFileAliasRoutes(mux *http.ServeMux) {
+	mux.Handle("/master/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/additional-files/delete/approve"):
+			rewritten := r.Clone(r.Context())
+			rewritten.URL.Path = strings.TrimSuffix(path, "/delete/approve") + "/approve-delete"
+			mux.ServeHTTP(w, rewritten)
+		case strings.HasSuffix(path, "/additional-files/delete/reject"):
+			rewritten := r.Clone(r.Context())
+			rewritten.URL.Path = strings.TrimSuffix(path, "/delete/reject") + "/reject-delete"
+			mux.ServeHTTP(w, rewritten)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
 func StartMasterService(db *sql.DB, port string) {
 	const serviceName = "master"
 	mux := http.NewServeMux()
+	registerMasterAdditionalFileAliasRoutes(mux)
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
