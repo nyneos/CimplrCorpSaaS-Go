@@ -42,11 +42,14 @@ type FileRecord struct {
 	FileSize          int64      `json:"file_size,omitempty"`
 	UploadS3Key       string     `json:"upload_s3_key,omitempty"`
 	UploadedBy        string     `json:"uploaded_by,omitempty"`
+	RequestedIP       string     `json:"requested_ip,omitempty"`
 	UploadedAt        time.Time  `json:"uploaded_at"`
 	ProcessingStatus  string     `json:"processing_status,omitempty"`
 	DeleteRequestedBy string     `json:"delete_requested_by,omitempty"`
+	DeleteRequestedIP string     `json:"delete_requested_ip,omitempty"`
 	DeleteRequestedAt *time.Time `json:"delete_requested_at,omitempty"`
 	CheckerBy         string     `json:"checker_by,omitempty"`
+	CheckerIP         string     `json:"checker_ip,omitempty"`
 	CheckerAt         *time.Time `json:"checker_at,omitempty"`
 	CheckerComment    string     `json:"checker_comment,omitempty"`
 }
@@ -133,8 +136,10 @@ type fileAuditEvent struct {
 type pendingDeleteState struct {
 	FileID           string
 	RequestedBy      string
+	RequestedIP      string
 	RequestedAt      *time.Time
 	CheckerBy        string
+	CheckerIP        string
 	CheckerAt        *time.Time
 	CheckerComment   string
 	ProcessingStatus string
@@ -1006,6 +1011,37 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 		fileIDs = append(fileIDs, files[i].FileID)
 	}
 
+	createQuery := `
+		SELECT DISTINCT ON (file_id)
+			file_id,
+			requested_ip
+		FROM ` + auditTableName(cfg) + `
+		WHERE module_key = $1
+		  AND parent_record_id = $2
+		  AND file_id = ANY($3)
+		  AND action_type = $4
+		ORDER BY file_id, requested_at DESC, audit_id DESC
+	`
+	createRows, err := pool.Query(ctx, createQuery, cfg.Module, parentID, fileIDs, fileAuditCreateAction)
+	if err != nil {
+		return nil, err
+	}
+	uploadIPs := make(map[string]string, len(files))
+	for createRows.Next() {
+		var fileID string
+		var requestedIP sql.NullString
+		if err := createRows.Scan(&fileID, &requestedIP); err != nil {
+			createRows.Close()
+			return nil, err
+		}
+		uploadIPs[strings.TrimSpace(fileID)] = strings.TrimSpace(requestedIP.String)
+	}
+	if err := createRows.Err(); err != nil {
+		createRows.Close()
+		return nil, err
+	}
+	createRows.Close()
+
 	query := `
 		SELECT DISTINCT ON (file_id)
 			file_id,
@@ -1066,11 +1102,13 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 		}
 
 		state.RequestedBy = strings.TrimSpace(requestedBy.String)
+		state.RequestedIP = strings.TrimSpace(requestedIP.String)
 		if requestedAt.Valid {
 			t := requestedAt.Time
 			state.RequestedAt = &t
 		}
 		state.CheckerBy = strings.TrimSpace(checkerBy.String)
+		state.CheckerIP = strings.TrimSpace(checkerIP.String)
 		if checkerAt.Valid {
 			t := checkerAt.Time
 			state.CheckerAt = &t
@@ -1084,11 +1122,14 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 	}
 
 	for i := range files {
+		files[i].RequestedIP = uploadIPs[files[i].FileID]
 		if state, ok := states[files[i].FileID]; ok {
 			files[i].ProcessingStatus = defaultString(state.ProcessingStatus, fileAuditPendingDeleteApproval)
 			files[i].DeleteRequestedBy = state.RequestedBy
+			files[i].DeleteRequestedIP = state.RequestedIP
 			files[i].DeleteRequestedAt = state.RequestedAt
 			files[i].CheckerBy = state.CheckerBy
+			files[i].CheckerIP = state.CheckerIP
 			files[i].CheckerAt = state.CheckerAt
 			files[i].CheckerComment = state.CheckerComment
 		}

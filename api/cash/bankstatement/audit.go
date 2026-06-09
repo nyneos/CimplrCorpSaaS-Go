@@ -29,8 +29,8 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 		}
 
 		var body bankStatementAuditRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingUserIDOrBankStatementID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "bank_statement_id is required")
 			return
 		}
 
@@ -118,8 +118,8 @@ func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 		}
 
 		var body bankStatementDownloadAuditRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingUserIDOrBankStatementID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "bank_statement_id is required")
 			return
 		}
 
@@ -195,8 +195,8 @@ func GetBankStatementBalanceImpactAuditHandler(db *sql.DB) http.Handler {
 		}
 
 		var body bankStatementAuditRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingUserIDOrBankStatementID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "bank_statement_id is required")
 			return
 		}
 
@@ -276,8 +276,8 @@ func GetBankStatementTransactionAuditHandler(db *sql.DB) http.Handler {
 		}
 
 		var body bankStatementAuditRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingUserIDOrBankStatementID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "bank_statement_id is required")
 			return
 		}
 

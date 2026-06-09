@@ -164,8 +164,8 @@ func loadLatestVarianceAudit(ctx context.Context, pool *pgxpool.Pool, exceptionI
 		&r.AuditID, &r.ExceptionID, &r.ActionType, &r.ProcessingStatus,
 		&r.Reason, &r.RequestedBy, &r.RequestedAt,
 		&r.RequestedIP,
-		&r.CheckerBy, &r.CheckerAt, &r.CheckerComment,
-		&r.CheckerIP,
+		&r.CheckerBy, &r.CheckerAt, &r.CheckerIP,
+		&r.CheckerComment,
 		&r.OldExceptionStatus, &r.OldProposedResolution, &r.OldReasonCode,
 		&r.OldResolutionRemarks, &r.OldAttachment, &r.OldCaseType, &r.OldVarianceOutcome,
 	)
@@ -286,8 +286,8 @@ func loadVarianceAuditTrail(ctx context.Context, pool *pgxpool.Pool, exceptionID
 			&r.AuditID, &r.ExceptionID, &r.ActionType, &r.ProcessingStatus,
 			&r.Reason, &r.RequestedBy, &r.RequestedAt,
 			&r.RequestedIP,
-			&r.CheckerBy, &r.CheckerAt, &r.CheckerComment,
-			&r.CheckerIP,
+			&r.CheckerBy, &r.CheckerAt, &r.CheckerIP,
+			&r.CheckerComment,
 			&r.OldExceptionStatus, &r.OldProposedResolution, &r.OldReasonCode,
 			&r.OldResolutionRemarks, &r.OldAttachment, &r.OldCaseType, &r.OldVarianceOutcome,
 		); err != nil {
