@@ -24,9 +24,10 @@ type MainPackageFile struct {
 }
 
 type PackageZipOptions struct {
-	ModuleLabel string
-	IDField     string
-	LoadMain    func(ctx context.Context, pool *pgxpool.Pool, rowID string) (*MainPackageFile, error)
+	ModuleLabel               string
+	IDField                   string
+	LoadMain                  func(ctx context.Context, pool *pgxpool.Pool, rowID string) (*MainPackageFile, error)
+	ResolveAdditionalParentID func(ctx context.Context, pool *pgxpool.Pool, rowID string) (string, error)
 }
 
 type packageZipRequest struct {
@@ -87,6 +88,7 @@ func collectPackageRows(ctx context.Context, pool *pgxpool.Pool, cfg Config, opt
 	rows := make([]packageRow, 0, len(rowIDs))
 	for _, rowID := range rowIDs {
 		row := packageRow{RowID: rowID}
+		additionalParentID := rowID
 
 		if opts.LoadMain != nil {
 			if mainFile, err := opts.LoadMain(ctx, pool, rowID); err == nil && mainFile != nil && strings.TrimSpace(mainFile.UploadS3Key) != "" {
@@ -98,8 +100,14 @@ func collectPackageRows(ctx context.Context, pool *pgxpool.Pool, cfg Config, opt
 			}
 		}
 
+		if opts.ResolveAdditionalParentID != nil {
+			if parentID, err := opts.ResolveAdditionalParentID(ctx, pool, rowID); err == nil && strings.TrimSpace(parentID) != "" {
+				additionalParentID = strings.TrimSpace(parentID)
+			}
+		}
+
 		if cfg.List != nil {
-			if files, err := cfg.List(ctx, pool, rowID); err == nil {
+			if files, err := cfg.List(ctx, pool, additionalParentID); err == nil {
 				for _, file := range files {
 					key := strings.TrimSpace(file.UploadS3Key)
 					if key == "" {
