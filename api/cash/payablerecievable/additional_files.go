@@ -28,6 +28,14 @@ func DownloadSelectedPayableAdditionalFilesHandler(pool *pgxpool.Pool) http.Hand
 	return additionalfiles.NewDownloadSelectedHandler(pool, transactionAdditionalFilesConfig("payable"))
 }
 
+func DownloadPayablePackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, transactionAdditionalFilesConfig("payable"), additionalfiles.PackageZipOptions{
+		ModuleLabel: "Payable",
+		IDField:     "payable_id",
+		LoadMain:    loadPayablePackageMainFile,
+	})
+}
+
 func DeletePayableAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, transactionAdditionalFilesConfig("payable"))
 }
@@ -58,6 +66,14 @@ func DownloadReceivableAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFun
 
 func DownloadSelectedReceivableAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDownloadSelectedHandler(pool, transactionAdditionalFilesConfig("receivable"))
+}
+
+func DownloadReceivablePackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, transactionAdditionalFilesConfig("receivable"), additionalfiles.PackageZipOptions{
+		ModuleLabel: "Receivable",
+		IDField:     "receivable_id",
+		LoadMain:    loadReceivablePackageMainFile,
+	})
 }
 
 func DeleteReceivableAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -123,6 +139,20 @@ func listPayableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentI
 		  AND COALESCE(p.is_deleted, FALSE) = FALSE
 		ORDER BY f.uploaded_at DESC
 	`), parentID)
+}
+
+func loadPayablePackageMainFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+	var uploadS3Key string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(upload_s3_key, '')
+		FROM public.tr_payables
+		WHERE payable_id = $1
+		  AND COALESCE(is_deleted, FALSE) = FALSE
+	`, rowID).Scan(&uploadS3Key)
+	if err != nil || strings.TrimSpace(uploadS3Key) == "" {
+		return nil, err
+	}
+	return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
 }
 
 func createPayableAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
@@ -208,6 +238,20 @@ func listReceivableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, pare
 		  AND COALESCE(r.is_deleted, FALSE) = FALSE
 		ORDER BY f.uploaded_at DESC
 	`), parentID)
+}
+
+func loadReceivablePackageMainFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+	var uploadS3Key string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(upload_s3_key, '')
+		FROM public.tr_receivables
+		WHERE receivable_id = $1
+		  AND COALESCE(is_deleted, FALSE) = FALSE
+	`, rowID).Scan(&uploadS3Key)
+	if err != nil || strings.TrimSpace(uploadS3Key) == "" {
+		return nil, err
+	}
+	return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
 }
 
 func createReceivableAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {

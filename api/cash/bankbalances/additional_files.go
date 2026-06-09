@@ -32,6 +32,14 @@ func DownloadSelectedAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc
 	return additionalfiles.NewDownloadSelectedHandler(pool, bankBalanceAdditionalFilesConfig())
 }
 
+func DownloadBankBalancePackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, bankBalanceAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "Bank Balance",
+		IDField:     "balance_id",
+		LoadMain:    loadBankBalancePackageMainFile,
+	})
+}
+
 func DeleteAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, bankBalanceAdditionalFilesConfig())
 }
@@ -108,6 +116,32 @@ func listBankBalanceAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, par
 
 	args := append([]interface{}{parentID}, scopeArgs...)
 	return additionalfiles.QueryFiles(ctx, pool, query, args...)
+}
+
+func loadBankBalancePackageMainFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+	scopeClause, scopeArgs, err := bankBalanceAccessScope(ctx, 2)
+	if err != nil {
+		return nil, err
+	}
+	query := `
+		SELECT COALESCE(b.upload_s3_key, '')
+		FROM public.bank_balances_manual b
+		JOIN (
+			SELECT account_number, MIN(entity_id) AS entity_id
+			FROM public.masterbankaccount
+			GROUP BY account_number
+		) mba ON mba.account_number = b.account_no
+		LEFT JOIN public.masterentitycash ec ON ec.entity_id = mba.entity_id
+		LEFT JOIN public.masterentity me ON me.entity_id::text = mba.entity_id
+		WHERE b.balance_id = $1
+		  AND ` + scopeClause + `
+	`
+	args := append([]interface{}{rowID}, scopeArgs...)
+	var uploadS3Key string
+	if err := pool.QueryRow(ctx, query, args...).Scan(&uploadS3Key); err != nil || strings.TrimSpace(uploadS3Key) == "" {
+		return nil, err
+	}
+	return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
 }
 
 func createBankBalanceAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {

@@ -589,6 +589,26 @@ func GetDownloadPresignedURL(ctx context.Context, key string, expiry time.Durati
 	return presignedReq.URL, nil
 }
 
+func GetObjectBytes(ctx context.Context, key string) ([]byte, error) {
+	client, bucket, err := newS3Client(ctx)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get s3 object %s from bucket %s: %w", key, bucket, err)
+	}
+	defer obj.Body.Close()
+	body, err := io.ReadAll(obj.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read s3 object %s from bucket %s: %w", key, bucket, err)
+	}
+	return body, nil
+}
+
 func GetInlinePresignedURL(ctx context.Context, key string, expiry time.Duration) (string, error) {
 	client, bucket, err := newS3Client(ctx)
 	if err != nil {

@@ -31,6 +31,14 @@ func DownloadSelectedAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc
 	return additionalfiles.NewDownloadSelectedHandler(pool, projectionAdditionalFilesConfig())
 }
 
+func DownloadProjectionPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, projectionAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "Projection",
+		IDField:     "proposal_id",
+		LoadMain:    loadProjectionPackageMainFile,
+	})
+}
+
 func DeleteAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, projectionAdditionalFilesConfig())
 }
@@ -78,6 +86,25 @@ func listProjectionAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, pare
 		  AND `+projectionParentEntityAllowed(constants.ProposalID, "$2")+`
 		ORDER BY f.uploaded_at DESC
 	`), parentID, names)
+}
+
+func loadProjectionPackageMainFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+	names, err := projectionEntityNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var uploadS3Key string
+	err = pool.QueryRow(ctx, `
+		SELECT COALESCE(p.upload_s3_key, '')
+		FROM cimplrcorpsaas.cashflow_proposal p
+		WHERE p.proposal_id = $1
+		  AND COALESCE(p.is_deleted, FALSE) = FALSE
+		  AND `+projectionParentEntityAllowed(constants.ProposalID, "$2")+`
+	`, rowID, names).Scan(&uploadS3Key)
+	if err != nil || strings.TrimSpace(uploadS3Key) == "" {
+		return nil, err
+	}
+	return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
 }
 
 func createProjectionAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
