@@ -55,11 +55,12 @@ func GetFVODownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var uploadS3Key sql.NullString
+		var activityID sql.NullString
 		if err := pgxPool.QueryRow(r.Context(), `
-			SELECT upload_s3_key
+			SELECT upload_s3_key, activity_id
 			FROM investment.accounting_fvo
 			WHERE fvo_id = $1
-		`, req.FVOID).Scan(&uploadS3Key); err != nil {
+		`, req.FVOID).Scan(&uploadS3Key, &activityID); err != nil {
 			api.RespondWithResult(w, false, constants.ErrFileNotFound)
 			return
 		}
@@ -74,6 +75,13 @@ func GetFVODownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
 			return
+		}
+
+		if activityID.Valid && strings.TrimSpace(activityID.String) != "" {
+			_, _ = pgxPool.Exec(r.Context(), `
+				INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
+				VALUES ($1, 'DOWNLOAD', 'APPROVED', $2, now())
+			`, activityID.String, api.GetUserNameFromCtx(r.Context()))
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -111,11 +119,12 @@ func GetFVOBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			var uploadS3Key sql.NullString
+			var activityID sql.NullString
 			if err := pgxPool.QueryRow(r.Context(), `
-				SELECT upload_s3_key
+				SELECT upload_s3_key, activity_id
 				FROM investment.accounting_fvo
 				WHERE fvo_id = $1
-			`, fvoID).Scan(&uploadS3Key); err != nil {
+			`, fvoID).Scan(&uploadS3Key, &activityID); err != nil {
 				failedIDs = append(failedIDs, fvoID)
 				continue
 			}
@@ -130,6 +139,12 @@ func GetFVOBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				failedIDs = append(failedIDs, fvoID)
 				continue
+			}
+			if activityID.Valid && strings.TrimSpace(activityID.String) != "" {
+				_, _ = pgxPool.Exec(r.Context(), `
+					INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
+					VALUES ($1, 'DOWNLOAD', 'APPROVED', $2, now())
+				`, activityID.String, req.UserID)
 			}
 			files = append(files, map[string]string{
 				"fvo_id":       fvoID,
@@ -596,7 +611,7 @@ func GetFVOsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactionaccountingactivity a
-				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
+				WHERE UPPER(COALESCE(a.actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 				ORDER BY a.activity_id, a.requested_at DESC
 			)
 			SELECT
@@ -628,7 +643,7 @@ func GetFVOsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(fvo.evidence_file_id::text,'') AS evidence_file_id,
 				'' AS old_evidence_file_id,
 				fvo.is_deleted,
-				TO_CHAR(NULLIF(fvo.updated_at::text, '')::timestamp, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(NULLIF(fvo.updated_at::text, '')::timestamp, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 				
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,

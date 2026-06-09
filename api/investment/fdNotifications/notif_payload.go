@@ -260,7 +260,7 @@ func fetchBookingRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 			COALESCE(b.booking_status,'')                                       AS booking_status,
 			COALESCE(b.bank_config_id,'')                                       AS bank_config_id,
 			COALESCE(b.source_account_id,'')                                    AS source_account_id,
-			COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS created_at,
+			COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')         AS created_at,
 			COALESCE(b.created_by,'')                                           AS created_by,
 			-- latest audit snapshot
 			COALESCE(la.processing_status,'')                                   AS processing_status,
@@ -404,7 +404,7 @@ func fetchConfirmationRows(ctx context.Context, pool *pgxpool.Pool, ids []string
 			COALESCE(c.variance_remarks,'')                                     AS variance_remarks,
 			COALESCE(c.has_variance,false)                                      AS has_variance,
 			COALESCE(c.variance_flag,'')                                        AS variance_flag,
-			COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS created_at,
+			COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')         AS created_at,
 			COALESCE(c.created_by,'')                                           AS created_by,
 			-- latest audit
 			COALESCE(la.processing_status,'')                                   AS processing_status,
@@ -549,7 +549,7 @@ func fetchFDMasterRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([
 			COALESCE(m.fd_status,'')                                            AS fd_status,
 			COALESCE(m.source_closure_id,'')                                    AS source_closure_id,
 			COALESCE(m.cashflow_generated,false)                                AS cashflow_generated,
-			COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS created_at,
+			COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')         AS created_at,
 			COALESCE(m.created_by,'')                                           AS created_by,
 			-- latest audit
 			COALESCE(la.processing_status,'')                                   AS processing_status,
@@ -692,7 +692,7 @@ func fetchClosureRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 			COALESCE(cr.net_payout_amount,0)                                    AS net_payout_amount,
 			COALESCE(cr.closure_status,'')                                      AS closure_status,
 			COALESCE(TO_CHAR(cr.closure_date,'YYYY-MM-DD'),'')                  AS closure_date,
-			COALESCE(TO_CHAR(cr.created_at,'YYYY-MM-DD HH24:MI:SS'),'')        AS created_at,
+			COALESCE(TO_CHAR(cr.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')        AS created_at,
 			COALESCE(cr.created_by,'')                                          AS created_by,
 			COALESCE(cr.rejection_reason,'')                                    AS rejection_reason,
 			COALESCE(cr.closure_remarks,'')                                     AS closure_remarks,
@@ -955,7 +955,7 @@ func fetchReceiptRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 			COALESCE(r.reconcile_run_id,'')                                     AS reconcile_run_id,
 			COALESCE(r.journal_entry_id,'')                                     AS journal_entry_id,
 			COALESCE(r.is_active,true)                                          AS is_active,
-			COALESCE(TO_CHAR(r.created_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS created_at,
+			COALESCE(TO_CHAR(r.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')         AS created_at,
 			COALESCE(r.created_by,'')                                           AS created_by,
 			-- latest audit
 			COALESCE(la.processing_status,'')                                   AS processing_status,
@@ -1070,7 +1070,7 @@ func fetchCimplrClosureInitiateRows(ctx context.Context, pool *pgxpool.Pool, ids
 			COALESCE(ci.net_expected_amount,0)                                  AS net_payout_amount,
 			COALESCE(ci.maturity_status,'')                                     AS closure_status,
 			COALESCE(TO_CHAR(ci.requested_closure_date,'YYYY-MM-DD'),'')        AS closure_date,
-			COALESCE(TO_CHAR(ci.created_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS created_at,
+			COALESCE(TO_CHAR(ci.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')         AS created_at,
 			COALESCE(ci.created_by,'')                                          AS created_by,
 			COALESCE(ci.remarks,'')                                             AS closure_remarks,
 			-- latest audit
@@ -1138,7 +1138,7 @@ func fetchCimplrClosureConfirmRows(ctx context.Context, pool *pgxpool.Pool, ids 
 			COALESCE(cc.net_amount_received, cc.net_expected, 0)                AS net_payout_amount,
 			COALESCE(cc.resolution_action,'')                                   AS closure_status,
 			COALESCE(TO_CHAR(cc.actual_payout_date,'YYYY-MM-DD'),'')            AS closure_date,
-			COALESCE(TO_CHAR(cc.created_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS created_at,
+			COALESCE(TO_CHAR(cc.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')         AS created_at,
 			COALESCE(cc.created_by,'')                                          AS created_by,
 			COALESCE(cc.remarks,'')                                             AS closure_remarks,
 			-- latest audit

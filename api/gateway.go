@@ -189,9 +189,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	session, mfaPending, err := authService.Login(req.Username, req.Password, clientIP)
 	if err != nil {
 		logger.LogError("Login failed for %s from %s: %v", req.Username, clientIP, err)
-		w.Header().Set(headerContentType, contentTypeJSON)
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		RespondWithError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
@@ -242,7 +240,8 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	err := authService.Logout(userID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		logger.LogError("Logout failed for userID %s: %v", userID, err)
+		RespondWithError(w, http.StatusUnauthorized, "Logout failed")
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -519,7 +518,7 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 		if r.URL.Path == "/events" {
 			// SSE endpoints don't need wrapped response writers
 			// Just log the connection and pass through
-			fmt.Printf("[GATEWAY] Incoming SSE connection request from %s query=%s\n", ClientIPFromRequest(r), r.URL.RawQuery)
+			logger.LogInfoCtx(r.Context(), "[GATEWAY] Incoming SSE connection from %s query=%s", r.RemoteAddr, r.URL.RawQuery)
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -557,8 +556,8 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 		duration := time.Since(start)
 		clientIP := extractClientIP(r)
 		userAgent := r.Header.Get("User-Agent")
-		fmt.Printf(
-			"[REQ] %s %s | Status: %d | IP: %s | UA: %s | Duration: %v | Body: %s | RespSize: %d\n",
+		logger.LogInfoCtx(r.Context(),
+			"[REQ] %s %s status=%d ip=%s ua=%s duration=%v body=%s resp_size=%d",
 			r.Method, r.URL.Path, rw.statusCode, clientIP, userAgent, duration, body, rw.body.Len(),
 		)
 	})
@@ -611,6 +610,10 @@ func StartGateway(port string, pathPrefix string) {
 
 	// Debug endpoint to show .env file contents and effective environment values
 	mux.HandleFunc("/debug/env", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if !isDevMode() {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusNotFound)
+			return
+		}
 		if r.Method != http.MethodGet {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
@@ -809,11 +812,12 @@ func StartGateway(port string, pathPrefix string) {
 		latency := time.Since(start)
 
 		if err != nil {
+			logger.LogError("Health check DB ping failed: %v", err)
 			w.WriteHeader(http.StatusServiceUnavailable)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"status":  "unhealthy",
 				"db":      "disconnected",
-				"error":   err.Error(),
+				"error":   "Database unavailable",
 				"latency": latency.String(),
 			})
 			return

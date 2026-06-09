@@ -274,7 +274,7 @@ func ValidateScope(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(vf.issue_description,'')              AS issue_description,
 				COALESCE(vf.suggested_action,'')               AS suggested_action,
 				COALESCE(vf.is_resolved,false)                 AS is_resolved,
-				TO_CHAR(vf.created_at,'YYYY-MM-DD HH24:MI:SS') AS created_at,
+				TO_CHAR(vf.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
 				COALESCE(fm.fd_status,'')                      AS fd_current_status,
 				COALESCE(fm.principal_amount,0)                AS fd_principal,
 				COALESCE(fm.interest_rate,0)                   AS fd_interest_rate,

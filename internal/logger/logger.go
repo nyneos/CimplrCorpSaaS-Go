@@ -2,20 +2,48 @@ package logger
 
 import (
 	"archive/zip"
+	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
-// getLogContext extracts MODULE, SUBMODULE, and FILENAME from the caller's stack
+type contextKey string
+
+// TraceIDKey is used to store and retrieve a trace ID from context.
+const TraceIDKey contextKey = "logger_trace_id"
+
+// instance is the shared logrus logger used by all log functions.
+var instance = logrus.New()
+
+func init() {
+	instance.SetFormatter(&logrus.JSONFormatter{
+		TimestampFormat: time.RFC3339,
+		FieldMap: logrus.FieldMap{
+			logrus.FieldKeyTime:  "timestamp",
+			logrus.FieldKeyLevel: "level",
+			logrus.FieldKeyMsg:   "message",
+		},
+	})
+	instance.SetLevel(logrus.InfoLevel)
+	instance.SetOutput(os.Stdout)
+}
+
+// WithTraceID stores a trace ID in the context for context-aware log functions.
+func WithTraceID(ctx context.Context, traceID string) context.Context {
+	return context.WithValue(ctx, TraceIDKey, traceID)
+}
+
+// getLogContext extracts MODULE, SUBMODULE, and FILENAME from the caller's stack.
 func getLogContext() (string, string, string) {
-	// Skip 3 levels: LogInfo/LogError -> getLogContext -> runtime.Caller
+	// Skip 3 levels: runtime.Caller -> getLogContext -> LogXxx -> actual caller
 	_, file, _, ok := runtime.Caller(3)
 	if !ok {
 		return "UNKNOWN", "UNKNOWN", "UNKNOWN"
@@ -27,7 +55,6 @@ func getLogContext() (string, string, string) {
 
 	module := "CORE"
 	submodule := "GENERAL"
-
 	foundApi := false
 	foundInternal := false
 
@@ -61,34 +88,85 @@ func getLogContext() (string, string, string) {
 	return module, submodule, fileName
 }
 
-// LogInfo logs an informational message in standardized format
+func baseFields(mod, sub, file string) logrus.Fields {
+	return logrus.Fields{
+		"module":    mod,
+		"submodule": sub,
+		"file":      file,
+	}
+}
+
+func withTrace(ctx context.Context, fields logrus.Fields) logrus.Fields {
+	if ctx != nil {
+		if traceID, ok := ctx.Value(TraceIDKey).(string); ok && traceID != "" {
+			fields["trace_id"] = traceID
+		}
+	}
+	return fields
+}
+
+// LogInfo logs at INFO level with module/submodule/file context.
 func LogInfo(msg string, args ...interface{}) {
 	mod, sub, file := getLogContext()
 	fullMsg := msg
 	if len(args) > 0 {
 		fullMsg = fmt.Sprintf(msg, args...)
 	}
-	log.Printf("[INFO] [%s] [%s] [%s] %s", mod, sub, file, fullMsg)
+	instance.WithFields(baseFields(mod, sub, file)).Info(fullMsg)
 }
 
-// LogError logs an error message in standardized format
+// LogError logs at ERROR level with module/submodule/file context.
 func LogError(msg string, args ...interface{}) {
 	mod, sub, file := getLogContext()
 	fullMsg := msg
 	if len(args) > 0 {
 		fullMsg = fmt.Sprintf(msg, args...)
 	}
-	log.Printf("[ERROR] [%s] [%s] [%s] %s", mod, sub, file, fullMsg)
+	instance.WithFields(baseFields(mod, sub, file)).Error(fullMsg)
 }
 
-// LogAudit logs an audit message (system level)
+// LogAudit logs an audit event at INFO level with event_type=audit.
 func LogAudit(msg string, args ...interface{}) {
 	mod, sub, file := getLogContext()
 	fullMsg := msg
 	if len(args) > 0 {
 		fullMsg = fmt.Sprintf(msg, args...)
 	}
-	log.Printf("[AUDIT] [%s] [%s] [%s] %s", mod, sub, file, fullMsg)
+	fields := baseFields(mod, sub, file)
+	fields["event_type"] = "audit"
+	instance.WithFields(fields).Info(fullMsg)
+}
+
+// LogInfoCtx logs at INFO level and includes trace_id from context if present.
+func LogInfoCtx(ctx context.Context, msg string, args ...interface{}) {
+	mod, sub, file := getLogContext()
+	fullMsg := msg
+	if len(args) > 0 {
+		fullMsg = fmt.Sprintf(msg, args...)
+	}
+	instance.WithFields(withTrace(ctx, baseFields(mod, sub, file))).Info(fullMsg)
+}
+
+// LogErrorCtx logs at ERROR level and includes trace_id from context if present.
+func LogErrorCtx(ctx context.Context, msg string, args ...interface{}) {
+	mod, sub, file := getLogContext()
+	fullMsg := msg
+	if len(args) > 0 {
+		fullMsg = fmt.Sprintf(msg, args...)
+	}
+	instance.WithFields(withTrace(ctx, baseFields(mod, sub, file))).Error(fullMsg)
+}
+
+// LogAuditCtx logs an audit event and includes trace_id from context if present.
+func LogAuditCtx(ctx context.Context, msg string, args ...interface{}) {
+	mod, sub, file := getLogContext()
+	fullMsg := msg
+	if len(args) > 0 {
+		fullMsg = fmt.Sprintf(msg, args...)
+	}
+	fields := baseFields(mod, sub, file)
+	fields["event_type"] = "audit"
+	instance.WithFields(withTrace(ctx, fields)).Info(fullMsg)
 }
 
 type LoggerService struct {
@@ -117,7 +195,6 @@ func NewLoggerService(config map[string]interface{}) *LoggerService {
 		}
 	}
 	folder, _ := config["folder_path"].(string)
-
 	if folder == "" {
 		folder = "./logs"
 	}
@@ -149,12 +226,10 @@ func (l *LoggerService) Start() error {
 	l.file = file
 	l.currentLog = logFile
 
-	// Set output to both file and terminal
 	multiWriter := io.MultiWriter(file, os.Stdout)
-	log.SetOutput(multiWriter)
-	log.Println("[LoggerService] Started, writing to", logFile, "and Terminal")
+	instance.SetOutput(multiWriter)
+	instance.WithField("log_file", logFile).Info("[LoggerService] Started")
 
-	// background goroutine for rotation and retention
 	l.wg.Add(1)
 	go l.backgroundWorker()
 
@@ -167,7 +242,7 @@ func (l *LoggerService) Stop() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.file != nil {
-		log.Println("[LoggerService] Stopping")
+		instance.Info("[LoggerService] Stopping")
 		return l.file.Close()
 	}
 	return nil
@@ -189,9 +264,7 @@ func (l *LoggerService) rotateIfNeeded() error {
 		return err
 	}
 	if info.Size() >= l.maxFileBytes && l.maxFileBytes > 0 {
-		// close current file who's size is now exceeded
 		l.file.Close()
-		// open new file
 		newLog := l.nextLogFileName()
 		file, err := os.OpenFile(newLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 		if err != nil {
@@ -200,10 +273,9 @@ func (l *LoggerService) rotateIfNeeded() error {
 		l.file = file
 		l.currentLog = newLog
 
-		// Update MultiWriter
 		multiWriter := io.MultiWriter(file, os.Stdout)
-		log.SetOutput(multiWriter)
-		log.Println("[LoggerService] Rotated log file to", newLog)
+		instance.SetOutput(multiWriter)
+		instance.WithField("log_file", newLog).Info("[LoggerService] Rotated log file")
 	}
 	return nil
 }
@@ -254,7 +326,6 @@ func (l *LoggerService) zipAndCleanOldLogs() {
 		if err != nil || info.ModTime().After(cutoff) {
 			continue
 		}
-		// add to zip
 		w, err := zipWriter.Create(f.Name())
 		if err != nil {
 			continue
@@ -265,7 +336,6 @@ func (l *LoggerService) zipAndCleanOldLogs() {
 		}
 		io.Copy(w, src)
 		src.Close()
-		// will remove old log file
 		os.Remove(fullPath)
 	}
 }
@@ -279,8 +349,3 @@ var GlobalLogger *LoggerService
 func SetGlobalLogger(l *LoggerService) {
 	GlobalLogger = l
 }
-
-// Example usage in any method:
-// if logger.GlobalLogger != nil {
-//     logger.GlobalLogger.LogAudit("ResourceManager started")
-// }

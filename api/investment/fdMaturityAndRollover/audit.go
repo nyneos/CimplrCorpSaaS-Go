@@ -53,7 +53,7 @@ func GetClosureAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(performed_by, '')                                              AS performed_by,
 				COALESCE(performed_by_email, '')                                        AS performed_by_email,
 				COALESCE(action_reason, '')                                             AS action_reason,
-				COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS'), '')             AS created_at,
+				COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')             AS created_at,
 				COALESCE(old_closure_status, '')                                        AS old_closure_status,
 				COALESCE(old_bank_id, '')                                               AS old_bank_id,
 				COALESCE(old_bank_name, '')                                             AS old_bank_name,

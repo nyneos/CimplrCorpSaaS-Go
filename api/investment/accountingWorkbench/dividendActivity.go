@@ -446,7 +446,7 @@ func GetDividendsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason
 				FROM investment.auditactionaccountingactivity a
-				WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
+				WHERE UPPER(COALESCE(a.actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 				ORDER BY a.activity_id, a.requested_at DESC
 			)
 			SELECT
@@ -476,7 +476,7 @@ func GetDividendsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(d.reinvest_units,0) AS reinvest_units,
 				COALESCE(d.old_reinvest_units,0) AS old_reinvest_units,
 				d.is_deleted,
-				TO_CHAR(NULLIF(d.updated_at::text, '')::timestamp, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(NULLIF(d.updated_at::text, '')::timestamp, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 				
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,

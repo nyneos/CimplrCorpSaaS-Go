@@ -58,6 +58,12 @@ func main() {
 
 		log.Fatal("failed to connect to DB:", err)
 	}
+	dbPingCtx, dbPingCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dbPingCancel()
+	if err := db.PingContext(dbPingCtx); err != nil {
+		log.Fatal("failed to validate DB connection:", err)
+	}
+	log.Println("database/sql DB connection validated.Success")
 	appmanager.SetDB(db)
 
 	// Initialize pgx pool for better performance
@@ -104,7 +110,7 @@ func main() {
 	manager := appmanager.NewAppManager()
 
 	// Load service configs from YAML
-	servicesCfg, err := appmanager.LoadServiceSequence("./services.yaml")
+	servicesCfg, err := appmanager.LoadServiceSequence("../services.yaml")
 	if err != nil {
 		log.Fatal("failed to load service sequence:", err)
 	}

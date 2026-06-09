@@ -2305,7 +2305,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.variance_action,'')                                         AS variance_action,
 				COALESCE(c.variance_remarks,'')                                        AS variance_remarks,
 				COALESCE(c.variance_resolved_by,'')                                    AS variance_resolved_by,
-				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD HH24:MI:SS'),'') AS variance_resolved_at,
+				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS variance_resolved_at,
 				COALESCE(c.confirmation_status,'')                                     AS confirmation_status,
 				COALESCE(c.penalty_id,'')                                              AS penalty_id,
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
@@ -2353,7 +2353,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(bc.quarter_definition,'')                                     AS quarter_definition,
 				%s,
 				COALESCE(c.is_deleted,false)                                           AS is_deleted,
-				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')           AS record_created_at,
+				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')           AS record_created_at,
 
 				COALESCE(l.audit_id::text,'')                                          AS audit_id,
 				COALESCE(l.action_type,'')                                             AS action_type,
@@ -2744,14 +2744,14 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.variance_action,'')                                         AS variance_action,
 				COALESCE(c.variance_remarks,'')                                        AS variance_remarks,
 				COALESCE(c.variance_resolved_by,'')                                    AS variance_resolved_by,
-				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD HH24:MI:SS'),'')  AS variance_resolved_at,
+				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')  AS variance_resolved_at,
 				COALESCE(c.confirmation_status,'')                                     AS confirmation_status,
 				COALESCE(c.is_deleted,false)                                           AS is_deleted,
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
 				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')        AS first_capitalization_date,
 				%s,
 				%s,
-				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')            AS record_created_at
+				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')            AS record_created_at
 			FROM investment.fd_confirmation c
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false`, bookingAccountExpr, bankReferenceNumberSQL, extraSelect, uploadKeyExpr),

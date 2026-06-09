@@ -1569,7 +1569,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(m.offer_valid_till,'YYYY-MM-DD'),'')              AS offer_valid_till,
 				COALESCE(m.booking_status,'')                                       AS booking_status,
 				COALESCE(m.is_deleted,false)                                        AS is_deleted,
-				COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS record_created_at,
+				COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')         AS record_created_at,
 				COALESCE(m.created_by,'')                                           AS record_created_by,
 
 				COALESCE(l.audit_id::text,'')                                       AS audit_id,
@@ -1750,7 +1750,7 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(TO_CHAR(offer_valid_till,'YYYY-MM-DD'),'')            AS offer_valid_till,
 					COALESCE(booking_status,'')                                    AS booking_status,
 					COALESCE(is_deleted,false)                                     AS is_deleted,
-					COALESCE(TO_CHAR(created_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS record_created_at,
+					COALESCE(TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')      AS record_created_at,
 					COALESCE(created_by,'')                                        AS record_created_by
 				FROM investment.fd_booking_request
 				WHERE booking_id = $1`, accountExpr), bookingID)

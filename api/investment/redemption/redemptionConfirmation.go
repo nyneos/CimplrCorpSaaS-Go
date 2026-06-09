@@ -151,6 +151,11 @@ func GetRedemptionConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFun
 			return
 		}
 
+		_, _ = pgxPool.Exec(r.Context(), `
+			INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, requested_by, requested_at)
+			VALUES ($1, 'DOWNLOAD', 'APPROVED', $2, now())
+		`, req.RedemptionConfirmID, api.GetUserNameFromCtx(r.Context()))
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -206,6 +211,10 @@ func GetRedemptionConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.Handle
 				failedIDs = append(failedIDs, confirmID)
 				continue
 			}
+			_, _ = pgxPool.Exec(r.Context(), `
+				INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, requested_by, requested_at)
+				VALUES ($1, 'DOWNLOAD', 'APPROVED', $2, now())
+			`, confirmID, api.GetUserNameFromCtx(r.Context()))
 			files = append(files, map[string]string{
 				"redemption_confirm_id": confirmID,
 				"download_url":          downloadURL,
@@ -915,7 +924,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 			SELECT DISTINCT ON (redemption_confirm_id) action_id, redemption_confirm_id, actiontype, processing_status
 			FROM investment.auditactionredemptionconfirmation
 			WHERE redemption_confirm_id = ANY($1)
-			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
+			  AND UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 			ORDER BY redemption_confirm_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.RedemptionConfirmIDs)
@@ -1194,7 +1203,7 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 			SELECT DISTINCT ON (redemption_confirm_id) action_id, redemption_confirm_id, processing_status
 			FROM investment.auditactionredemptionconfirmation
 			WHERE redemption_confirm_id = ANY($1)
-			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
+			  AND UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 			ORDER BY redemption_confirm_id, requested_at DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.RedemptionConfirmIDs)
@@ -1296,7 +1305,7 @@ func fetchRedemptionConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool,
 				a.checker_comment,
 				a.reason
 			FROM investment.auditactionredemptionconfirmation a
-			WHERE UPPER(COALESCE(a.actiontype, '')) <> 'UPLOAD_FILE'
+			WHERE UPPER(COALESCE(a.actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 			ORDER BY a.redemption_confirm_id, a.requested_at DESC
 		),
 		history AS (
@@ -1366,9 +1375,9 @@ func fetchRedemptionConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool,
 			m.old_status,
 			COALESCE(m.upload_s3_key, '') AS upload_s3_key,
 			m.confirmed_by,
-			TO_CHAR(m.confirmed_at, 'YYYY-MM-DD HH24:MI:SS') AS confirmed_at,
+			TO_CHAR(m.confirmed_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS confirmed_at,
 			m.is_deleted,
-			TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+			TO_CHAR(m.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 			
 			-- initiation fields
 			TO_CHAR(i.requested_date, 'YYYY-MM-DD') AS initiation_requested_date,
@@ -1458,7 +1467,7 @@ func GetApprovedRedemptionConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc 
 					redemption_confirm_id,
 					processing_status
 				FROM investment.auditactionredemptionconfirmation
-				WHERE UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
+				WHERE UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 				ORDER BY redemption_confirm_id, requested_at DESC
 			)
 			SELECT

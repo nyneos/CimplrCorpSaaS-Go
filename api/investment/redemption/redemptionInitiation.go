@@ -1303,7 +1303,7 @@ func fetchRedemptionInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, i
 			COALESCE(s.method, 'FIFO') AS method,
 			COALESCE(s.method, 'FIFO') AS old_method,
 			m.is_deleted,
-			TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+			TO_CHAR(m.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
 			
 			COALESCE(l.actiontype,'') AS action_type,
 			COALESCE(l.processing_status,'') AS processing_status,
@@ -1992,7 +1992,7 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(ot.demat_acc_number,'') AS demat_acc_number,
 				COALESCE(ot.demat_id,'') AS demat_id,
 				COALESCE(ot.entity_name,'') AS entity_name,
-				TO_CHAR(ot.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
+				TO_CHAR(ot.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
 			FROM investment.onboard_transaction ot
 			LEFT JOIN investment.portfolio_snapshot ps ON ps.batch_id = ot.batch_id
 			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)

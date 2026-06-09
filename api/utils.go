@@ -86,15 +86,67 @@ func IsBulkSuccess(results []map[string]interface{}) bool {
 	return true
 }
 
+// sanitizeInternalError strips raw DB/driver error details from a 5xx message.
+// It preserves the human-readable prefix (e.g. "Failed to fetch sweeps") but
+// removes the internal suffix (e.g. ": pq: column X does not exist").
+// The full original message is always logged before this is called.
+func sanitizeInternalError(msg string) string {
+	// Known internal error signatures — truncate the message at these points.
+	// Covers: PostgreSQL driver, Go database/sql, network, context, stdlib, OS, runtime.
+	dbSignatures := []string{
+		// PostgreSQL driver (lib/pq)
+		"pq:",
+		// Go database/sql
+		"sql:",
+		// PostgreSQL server-level messages
+		"ERROR:", "FATAL:", "PANIC:",
+		// Context / timeout
+		"context deadline exceeded", "context canceled",
+		// Network
+		"connection refused", "connection reset by peer",
+		"i/o timeout", "dial tcp", "dial udp",
+		// Database driver / scan internals
+		"driver:", "scantype:", "converting NULL",
+		// Go stdlib that leaks internals
+		"strconv.", "runtime error:", "reflect.",
+		// File system (leaks paths)
+		"no such file or directory", "permission denied",
+		"too many open files",
+		// TLS / crypto
+		"tls:", "x509:", "certificate",
+	}
+	lower := strings.ToLower(msg)
+	for _, sig := range dbSignatures {
+		if idx := strings.Index(lower, strings.ToLower(sig)); idx != -1 {
+			prefix := strings.TrimRight(strings.TrimSpace(msg[:idx]), ": -")
+			if prefix == "" {
+				return "An internal error occurred"
+			}
+			return prefix
+		}
+	}
+	// No known DB signature — split on the first ": " to strip any appended err.Error() tail.
+	if idx := strings.Index(msg, ": "); idx != -1 {
+		return msg[:idx]
+	}
+	// No separator either — message looks like a plain human string, return as-is.
+	return msg
+}
+
 // Error response helper
 func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
-	logger.LogError("%s", errMsg)
+	logger.LogError("%s", errMsg) // always log the full detail
+
+	clientMsg := errMsg
+	if status >= 500 {
+		clientMsg = sanitizeInternalError(errMsg)
+	}
 
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
+		constants.ValueError:   clientMsg,
 	})
 }
 
@@ -107,7 +159,9 @@ func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
 		logger.LogInfo("RespondWithResult success")
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true})
 	} else {
-		// Set appropriate error status code based on error type
+		logger.LogError("RespondWithResult: %s", errMsg) // log full detail before any sanitization
+
+		clientMsg := errMsg
 		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
 			w.WriteHeader(http.StatusBadRequest) // 400
 		} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
@@ -116,9 +170,9 @@ func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
 			w.WriteHeader(http.StatusUnauthorized) // 401
 		} else {
 			w.WriteHeader(http.StatusInternalServerError) // 500
+			clientMsg = sanitizeInternalError(errMsg)
 		}
-		logger.LogError("RespondWithResult: %s", errMsg)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: clientMsg})
 	}
 }
 
@@ -132,9 +186,8 @@ func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payl
 	}
 
 	if !success && errMsg != "" {
-		resp[constants.ValueError] = errMsg
-		logger.LogError("RespondWithPayload: %s", errMsg)
-		// Set appropriate error status code
+		logger.LogError("RespondWithPayload: %s", errMsg) // log full detail before any sanitization
+		clientMsg := errMsg
 		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
 			w.WriteHeader(http.StatusBadRequest) // 400
 		} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
@@ -143,7 +196,9 @@ func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payl
 			w.WriteHeader(http.StatusUnauthorized) // 401
 		} else {
 			w.WriteHeader(http.StatusInternalServerError) // 500
+			clientMsg = sanitizeInternalError(errMsg)
 		}
+		resp[constants.ValueError] = clientMsg
 	} else {
 		w.WriteHeader(http.StatusOK) // 200
 	}

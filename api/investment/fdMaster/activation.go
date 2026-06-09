@@ -1826,7 +1826,7 @@ func GetFDJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				TO_CHAR(je.entry_date, 'YYYY-MM-DD') AS entry_date,
 				je.accounting_period, je.entry_type, je.description,
 				je.total_debit, je.total_credit, je.status,
-				TO_CHAR(je.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+				TO_CHAR(je.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
 				je.created_by,
 				jl.line_id, jl.line_number, jl.account_number, jl.account_name,
 				jl.account_type, jl.debit_amount, jl.credit_amount, jl.narration,

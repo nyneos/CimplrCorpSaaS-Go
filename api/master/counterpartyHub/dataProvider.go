@@ -553,9 +553,9 @@ func GetDataProviderAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			history AS (
 				SELECT provider_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at
 				FROM apibox.audit_data_provider
 				GROUP BY provider_id
 			)
@@ -569,9 +569,9 @@ func GetDataProviderAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.action_type,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.requested_by,'') AS requested_by,
-				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 				COALESCE(l.old_provider_type,'') AS old_provider_type,
@@ -620,8 +620,8 @@ func GetDataProviderAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		id := r.URL.Query().Get("provider_id")
 		q := `SELECT audit_id, provider_id, action_type, processing_status, reason,
-			         requested_by, TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS'),
-			         COALESCE(checker_by,''), COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),''),
+			         requested_by, TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			         COALESCE(checker_by,''), COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
 			         COALESCE(checker_comment,''), COALESCE(old_provider_type,''), COALESCE(old_delivery_mechanism,'')
 			  FROM apibox.audit_data_provider`
 		var args []interface{}

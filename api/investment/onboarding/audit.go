@@ -69,8 +69,8 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(b.source,'') AS source,
 				COALESCE(b.status,'') AS status,
 				COALESCE(b.approval_status,'') AS approval_status,
-				TO_CHAR(b.created_at,'YYYY-MM-DD HH24:MI:SS') AS created_at,
-				TO_CHAR(b.completed_at,'YYYY-MM-DD HH24:MI:SS') AS completed_at
+				TO_CHAR(b.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
+				TO_CHAR(b.completed_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS completed_at
 			FROM investment.onboard_batch b`
 
 		// Query 2: entity-level audit union (AMC + Scheme + DP + Demat + Folio)
