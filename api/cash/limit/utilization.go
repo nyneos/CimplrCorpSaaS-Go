@@ -676,9 +676,9 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":       stringOrEmpty(actionType),
 				"processing_status": stringOrEmpty(procStatus),
 				"requested_by":      stringOrEmpty(requestedBy),
-				"requested_at":      timeOrEmpty(requestedAt),
+				"requested_at":      auditTimeOrEmpty(requestedAt),
 				"checker_by":        stringOrEmpty(checkerBy),
-				"checker_at":        timeOrEmpty(checkerAt),
+				"checker_at":        auditTimeOrEmpty(checkerAt),
 				"checker_comment":   stringOrEmpty(checkerComment),
 				"reason":            stringOrEmpty(reason),
 
@@ -717,9 +717,9 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"limit_action_type":       stringOrEmpty(limitActionType),
 				"limit_processing_status": stringOrEmpty(limitProcStatus),
 				"limit_requested_by":      stringOrEmpty(limitRequestedBy),
-				"limit_requested_at":      timeOrEmpty(limitRequestedAt),
+				"limit_requested_at":      auditTimeOrEmpty(limitRequestedAt),
 				"limit_checker_by":        stringOrEmpty(limitCheckerBy),
-				"limit_checker_at":        timeOrEmpty(limitCheckerAt),
+				"limit_checker_at":        auditTimeOrEmpty(limitCheckerAt),
 				"limit_checker_comment":   stringOrEmpty(limitCheckerComment),
 				"limit_reason":            stringOrEmpty(limitReason),
 				// KPIs

@@ -354,7 +354,7 @@ func getAuditInfoPayable(ctx context.Context, pgxPool *pgxpool.Pool, payableID s
 					by = *rbyPtr
 				}
 				if ratPtr != nil {
-					at = ratPtr.Format(constants.DateTimeFormat)
+					at = api.FormatAuditTimestampIST(*ratPtr)
 				}
 				if atype == "CREATE" && createdBy == "" {
 					createdBy = by
@@ -391,7 +391,7 @@ func getAuditInfoReceivable(ctx context.Context, pgxPool *pgxpool.Pool, receivab
 					by = *rbyPtr
 				}
 				if ratPtr != nil {
-					at = ratPtr.Format(constants.DateTimeFormat)
+					at = api.FormatAuditTimestampIST(*ratPtr)
 				}
 				if atype == "CREATE" && createdBy == "" {
 					createdBy = by
@@ -863,19 +863,19 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if atype == "CREATE" {
 						auditPayableMap[pid]["created_by"] = requestedBy
 						if requestedAt != nil {
-							auditPayableMap[pid]["created_at"] = requestedAt.Format(constants.DateTimeFormat)
+							auditPayableMap[pid]["created_at"] = api.FormatAuditTimestampIST(*requestedAt)
 						}
 						auditPayableMap[pid]["created_status"] = status
 					} else if atype == constants.AuditActionEdit {
 						auditPayableMap[pid]["edited_by"] = requestedBy
 						if requestedAt != nil {
-							auditPayableMap[pid]["edited_at"] = requestedAt.Format(constants.DateTimeFormat)
+							auditPayableMap[pid]["edited_at"] = api.FormatAuditTimestampIST(*requestedAt)
 						}
 						auditPayableMap[pid]["edited_status"] = status
 					} else if atype == constants.AuditActionDelete {
 						auditPayableMap[pid]["deleted_by"] = requestedBy
 						if requestedAt != nil {
-							auditPayableMap[pid]["deleted_at"] = requestedAt.Format(constants.DateTimeFormat)
+							auditPayableMap[pid]["deleted_at"] = api.FormatAuditTimestampIST(*requestedAt)
 						}
 						auditPayableMap[pid]["deleted_status"] = status
 					}
@@ -918,19 +918,19 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if atype == "CREATE" {
 						auditReceivableMap[rid]["created_by"] = requestedBy
 						if requestedAt != nil {
-							auditReceivableMap[rid]["created_at"] = requestedAt.Format(constants.DateTimeFormat)
+							auditReceivableMap[rid]["created_at"] = api.FormatAuditTimestampIST(*requestedAt)
 						}
 						auditReceivableMap[rid]["created_status"] = status
 					} else if atype == constants.AuditActionEdit {
 						auditReceivableMap[rid]["edited_by"] = requestedBy
 						if requestedAt != nil {
-							auditReceivableMap[rid]["edited_at"] = requestedAt.Format(constants.DateTimeFormat)
+							auditReceivableMap[rid]["edited_at"] = api.FormatAuditTimestampIST(*requestedAt)
 						}
 						auditReceivableMap[rid]["edited_status"] = status
 					} else if atype == constants.AuditActionDelete {
 						auditReceivableMap[rid]["deleted_by"] = requestedBy
 						if requestedAt != nil {
-							auditReceivableMap[rid]["deleted_at"] = requestedAt.Format(constants.DateTimeFormat)
+							auditReceivableMap[rid]["deleted_at"] = api.FormatAuditTimestampIST(*requestedAt)
 						}
 						auditReceivableMap[rid]["deleted_status"] = status
 					}

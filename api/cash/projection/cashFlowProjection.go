@@ -78,6 +78,23 @@ func ifaceToTimeString(v interface{}) string {
 	}
 }
 
+func ifaceToAuditTimeString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case time.Time:
+		return api.FormatAuditTimestampIST(t)
+	case *time.Time:
+		if t == nil {
+			return ""
+		}
+		return api.FormatAuditTimestampIST(*t)
+	default:
+		return ifaceToTimeString(v)
+	}
+}
+
 func Capitalize(s string) string {
 	if s == "" {
 		return s
@@ -1192,10 +1209,10 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"processing_status": ifaceToString(processingStatus),
 					"reason":            ifaceToString(reason),
 					"requested_by":      ifaceToString(requestedBy),
-					"requested_at":      ifaceToTimeString(requestedAt),
+					"requested_at":      ifaceToAuditTimeString(requestedAt),
 					"requested_ip":      ifaceToString(requestedIP),
 					"checker_by":        ifaceToString(checkerBy),
-					"checker_at":        ifaceToTimeString(checkerAt),
+					"checker_at":        ifaceToAuditTimeString(checkerAt),
 					"checker_ip":        ifaceToString(checkerIP),
 					"checker_comment":   ifaceToString(checkerComment),
 				}

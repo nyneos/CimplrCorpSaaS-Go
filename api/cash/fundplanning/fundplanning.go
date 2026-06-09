@@ -1435,10 +1435,10 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if requestedAt.Valid {
-				plan["requested_at"] = requestedAt.Time.Format(constants.DateTimeFormat)
+				plan["requested_at"] = api.FormatAuditTimestampIST(requestedAt.Time)
 			}
 			if checkerAt.Valid {
-				plan["checker_at"] = checkerAt.Time.Format(constants.DateTimeFormat)
+				plan["checker_at"] = api.FormatAuditTimestampIST(checkerAt.Time)
 			}
 
 			results = append(results, plan)
@@ -1580,10 +1580,10 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if requestedAt.Valid {
-				group["requested_at"] = requestedAt.Time.Format(constants.DateTimeFormat)
+				group["requested_at"] = api.FormatAuditTimestampIST(requestedAt.Time)
 			}
 			if checkerAt.Valid {
-				group["checker_at"] = checkerAt.Time.Format(constants.DateTimeFormat)
+				group["checker_at"] = api.FormatAuditTimestampIST(checkerAt.Time)
 			}
 
 			groups = append(groups, group)

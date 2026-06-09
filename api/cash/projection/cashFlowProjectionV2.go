@@ -913,10 +913,10 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						"processing_status": processingStatus,
 						"reason":            reason,
 						"requested_by":      requestedBy,
-						"requested_at":      requestedAt.Format(constants.DateTimeFormat),
+						"requested_at":      api.FormatAuditTimestampIST(requestedAt),
 						"requested_ip":      ifaceToString(requestedIP),
 						"checker_by":        ifaceToString(checkerBy),
-						"checker_at":        ifaceToTimeString(checkerAt),
+						"checker_at":        ifaceToAuditTimeString(checkerAt),
 						"checker_ip":        ifaceToString(checkerIP),
 						"checker_comment":   ifaceToString(checkerComment),
 					})

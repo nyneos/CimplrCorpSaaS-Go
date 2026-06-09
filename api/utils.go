@@ -50,7 +50,7 @@ func getPtrString(s *string) string {
 // getPtrTime returns formatted time for non-nil pointer
 func getPtrTime(t *time.Time) string {
 	if t != nil {
-		return t.Format(constants.DateTimeFormat)
+		return FormatAuditTimestampIST(*t)
 	}
 	return ""
 }

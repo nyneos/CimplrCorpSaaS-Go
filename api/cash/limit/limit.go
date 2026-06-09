@@ -818,9 +818,9 @@ func GetAllBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":       stringOrEmpty(actionType),
 				"processing_status": stringOrEmpty(procStatus),
 				"requested_by":      stringOrEmpty(requestedBy),
-				"requested_at":      timeOrEmpty(requestedAt),
+				"requested_at":      auditTimeOrEmpty(requestedAt),
 				"checker_by":        stringOrEmpty(checkerBy),
-				"checker_at":        timeOrEmpty(checkerAt),
+				"checker_at":        auditTimeOrEmpty(checkerAt),
 				"checker_comment":   stringOrEmpty(checkerComment),
 				"reason":            stringOrEmpty(reason),
 			}
@@ -1154,4 +1154,11 @@ func timeOrEmpty(t *time.Time) string {
 		return ""
 	}
 	return t.Format(constants.DateTimeFormat)
+}
+
+func auditTimeOrEmpty(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return api.FormatAuditTimestampIST(*t)
 }
