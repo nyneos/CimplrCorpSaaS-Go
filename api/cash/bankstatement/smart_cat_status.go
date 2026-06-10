@@ -65,8 +65,6 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 
 		ctx := r.Context()
 
-		// ── 1. Transaction totals ─────────────────────────────────────
-		var totalTxns, categorized, uncategorized int
 		entityFilter := ""
 		entityArgs := []interface{}{}
 		if req.EntityID != "" {
@@ -74,14 +72,20 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 			entityArgs = append(entityArgs, req.EntityID)
 		}
 
+		txnScopeJoin := `
+			FROM cimplrcorpsaas.bank_statement_transactions t
+			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
+			WHERE COALESCE(bs.is_deleted, false) = false` + entityFilter
+
+		// ── 1. Transaction totals ─────────────────────────────────────
+		var totalTxns, categorized, uncategorized int
+
 		_ = pool.QueryRow(ctx, `
 			SELECT
 				COUNT(*),
-				COUNT(category_id),
-				COUNT(*) FILTER (WHERE category_id IS NULL)
-			FROM cimplrcorpsaas.bank_statement_transactions t
-			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
-			WHERE COALESCE(bs.is_deleted, false) = false`+entityFilter,
+				COUNT(t.category_id),
+				COUNT(*) FILTER (WHERE t.category_id IS NULL)
+			`+txnScopeJoin,
 			entityArgs...,
 		).Scan(&totalTxns, &categorized, &uncategorized)
 
@@ -98,21 +102,19 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 		}
 		stepRows, err := pool.Query(ctx, `
 			WITH latest AS (
-				SELECT DISTINCT ON (transaction_id)
-					transaction_id, classification_step
-				FROM cimplrcorpsaas.classification_audit_log
-				WHERE transaction_id IN (
-					SELECT t.transaction_id
-					FROM cimplrcorpsaas.bank_statement_transactions t
-					JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
-					WHERE COALESCE(bs.is_deleted, false) = false
-				)
-				ORDER BY transaction_id, classified_at DESC
+				SELECT DISTINCT ON (cal.transaction_id)
+					cal.transaction_id, cal.classification_step
+				FROM cimplrcorpsaas.classification_audit_log cal
+				JOIN cimplrcorpsaas.bank_statement_transactions t ON t.transaction_id = cal.transaction_id
+				JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
+				WHERE COALESCE(bs.is_deleted, false) = false`+entityFilter+`
+				ORDER BY cal.transaction_id, cal.classified_at DESC
 			)
 			SELECT classification_step, COUNT(*)
 			FROM latest
+			WHERE classification_step IS NOT NULL AND classification_step <> ''
 			GROUP BY classification_step
-		`)
+		`, entityArgs...)
 		if err == nil {
 			for stepRows.Next() {
 				var step string
@@ -138,11 +140,9 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 				COUNT(*) FILTER (WHERE t.confidence_score >= 0.90),
 				COUNT(*) FILTER (WHERE t.confidence_score >= 0.70 AND t.confidence_score < 0.90),
 				COUNT(*) FILTER (WHERE t.confidence_score < 0.70 AND t.confidence_score IS NOT NULL)
-			FROM cimplrcorpsaas.bank_statement_transactions t
-			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
-			WHERE t.classification_step IS NOT NULL
-			  AND COALESCE(bs.is_deleted, false) = false
-		`).Scan(&highConf, &medConf, &lowConf)
+			`+txnScopeJoin+`
+			  AND t.classification_step IS NOT NULL
+		`, entityArgs...).Scan(&highConf, &medConf, &lowConf)
 
 		classifiedTotal := highConf + medConf + lowConf
 		highPct, medPct, lowPct := 0.0, 0.0, 0.0
@@ -163,9 +163,9 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 			    ON t.transaction_id = q.transaction_id
 			JOIN cimplrcorpsaas.bank_statements bs
 			    ON bs.bank_statement_id = t.bank_statement_id
-			WHERE COALESCE(bs.is_deleted, false) = false
+			WHERE COALESCE(bs.is_deleted, false) = false`+entityFilter+`
 			GROUP BY q.status
-		`)
+		`, entityArgs...)
 		if err == nil {
 			for rqRows.Next() {
 				var status string
@@ -206,6 +206,112 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 		}
 		_ = lastRun
 
+		// ── 7. Top 10 categories × classification step heatmap ───────
+		// Uses the category assigned at each waterfall step (audit log), not the
+		// post-review transaction category, so RULE/COUNTERPARTY/GL assignments show correctly.
+		stepKeys := []string{
+			"RULE", "COUNTERPARTY", "GL", "CORRECTION",
+			"SIMILARITY", "ACCOUNT_DEFAULT", "AI_INFERENCE", "UNALLOCATED",
+		}
+		type catStepKey struct {
+			category string
+			step     string
+		}
+		catStepCounts := map[catStepKey]int{}
+		catTotals := map[string]int{}
+
+		hmRows, hmErr := pool.Query(ctx, `
+			WITH latest AS (
+				SELECT DISTINCT ON (cal.transaction_id)
+					cal.transaction_id,
+					cal.classification_step,
+					cal.category_id
+				FROM cimplrcorpsaas.classification_audit_log cal
+				JOIN cimplrcorpsaas.bank_statement_transactions t ON t.transaction_id = cal.transaction_id
+				JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
+				WHERE COALESCE(bs.is_deleted, false) = false`+entityFilter+`
+				ORDER BY cal.transaction_id, cal.classified_at DESC
+			),
+			classified AS (
+				SELECT
+					l.transaction_id,
+					l.classification_step,
+					COALESCE(
+						NULLIF(TRIM(l.category_id), ''),
+						NULLIF(TRIM(q.suggested_cat), ''),
+						NULLIF(TRIM(t.category_id::text), '')
+					) AS effective_category_id
+				FROM latest l
+				JOIN cimplrcorpsaas.bank_statement_transactions t ON t.transaction_id = l.transaction_id
+				LEFT JOIN cimplrcorpsaas.categorization_review_queue q ON q.transaction_id = l.transaction_id
+				WHERE l.classification_step IS NOT NULL AND l.classification_step <> ''
+			),
+			cat_step AS (
+				SELECT
+					COALESCE(NULLIF(TRIM(mc.category_name), ''), 'Unallocated') AS category_name,
+					c.classification_step,
+					COUNT(*) AS cnt
+				FROM classified c
+				LEFT JOIN public.mastercashflowcategory mc
+				    ON mc.category_id::text = c.effective_category_id
+				GROUP BY category_name, c.classification_step
+			),
+			top_cats AS (
+				SELECT category_name
+				FROM cat_step
+				GROUP BY category_name
+				ORDER BY SUM(cnt) DESC
+				LIMIT 10
+			)
+			SELECT cs.category_name, cs.classification_step, cs.cnt
+			FROM cat_step cs
+			JOIN top_cats tc ON tc.category_name = cs.category_name
+			ORDER BY (
+				SELECT SUM(cs2.cnt) FROM cat_step cs2 WHERE cs2.category_name = cs.category_name
+			) DESC, cs.category_name, cs.classification_step
+		`, entityArgs...)
+		if hmErr == nil {
+			for hmRows.Next() {
+				var category, step string
+				var cnt int64
+				if scanErr := hmRows.Scan(&category, &step, &cnt); scanErr == nil {
+					catStepCounts[catStepKey{category, step}] = int(cnt)
+					catTotals[category] += int(cnt)
+				}
+			}
+			if rowsErr := hmRows.Err(); rowsErr != nil {
+				log.Printf("[SMART-CAT-STATUS] top_categories_heatmap rows error: %v", rowsErr)
+			}
+			hmRows.Close()
+		} else {
+			log.Printf("[SMART-CAT-STATUS] top_categories_heatmap query error: %v", hmErr)
+		}
+
+		type catTotal struct {
+			name  string
+			total int
+		}
+		rankedCats := make([]catTotal, 0, len(catTotals))
+		for name, total := range catTotals {
+			rankedCats = append(rankedCats, catTotal{name, total})
+		}
+		for i := 0; i < len(rankedCats); i++ {
+			for j := i + 1; j < len(rankedCats); j++ {
+				if rankedCats[j].total > rankedCats[i].total {
+					rankedCats[i], rankedCats[j] = rankedCats[j], rankedCats[i]
+				}
+			}
+		}
+
+		topCategoriesHeatmap := make([]map[string]interface{}, 0, len(rankedCats))
+		for _, cat := range rankedCats {
+			row := map[string]interface{}{"category": cat.name}
+			for _, step := range stepKeys {
+				row[step] = catStepCounts[catStepKey{cat.name, step}]
+			}
+			topCategoriesHeatmap = append(topCategoriesHeatmap, row)
+		}
+
 		// ── Build response ────────────────────────────────────────────
 		resp := map[string]interface{}{
 			"success": true,
@@ -223,6 +329,8 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 			},
 			"review_queue":           reviewQueue,
 			"correction_memory_size": correctionCount,
+			"heatmap_steps":          stepKeys,
+			"top_categories_heatmap": topCategoriesHeatmap,
 			"last_run":               lastRunStr,
 			"last_run_ago_mins":      round2(lastRunAgo),
 		}
