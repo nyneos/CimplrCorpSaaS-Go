@@ -31,6 +31,13 @@ func DownloadSelectedAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc
 	return additionalfiles.NewDownloadSelectedHandler(pool, fundPlanAdditionalFilesConfig())
 }
 
+func DownloadFundPlanPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, fundPlanAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "Fund Planning",
+		IDField:     "plan_id",
+	})
+}
+
 func DeleteAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, fundPlanAdditionalFilesConfig())
 }

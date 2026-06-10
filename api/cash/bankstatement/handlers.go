@@ -1010,7 +1010,29 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					})
 					continue
 				}
-				if err := tx.Commit(ctx); err != nil {
+				_, err = tx.Exec(ctx,`
+					UPDATE public.bank_balances_manual
+					SET is_deleted = TRUE,
+						deleted_at = now(),
+						deleted_by = (
+							SELECT requested_by
+							FROM cimplrcorpsaas.auditactionbankstatement
+							WHERE bankstatementid = $1
+							  AND actiontype = 'DELETE'
+							ORDER BY requested_at DESC, action_id DESC
+							LIMIT 1
+						)
+					WHERE balance_id = $1
+				`, bsid)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+				if err := tx.Commit(); err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
 						"success":           false,
@@ -1038,11 +1060,12 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				var accountNumber string
 				var statementPeriodEnd time.Time
 				var openingBalance, closingBalance float64
-				err = tx.QueryRow(ctx, `
-				       SELECT account_number, statement_period_end, opening_balance, closing_balance
+				var uploadS3Key sql.NullString
+				err = tx.QueryRowContext(ctx, `
+				       SELECT account_number, statement_period_end, opening_balance, closing_balance, upload_s3_key
 				       FROM cimplrcorpsaas.bank_statements
 				       WHERE bank_statement_id = $1
-			       `, bsid).Scan(&accountNumber, &statementPeriodEnd, &openingBalance, &closingBalance)
+			       `, bsid).Scan(&accountNumber, &statementPeriodEnd, &openingBalance, &closingBalance, &uploadS3Key)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1114,9 +1137,9 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 
 				_, err = tx.Exec(ctx, `
 				       INSERT INTO public.bank_balances_manual (
-					       balance_id, bank_name, account_no, currency_code, nickname, country, as_of_date, balance_type, balance_amount, opening_balance, total_credits, total_debits, closing_balance, statement_type, source_channel
+					       balance_id, bank_name, account_no, currency_code, nickname, country, as_of_date, balance_type, balance_amount, opening_balance, total_credits, total_debits, closing_balance, statement_type, source_channel, upload_s3_key
 				       ) VALUES (
-					       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+					       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
 				       )
 				       ON CONFLICT (balance_id) DO UPDATE SET
 					       bank_name = EXCLUDED.bank_name,
@@ -1132,7 +1155,8 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					       total_debits = EXCLUDED.total_debits,
 					       closing_balance = EXCLUDED.closing_balance,
 					       statement_type = EXCLUDED.statement_type,
-					       source_channel = EXCLUDED.source_channel
+					       source_channel = EXCLUDED.source_channel,
+					       upload_s3_key = EXCLUDED.upload_s3_key
 			       `,
 					bsid,
 					bankName,
@@ -1149,6 +1173,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					closingBalance,
 					"BANK_STATEMENT_MANUAL_UPLOAD",
 					"MANUAL UPLOAD",
+					uploadS3Key,
 				)
 				if err != nil {
 					results = append(results, map[string]interface{}{

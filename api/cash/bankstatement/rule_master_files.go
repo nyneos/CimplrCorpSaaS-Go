@@ -31,6 +31,13 @@ func DownloadSelectedRuleMasterAdditionalFilesHandler(pool *pgxpool.Pool) http.H
 	return additionalfiles.NewDownloadSelectedHandler(pool, ruleMasterAdditionalFilesConfig())
 }
 
+func DownloadRuleMasterPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, ruleMasterAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "Rule Master",
+		IDField:     "rule_id",
+	})
+}
+
 func DeleteRuleMasterAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, ruleMasterAdditionalFilesConfig())
 }

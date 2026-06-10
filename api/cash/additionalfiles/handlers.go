@@ -87,6 +87,11 @@ type Config struct {
 	RecordMainUploadAudit   func(ctx context.Context, tx pgx.Tx, parentID string, payload MainUploadAuditPayload) error
 	RecordMainDownloadAudit func(ctx context.Context, exec auditExecutor, parentID string, payload MainUploadAuditPayload) error
 	RequireMainUploadAudit  bool
+	// AuditByFileIDOnly keys the file lifecycle (delete-approval state, audit trail,
+	// status enrichment) by file_id alone, ignoring module_key/parent_record_id. Use
+	// for files that are shown under multiple parents so they share ONE lifecycle
+	// across every screen. file_id must be globally unique for this to be safe.
+	AuditByFileIDOnly bool
 }
 
 type downloadRequest struct {
@@ -997,32 +1002,35 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 		fileIDs = append(fileIDs, files[i].FileID)
 	}
 
-	query := `
-		SELECT DISTINCT ON (file_id)
-			file_id,
-			requested_by,
-			requested_at,
-			checker_by,
-			checker_at,
-			checker_comment,
-			processing_status
-		FROM ` + auditTableName(cfg) + `
-		WHERE module_key = $1
-		  AND parent_record_id = $2
-		  AND file_id = ANY($3)
-		  AND action_type = $4
-		  AND processing_status = ANY($5)
-		ORDER BY file_id, requested_at DESC, audit_id DESC
-	`
-	rows, err := pool.Query(
-		ctx,
-		query,
-		cfg.Module,
-		parentID,
-		fileIDs,
-		fileAuditDeleteAction,
-		[]string{fileAuditPendingDeleteApproval, fileAuditRejectedStatus},
-	)
+	pendingStatuses := []string{fileAuditPendingDeleteApproval, fileAuditRejectedStatus}
+	var query string
+	var args []interface{}
+	if cfg.AuditByFileIDOnly {
+		query = `
+			SELECT DISTINCT ON (file_id)
+				file_id, requested_by, requested_at, checker_by, checker_at, checker_comment, processing_status
+			FROM ` + auditTableName(cfg) + `
+			WHERE file_id = ANY($1)
+			  AND action_type = $2
+			  AND processing_status = ANY($3)
+			ORDER BY file_id, requested_at DESC, audit_id DESC
+		`
+		args = []interface{}{fileIDs, fileAuditDeleteAction, pendingStatuses}
+	} else {
+		query = `
+			SELECT DISTINCT ON (file_id)
+				file_id, requested_by, requested_at, checker_by, checker_at, checker_comment, processing_status
+			FROM ` + auditTableName(cfg) + `
+			WHERE module_key = $1
+			  AND parent_record_id = $2
+			  AND file_id = ANY($3)
+			  AND action_type = $4
+			  AND processing_status = ANY($5)
+			ORDER BY file_id, requested_at DESC, audit_id DESC
+		`
+		args = []interface{}{cfg.Module, parentID, fileIDs, fileAuditDeleteAction, pendingStatuses}
+	}
+	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1223,27 +1231,23 @@ func InsertMainUploadAudit(ctx context.Context, tx pgx.Tx, tableName, parentColu
 }
 
 func listAuditEvents(ctx context.Context, pool *pgxpool.Pool, cfg Config, parentID, fileID string) ([]fileAuditEvent, error) {
-	query := `
-		SELECT audit_id,
-		       module_key,
-		       parent_record_id,
-		       file_id,
-		       action_type,
-		       processing_status,
-		       requested_by,
-		       requested_at,
-		       checker_by,
-		       checker_at,
-		       checker_comment,
-		       reason
-		FROM ` + auditTableName(cfg) + `
-		WHERE module_key = $1
-		  AND parent_record_id = $2
-		  AND file_id = $3
-		ORDER BY requested_at ASC, audit_id ASC
-	`
+	cols := `audit_id, module_key, parent_record_id, file_id, action_type, processing_status,
+	         requested_by, requested_at, checker_by, checker_at, checker_comment, reason`
+	var query string
+	var args []interface{}
+	if cfg.AuditByFileIDOnly {
+		query = `SELECT ` + cols + ` FROM ` + auditTableName(cfg) + `
+			WHERE file_id = $1
+			ORDER BY requested_at ASC, audit_id ASC`
+		args = []interface{}{fileID}
+	} else {
+		query = `SELECT ` + cols + ` FROM ` + auditTableName(cfg) + `
+			WHERE module_key = $1 AND parent_record_id = $2 AND file_id = $3
+			ORDER BY requested_at ASC, audit_id ASC`
+		args = []interface{}{cfg.Module, parentID, fileID}
+	}
 
-	rows, err := pool.Query(ctx, query, cfg.Module, parentID, fileID)
+	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1314,27 +1318,23 @@ type queryRower interface {
 }
 
 func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, cfg Config, fileID string, forUpdate bool) (*fileAuditEvent, error) {
-	query := `
-		SELECT audit_id,
-		       module_key,
-		       parent_record_id,
-		       file_id,
-		       action_type,
-		       processing_status,
-		       requested_by,
-		       requested_at,
-		       checker_by,
-		       checker_at,
-		       checker_comment,
-		       reason
-		FROM ` + auditTableName(cfg) + `
-		WHERE module_key = $1
-		  AND file_id = $2
-		  AND action_type = $3
-		  AND processing_status = $4
-		ORDER BY requested_at DESC, audit_id DESC
-		LIMIT 1
-	`
+	cols := `audit_id, module_key, parent_record_id, file_id, action_type, processing_status,
+	         requested_by, requested_at, checker_by, checker_at, checker_comment, reason`
+	var query string
+	var args []interface{}
+	if cfg.AuditByFileIDOnly {
+		query = `SELECT ` + cols + ` FROM ` + auditTableName(cfg) + `
+			WHERE file_id = $1 AND action_type = $2 AND processing_status = $3
+			ORDER BY requested_at DESC, audit_id DESC
+			LIMIT 1`
+		args = []interface{}{fileID, fileAuditDeleteAction, fileAuditPendingDeleteApproval}
+	} else {
+		query = `SELECT ` + cols + ` FROM ` + auditTableName(cfg) + `
+			WHERE module_key = $1 AND file_id = $2 AND action_type = $3 AND processing_status = $4
+			ORDER BY requested_at DESC, audit_id DESC
+			LIMIT 1`
+		args = []interface{}{cfg.Module, fileID, fileAuditDeleteAction, fileAuditPendingDeleteApproval}
+	}
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
@@ -1348,7 +1348,7 @@ func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, cfg Co
 	var checkerAt sql.NullTime
 	var checkerComment sql.NullString
 	var reason sql.NullString
-	err := queryer.QueryRow(ctx, query, cfg.Module, fileID, fileAuditDeleteAction, fileAuditPendingDeleteApproval).Scan(
+	err := queryer.QueryRow(ctx, query, args...).Scan(
 		&event.AuditID,
 		&module,
 		&parent,

@@ -32,6 +32,14 @@ func DownloadSelectedAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc
 	return additionalfiles.NewDownloadSelectedHandler(pool, bankStatementAdditionalFilesConfig())
 }
 
+func DownloadBankStatementPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, bankStatementAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "Bank Statement",
+		IDField:     "bank_statement_id",
+		LoadMain:    loadBankStatementPackageMainFile,
+	})
+}
+
 func DeleteAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, bankStatementAdditionalFilesConfig())
 }
@@ -49,7 +57,7 @@ func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func bankStatementAdditionalFilesConfig() additionalfiles.Config {
-	return additionalfiles.Config{
+	return additionalfiles.WithCashCrossStageVisibility(additionalfiles.Config{
 		Module:                "bankstatement",
 		AuditSource:           "BANK_STATEMENT",
 		ParentIDField:         "bank_statement_id",
@@ -61,7 +69,7 @@ func bankStatementAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteBankStatementAdditionalFile,
 		SoftDeleteTx:          deleteBankStatementAdditionalFileTx,
 		RecordMainUploadAudit: recordBankStatementMainUploadAudit,
-	}
+	})
 }
 
 func recordBankStatementMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
@@ -83,6 +91,25 @@ func listBankStatementAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, p
 		  AND s.entity_id = ANY($2)
 		ORDER BY f.uploaded_at DESC
 	`, parentID, entityIDs)
+}
+
+func loadBankStatementPackageMainFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+	entityIDs := api.GetEntityIDsFromCtx(ctx)
+	if len(entityIDs) == 0 {
+		return nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
+	}
+
+	var uploadS3Key string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(upload_s3_key, '')
+		FROM cimplrcorpsaas.bank_statements
+		WHERE bank_statement_id = $1
+		  AND entity_id = ANY($2)
+	`, rowID, entityIDs).Scan(&uploadS3Key)
+	if err != nil || strings.TrimSpace(uploadS3Key) == "" {
+		return nil, err
+	}
+	return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
 }
 
 func createBankStatementAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {

@@ -1628,9 +1628,6 @@ func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Con
 		GetMany: func(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]cashfiles.FileRecord, []string, error) {
 			return getInvestmentAdditionalFiles(ctx, pool, def, parentID, fileIDs)
 		},
-		DuplicateExists: func(ctx context.Context, pool *pgxpool.Pool, parentID, fileHash string) (bool, error) {
-			return investmentAdditionalFileDuplicateExists(ctx, pool, def, parentID, fileHash)
-		},
 		SoftDelete: func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 			return deleteInvestmentAdditionalFile(ctx, pool, def, parentID, fileID, deletedBy, deletedAt)
 		},
@@ -1683,6 +1680,52 @@ func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Con
 		cfg.RecordMainUploadAudit = recordFDAccountingJournalMainUploadAudit
 	}
 
+	if isFDCrossStageModule(def.Module) {
+		module := def.Module
+		cfg.AuditByFileIDOnly = true
+		cfg.List = func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]cashfiles.FileRecord, error) {
+			return listFDCrossStageFiles(ctx, pool, module, parentID)
+		}
+		cfg.GetOne = func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*cashfiles.FileRecord, error) {
+			return getFDCrossStageFile(ctx, pool, module, parentID, fileID, false)
+		}
+		cfg.GetAnyFile = func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*cashfiles.FileRecord, error) {
+			return getFDCrossStageFile(ctx, pool, module, parentID, fileID, true)
+		}
+		cfg.GetMany = func(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]cashfiles.FileRecord, []string, error) {
+			return getFDCrossStageFiles(ctx, pool, module, parentID, fileIDs)
+		}
+		cfg.SoftDelete = func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+			return softDeleteFDCrossStageFile(ctx, pool, fileID, deletedBy, deletedAt)
+		}
+		cfg.SoftDeleteTx = func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+			return softDeleteFDCrossStageFile(ctx, tx, fileID, deletedBy, deletedAt)
+		}
+	}
+
+	if isMFCrossStageModule(def.Module) {
+		module := def.Module
+		cfg.AuditByFileIDOnly = true
+		cfg.List = func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]cashfiles.FileRecord, error) {
+			return listMFCrossStageFiles(ctx, pool, module, parentID)
+		}
+		cfg.GetOne = func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*cashfiles.FileRecord, error) {
+			return getMFCrossStageFile(ctx, pool, module, parentID, fileID, false)
+		}
+		cfg.GetAnyFile = func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string) (*cashfiles.FileRecord, error) {
+			return getMFCrossStageFile(ctx, pool, module, parentID, fileID, true)
+		}
+		cfg.GetMany = func(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]cashfiles.FileRecord, []string, error) {
+			return getMFCrossStageFiles(ctx, pool, module, parentID, fileIDs)
+		}
+		cfg.SoftDelete = func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+			return softDeleteMFCrossStageFile(ctx, pool, fileID, deletedBy, deletedAt)
+		}
+		cfg.SoftDeleteTx = func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+			return softDeleteMFCrossStageFile(ctx, tx, fileID, deletedBy, deletedAt)
+		}
+	}
+
 	return cfg
 }
 
@@ -1712,32 +1755,6 @@ func createInvestmentAdditionalFileReturningID(ctx context.Context, tx pgx.Tx, d
 		  %s
 	`, def.ParentColumn, def.ParentTable, def.ParentColumn, def.ParentFilter)
 	return cashfiles.InsertAdditionalFileRowReturningID(ctx, tx, def.TableName, def.ParentColumn, input, parentScope, strings.TrimSpace(input.ParentID))
-}
-
-func investmentAdditionalFileDuplicateExists(ctx context.Context, pool *pgxpool.Pool, def investmentFileDefinition, parentID, fileHash string) (bool, error) {
-	parentID = strings.TrimSpace(parentID)
-	fileHash = strings.TrimSpace(fileHash)
-	if parentID == "" || fileHash == "" {
-		return false, nil
-	}
-
-	query := fmt.Sprintf(`
-		SELECT EXISTS (
-			SELECT 1
-			FROM %s f
-			JOIN %s p ON p.%s = f.%s
-			WHERE f.%s::text = $1
-			  AND f.file_hash = $2
-			  AND COALESCE(f.is_deleted, FALSE) = FALSE
-			  %s
-		)
-	`, def.TableName, def.ParentTable, def.ParentColumn, def.ParentColumn, def.ParentColumn, def.ParentFilter)
-
-	var exists bool
-	if err := pool.QueryRow(ctx, query, parentID, fileHash).Scan(&exists); err != nil {
-		return false, err
-	}
-	return exists, nil
 }
 
 func getInvestmentAdditionalFile(ctx context.Context, pool *pgxpool.Pool, def investmentFileDefinition, parentID, fileID string, includeDeleted bool) (*cashfiles.FileRecord, error) {

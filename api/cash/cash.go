@@ -1,6 +1,7 @@
 package cash
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/bankbalances"
 	"CimplrCorpSaas/api/cash/bankstatement"
 	fundavailibilty "CimplrCorpSaas/api/cash/fundavailibilty"
@@ -13,6 +14,7 @@ import (
 	"CimplrCorpSaas/api/travel"
 	"CimplrCorpSaas/internal/observability"
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
@@ -24,7 +26,7 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
-func StartCashService(port string) {
+func StartCashService(db *sql.DB, port string) {
 	const serviceName = "cash"
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
@@ -93,6 +95,7 @@ func StartCashService(port string) {
 	mux.Handle("/cash/rule-master/additional-files/upload", cashChain(bankstatement.UploadRuleMasterAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/rule-master/additional-files/download", cashChain(bankstatement.DownloadRuleMasterAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/rule-master/additional-files/download-bulk", cashChain(bankstatement.DownloadSelectedRuleMasterAdditionalFilesHandler(pgxPool)))
+	mux.Handle("/cash/rule-master/package-zip", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DownloadRuleMasterPackageZipHandler(pgxPool)))
 	mux.Handle("/cash/rule-master/additional-files/delete", cashChain(bankstatement.DeleteRuleMasterAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/rule-master/additional-files/delete/approve", cashChain(bankstatement.ApproveRuleMasterAdditionalFileDeleteHandler(pgxPool)))
 	mux.Handle("/cash/rule-master/additional-files/delete/reject", cashChain(bankstatement.RejectRuleMasterAdditionalFileDeleteHandler(pgxPool)))
@@ -121,6 +124,7 @@ func StartCashService(port string) {
 	mux.Handle("/cash/bank-statements/v2/transactions", cashChain(bankstatement.GetBankStatementTransactionsHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/download", cashChain(bankstatement.GetBankStatementDownloadURLHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/download-bulk", cashChain(bankstatement.GetBankStatementBulkDownloadURLHandler(pgxPool)))
+	mux.Handle("/cash/bank-statements/v2/package-zip", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DownloadBankStatementPackageZipHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/additional-files/list", cashChain(bankstatement.ListAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/additional-files/upload", cashChain(bankstatement.UploadAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/additional-files/download", cashChain(bankstatement.DownloadAdditionalFileHandler(pgxPool)))
@@ -159,6 +163,7 @@ func StartCashService(port string) {
 	mux.Handle("/cash/transactions/upload-payrec-batch", cashChain(payablerecievable.BatchUploadTransactionsV2(pgxPool))) //twotwo
 	mux.Handle("/cash/transactions/download", cashChain(payablerecievable.GetTransactionDownloadURL(pgxPool)))
 	mux.Handle("/cash/transactions/download-bulk", cashChain(payablerecievable.GetTransactionBulkDownloadURL(pgxPool)))
+	mux.Handle("/cash/transactions/payables/package-zip", api.BusinessUnitMiddleware(db)(payablerecievable.DownloadPayablePackageZipHandler(pgxPool)))
 	mux.Handle("/cash/transactions/payables/additional-files/list", cashChain(payablerecievable.ListPayableAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/transactions/payables/additional-files/upload", cashChain(payablerecievable.UploadPayableAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/transactions/payables/additional-files/download", cashChain(payablerecievable.DownloadPayableAdditionalFileHandler(pgxPool)))
@@ -168,6 +173,7 @@ func StartCashService(port string) {
 	mux.Handle("/cash/transactions/payables/additional-files/delete/reject", cashChain(payablerecievable.RejectPayableAdditionalFileDeleteHandler(pgxPool)))
 	mux.Handle("/cash/transactions/payables/additional-files/audit", cashChain(payablerecievable.AuditPayableAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/transactions/receivables/additional-files/list", cashChain(payablerecievable.ListReceivableAdditionalFilesHandler(pgxPool)))
+	mux.Handle("/cash/transactions/receivables/package-zip", api.BusinessUnitMiddleware(db)(payablerecievable.DownloadReceivablePackageZipHandler(pgxPool)))
 	mux.Handle("/cash/transactions/receivables/additional-files/upload", cashChain(payablerecievable.UploadReceivableAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/transactions/receivables/additional-files/download", cashChain(payablerecievable.DownloadReceivableAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/transactions/receivables/additional-files/download-bulk", cashChain(payablerecievable.DownloadSelectedReceivableAdditionalFilesHandler(pgxPool)))
@@ -191,6 +197,7 @@ func StartCashService(port string) {
 	mux.Handle("/cash/fund-planning/additional-files/upload", cashChain(fundplanning.UploadAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/fund-planning/additional-files/download", cashChain(fundplanning.DownloadAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/fund-planning/additional-files/download-bulk", cashChain(fundplanning.DownloadSelectedAdditionalFilesHandler(pgxPool)))
+	mux.Handle("/cash/fund-planning/package-zip", api.BusinessUnitMiddleware(db)(fundplanning.DownloadFundPlanPackageZipHandler(pgxPool)))
 	mux.Handle("/cash/fund-planning/additional-files/delete", cashChain(fundplanning.DeleteAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/fund-planning/additional-files/delete/approve", cashChain(fundplanning.ApproveAdditionalFileDeleteHandler(pgxPool)))
 	mux.Handle("/cash/fund-planning/additional-files/delete/reject", cashChain(fundplanning.RejectAdditionalFileDeleteHandler(pgxPool)))
@@ -224,6 +231,7 @@ func StartCashService(port string) {
 	mux.Handle("/cash/sweep-planning/additional-files/upload", cashChain(sweepconfig.UploadSweepPlanningAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/sweep-planning/additional-files/download", cashChain(sweepconfig.DownloadSweepPlanningAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/sweep-planning/additional-files/download-bulk", cashChain(sweepconfig.DownloadSelectedSweepPlanningAdditionalFilesHandler(pgxPool)))
+	mux.Handle("/cash/sweep-planning/package-zip", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.DownloadSweepPlanningPackageZipHandler(pgxPool)))
 	mux.Handle("/cash/sweep-planning/additional-files/delete", cashChain(sweepconfig.DeleteSweepPlanningAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/sweep-planning/additional-files/delete/approve", cashChain(sweepconfig.ApproveSweepPlanningAdditionalFileDeleteHandler(pgxPool)))
 	mux.Handle("/cash/sweep-planning/additional-files/delete/reject", cashChain(sweepconfig.RejectSweepPlanningAdditionalFileDeleteHandler(pgxPool)))
@@ -244,6 +252,7 @@ func StartCashService(port string) {
 	mux.Handle("/cash/sweep-initiation/additional-files/upload", cashChain(sweepconfig.UploadSweepInitiationAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/additional-files/download", cashChain(sweepconfig.DownloadSweepInitiationAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/additional-files/download-bulk", cashChain(sweepconfig.DownloadSelectedSweepInitiationAdditionalFilesHandler(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/package-zip", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.DownloadSweepInitiationPackageZipHandler(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/additional-files/delete", cashChain(sweepconfig.DeleteSweepInitiationAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/additional-files/delete/approve", cashChain(sweepconfig.ApproveSweepInitiationAdditionalFileDeleteHandler(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/additional-files/delete/reject", cashChain(sweepconfig.RejectSweepInitiationAdditionalFileDeleteHandler(pgxPool)))
@@ -296,6 +305,7 @@ func StartCashService(port string) {
 	mux.Handle("/cash/projection/v2/upload", cashChain(projection.UploadCashflowProposalV2(pgxPool)))
 	mux.Handle("/cash/projection/v2/download", cashChain(projection.GetProjectionDownloadURLV2(pgxPool)))
 	mux.Handle("/cash/projection/v2/download-bulk", cashChain(projection.GetProjectionBulkDownloadURLV2(pgxPool)))
+	mux.Handle("/cash/projection/v2/package-zip", middlewares.PreValidationMiddleware(pgxPool)(projection.DownloadProjectionPackageZipHandler(pgxPool)))
 	mux.Handle("/cash/projection/v2/additional-files/list", cashChain(projection.ListAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/projection/v2/additional-files/upload", cashChain(projection.UploadAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/projection/v2/additional-files/download", cashChain(projection.DownloadAdditionalFileHandler(pgxPool)))
@@ -317,6 +327,7 @@ func StartCashService(port string) {
 	mux.Handle("/cash/bank-balances/audit", cashChain(bankbalances.GetBankBalanceAuditHandler(pgxPool)))
 	mux.Handle("/cash/bank-balances/download", cashChain(bankbalances.GetBankBalanceDownloadURL(pgxPool)))
 	mux.Handle("/cash/bank-balances/download-bulk", cashChain(bankbalances.GetBankBalanceBulkDownloadURL(pgxPool)))
+	mux.Handle("/cash/bank-balances/package-zip", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.DownloadBankBalancePackageZipHandler(pgxPool)))
 	mux.Handle("/cash/bank-balances/additional-files/list", cashChain(bankbalances.ListAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/bank-balances/additional-files/upload", cashChain(bankbalances.UploadAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/bank-balances/additional-files/download", cashChain(bankbalances.DownloadAdditionalFileHandler(pgxPool)))
