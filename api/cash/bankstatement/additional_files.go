@@ -1,7 +1,6 @@
 package bankstatement
 
 import (
-	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
