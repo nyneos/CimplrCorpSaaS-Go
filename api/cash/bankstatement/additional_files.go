@@ -95,7 +95,7 @@ func listBankStatementAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, p
 }
 
 func loadBankStatementPackageMainFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
-	entityIDs := api.GetEntityIDsFromCtx(ctx)
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	if len(entityIDs) == 0 {
 		return nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
