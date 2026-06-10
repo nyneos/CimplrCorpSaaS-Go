@@ -80,6 +80,15 @@ func fdFormRawJSON(r *http.Request, key string) *json.RawMessage {
 	return &msg
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 func fdConfirmationCaptureRequestFromForm(r *http.Request) fdConfirmationCaptureRequest {
 	return fdConfirmationCaptureRequest{
 		UserID:                   strings.TrimSpace(r.FormValue("user_id")),
@@ -232,8 +241,13 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
-			"interest_type": bookedInterestTypeCode,
-			"frequency_id":  bookedFrequencyID,
+			"interest_type":           bookedInterestTypeCode,
+			"confirmed_interest_type": req.ConfirmedInterestType,
+			"frequency_id":            bookedFrequencyID,
+			"confirmed_frequency_id":  req.ConfirmedFrequencyID,
+			"payout_frequency_id":     firstNonEmpty(req.PayoutFrequencyID, bookedPayoutFreqID),
+			"accrual_frequency_code":  firstNonEmpty(req.AccrualFrequencyCode, bookedAccrualFreqCode),
+			"penalty_id":              req.PenaltyID,
 		}); errMsg != "" {
 			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
@@ -623,11 +637,15 @@ func GetFDConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		var uploadS3Key sql.NullString
+		scopeWhere, scopeArgs := fdBookingScopeWhere(r.Context(), "b", 2)
+		queryArgs := append([]interface{}{confirmationID}, scopeArgs...)
 		if err := pgxPool.QueryRow(r.Context(), `
-			SELECT upload_s3_key
-			FROM investment.fd_confirmation
-			WHERE confirmation_id = $1 AND COALESCE(is_deleted,false) = false
-		`, confirmationID).Scan(&uploadS3Key); err != nil {
+			SELECT c.upload_s3_key
+			FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE c.confirmation_id = $1
+			  AND COALESCE(c.is_deleted,false) = false`+scopeWhere,
+			queryArgs...).Scan(&uploadS3Key); err != nil {
 			api.RespondWithResult(w, false, constants.ErrFileNotFound)
 			return
 		}
@@ -680,11 +698,15 @@ func GetFDConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			var uploadS3Key sql.NullString
+			scopeWhere, scopeArgs := fdBookingScopeWhere(r.Context(), "b", 2)
+			queryArgs := append([]interface{}{confirmationID}, scopeArgs...)
 			if err := pgxPool.QueryRow(r.Context(), `
-				SELECT upload_s3_key
-				FROM investment.fd_confirmation
-				WHERE confirmation_id = $1 AND COALESCE(is_deleted,false) = false
-			`, confirmationID).Scan(&uploadS3Key); err != nil {
+				SELECT c.upload_s3_key
+				FROM investment.fd_confirmation c
+				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+				WHERE c.confirmation_id = $1
+				  AND COALESCE(c.is_deleted,false) = false`+scopeWhere,
+				queryArgs...).Scan(&uploadS3Key); err != nil {
 				failedIDs = append(failedIDs, confirmationID)
 				continue
 			}
@@ -833,8 +855,11 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
-			"interest_type": req.ConfirmedInterestType,
-			"frequency_id":  req.ConfirmedFrequencyID,
+			"interest_type":          req.ConfirmedInterestType,
+			"frequency_id":           firstNonEmpty(req.ConfirmedFrequencyID, bookedFrequencyID),
+			"payout_frequency_id":    firstNonEmpty(req.PayoutFrequencyID, bookedPayoutFreqID),
+			"accrual_frequency_code": firstNonEmpty(req.AccrualFrequencyCode, bookedAccrualFreqCode),
+			"penalty_id":             req.PenaltyID,
 		}); errMsg != "" {
 			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
@@ -1297,8 +1322,11 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
-			"interest_type": req.Fields["confirmed_interest_type_code"],
-			"frequency_id":  req.Fields["confirmed_frequency_id"],
+			"interest_type":          req.Fields["confirmed_interest_type_code"],
+			"frequency_id":           req.Fields["confirmed_frequency_id"],
+			"payout_frequency_id":    req.Fields["payout_frequency_id"],
+			"accrual_frequency_code": req.Fields["accrual_frequency_code"],
+			"penalty_id":             req.Fields["penalty_id"],
 		}); errMsg != "" {
 			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
@@ -2287,6 +2315,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		uploadKeyExpr := resolveFDConfirmationUploadKeyExpression(ctx, pgxPool, "c")
+		scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "b", 1)
 
 		q := fmt.Sprintf(`
 			WITH latest_audit AS (
@@ -2446,12 +2475,13 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ON aie.instance_id = ai.instance_id
 				AND aie.status = 'ACTIVE'
 			WHERE COALESCE(c.is_deleted,false) = false
+			  %s
 			ORDER BY GREATEST(
 				COALESCE(l.requested_at,'1970-01-01'::timestamp),
 				COALESCE(l.checker_at,'1970-01-01'::timestamp)
-			) DESC`, bookingAccountExpr, uploadKeyExpr)
+			) DESC`, bookingAccountExpr, uploadKeyExpr, scopeWhere)
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, scopeArgs...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
@@ -2494,6 +2524,7 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var q string
 		var args []interface{}
 		if confirmationID != "" {
+			scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "b", 2)
 			q = `
 				SELECT
 					a.audit_id::text, a.confirmation_id, a.action_type, a.processing_status,
@@ -2524,9 +2555,12 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_confirmation c ON c.confirmation_id = a.confirmation_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 				WHERE a.confirmation_id = $1
+				` + scopeWhere + `
 				ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`
 			args = append(args, confirmationID)
+			args = append(args, scopeArgs...)
 		} else {
+			scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "b", 1)
 			q = `
 				SELECT
 					a.audit_id::text, a.confirmation_id, a.action_type, a.processing_status,
@@ -2556,8 +2590,11 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_audit_confirmation a
 				LEFT JOIN investment.fd_confirmation c ON c.confirmation_id = a.confirmation_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+				WHERE 1=1
+				` + scopeWhere + `
 				ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
 				LIMIT 1000`
+			args = append(args, scopeArgs...)
 		}
 
 		rows, err := pgxPool.Query(ctx, q, args...)
@@ -2599,7 +2636,11 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		entityID := r.URL.Query().Get("entity_id")
+		entityID := strings.TrimSpace(r.URL.Query().Get("entity_id"))
+		if !fdBookingEntityAllowed(ctx, entityID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return
+		}
 		bookingAccountExpr, err := resolveFDBookingAccountExpression(ctx, pgxPool, "b")
 		if err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrLoadBookingSchemaFailed)
@@ -2691,9 +2732,12 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var args []interface{}
 		if entityID != "" {
-			baseQ += ` AND b.entity_id = $1`
+			baseQ += fmt.Sprintf(` AND b.entity_id = $%d`, len(args)+1)
 			args = append(args, entityID)
 		}
+		scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "b", len(args)+1)
+		baseQ += scopeWhere
+		args = append(args, scopeArgs...)
 		baseQ += ` ORDER BY latest_approval_at DESC`
 
 		rows, err := pgxPool.Query(ctx, baseQ, args...)
@@ -2759,6 +2803,8 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bankReferenceNumberSQL = "COALESCE(NULLIF(BTRIM(c.bank_reference_number::text),''), c.bank_fd_ref_no,'')"
 		}
 		extraSelect := fdConfirmationDetailExtraSelect(confCols)
+		scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "b", 2)
+		confArgs := append([]interface{}{confirmationID}, scopeArgs...)
 
 		// ── Confirmation row ─────────────────────────────────────────────────
 		confRows, err := pgxPool.Query(ctx, fmt.Sprintf(`
@@ -2798,8 +2844,9 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')            AS record_created_at
 			FROM investment.fd_confirmation c
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
-			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false`, bookingAccountExpr, bankReferenceNumberSQL, extraSelect, uploadKeyExpr),
-			confirmationID)
+			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false
+			%s`, bookingAccountExpr, bankReferenceNumberSQL, extraSelect, uploadKeyExpr, scopeWhere),
+			confArgs...)
 		if err != nil {
 			msg, httpStatus := getUserFriendlyFDError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, httpStatus, msg)
@@ -3294,7 +3341,11 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		bookingID := r.URL.Query().Get("booking_id")
-		entityID := r.URL.Query().Get("entity_id")
+		entityID := strings.TrimSpace(r.URL.Query().Get("entity_id"))
+		if !fdBookingEntityAllowed(ctx, entityID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return
+		}
 
 		// ── 1. SENT_TO_BANK bookings waiting for confirmation ─────────────────
 		bookingSQL := `
@@ -3359,6 +3410,9 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bookingArgs = append(bookingArgs, entityID)
 			argIdx++
 		}
+		scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "br", argIdx)
+		bookingSQL += scopeWhere
+		bookingArgs = append(bookingArgs, scopeArgs...)
 		bookingSQL += " ORDER BY br.expected_maturity_date ASC"
 
 		bookingRows, err := pgxPool.Query(ctx, bookingSQL, bookingArgs...)

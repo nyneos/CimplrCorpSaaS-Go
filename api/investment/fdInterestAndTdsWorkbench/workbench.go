@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/validation"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -41,6 +43,119 @@ func rowsToMapSlice(rows pgx.Rows) ([]map[string]interface{}, error) {
 	return out, rows.Err()
 }
 
+func fdAllowedEntityIDs(ctx context.Context) []string {
+	return api.GetEntityIDsFromCtx(ctx)
+}
+
+func fdEntityAllowed(ctx context.Context, entityID string) bool {
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" {
+		return false
+	}
+	for _, allowedID := range fdAllowedEntityIDs(ctx) {
+		if strings.EqualFold(strings.TrimSpace(allowedID), entityID) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendFDEntityScope(ctx context.Context, query *string, args *[]interface{}, idx *int, column, requestedEntityID string) string {
+	requestedEntityID = strings.TrimSpace(requestedEntityID)
+	if requestedEntityID != "" {
+		if !fdEntityAllowed(ctx, requestedEntityID) {
+			return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", requestedEntityID)
+		}
+		*query += fmt.Sprintf(" AND %s=$%d", column, *idx)
+		*args = append(*args, requestedEntityID)
+		*idx += 1
+		return ""
+	}
+	allowedIDs := fdAllowedEntityIDs(ctx)
+	if len(allowedIDs) == 0 {
+		return constants.ErrNoAccessibleBusinessUnit
+	}
+	*query += fmt.Sprintf(" AND %s=ANY($%d::text[])", column, *idx)
+	*args = append(*args, allowedIDs)
+	*idx += 1
+	return ""
+}
+
+func validateFDRecordAccess(ctx context.Context, pool *pgxpool.Pool, fdID string) string {
+	fdID = strings.TrimSpace(fdID)
+	if fdID == "" {
+		return ""
+	}
+	var entityID, bankID, bankName string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(entity_id, ''), COALESCE(bank_id, ''), COALESCE(bank_name, '')
+		FROM investment.fd_master
+		WHERE fd_id = $1 AND COALESCE(is_deleted, false) = false
+		LIMIT 1
+	`, fdID).Scan(&entityID, &bankID, &bankName); err != nil {
+		return constants.ErrFDNotFound
+	}
+	if !fdEntityAllowed(ctx, entityID) {
+		return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID)
+	}
+	return validation.ValidateFDMasterReferences(ctx, map[string]interface{}{
+		"entity_id": entityID,
+		"bank_id":   bankID,
+		"bank_name": bankName,
+	})
+}
+
+func validateTDSRecordAccess(ctx context.Context, pool *pgxpool.Pool, tdsID string) string {
+	tdsID = strings.TrimSpace(tdsID)
+	if tdsID == "" {
+		return ""
+	}
+	var entityID, fdID, bankID, bankName string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(t.entity_id, ''), COALESCE(t.fd_id, ''), COALESCE(fd.bank_id, ''), COALESCE(fd.bank_name, '')
+		FROM investment.fd_tds_receipt t
+		LEFT JOIN investment.fd_master fd ON fd.fd_id = t.fd_id
+		WHERE t.tds_id = $1 AND COALESCE(t.is_deleted, false) = false
+		LIMIT 1
+	`, tdsID).Scan(&entityID, &fdID, &bankID, &bankName); err != nil {
+		return "TDS receipt not found"
+	}
+	if !fdEntityAllowed(ctx, entityID) {
+		return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID)
+	}
+	return validation.ValidateFDMasterReferences(ctx, map[string]interface{}{
+		"entity_id": entityID,
+		"bank_id":   bankID,
+		"bank_name": bankName,
+		"fd_id":     fdID,
+	})
+}
+
+func validateFDInterestReceiptAccess(ctx context.Context, pool *pgxpool.Pool, receiptID string) string {
+	receiptID = strings.TrimSpace(receiptID)
+	if receiptID == "" {
+		return ""
+	}
+	var entityID, fdID, bankID, bankName string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(r.entity_id, ''), COALESCE(r.fd_id, ''), COALESCE(r.bank_id, ''), COALESCE(r.bank_name, '')
+		FROM investment.fd_interest_receipt r
+		WHERE r.receipt_id = $1 AND COALESCE(r.is_deleted, false) = false
+		LIMIT 1
+	`, receiptID).Scan(&entityID, &fdID, &bankID, &bankName); err != nil {
+		return "FD interest receipt not found"
+	}
+	if !fdEntityAllowed(ctx, entityID) {
+		return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID)
+	}
+	return validation.ValidateFDMasterReferences(ctx, map[string]interface{}{
+		"entity_id": entityID,
+		"bank_id":   bankID,
+		"bank_name": bankName,
+		"fd_id":     fdID,
+	})
+}
+
 // GetInterestWorkbenchSummary returns consolidated interest receipt status counts and totals.
 func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -70,10 +185,9 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_interest_receipt WHERE is_deleted=false`
 		args := []interface{}{}
 		idx := 1
-		if req.EntityID != "" {
-			statusSQL += fmt.Sprintf(constants.QuerryEntityID, idx)
-			args = append(args, req.EntityID)
-			idx++
+		if msg := appendFDEntityScope(ctx, &statusSQL, &args, &idx, "entity_id", req.EntityID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
 		}
 		if req.FromDate != "" {
 			statusSQL += fmt.Sprintf(" AND receipt_date>=$%d", idx)
@@ -103,10 +217,9 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_interest_receipt WHERE is_deleted=false`
 		recentArgs := []interface{}{}
 		ridx := 1
-		if req.EntityID != "" {
-			recentSQL += fmt.Sprintf(constants.QuerryEntityID, ridx)
-			recentArgs = append(recentArgs, req.EntityID)
-			ridx++
+		if msg := appendFDEntityScope(ctx, &recentSQL, &recentArgs, &ridx, "entity_id", req.EntityID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
 		}
 		if req.FromDate != "" {
 			recentSQL += fmt.Sprintf(" AND receipt_date>=$%d", ridx)
@@ -130,11 +243,26 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 
 		var totalGross, totalTDS, totalNet float64
 		var totalCount int
-		pool.QueryRow(ctx,
-			`SELECT COUNT(*), COALESCE(SUM(gross_interest_received),0),
+		totalSQL := `SELECT COUNT(*), COALESCE(SUM(gross_interest_received),0),
 			        COALESCE(SUM(tds_amount_deducted),0), COALESCE(SUM(net_amount_received),0)
-			 FROM investment.fd_interest_receipt WHERE is_deleted=false`,
-		).Scan(&totalCount, &totalGross, &totalTDS, &totalNet) //nolint:errcheck
+			 FROM investment.fd_interest_receipt WHERE is_deleted=false`
+		totalArgs := []interface{}{}
+		tidx := 1
+		if msg := appendFDEntityScope(ctx, &totalSQL, &totalArgs, &tidx, "entity_id", req.EntityID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
+		if req.FromDate != "" {
+			totalSQL += fmt.Sprintf(" AND receipt_date>=$%d", tidx)
+			totalArgs = append(totalArgs, req.FromDate)
+			tidx++
+		}
+		if req.ToDate != "" {
+			totalSQL += fmt.Sprintf(" AND receipt_date<=$%d", tidx)
+			totalArgs = append(totalArgs, req.ToDate)
+			tidx++
+		}
+		pool.QueryRow(ctx, totalSQL, totalArgs...).Scan(&totalCount, &totalGross, &totalTDS, &totalNet) //nolint:errcheck
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -169,11 +297,12 @@ func GetTDSWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 		baseFilter := " WHERE is_deleted=false"
 		args := []interface{}{}
 		idx := 1
-		if req.EntityID != "" {
-			baseFilter += fmt.Sprintf(constants.QuerryEntityID, idx)
-			args = append(args, req.EntityID)
-			idx++
+		baseSQL := baseFilter
+		if msg := appendFDEntityScope(ctx, &baseSQL, &args, &idx, "entity_id", req.EntityID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
 		}
+		baseFilter = baseSQL
 		if req.FromDate != "" {
 			baseFilter += fmt.Sprintf(" AND period_start>=$%d", idx)
 			args = append(args, req.FromDate)
@@ -209,15 +338,24 @@ func GetTDSWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 		defer entityRows.Close()
 		entityData, _ := rowsToMapSlice(entityRows)
 
-		exRows, err := pool.Query(ctx, `
-			SELECT exception_id, fd_id,
+		exSQL := `
+			SELECT e.exception_id, e.fd_id,
 			       COALESCE(exception_type,'') AS exception_type,
 			       COALESCE(severity,'') AS severity,
 			       COALESCE(variance_amount,0) AS variance_amount,
 			       COALESCE(exception_status,'') AS exception_status,
 			       TO_CHAR(raised_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS raised_at
-			FROM investment.fd_receipt_exception
-			WHERE is_deleted=false ORDER BY raised_at DESC LIMIT 10`)
+			FROM investment.fd_receipt_exception e
+			JOIN investment.fd_master fd ON fd.fd_id = e.fd_id
+			WHERE e.is_deleted=false`
+		exArgs := []interface{}{}
+		exIdx := 1
+		if msg := appendFDEntityScope(ctx, &exSQL, &exArgs, &exIdx, "fd.entity_id", req.EntityID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
+		exSQL += " ORDER BY raised_at DESC LIMIT 10"
+		exRows, err := pool.Query(ctx, exSQL, exArgs...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Exception query failed: "+err.Error())
 			return
@@ -270,9 +408,11 @@ func GetReconciliationDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			       TO_CHAR(completed_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS completed_at
 			FROM investment.fd_receipt_reconcile_run`
 		runArgs := []interface{}{}
-		if req.EntityID != "" {
-			runSQL += " WHERE entity_id=$1"
-			runArgs = append(runArgs, req.EntityID)
+		runSQL += " WHERE 1=1"
+		runIdx := 1
+		if msg := appendFDEntityScope(ctx, &runSQL, &runArgs, &runIdx, "entity_id", req.EntityID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
 		}
 		runSQL += fmt.Sprintf(" ORDER BY triggered_at DESC LIMIT %d", req.Limit)
 
@@ -284,12 +424,20 @@ func GetReconciliationDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		defer runRows.Close()
 		runData, _ := rowsToMapSlice(runRows)
 
-		pipelineRows, err := pool.Query(ctx, `
+		pipelineSQL := `
 			SELECT severity, exception_status, COUNT(*) AS count,
 			       COALESCE(SUM(variance_amount),0) AS total_variance
-			FROM investment.fd_receipt_exception
-			WHERE is_deleted=false AND exception_status NOT IN ('CLOSED')
-			GROUP BY severity, exception_status ORDER BY severity, exception_status`)
+			FROM investment.fd_receipt_exception e
+			JOIN investment.fd_master fd ON fd.fd_id = e.fd_id
+			WHERE e.is_deleted=false AND exception_status NOT IN ('CLOSED')`
+		pipelineArgs := []interface{}{}
+		pipelineIdx := 1
+		if msg := appendFDEntityScope(ctx, &pipelineSQL, &pipelineArgs, &pipelineIdx, "fd.entity_id", req.EntityID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
+		pipelineSQL += " GROUP BY severity, exception_status ORDER BY severity, exception_status"
+		pipelineRows, err := pool.Query(ctx, pipelineSQL, pipelineArgs...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Pipeline query failed: "+err.Error())
 			return
@@ -326,6 +474,10 @@ func GetInterestVsAccrualAnalysis(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+		if msg := validateFDRecordAccess(ctx, pool, req.FdID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
 
 		analysisSQL := `
 			SELECT r.fd_id, r.fd_ref_no, r.entity_id, r.entity_name,
@@ -353,10 +505,9 @@ func GetInterestVsAccrualAnalysis(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE COALESCE(r.is_deleted,false)=false`
 		args := []interface{}{}
 		idx := 1
-		if req.EntityID != "" {
-			analysisSQL += fmt.Sprintf(" AND r.entity_id=$%d", idx)
-			args = append(args, req.EntityID)
-			idx++
+		if msg := appendFDEntityScope(ctx, &analysisSQL, &args, &idx, "r.entity_id", req.EntityID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
 		}
 		if req.FdID != "" {
 			analysisSQL += fmt.Sprintf(" AND r.fd_id=$%d", idx)

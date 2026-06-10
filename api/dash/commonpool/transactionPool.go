@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type ConsolidatedTransactionPool struct {
@@ -66,7 +66,7 @@ func mergeBodyIntoQuery(q url.Values, body map[string]any, queryKey string, body
 	}
 }
 
-func GetTransactionPoolHandler(db *sql.DB) http.HandlerFunc {
+func GetTransactionPoolHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		q := r.URL.Query()
@@ -82,7 +82,7 @@ func GetTransactionPoolHandler(db *sql.DB) http.HandlerFunc {
 				mergeBodyIntoQuery(q, body, "currency", "currency")
 			}
 		}
-		transactions, err := FetchConsolidatedTransactionPool(ctx, db, q)
+		transactions, err := FetchConsolidatedTransactionPool(ctx, pool, q)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -95,7 +95,7 @@ func GetTransactionPoolHandler(db *sql.DB) http.HandlerFunc {
 // FetchConsolidatedTransactionPool fetches and maps all transactions for dashboard.
 // Optional query params: from_date, to_date, as_on_date (YYYY-MM-DD) cap the value/transaction date range; as_on_date is an inclusive upper bound.
 // Optional narrowing: entity, bank (name/short_name or bank_id), currency — must remain within prevalidation scope.
-func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB, q url.Values) ([]ConsolidatedTransactionPool, error) {
+func FetchConsolidatedTransactionPool(ctx context.Context, pool *pgxpool.Pool, q url.Values) ([]ConsolidatedTransactionPool, error) {
 	allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
 	allowedBankNames := api.GetBankNamesFromCtx(ctx)
 	allowedCurrencyCodes := api.GetCurrencyCodesFromCtx(ctx)
@@ -182,10 +182,10 @@ func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB, q url.Val
 	}
 
 	args := []interface{}{
-		pq.Array(effectiveEntityIDs),
-		pq.Array(allowedAccountNumbers),
-		pq.Array(effectiveNormBanks),
-		pq.Array(effectiveNormCurrencies),
+		effectiveEntityIDs,
+		allowedAccountNumbers,
+		effectiveNormBanks,
+		effectiveNormCurrencies,
 	}
 	argN := 5
 	extra := ""
@@ -235,17 +235,17 @@ WHERE s.entity_id = ANY($1)
   AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($3)
   AND upper(trim(mba.currency)) = ANY($4)` + extra
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
-	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE _ctp_pool ON COMMIT DROP AS `+baseSQL, args...); err != nil {
+	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE _ctp_pool ON COMMIT DROP AS `+baseSQL, args...); err != nil {
 		return nil, fmt.Errorf("materialize pool: %w", err)
 	}
 
-	rows, err := tx.QueryContext(ctx, `
+	rows, err := tx.Query(ctx, `
 SELECT value_date, entity_name, bank_name, currency, category_name, category_type, description, withdrawal_amount, deposit_amount
 FROM _ctp_pool
 ORDER BY value_date DESC`)
@@ -297,7 +297,7 @@ ORDER BY value_date DESC`)
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return result, nil

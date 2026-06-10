@@ -5,11 +5,11 @@ import (
 	"database/sql"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// loadCategoryRuleComponents fetches all active rule components for a given
-// account/entity/bank/currency/global scope, ordered by rule priority.
-func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, entityID, currencyCode string) ([]categoryRuleComponent, error) {
+func loadCategoryRuleComponentsPgx(ctx context.Context, pool *pgxpool.Pool, accountNumber, entityID, currencyCode string) ([]categoryRuleComponent, error) {
 	q := `
 		SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code, r.effective_date
 		FROM cimplrcorpsaas.category_rules r
@@ -28,7 +28,7 @@ func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, 
 					 ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
 			 `
 
-	rowsRule, err := db.QueryContext(ctx, q, accountNumber, entityID, currencyCode)
+	rowsRule, err := pool.Query(ctx, q, accountNumber, entityID, currencyCode)
 	if err != nil {
 		return nil, err
 	}

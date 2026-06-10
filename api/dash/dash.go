@@ -3,12 +3,12 @@ package dash
 import (
 	bankbalance "CimplrCorpSaas/api/dash/bank-balance"
 	benchmarks "CimplrCorpSaas/api/dash/benchmarks"
-	dashboardbuilder "CimplrCorpSaas/api/dash/dashboard-builder"
 	"CimplrCorpSaas/api/dash/buCurrExpDash"
 	cashflowforecast "CimplrCorpSaas/api/dash/cashflowforecast"
 	categorywisedata "CimplrCorpSaas/api/dash/categorywiseData"
 	"CimplrCorpSaas/api/dash/cfo"
 	commonpool "CimplrCorpSaas/api/dash/commonpool"
+	dashboardbuilder "CimplrCorpSaas/api/dash/dashboard-builder"
 	forecastVsActual "CimplrCorpSaas/api/dash/forecastVsActual"
 	fxops "CimplrCorpSaas/api/dash/fx-ops"
 	hedgeproposal "CimplrCorpSaas/api/dash/hedging-proposal"
@@ -27,7 +27,6 @@ import (
 	"CimplrCorpSaas/internal/dbutil"
 	"CimplrCorpSaas/internal/observability"
 	"context"
-	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
@@ -38,7 +37,7 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
-func StartDashService(db *sql.DB, port string) {
+func StartDashService(port string) {
 	const serviceName = "dash"
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
@@ -61,11 +60,21 @@ func StartDashService(db *sql.DB, port string) {
 	}
 
 	midDashFull := func(h http.Handler) http.Handler {
-		return middlewares.SessionMiddleware(pgxPool)(middlewares.PreValidationMiddleware(pgxPool)(h))
+		return middlewares.SessionMiddleware(pgxPool)(
+			middlewares.GlobalIndependentMiddleware(pgxPool)(
+				middlewares.GlobalDependentMiddleware(pgxPool)(
+					middlewares.CashMiddleware(pgxPool)(
+						middlewares.InvestmentMFMiddleware(pgxPool)(
+							middlewares.InvestmentFDMiddleware(pgxPool)(h),
+						),
+					),
+				),
+			),
+		)
 	}
 	// Statement Status Dashboard
 	mux.Handle("/dash/statement-status", midDashFull(statementstatus.GetStatementStatusHandler(pgxPool)))
-	mux.Handle("/dash/transaction-pool", midDashFull(commonpool.GetTransactionPoolHandler(db)))
+	mux.Handle("/dash/transaction-pool", midDashFull(commonpool.GetTransactionPoolHandler(pgxPool)))
 	// Categorywise Breakdown Dashboard
 	mux.Handle("/dash/categorywise-breakdown", midDashFull(categorywisedata.GetCategorywiseBreakdownHandler(pgxPool)))
 	mux.HandleFunc("/dash/health", func(w http.ResponseWriter, r *http.Request) {
@@ -74,58 +83,58 @@ func StartDashService(db *sql.DB, port string) {
 	mux.Handle("/dash/metrics", observability.MetricsHandler(serviceName))
 
 	// Real-time Balances KPI Route
-	mux.Handle("/dash/realtime-balances/kpi", midDashFull(realtimebalances.GetKpiHandler(db)))
+	mux.Handle("/dash/realtime-balances/kpi", midDashFull(realtimebalances.GetKpiHandler(pgxPool)))
 
 	// Simple rates ticker (POST)
 	mux.Handle("/dash/ticker", midDashFull(ticker.GetTickerHandler()))
-	// Bank balance endpoints: use PreValidationMiddleware ONLY (no BusinessUnitMiddleware to avoid overriding entity scope)
+	// Bank balance endpoints use the shared v2 master middleware chain.
 	mux.Handle("/dash/bank-balance/approved", midDashFull(bankbalance.GetApprovedBankBalances(pgxPool)))
 	mux.Handle("/dash/bank-balance/currency-wise", midDashFull(bankbalance.GetCurrencyWiseBalancesFromManual(pgxPool)))
 	mux.Handle("/dash/bank-balance/currency-wise-dashboard", midDashFull(bankbalance.GetCurrencyWiseDashboard(pgxPool)))
 	mux.Handle("/dash/bank-balance/approved-manual", midDashFull(bankbalance.GetApprovedBalancesFromManual(pgxPool)))
 
 	// Business Unit/Currency Exposure Dashboard
-	// mux.Handle("/dash/bu-curr-exp-dashboard", http.HandlerFunc(buCurrExpDash.GetDashboard(db)))
-	mux.Handle("/dash/bu-curr-exp-dashboard", midDashFull(buCurrExpDash.GetDashboard(db)))
+	// mux.Handle("/dash/bu-curr-exp-dashboard", http.HandlerFunc(buCurrExpDash.GetDashboard(pgxPool)))
+	mux.Handle("/dash/bu-curr-exp-dashboard", midDashFull(buCurrExpDash.GetDashboard(pgxPool)))
 
 	// CFO Dashboard Endpoints
 	// --- Forward Dashboard Routes ---
-	mux.Handle("/dash/cfo/fwd/waht", midDashFull(cfo.GetAvgForwardMaturity(db)))
-	mux.Handle("/dash/cfo/fwd/buysell", midDashFull(cfo.GetForwardBuySellTotals(db)))
-	mux.Handle("/dash/cfo/fwd/localcurr", midDashFull(cfo.GetUserCurrency(db)))
-	mux.Handle("/dash/cfo/fwd/active-forwards", midDashFull(cfo.GetActiveForwardsCount(db)))
-	mux.Handle("/dash/cfo/fwd/recent-trades-dashboard", midDashFull(cfo.GetRecentTradesDashboard(db)))
-	mux.Handle("/dash/cfo/fwd/total-usd-sum", midDashFull(cfo.GetTotalUsdSumDashboard(db)))
-	mux.Handle("/dash/cfo/fwd/open-to-booking-ratio", midDashFull(cfo.GetOpenAmountToBookingRatioDashboard(db)))
-	// mux.Handle("/dash/cfo/fwd/total-bank-margin", midDashFull(cfo.GetTotalBankMarginDashboard(db)))
-	mux.Handle("/dash/cfo/fwd/total-usd-sum-by-currency", midDashFull(cfo.GetTotalUsdSumByCurrencyDashboard(db)))
-	mux.Handle("/dash/cfo/fwd/forward-booking-maturity-buckets", midDashFull(cfo.GetForwardBookingMaturityBucketsDashboard(db)))
-	mux.Handle("/dash/cfo/fwd/maturity-buckets", midDashFull(cfo.GetMaturityBucketsDashboard(db)))
-	mux.Handle("/dash/cfo/fwd/rollover-counts", midDashFull(cfo.GetRolloverCountsByCurrency(db)))
-	mux.Handle("/dash/cfo/fwd/total-bankmargin", midDashFull(cfo.GetTotalBankMarginFromForwardBookings(db)))
-	mux.Handle("/dash/cfo/fwd/hedge-ratio", midDashFull(cfo.GetOpenAmountToBookingRatioSimple(db)))
-	mux.Handle("/dash/cfo/fwd/bank-trades", midDashFull(cfo.GetBankTradesData(db)))
+	mux.Handle("/dash/cfo/fwd/waht", midDashFull(cfo.GetAvgForwardMaturity(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/buysell", midDashFull(cfo.GetForwardBuySellTotals(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/localcurr", midDashFull(cfo.GetUserCurrency(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/active-forwards", midDashFull(cfo.GetActiveForwardsCount(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/recent-trades-dashboard", midDashFull(cfo.GetRecentTradesDashboard(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/total-usd-sum", midDashFull(cfo.GetTotalUsdSumDashboard(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/open-to-booking-ratio", midDashFull(cfo.GetOpenAmountToBookingRatioDashboard(pgxPool)))
+	// mux.Handle("/dash/cfo/fwd/total-bank-margin", midDashFull(cfo.GetTotalBankMarginDashboard(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/total-usd-sum-by-currency", midDashFull(cfo.GetTotalUsdSumByCurrencyDashboard(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/forward-booking-maturity-buckets", midDashFull(cfo.GetForwardBookingMaturityBucketsDashboard(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/maturity-buckets", midDashFull(cfo.GetMaturityBucketsDashboard(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/rollover-counts", midDashFull(cfo.GetRolloverCountsByCurrency(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/total-bankmargin", midDashFull(cfo.GetTotalBankMarginFromForwardBookings(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/hedge-ratio", midDashFull(cfo.GetOpenAmountToBookingRatioSimple(pgxPool)))
+	mux.Handle("/dash/cfo/fwd/bank-trades", midDashFull(cfo.GetBankTradesData(pgxPool)))
 
 	// --- Exposure Dashboard Routes ---
-	mux.Handle("/dash/cfo/exp/total-open-amount-usd", midDashFull(cfo.GetTotalOpenAmountUsdSumFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/payables-by-currency", midDashFull(cfo.GetPayablesByCurrencyFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/receivables-by-currency", midDashFull(cfo.GetReceivablesByCurrencyFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/amount-by-currency", midDashFull(cfo.GetAmountByCurrencyFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/business-unit-currency-summary", midDashFull(cfo.GetBusinessUnitCurrencySummaryFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/maturity-expiry-summary", midDashFull(cfo.GetMaturityExpirySummaryFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/maturity-expiry-count-7-days", midDashFull(cfo.GetMaturityExpiryCount7DaysFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/waet", midDashFull(cfo.GetAvgExposureMaturity(db)))
+	mux.Handle("/dash/cfo/exp/total-open-amount-usd", midDashFull(cfo.GetTotalOpenAmountUsdSumFromHeaders(pgxPool)))
+	mux.Handle("/dash/cfo/exp/payables-by-currency", midDashFull(cfo.GetPayablesByCurrencyFromHeaders(pgxPool)))
+	mux.Handle("/dash/cfo/exp/receivables-by-currency", midDashFull(cfo.GetReceivablesByCurrencyFromHeaders(pgxPool)))
+	mux.Handle("/dash/cfo/exp/amount-by-currency", midDashFull(cfo.GetAmountByCurrencyFromHeaders(pgxPool)))
+	mux.Handle("/dash/cfo/exp/business-unit-currency-summary", midDashFull(cfo.GetBusinessUnitCurrencySummaryFromHeaders(pgxPool)))
+	mux.Handle("/dash/cfo/exp/maturity-expiry-summary", midDashFull(cfo.GetMaturityExpirySummaryFromHeaders(pgxPool)))
+	mux.Handle("/dash/cfo/exp/maturity-expiry-count-7-days", midDashFull(cfo.GetMaturityExpiryCount7DaysFromHeaders(pgxPool)))
+	mux.Handle("/dash/cfo/exp/waet", midDashFull(cfo.GetAvgExposureMaturity(pgxPool)))
 
 	// --- FX Ops Dashboard Routes ---
 	// Top Currencies
-	mux.Handle("/dash/fx-ops/top-currencies-from-headers", midDashFull(fxops.GetTopCurrenciesFromHeaders(db)))
-	mux.Handle("/dash/fx-ops/ready-for-settlement", midDashFull(fxops.GetForwardBookingsMaturingTodayCount(db)))
-	mux.Handle("/dash/fx-ops/daily-traded-volume", midDashFull(fxops.GetTodayBookingAmountSum(db)))
-	mux.Handle("/dash/fx-ops/maturity-buckets-currencypair", midDashFull(fxops.GetMaturityBucketsByCurrencyPair(db)))
+	mux.Handle("/dash/fx-ops/top-currencies-from-headers", midDashFull(fxops.GetTopCurrenciesFromHeaders(pgxPool)))
+	mux.Handle("/dash/fx-ops/ready-for-settlement", midDashFull(fxops.GetForwardBookingsMaturingTodayCount(pgxPool)))
+	mux.Handle("/dash/fx-ops/daily-traded-volume", midDashFull(fxops.GetTodayBookingAmountSum(pgxPool)))
+	mux.Handle("/dash/fx-ops/maturity-buckets-currencypair", midDashFull(fxops.GetMaturityBucketsByCurrencyPair(pgxPool)))
 	// Comprehensive FX Ops Dashboard (with filters)
-	mux.Handle("/dash/landingpage/dashboard", midDashFull(landingpage.GetFXOpsDashboard(db)))
+	mux.Handle("/dash/landingpage/dashboard", midDashFull(landingpage.GetFXOpsDashboard(pgxPool)))
 	// Home/Landing dashboard (liquidity + investments + risk)
-	mux.Handle("/dash/landingpage/home", midDashFull(landingpage.GetHomePageDashboard(db)))
+	mux.Handle("/dash/landingpage/home", midDashFull(landingpage.GetHomePageDashboard(pgxPool)))
 	mux.Handle("/dash/landingpage/cash", midDashFull(landingpage.GetLandingCashDashboard(pgxPool)))
 	// Combined investment overview (aggregates multiple investment endpoints sequentially)
 	mux.Handle("/dash/investment/overview/combined", midDashFull(investmentdashboards.GetCombinedInvestmentOverview(pgxPool)))
@@ -146,11 +155,11 @@ func StartDashService(db *sql.DB, port string) {
 
 	// --- Hedging Proposal Dashboard Routes ---
 	// Forward Dashboard
-	mux.Handle("/dash/hedge/fwd/bu-maturity-currency-summary", midDashFull(hedgeproposal.GetForwardBookingMaturityBucketsDashboard(db)))
-	mux.Handle("/dash/hedge/fwd/forward-bookings", midDashFull(hedgeproposal.GetForwardBookingsDashboard(db)))
+	mux.Handle("/dash/hedge/fwd/bu-maturity-currency-summary", midDashFull(hedgeproposal.GetForwardBookingMaturityBucketsDashboard(pgxPool)))
+	mux.Handle("/dash/hedge/fwd/forward-bookings", midDashFull(hedgeproposal.GetForwardBookingsDashboard(pgxPool)))
 	// Exposure Dashboard
-	mux.Handle("/dash/hedge/exp/bu-maturity-currency-summary", midDashFull(hedgeproposal.GetBuMaturityCurrencySummaryJoinedFromHeaders(db)))
-	mux.Handle("/dash/hedge/exp/exposure-rows", midDashFull(hedgeproposal.GetExposureRowsDashboard(db)))
+	mux.Handle("/dash/hedge/exp/bu-maturity-currency-summary", midDashFull(hedgeproposal.GetBuMaturityCurrencySummaryJoinedFromHeaders(pgxPool)))
+	mux.Handle("/dash/hedge/exp/exposure-rows", midDashFull(hedgeproposal.GetExposureRowsDashboard(pgxPool)))
 
 	//Liquidity Snapshot
 	mux.Handle("/dash/liquidity/total-cash-balance-by-entity", midDashFull(liqsnap.TotalCashBalanceByEntityHandler(pgxPool)))
@@ -213,8 +222,8 @@ func StartDashService(db *sql.DB, port string) {
 	mux.Handle("/dash/forecast-vs-actual/by-month", midDashFull(forecastVsActual.GetForecastVsActualByMonthHandler(pgxPool)))
 
 	// --- Reports Dashboard Routes ---
-	mux.Handle("/dash/reports/exposure-summary", midDashFull(reports.GetExposureSummary(db)))
-	mux.Handle("/dash/reports/linked-summary-by-category", midDashFull(reports.GetLinkedSummaryByCategory(db)))
+	mux.Handle("/dash/reports/exposure-summary", midDashFull(reports.GetExposureSummary(pgxPool)))
+	mux.Handle("/dash/reports/linked-summary-by-category", midDashFull(reports.GetLinkedSummaryByCategory(pgxPool)))
 
 	// Projection Pipeline Dashboard
 	mux.Handle("/dash/projection-pipeline/kpi", midDashFull(projectiondash.GetProjectionPipelineKPI(pgxPool)))
@@ -229,11 +238,11 @@ func StartDashService(db *sql.DB, port string) {
 	mux.Handle("/dash/planned-inflow-outflow", midDashFull(plannedinflowoutflowdash.GetPlannedIODash(pgxPool)))
 
 	// ── Dashboard Builder ─────────────────────────────────────────────────────
-	mux.Handle("/dash/builder/dashboard/save",   middlewares.PreValidationMiddleware(pgxPool)(dashboardbuilder.SaveDashboard(pgxPool)))
-	mux.Handle("/dash/builder/dashboard/list",   middlewares.PreValidationMiddleware(pgxPool)(dashboardbuilder.ListDashboards(pgxPool)))
-	mux.Handle("/dash/builder/dashboard/get",    middlewares.PreValidationMiddleware(pgxPool)(dashboardbuilder.GetDashboardByID(pgxPool)))
-	mux.Handle("/dash/builder/dashboard/delete", middlewares.PreValidationMiddleware(pgxPool)(dashboardbuilder.DeleteDashboard(pgxPool)))
-	mux.Handle("/dash/builder/data",             middlewares.PreValidationMiddleware(pgxPool)(dashboardbuilder.GetDataSource(pgxPool)))
+	mux.Handle("/dash/builder/dashboard/save", midDashFull(dashboardbuilder.SaveDashboard(pgxPool)))
+	mux.Handle("/dash/builder/dashboard/list", midDashFull(dashboardbuilder.ListDashboards(pgxPool)))
+	mux.Handle("/dash/builder/dashboard/get", midDashFull(dashboardbuilder.GetDashboardByID(pgxPool)))
+	mux.Handle("/dash/builder/dashboard/delete", midDashFull(dashboardbuilder.DeleteDashboard(pgxPool)))
+	mux.Handle("/dash/builder/data", midDashFull(dashboardbuilder.GetDataSource(pgxPool)))
 
 	// ── Notification Dashboard ────────────────────────────────────────────────
 	mux.Handle("/dash/notification/kpi", midDashFull(notifDash.GetKPI(pgxPool)))

@@ -4,7 +4,6 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -15,6 +14,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
 )
@@ -117,7 +118,7 @@ func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, passwor
 // a converted document) and returns a preview response map containing a "clean"
 // key with Metadata, OpeningBalance, and Transactions shaped for
 // /cash/recalculate and /cash/commit. No data is written to the database.
-func BuildPreviewResponseFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes []byte, filename string, accountOverride string) (map[string]interface{}, error) {
+func BuildPreviewResponseFromCSVBytes(ctx context.Context, pool *pgxpool.Pool, csvBytes []byte, filename string, accountOverride string) (map[string]interface{}, error) {
 	csvFilename := filename
 	if !strings.HasSuffix(strings.ToLower(csvFilename), ".csv") {
 		noExt := strings.TrimSuffix(csvFilename, ".pdf")
@@ -125,7 +126,7 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes 
 		csvFilename = noExt + ".csv"
 	}
 
-	txns, err := processSingleFilePreviewFlat(ctx, db, csvBytes, csvFilename, false, nil, accountOverride)
+	txns, err := processSingleFilePreviewFlat(ctx, pool, csvBytes, csvFilename, false, nil, accountOverride)
 	if err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
@@ -139,7 +140,7 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes 
 // For single-account converted CSVs this returns exactly one entry.
 // When accountOverride is set (forced single account from the upload form), the multi-account
 // split path is skipped so preview and staging resolve the same master row as CSV/XLS uploads.
-func BuildPreviewResponsesFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes []byte, filename string, accountOverride string) ([]map[string]interface{}, error) {
+func BuildPreviewResponsesFromCSVBytes(ctx context.Context, pool *pgxpool.Pool, csvBytes []byte, filename string, accountOverride string) ([]map[string]interface{}, error) {
 	csvFilename := filename
 	if !strings.HasSuffix(strings.ToLower(csvFilename), ".csv") {
 		noExt := strings.TrimSuffix(csvFilename, ".pdf")
@@ -149,7 +150,7 @@ func BuildPreviewResponsesFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes
 
 	// Prefer multi-account parser first so one converted CSV can stage N statements.
 	if strings.TrimSpace(accountOverride) == "" {
-		if txns, err := processMultiAccountCSVPreviewFlat(ctx, db, csvBytes); err == nil && len(txns) > 0 {
+		if txns, err := processMultiAccountCSVPreviewFlat(ctx, pool, csvBytes); err == nil && len(txns) > 0 {
 			grouped := map[string][]map[string]interface{}{}
 			order := make([]string, 0)
 			for _, t := range txns {
@@ -173,7 +174,7 @@ func BuildPreviewResponsesFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes
 		}
 	}
 
-	single, err := BuildPreviewResponseFromCSVBytes(ctx, db, csvBytes, filename, accountOverride)
+	single, err := BuildPreviewResponseFromCSVBytes(ctx, pool, csvBytes, filename, accountOverride)
 	if err != nil {
 		return nil, err
 	}

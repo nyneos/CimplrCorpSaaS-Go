@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -101,9 +102,17 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		bankNames := api.GetBankNamesFromCtx(ctx)
 		// If request provided explicit filters, prefer them
 		if len(req.EntityIDs) > 0 {
+			if msg := validation.ValidateCashMasterReferences(ctx, map[string]interface{}{"entity_ids": req.EntityIDs}); msg != "" {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
 			entityIDs = req.EntityIDs
 		}
 		if len(req.BankNames) > 0 {
+			if msg := validation.ValidateCashMasterReferences(ctx, map[string]interface{}{"bank_names": req.BankNames}); msg != "" {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
 			bankNames = req.BankNames
 		}
 

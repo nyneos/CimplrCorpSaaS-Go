@@ -142,6 +142,42 @@ type EntitySchemeHolding struct {
 	CurrentHolding float64 `json:"current_holding"`
 }
 
+func proposalMFReferenceFields(req *CreateProposalRequest) map[string]interface{} {
+	schemeIDs := make([]string, 0, len(req.Allocations))
+	schemeCodes := make([]string, 0, len(req.Allocations))
+	for _, alloc := range req.Allocations {
+		if alloc.SchemeID != "" {
+			schemeIDs = append(schemeIDs, alloc.SchemeID)
+		}
+		if alloc.SchemeInternalCode != "" {
+			schemeCodes = append(schemeCodes, alloc.SchemeInternalCode)
+		}
+	}
+	return map[string]interface{}{
+		"entity_name":           req.EntityName,
+		"scheme_ids":            schemeIDs,
+		"scheme_internal_codes": schemeCodes,
+	}
+}
+
+func updateProposalMFReferenceFields(req *UpdateProposalRequest) map[string]interface{} {
+	schemeIDs := make([]string, 0, len(req.Allocations))
+	schemeCodes := make([]string, 0, len(req.Allocations))
+	for _, alloc := range req.Allocations {
+		if alloc.SchemeID != "" {
+			schemeIDs = append(schemeIDs, alloc.SchemeID)
+		}
+		if alloc.SchemeInternalCode != "" {
+			schemeCodes = append(schemeCodes, alloc.SchemeInternalCode)
+		}
+	}
+	return map[string]interface{}{
+		"entity_name":           req.EntityName,
+		"scheme_ids":            schemeIDs,
+		"scheme_internal_codes": schemeCodes,
+	}
+}
+
 // CreateInvestmentProposal exposes POST /investment/proposals
 func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -160,6 +196,10 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 		normalizeProposalRequest(&req)
 		if err := validateProposalRequest(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(ctx, proposalMFReferenceFields(&req)); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -238,6 +278,10 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 		normalizeUpdateProposalRequest(&req)
 		if err := validateUpdateProposalRequest(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(ctx, updateProposalMFReferenceFields(&req)); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -762,7 +806,14 @@ func fetchProposalRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([
 		q = baseSQL + " WHERE p.proposal_id = ANY($1) ORDER BY p.entity_name, p.proposal_id"
 		args = []interface{}{ids}
 	} else {
-		q = baseSQL + " WHERE COALESCE(p.is_deleted,false)=false ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+		args = []interface{}{}
+		pos := 1
+		where := " WHERE COALESCE(p.is_deleted,false)=false"
+		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
+			where += fmt.Sprintf(" AND p.entity_name = ANY($%d::text[])", pos)
+			args = append(args, entityNames)
+		}
+		q = baseSQL + where + " ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
 	}
 
 	rows, err := pool.Query(ctx, q, args...)
@@ -804,7 +855,7 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		const metaSQL = `
+		metaSQL := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (proposal_id)
 					proposal_id,
@@ -868,10 +919,16 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN history h ON h.proposal_id = p.proposal_id
 			WHERE COALESCE(p.is_deleted,false)=false
 				AND UPPER(l.processing_status)='APPROVED'
-			ORDER BY l.requested_at DESC NULLS LAST
 		`
+		args := []interface{}{}
+		pos := 1
+		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
+			metaSQL += fmt.Sprintf(" AND p.entity_name = ANY($%d::text[])", pos)
+			args = append(args, entityNames)
+		}
+		metaSQL += " ORDER BY l.requested_at DESC NULLS LAST"
 
-		rows, err := pool.Query(ctx, metaSQL)
+		rows, err := pool.Query(ctx, metaSQL, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch proposal meta: "+err.Error())
 			return
@@ -1223,10 +1280,14 @@ func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 
 		entityName := strings.TrimSpace(req.EntityName)
 		if entityName == "" {
-			if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{"entity_name": req.EntityName}); errMsg != "" {
-				api.RespondWithError(w, http.StatusBadRequest, errMsg)
-				return
-			}
+			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{
+			"entity_name": entityName,
+			"amc_names":   req.AMCNames,
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -1341,6 +1402,10 @@ func GetEntityAccounts(pool *pgxpool.Pool) http.HandlerFunc {
 		entityName := strings.TrimSpace(req.EntityName)
 		if entityName == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{"entity_name": entityName}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 

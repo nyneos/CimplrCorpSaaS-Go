@@ -16,7 +16,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/dash/ticker"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
 )
@@ -42,7 +42,7 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 }
 
 // Endpoint: Top Currencies from Headers
-func GetTopCurrenciesFromHeaders(db *sql.DB) http.HandlerFunc {
+func GetTopCurrenciesFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames := api.GetEntityNamesFromCtx(r.Context())
 		if len(buNames) == 0 {
@@ -50,7 +50,7 @@ func GetTopCurrenciesFromHeaders(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
+		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
@@ -100,7 +100,7 @@ func GetTopCurrenciesFromHeaders(db *sql.DB) http.HandlerFunc {
 }
 
 // Endpoint: Count of Forward Bookings Maturing Today
-func GetForwardBookingsMaturingTodayCount(db *sql.DB) http.HandlerFunc {
+func GetForwardBookingsMaturingTodayCount(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames := api.GetEntityNamesFromCtx(r.Context())
 		if len(buNames) == 0 {
@@ -109,7 +109,7 @@ func GetForwardBookingsMaturingTodayCount(db *sql.DB) http.HandlerFunc {
 		}
 		query := `SELECT COUNT(*) FROM forward_bookings WHERE entity_level_0 = ANY($1) AND maturity_date = CURRENT_DATE AND (processing_status = 'Approved' OR processing_status = 'approved')`
 		var count sql.NullInt64
-		err := db.QueryRowContext(r.Context(), query, pq.Array(buNames)).Scan(&count)
+		err := db.QueryRow(r.Context(), query, buNames).Scan(&count)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
@@ -123,7 +123,7 @@ func GetForwardBookingsMaturingTodayCount(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
+func GetTodayBookingAmountSum(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames := api.GetEntityNamesFromCtx(r.Context())
 		if len(buNames) == 0 {
@@ -138,7 +138,7 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 			AND (processing_status = 'Approved' OR processing_status = 'approved')
 		`
 
-		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
+		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
@@ -202,7 +202,7 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func GetMaturityBucketsByCurrencyPair(db *sql.DB) http.HandlerFunc {
+func GetMaturityBucketsByCurrencyPair(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames := api.GetEntityNamesFromCtx(r.Context())
 		if len(buNames) == 0 {
@@ -227,7 +227,7 @@ func GetMaturityBucketsByCurrencyPair(db *sql.DB) http.HandlerFunc {
 				AND LOWER(fb.processing_status) = 'approved'
 		`
 
-		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
+		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return

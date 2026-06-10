@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/validation"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -48,6 +49,58 @@ type GetRedemptionDetailRequest struct {
 	RedemptionID string `json:"redemption_id"`
 }
 
+func redemptionScopeValues(rows []map[string]string, keys ...string) []string {
+	seen := make(map[string]struct{})
+	values := make([]string, 0, len(rows))
+	for _, row := range rows {
+		for _, key := range keys {
+			value := strings.TrimSpace(row[key])
+			if value == "" {
+				continue
+			}
+			lookup := strings.ToUpper(value)
+			if _, ok := seen[lookup]; ok {
+				continue
+			}
+			seen[lookup] = struct{}{}
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+func redemptionEntityNameRefs(ctx context.Context) []string {
+	scope := ctxutil.FromContext(ctx)
+	if scope.IsAdminOverride {
+		return nil
+	}
+	return scope.EntityNames
+}
+
+func redemptionMFSchemeRefs(ctx context.Context) []string {
+	scope := ctxutil.FromContext(ctx)
+	if scope.IsAdminOverride {
+		return nil
+	}
+	return redemptionScopeValues(scope.Schemes, "scheme_id", "scheme_name", "isin", "internal_scheme_code")
+}
+
+func redemptionMFFolioRefs(ctx context.Context) []string {
+	scope := ctxutil.FromContext(ctx)
+	if scope.IsAdminOverride {
+		return nil
+	}
+	return redemptionScopeValues(scope.Folios, "folio_id", "folio_number")
+}
+
+func redemptionMFDematRefs(ctx context.Context) []string {
+	scope := ctxutil.FromContext(ctx)
+	if scope.IsAdminOverride {
+		return nil
+	}
+	return redemptionScopeValues(scope.Demats, "demat_id", "demat_account_number")
+}
+
 // ---------------------------
 // CreateRedemptionSingle
 // ---------------------------
@@ -71,6 +124,15 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.ByAmount <= 0 && req.ByUnits <= 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "Either by_amount or by_units must be greater than 0")
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{
+			"entity_name": req.EntityName,
+			"scheme_id":   req.SchemeID,
+			"folio_id":    req.FolioID,
+			"demat_id":    req.DematID,
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -301,6 +363,15 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Either by_amount or by_units must be > 0"})
 				continue
 			}
+			if errMsg := validation.ValidateMFMasterReferences(ctx, map[string]interface{}{
+				"entity_name": row.EntityName,
+				"scheme_id":   row.SchemeID,
+				"folio_id":    row.FolioID,
+				"demat_id":    row.DematID,
+			}); errMsg != "" {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg})
+				continue
+			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
@@ -481,13 +552,18 @@ func UpdateRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		ctx := r.Context()
+		if errMsg := validation.ValidateMFMasterReferences(ctx, req.Fields); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+
 		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
-		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -605,6 +681,10 @@ func UpdateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, row := range req.Rows {
 			if row.RedemptionID == "" {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "redemption_id missing"})
+				continue
+			}
+			if errMsg := validation.ValidateMFMasterReferences(ctx, row.Fields); errMsg != "" {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: errMsg})
 				continue
 			}
 
@@ -1343,7 +1423,29 @@ func fetchRedemptionInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, i
 		q = baseSQL + " WHERE m.redemption_id = ANY($1) ORDER BY m.entity_name, m.redemption_id"
 		args = []interface{}{ids}
 	} else {
-		q = baseSQL + " WHERE COALESCE(m.is_deleted, false) = false ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+		args = []interface{}{}
+		pos := 1
+		where := " WHERE COALESCE(m.is_deleted, false) = false"
+		if entityNames := redemptionEntityNameRefs(ctx); len(entityNames) > 0 {
+			where += fmt.Sprintf(" AND (COALESCE(m.entity_name,'') = '' OR m.entity_name = ANY($%d::text[]))", pos)
+			args = append(args, entityNames)
+			pos++
+		}
+		if schemeRefs := redemptionMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			where += fmt.Sprintf(" AND m.scheme_id = ANY($%d::text[])", pos)
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := redemptionMFFolioRefs(ctx); len(folioRefs) > 0 {
+			where += fmt.Sprintf(" AND (COALESCE(m.folio_id,'') = '' OR m.folio_id = ANY($%d::text[]))", pos)
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := redemptionMFDematRefs(ctx); len(dematRefs) > 0 {
+			where += fmt.Sprintf(" AND (COALESCE(m.demat_id,'') = '' OR m.demat_id = ANY($%d::text[]))", pos)
+			args = append(args, dematRefs)
+		}
+		q = baseSQL + where + " ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
 	}
 
 	rows, err := pgxPool.Query(ctx, q, args...)
@@ -1445,10 +1547,31 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			AND m.redemption_id NOT IN (
 				SELECT redemption_id FROM investment.redemption_confirmation
 			)
-		ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
 	`
+		args := []interface{}{}
+		pos := 1
+		if entityNames := redemptionEntityNameRefs(ctx); len(entityNames) > 0 {
+			q += fmt.Sprintf(" AND (COALESCE(m.entity_name,'') = '' OR m.entity_name = ANY($%d::text[]))", pos)
+			args = append(args, entityNames)
+			pos++
+		}
+		if schemeRefs := redemptionMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			q += fmt.Sprintf(" AND m.scheme_id = ANY($%d::text[])", pos)
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := redemptionMFFolioRefs(ctx); len(folioRefs) > 0 {
+			q += fmt.Sprintf(" AND (COALESCE(m.folio_id,'') = '' OR m.folio_id = ANY($%d::text[]))", pos)
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := redemptionMFDematRefs(ctx); len(dematRefs) > 0 {
+			q += fmt.Sprintf(" AND (COALESCE(m.demat_id,'') = '' OR m.demat_id = ANY($%d::text[]))", pos)
+			args = append(args, dematRefs)
+		}
+		q += " ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return

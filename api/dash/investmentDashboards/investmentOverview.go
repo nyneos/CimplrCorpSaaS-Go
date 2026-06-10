@@ -220,15 +220,11 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Validate entity from context if not provided
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-
-		// Get allowed entities from context for filtering
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 		entityFilterSQL := ""
 		if entityFilter != "" {
 			entityFilterSQL = entityFilter
@@ -1118,13 +1114,11 @@ func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Entity validation
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		if req.Limit <= 0 {
 			req.Limit = 50
@@ -1245,13 +1239,11 @@ func GetConsolidatedRisk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Entity validation
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		// Mapping: Low -> 15, Medium -> 50, High -> 85 (gives values within the gauge zones)
 		q := `
@@ -1343,13 +1335,11 @@ func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Entity validation
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		// default date range: start = financial year start (1 Apr), end = today
 		now := time.Now().UTC()
@@ -1501,13 +1491,11 @@ func GetAMCPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Entity validation
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		if req.Limit <= 0 {
 			req.Limit = 100
@@ -1607,13 +1595,11 @@ func GetTopPerformingAssets(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Entity validation
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		// default limit
 		if req.Limit <= 0 {
@@ -1728,13 +1714,11 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Entity validation
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		now := time.Now().UTC()
 		if req.Year <= 0 {
@@ -1974,13 +1958,11 @@ func GetAUMMovementWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Entity validation
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		now := time.Now().UTC()
 
@@ -2136,13 +2118,11 @@ func GetAUMBreakdown(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Entity validation
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		// Default to "amc" grouping
 		if req.GroupBy == "" {
@@ -2286,13 +2266,11 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Entity validation
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		// 1) Calculate Portfolio Return using XIRR
 		txnQuery := `
@@ -2578,13 +2556,11 @@ func GetDailyPnLHeatmap(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Entity validation
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		// Query returns entity, amc, scheme, pnl - always all four fields
 		// group_by controls the aggregation level
@@ -2746,13 +2722,11 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Entity validation
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		now := time.Now()
 		if req.Year == 0 {
@@ -2967,13 +2941,11 @@ func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Entity validation
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		if req.Limit <= 0 {
 			req.Limit = 20

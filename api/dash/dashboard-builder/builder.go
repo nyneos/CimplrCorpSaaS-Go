@@ -2,7 +2,7 @@ package dashboardbuilder
 
 // Dashboard Builder — user-scoped config persistence.
 //
-// Routes (registered in dash.go with PreValidationMiddleware):
+// Routes (registered in dash.go with the v2 master middleware chain):
 //
 //   POST /dash/builder/dashboard/save    — upsert a dashboard for the current user
 //   GET  /dash/builder/dashboard/list    — list all dashboards for the current user
@@ -153,11 +153,11 @@ func ListDashboards(pool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		type summary struct {
-			ID         string    `json:"id"`
-			Name       string    `json:"name"`
-			IsDefault  bool      `json:"is_default"`
-			CreatedAt  time.Time `json:"created_at"`
-			UpdatedAt  time.Time `json:"updated_at"`
+			ID        string    `json:"id"`
+			Name      string    `json:"name"`
+			IsDefault bool      `json:"is_default"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
 		}
 		var list []summary
 		for rows.Next() {

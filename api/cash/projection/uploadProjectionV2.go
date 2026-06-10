@@ -164,6 +164,12 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
+		if err := validateProjectionCashScope(ctx, map[string]interface{}{
+			"currency_code": baseCurrencyCode,
+		}); err != nil {
+			api.RespondWithError(w, http.StatusForbidden, err.Error())
+			return
+		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -264,6 +270,17 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			maturityDate := get("maturity_date")
 			bankName := get("bank_name")
 			bankAccountNumber := get("bank_account_number")
+			entityName := get("entity")
+			if err := validateProjectionCashScope(ctx, map[string]interface{}{
+				"entity_name":         entityName,
+				"category_id":         categoryID,
+				"currency_code":       itemCurrency,
+				"bank_name":           bankName,
+				"bank_account_number": bankAccountNumber,
+			}); err != nil {
+				api.RespondWithError(w, http.StatusForbidden, err.Error())
+				return
+			}
 
 			// Use bank name as-is (pre-validation can handle bank lookups if needed)
 			bankID := bankName
@@ -276,7 +293,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			copyRows = append(copyRows, []interface{}{
 				proposalID, get("description"), cfType, categoryID, amount,
 				recurring, frequency, maturityDateVal,
-				get("entity"), itemCurrency,
+				entityName, itemCurrency,
 				nullStringV2(bankID), nullStringV2(bankAccountNumber),
 			})
 

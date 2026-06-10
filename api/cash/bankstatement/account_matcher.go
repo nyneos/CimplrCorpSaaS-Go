@@ -2,13 +2,14 @@ package bankstatement
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
 
 	"CimplrCorpSaas/internal/logger"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // accountMatchScore represents a scored match between a file and an account
@@ -30,7 +31,7 @@ type accountMatchScore struct {
 // - Masked pattern found but not in available list: 100 points
 //
 // Returns the account with the highest score, or empty string if no match found.
-func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, accountOverride string, availableAccounts []string, fileContent [][]string) string {
+func matchAccountNumberToFile(ctx context.Context, pool *pgxpool.Pool, filename, accountOverride string, availableAccounts []string, fileContent [][]string) string {
 	// Strategy 1: Direct override with exact match (highest priority - immediate return)
 	if strings.TrimSpace(accountOverride) != "" {
 		override := strings.TrimSpace(accountOverride)
@@ -50,7 +51,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 
 			// Verify against DB
 			var exists bool
-			err := db.QueryRowContext(ctx, `
+			err := pool.QueryRow(ctx, `
 				SELECT EXISTS(
 					SELECT 1 FROM public.masterbankaccount 
 					WHERE account_number = $1 AND is_deleted = false
@@ -100,7 +101,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 				}
 			} else {
 				// Try DB lookup
-				matched := matchMaskedAccount(ctx, db, masked, availableAccounts)
+				matched := matchMaskedAccount(ctx, pool, masked, availableAccounts)
 				if matched != "" {
 					addScore(matched, 400, fmt.Sprintf("masked pattern '%s' in file content resolved via DB", masked))
 					logger.LogInfo("[ACCOUNT-MATCHER]  Masked pattern '%s' in file content resolved to %s via DB (+400 points)", masked, matched)
@@ -124,7 +125,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 					}
 				}
 			} else {
-				matched := matchMaskedAccount(ctx, db, masked, availableAccounts)
+				matched := matchMaskedAccount(ctx, pool, masked, availableAccounts)
 				if matched != "" {
 					addScore(matched, 250, fmt.Sprintf("masked pattern '%s' in filename resolved via DB", masked))
 					logger.LogInfo("[ACCOUNT-MATCHER]  Masked pattern '%s' in filename resolved to %s via DB (+250 points)", masked, matched)
@@ -151,7 +152,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 
 			// Check against DB
 			var matchedAccount string
-			err := db.QueryRowContext(ctx, `
+			err := pool.QueryRow(ctx, `
 				SELECT account_number FROM public.masterbankaccount 
 				WHERE is_deleted = false 
 				  AND account_number = $1
@@ -162,7 +163,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 				logger.LogInfo("[ACCOUNT-MATCHER]  Filename candidate %s matched DB account %s (+350 points)", candidate, matchedAccount)
 			} else {
 				// Try suffix match
-				err = db.QueryRowContext(ctx, `
+				err = pool.QueryRow(ctx, `
 					SELECT account_number FROM public.masterbankaccount 
 					WHERE is_deleted = false 
 					  AND account_number LIKE '%' || $1
@@ -186,7 +187,7 @@ func matchAccountNumberToFile(ctx context.Context, db *sql.DB, filename, account
 				}
 			}
 		} else {
-			matched := matchMaskedAccount(ctx, db, accountOverride, availableAccounts)
+			matched := matchMaskedAccount(ctx, pool, accountOverride, availableAccounts)
 			if matched != "" {
 				addScore(matched, 400, fmt.Sprintf("override masked pattern '%s' resolved via DB", accountOverride))
 				logger.LogError("[ACCOUNT-MATCHER]  Override masked pattern %s resolved to %s via DB (+400 points)", accountOverride, matched)
@@ -269,7 +270,7 @@ func extractAccountCandidatesFromFilename(filename string) []string {
 // matchMaskedAccount matches a masked account number (e.g., XXXXXXXX009) against real accounts.
 // The mask uses 'X' characters for hidden digits and reveals a suffix.
 // Returns the first matching account or empty string.
-func matchMaskedAccount(ctx context.Context, db *sql.DB, maskedAccount string, availableAccounts []string) string {
+func matchMaskedAccount(ctx context.Context, pool *pgxpool.Pool, maskedAccount string, availableAccounts []string) string {
 	masked := strings.TrimSpace(strings.ToUpper(maskedAccount))
 	if masked == "" || !strings.Contains(masked, "X") {
 		return ""
@@ -309,14 +310,14 @@ func matchMaskedAccount(ctx context.Context, db *sql.DB, maskedAccount string, a
 		  AND LENGTH(account_number) = $2
 		LIMIT 1
 	`
-	err := db.QueryRowContext(ctx, query, suffix, expectedLen).Scan(&matchedAccount)
+	err := pool.QueryRow(ctx, query, suffix, expectedLen).Scan(&matchedAccount)
 	if err == nil && matchedAccount != "" {
 		logger.LogInfo("[ACCOUNT-MATCHER] masked %s matched DB account %s", masked, matchedAccount)
 		return matchedAccount
 	}
 
 	// Fallback: try without length constraint (in case account has dashes/spaces)
-	err = db.QueryRowContext(ctx, `
+	err = pool.QueryRow(ctx, `
 		SELECT account_number FROM public.masterbankaccount 
 		WHERE is_deleted = false 
 		  AND account_number LIKE '%' || $1

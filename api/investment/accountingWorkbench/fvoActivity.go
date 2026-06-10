@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/uploadutil"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/validation"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -201,6 +202,10 @@ func CreateFVOSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if strings.TrimSpace(req.Justification) == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "justification is required")
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{"scheme_id": req.SchemeID}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -432,6 +437,10 @@ func CreateFVOBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"success": false, "error": "justification is required"})
 				continue
 			}
+			if errMsg := validation.ValidateMFMasterReferences(ctx, map[string]interface{}{"scheme_id": row.SchemeID}); errMsg != "" {
+				results = append(results, map[string]interface{}{"success": false, "error": errMsg})
+				continue
+			}
 
 			var fvoID string
 			if err := tx.QueryRow(ctx, `
@@ -494,6 +503,10 @@ func UpdateFVO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(req.Fields) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "no fields to update")
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), req.Fields); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -597,6 +610,8 @@ func UpdateFVO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetFVOsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		args := []interface{}{}
+		pos := 1
 		q := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.activity_id)
@@ -659,10 +674,14 @@ func GetFVOsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l ON l.activity_id = fvo.activity_id
 			WHERE COALESCE(fvo.is_deleted, false) = false
 				AND COALESCE(act.is_deleted, false) = false
-			ORDER BY fvo.updated_at DESC, fvo.fvo_id;
 		`
+		if schemeRefs := accountingMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			q += fmt.Sprintf(" AND fvo.scheme_id = ANY($%d::text[])", pos)
+			args = append(args, schemeRefs)
+		}
+		q += " ORDER BY fvo.updated_at DESC, fvo.fvo_id"
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return

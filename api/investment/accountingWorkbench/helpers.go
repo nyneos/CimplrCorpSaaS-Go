@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 )
 
@@ -68,6 +69,50 @@ func GetCachedSettings() *SettingsCache {
 		}
 	}
 	return globalSettings
+}
+
+func accountingMFSchemeRefs(ctx context.Context) []string {
+	scope := ctxutil.FromContext(ctx)
+	if scope.IsAdminOverride {
+		return nil
+	}
+	return accountingScopeValues(scope.Schemes, "scheme_id", "scheme_name", "isin", "internal_scheme_code")
+}
+
+func accountingMFFolioRefs(ctx context.Context) []string {
+	scope := ctxutil.FromContext(ctx)
+	if scope.IsAdminOverride {
+		return nil
+	}
+	return accountingScopeValues(scope.Folios, "folio_id", "folio_number")
+}
+
+func accountingMFDematRefs(ctx context.Context) []string {
+	scope := ctxutil.FromContext(ctx)
+	if scope.IsAdminOverride {
+		return nil
+	}
+	return accountingScopeValues(scope.Demats, "demat_id", "demat_account_number")
+}
+
+func accountingScopeValues(rows []map[string]string, keys ...string) []string {
+	seen := make(map[string]struct{})
+	values := make([]string, 0, len(rows))
+	for _, row := range rows {
+		for _, key := range keys {
+			value := strings.TrimSpace(row[key])
+			if value == "" {
+				continue
+			}
+			lookup := strings.ToUpper(value)
+			if _, ok := seen[lookup]; ok {
+				continue
+			}
+			seen[lookup] = struct{}{}
+			values = append(values, value)
+		}
+	}
+	return values
 }
 
 // RoundUnits rounds units based on precision and rounding mode

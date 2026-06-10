@@ -6,7 +6,8 @@ import (
 	"math"
 	"net/http"
 	"sort"
-	"strings"
+
+	// "strings"
 	"time"
 
 	"CimplrCorpSaas/api"
@@ -32,16 +33,12 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowed, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		var allowedEntities interface{} = nil
-		allowed := api.GetEntityNamesFromCtx(ctx)
-		if len(allowed) > 0 {
-			allowedEntities = allowed
-		}
+		allowedEntities := allowed
 		if req.Limit <= 0 {
 			req.Limit = 3
 		}
@@ -135,7 +132,7 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Use the shared helper (same as individual handler) to fetch recent transactions
 		// We keep the same fromDate as FY start to be consistent with KPIs
 		fromDate := getFinancialYearStart(time.Now().UTC())
-		transactionDetail := fetchRawTransactionDetails(ctx, pgxPool, entityFilter, api.GetEntityNamesFromCtx(ctx), fromDate)
+		transactionDetail := fetchRawTransactionDetails(ctx, pgxPool, entityFilter, allowed, fromDate)
 
 		// Query B: YTD flows (simple inflows/outflows)
 		fyStart := getFinancialYearStart(time.Now().UTC()).Format(constants.DateFormat)
@@ -148,7 +145,7 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Additional KPI computations to mirror individual endpoint
-		allowedSlice := api.GetEntityNamesFromCtx(ctx)
+		allowedSlice := allowed
 		today := time.Now().UTC()
 		fyStartTime := getFinancialYearStart(today)
 		prevFYStart := fyStartTime.AddDate(-1, 0, 0)

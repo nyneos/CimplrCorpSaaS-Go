@@ -13,7 +13,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Summary struct {
@@ -53,7 +53,7 @@ type Exposure struct {
 }
 
 // Handler: GetExposureSummary
-func GetExposureSummary(db *sql.DB) http.HandlerFunc {
+func GetExposureSummary(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -71,7 +71,7 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		expRows, err := db.QueryContext(r.Context(), `SELECT exposure_header_id, company_code, entity, entity1, entity2, entity3, exposure_type, document_id, document_date, counterparty_name, currency, total_original_amount, total_open_amount, value_date FROM exposure_headers WHERE entity = ANY($1)`, pq.Array(buNames))
+		expRows, err := db.Query(r.Context(), `SELECT exposure_header_id, company_code, entity, entity1, entity2, entity3, exposure_type, document_id, document_date, counterparty_name, currency, total_original_amount, total_open_amount, value_date FROM exposure_headers WHERE entity = ANY($1)`, buNames)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch exposures"})
@@ -96,7 +96,7 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 		// 4. Fetch all hedged values in one query
 		hedgeMap := make(map[string]float64)
 		if len(exposureIds) > 0 {
-			hedgeRows, err := db.QueryContext(r.Context(), `SELECT exposure_header_id, COALESCE(SUM(hedged_amount), 0) AS hedged_value FROM exposure_hedge_links WHERE exposure_header_id = ANY($1) GROUP BY exposure_header_id`, pq.Array(exposureIds))
+			hedgeRows, err := db.Query(r.Context(), `SELECT exposure_header_id, COALESCE(SUM(hedged_amount), 0) AS hedged_value FROM exposure_hedge_links WHERE exposure_header_id = ANY($1) GROUP BY exposure_header_id`, exposureIds)
 			if err == nil {
 				for hedgeRows.Next() {
 					var eid string
@@ -234,8 +234,8 @@ type ForwardCancellation struct {
 	EntityLevel3       *string   `json:"entity_level_3,omitempty"`
 }
 
-func fetchForwardBookings(ctx context.Context, db *sql.DB, buNames []string) ([]ForwardBooking, error) {
-	rows, err := db.QueryContext(ctx, `
+func fetchForwardBookings(ctx context.Context, db *pgxpool.Pool, buNames []string) ([]ForwardBooking, error) {
+	rows, err := db.Query(ctx, `
 		SELECT
 			system_transaction_id, internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3,
 			local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period,
@@ -245,7 +245,7 @@ func fetchForwardBookings(ctx context.Context, db *sql.DB, buNames []string) ([]
 			transaction_timestamp, status, processing_status
 		FROM forward_bookings
 		WHERE entity_level_0 = ANY($1)
-	`, pq.Array(buNames))
+	`, buNames)
 	if err != nil {
 		return nil, err
 	}
@@ -283,8 +283,8 @@ func fetchForwardBookings(ctx context.Context, db *sql.DB, buNames []string) ([]
 	return list, nil
 }
 
-func fetchForwardRollovers(ctx context.Context, db *sql.DB, buNames []string) ([]ForwardRollover, error) {
-	rows, err := db.QueryContext(ctx, `
+func fetchForwardRollovers(ctx context.Context, db *pgxpool.Pool, buNames []string) ([]ForwardRollover, error) {
+	rows, err := db.Query(ctx, `
 		SELECT
 			r.rollover_id, r.booking_id, r.amount_rolled_over, r.rollover_date,
 			r.original_maturity_date, r.new_maturity_date, r.rollover_cost,
@@ -292,7 +292,7 @@ func fetchForwardRollovers(ctx context.Context, db *sql.DB, buNames []string) ([
 		FROM forward_rollovers r
 		LEFT JOIN forward_bookings b ON r.booking_id = b.system_transaction_id
 		WHERE b.entity_level_0 = ANY($1)
-	`, pq.Array(buNames))
+	`, buNames)
 	if err != nil {
 		return nil, err
 	}
@@ -313,8 +313,8 @@ func fetchForwardRollovers(ctx context.Context, db *sql.DB, buNames []string) ([
 	return list, nil
 }
 
-func fetchForwardCancellations(ctx context.Context, db *sql.DB, buNames []string) ([]ForwardCancellation, error) {
-	rows, err := db.QueryContext(ctx, `
+func fetchForwardCancellations(ctx context.Context, db *pgxpool.Pool, buNames []string) ([]ForwardCancellation, error) {
+	rows, err := db.Query(ctx, `
 		SELECT
 			c.cancellation_id, c.booking_id, c.amount_cancelled, c.cancellation_date,
 			c.cancellation_rate, c.realized_gain_loss, c.cancellation_reason,
@@ -322,7 +322,7 @@ func fetchForwardCancellations(ctx context.Context, db *sql.DB, buNames []string
 		FROM forward_cancellations c
 		LEFT JOIN forward_bookings b ON c.booking_id = b.system_transaction_id
 		WHERE b.entity_level_0 = ANY($1)
-	`, pq.Array(buNames))
+	`, buNames)
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +343,7 @@ func fetchForwardCancellations(ctx context.Context, db *sql.DB, buNames []string
 	return list, nil
 }
 
-func GetLinkedSummaryByCategory(db *sql.DB) http.HandlerFunc {
+func GetLinkedSummaryByCategory(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`

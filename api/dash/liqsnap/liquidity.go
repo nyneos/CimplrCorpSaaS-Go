@@ -5,12 +5,67 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	// "github.com/jackc/pgx/v5"
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 )
+
+type liquidityScope struct {
+	Entities   []string
+	Currencies []string
+	Accounts   []string
+}
+
+func resolveLiquidityScope(ctx context.Context, entityName, currency string) (liquidityScope, string) {
+	entityName = strings.TrimSpace(entityName)
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+
+	entities := api.GetEntityNamesFromCtx(ctx)
+	if entityName != "" {
+		if !api.IsEntityAllowed(ctx, entityName) {
+			return liquidityScope{}, constants.ErrNoAccessibleBusinessUnit
+		}
+		entities = []string{entityName}
+	}
+
+	currencies := normalizeUpper(api.GetCurrencyCodesFromCtx(ctx))
+	if currency != "" {
+		if !api.IsCurrencyAllowed(ctx, currency) {
+			return liquidityScope{}, constants.ErrNoAccessibleBusinessUnit
+		}
+		currencies = []string{currency}
+	}
+
+	if len(entities) == 0 || len(currencies) == 0 {
+		return liquidityScope{}, constants.ErrNoAccessibleBusinessUnit
+	}
+	return liquidityScope{Entities: entities, Currencies: currencies, Accounts: approvedAccounts(ctx)}, ""
+}
+
+func normalizeUpper(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if s := strings.ToUpper(strings.TrimSpace(value)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func approvedAccounts(ctx context.Context) []string {
+	accounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
+	out := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		if s := strings.TrimSpace(account["account_number"]); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
 
 // Handler for /dash/liquidity/total-cash-balance-by-entity
 type UserRequest struct {
@@ -28,8 +83,12 @@ func TotalCashBalanceByEntityHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
-		// You can use req.UserID for filtering if needed
-		balances, err := TotalCashBalanceByEntity(pgxPool)
+		scope, msg := resolveLiquidityScope(r.Context(), "", "")
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		balances, err := TotalCashBalanceByEntity(r.Context(), pgxPool, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -51,8 +110,12 @@ func LiquidityCoverageRatioHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
-		// You can use req.UserID for filtering if needed
-		ratio, err := LiquidityCoverageRatio(pgxPool)
+		scope, msg := resolveLiquidityScope(r.Context(), "", "")
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		ratio, err := LiquidityCoverageRatio(r.Context(), pgxPool, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -78,8 +141,12 @@ func EntityCurrencyWiseCashHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
-		// You can use req.UserID for session/middleware; now accept optional filters
-		data, err := entitycurrencywiseCash(pgxPool, req.EntityName, req.Currency)
+		scope, msg := resolveLiquidityScope(r.Context(), req.EntityName, req.Currency)
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		data, err := entitycurrencywiseCash(r.Context(), pgxPool, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -104,7 +171,7 @@ type EntityBankBalance struct {
 	Banks  []BankBalance `json:"banks"`
 }
 
-func TotalCashBalanceByEntity(pgxPool *pgxpool.Pool) ([]EntityBankBalance, error) {
+func TotalCashBalanceByEntity(ctx context.Context, pgxPool *pgxpool.Pool, scope liquidityScope) ([]EntityBankBalance, error) {
 	// Query for entity, bank, currency, balance
 	query := `SELECT 
 		m.entity_name,
@@ -116,8 +183,11 @@ func TotalCashBalanceByEntity(pgxPool *pgxpool.Pool) ([]EntityBankBalance, error
 	JOIN masterbankaccount mba ON bs.account_no = mba.account_no
 	JOIN masterbank mb ON mba.bank_id = mb.bank_id
 	WHERE bs.status = 'Approved'
+	  AND bs.account_no = ANY($1)
+	  AND m.entity_name = ANY($2)
+	  AND UPPER(TRIM(COALESCE(bs.currency_code, ''))) = ANY($3)
 	GROUP BY m.entity_name, mb.bank_name, bs.currency_code;`
-	rows, err := pgxPool.Query(context.Background(), query)
+	rows, err := pgxPool.Query(ctx, query, scope.Accounts, scope.Entities, scope.Currencies)
 	if err != nil {
 		return nil, err
 	}
@@ -163,23 +233,29 @@ func TotalCashBalanceByEntity(pgxPool *pgxpool.Pool) ([]EntityBankBalance, error
 	return response, nil
 }
 
-func LiquidityCoverageRatio(pgxPool *pgxpool.Pool) (float64, error) {
+func LiquidityCoverageRatio(ctx context.Context, pgxPool *pgxpool.Pool, scope liquidityScope) (float64, error) {
 	var inflows, outflows float64
 
-	inflowQuery := `SELECT COALESCE(SUM(expected_amount), 0)
-        FROM cashflow_proposal_item
-        WHERE cashflow_type = 'Inflow'
-        AND start_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '14 days';`
-	err := pgxPool.QueryRow(context.Background(), inflowQuery).Scan(&inflows)
+	inflowQuery := `SELECT COALESCE(SUM(cpi.expected_amount), 0)
+        FROM cashflow_proposal_item cpi
+        JOIN cashflow_proposal cp ON cp.proposal_id = cpi.proposal_id
+        WHERE cpi.cashflow_type = 'Inflow'
+        AND cpi.start_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '14 days'
+        AND cpi.entity_name = ANY($1)
+        AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($2);`
+	err := pgxPool.QueryRow(ctx, inflowQuery, scope.Entities, scope.Currencies).Scan(&inflows)
 	if err != nil {
 		return 0, err
 	}
 
-	outflowQuery := `SELECT COALESCE(SUM(expected_amount), 0)
-        FROM cashflow_proposal_item
-        WHERE cashflow_type = 'Outflow'
-        AND start_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '14 days';`
-	err = pgxPool.QueryRow(context.Background(), outflowQuery).Scan(&outflows)
+	outflowQuery := `SELECT COALESCE(SUM(cpi.expected_amount), 0)
+        FROM cashflow_proposal_item cpi
+        JOIN cashflow_proposal cp ON cp.proposal_id = cpi.proposal_id
+        WHERE cpi.cashflow_type = 'Outflow'
+        AND cpi.start_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '14 days'
+        AND cpi.entity_name = ANY($1)
+        AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($2);`
+	err = pgxPool.QueryRow(ctx, outflowQuery, scope.Entities, scope.Currencies).Scan(&outflows)
 	if err != nil {
 		return 0, err
 	}
@@ -197,7 +273,7 @@ type EntityCurrencyCash struct {
 	Normalized   float64 `json:"normalized_total"`
 }
 
-func entitycurrencywiseCash(pgxPool *pgxpool.Pool, entityFilter, currencyFilter string) ([]EntityCurrencyCash, error) {
+func entitycurrencywiseCash(ctx context.Context, pgxPool *pgxpool.Pool, scope liquidityScope) ([]EntityCurrencyCash, error) {
 	results := make([]EntityCurrencyCash, 0) // ensures JSON [] instead of null
 	today := time.Now().UTC().Format(constants.DateFormat)
 
@@ -212,24 +288,15 @@ func entitycurrencywiseCash(pgxPool *pgxpool.Pool, entityFilter, currencyFilter 
 		) t
 		JOIN masterbankaccount mba ON t.account_no = mba.account_number
 		JOIN masterentitycash me ON mba.entity_id = me.entity_id
-		WHERE 1=1
+		WHERE t.account_no = ANY($2)
+		  AND me.entity_name = ANY($3)
+		  AND UPPER(TRIM(COALESCE(t.currency_code, ''))) = ANY($4)
 	`
 
-	args := []interface{}{today}
-	pos := 2
-	if entityFilter != "" {
-		fetchQuery += fmt.Sprintf(" AND me.entity_name = $%d", pos)
-		args = append(args, entityFilter)
-		pos++
-	}
-	if currencyFilter != "" {
-		fetchQuery += fmt.Sprintf(" AND t.currency_code = $%d", pos)
-		args = append(args, currencyFilter)
-		pos++
-	}
+	args := []interface{}{today, scope.Accounts, scope.Entities, scope.Currencies}
 	fetchQuery += ` GROUP BY me.entity_name, t.currency_code ORDER BY me.entity_name, t.currency_code;`
 
-	rows, err := pgxPool.Query(context.Background(), fetchQuery, args...)
+	rows, err := pgxPool.Query(ctx, fetchQuery, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +358,12 @@ func KpiCardsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 14
 		}
-		kpi, err := GetKpiCards(pgxPool, req.Horizon, req.EntityName, req.Currency)
+		scope, msg := resolveLiquidityScope(r.Context(), req.EntityName, req.Currency)
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		kpi, err := GetKpiCards(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -321,7 +393,12 @@ func DetailedDailyCashFlowHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 14
 		}
-		rows, err := DetailedDailyCashFlowRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
+		scope, msg := resolveLiquidityScope(r.Context(), req.EntityName, req.Currency)
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		rows, err := DetailedDailyCashFlowRows(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -346,7 +423,7 @@ var rates = map[string]float64{
 	"INR": 0.0117,
 }
 
-func GetKpiCards(pgxPool *pgxpool.Pool, horizon int, entityName string, currency string) (KPICards, error) {
+func GetKpiCards(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope liquidityScope) (KPICards, error) {
 	var k KPICards
 	// 1) Total cash balance: sum of latest balance_amount per account as of today
 	today := time.Now().UTC()
@@ -356,24 +433,13 @@ func GetKpiCards(pgxPool *pgxpool.Pool, horizon int, entityName string, currency
 	// We'll fetch per-account latest balances and convert to USD in Go
 	fetchQuery := `SELECT DISTINCT ON (COALESCE(account_no, iban, nickname)) balance_amount, currency_code
 		FROM bank_balances_manual
-		WHERE as_of_date <= $1`
-	fetchArgs := []interface{}{dateToday}
-	if entityName != "" {
-		fetchQuery += " AND bank_name = $2"
-		fetchArgs = append(fetchArgs, entityName)
-	}
-	if currency != "" {
-		if len(fetchArgs) == 1 {
-			fetchQuery += " AND currency_code = $2"
-			fetchArgs = append(fetchArgs, currency)
-		} else {
-			fetchQuery += " AND currency_code = $3"
-			fetchArgs = append(fetchArgs, currency)
-		}
-	}
+		WHERE as_of_date <= $1
+		  AND account_no = ANY($2)
+		  AND UPPER(TRIM(COALESCE(currency_code, ''))) = ANY($3)`
+	fetchArgs := []interface{}{dateToday, scope.Accounts, scope.Currencies}
 	fetchQuery += " ORDER BY COALESCE(account_no, iban, nickname), as_of_date DESC, as_of_time DESC"
 
-	fetchRows, err := pgxPool.Query(context.Background(), fetchQuery, fetchArgs...)
+	fetchRows, err := pgxPool.Query(ctx, fetchQuery, fetchArgs...)
 	if err != nil {
 		return k, fmt.Errorf("total balance fetch: %w", err)
 	}
@@ -404,22 +470,14 @@ func GetKpiCards(pgxPool *pgxpool.Pool, horizon int, entityName string, currency
 		JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND a.processing_status='APPROVED'
 		WHERE r.due_date BETWEEN $1 AND $2`
 	inflowArgs := []interface{}{startDate, endDate}
-	if entityName != "" {
-		inflowQuery += " AND r.entity_name = $3"
-		inflowArgs = append(inflowArgs, entityName)
-	}
-	if currency != "" {
-		if len(inflowArgs) == 2 {
-			inflowQuery += " AND r.currency_code = $3"
-		} else {
-			inflowQuery += " AND r.currency_code = $4"
-		}
-		inflowArgs = append(inflowArgs, currency)
-	}
+	inflowQuery += " AND r.entity_name = ANY($3)"
+	inflowArgs = append(inflowArgs, scope.Entities)
+	inflowQuery += " AND UPPER(TRIM(COALESCE(r.currency_code, ''))) = ANY($4)"
+	inflowArgs = append(inflowArgs, scope.Currencies)
 	inflowQuery += " GROUP BY r.currency_code"
 	var inflows float64
 	// We may get multiple rows (one per currency). Sum after converting to USD.
-	inflowRows2, err := pgxPool.Query(context.Background(), inflowQuery, inflowArgs...)
+	inflowRows2, err := pgxPool.Query(ctx, inflowQuery, inflowArgs...)
 	if err != nil {
 		return k, fmt.Errorf("inflows query: %w", err)
 	}
@@ -444,21 +502,13 @@ func GetKpiCards(pgxPool *pgxpool.Pool, horizon int, entityName string, currency
 		JOIN auditactionpayable a ON a.payable_id = p.payable_id AND a.processing_status='APPROVED'
 		WHERE p.due_date BETWEEN $1 AND $2`
 	outflowArgs := []interface{}{startDate, endDate}
-	if entityName != "" {
-		outflowQuery += " AND p.entity_name = $3"
-		outflowArgs = append(outflowArgs, entityName)
-	}
-	if currency != "" {
-		if len(outflowArgs) == 2 {
-			outflowQuery += " AND p.currency_code = $3"
-		} else {
-			outflowQuery += " AND p.currency_code = $4"
-		}
-		outflowArgs = append(outflowArgs, currency)
-	}
+	outflowQuery += " AND p.entity_name = ANY($3)"
+	outflowArgs = append(outflowArgs, scope.Entities)
+	outflowQuery += " AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($4)"
+	outflowArgs = append(outflowArgs, scope.Currencies)
 	outflowQuery += " GROUP BY p.currency_code"
 	var outflows float64
-	outflowRows2, err := pgxPool.Query(context.Background(), outflowQuery, outflowArgs...)
+	outflowRows2, err := pgxPool.Query(ctx, outflowQuery, outflowArgs...)
 	if err != nil {
 		return k, fmt.Errorf("outflows query: %w", err)
 	}
@@ -485,7 +535,7 @@ func GetKpiCards(pgxPool *pgxpool.Pool, horizon int, entityName string, currency
 	}
 
 	// 3) Build detailed rows and derive min projected closing and net position today
-	detailedRows, err := DetailedDailyCashFlowRows(pgxPool, horizon, entityName, currency)
+	detailedRows, err := DetailedDailyCashFlowRows(ctx, pgxPool, horizon, scope)
 	if err != nil {
 		return k, fmt.Errorf("detailed rows: %w", err)
 	}
@@ -518,7 +568,7 @@ func GetKpiCards(pgxPool *pgxpool.Pool, horizon int, entityName string, currency
 // DetailedDailyCashFlowRows returns the daily flow rows for horizon days starting today.
 // Implementation: fetch opening (latest closing) balance as of today, fetch aggregated inflows/outflows per date
 // over the range in two queries, then iterate days and compute net/closing balances in Go (single pass).
-func DetailedDailyCashFlowRows(pgxPool *pgxpool.Pool, horizon int, entityName string, currency string) ([]DetailedDailyCashFlowRow, error) {
+func DetailedDailyCashFlowRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope liquidityScope) ([]DetailedDailyCashFlowRow, error) {
 	today := time.Now().UTC()
 	start := today
 	end := today.AddDate(0, 0, horizon-1)
@@ -528,24 +578,13 @@ func DetailedDailyCashFlowRows(pgxPool *pgxpool.Pool, horizon int, entityName st
 	// Opening balance: latest balance_amount per account as of start date
 	openingQuery := `SELECT DISTINCT ON (COALESCE(account_no, iban, nickname)) balance_amount, currency_code
 		FROM bank_balances_manual
-		WHERE as_of_date <= $1`
-	openingArgs := []interface{}{startDate}
-	if entityName != "" {
-		openingQuery += " AND bank_name = $2"
-		openingArgs = append(openingArgs, entityName)
-	}
-	if currency != "" {
-		if len(openingArgs) == 1 {
-			openingQuery += " AND currency_code = $2"
-			openingArgs = append(openingArgs, currency)
-		} else {
-			openingQuery += " AND currency_code = $3"
-			openingArgs = append(openingArgs, currency)
-		}
-	}
+		WHERE as_of_date <= $1
+		  AND account_no = ANY($2)
+		  AND UPPER(TRIM(COALESCE(currency_code, ''))) = ANY($3)`
+	openingArgs := []interface{}{startDate, scope.Accounts, scope.Currencies}
 	openingQuery += ` ORDER BY COALESCE(account_no, iban, nickname), as_of_date DESC, as_of_time DESC`
 	// Sum per-account latest closing balances and convert to USD using rates
-	openingRows, err := pgxPool.Query(context.Background(), openingQuery, openingArgs...)
+	openingRows, err := pgxPool.Query(ctx, openingQuery, openingArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("opening balance query: %w", err)
 	}
@@ -570,20 +609,12 @@ func DetailedDailyCashFlowRows(pgxPool *pgxpool.Pool, horizon int, entityName st
 		JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND a.processing_status='APPROVED'
 		WHERE r.due_date BETWEEN $1 AND $2`
 	inflowArgs := []interface{}{startDate, endDate}
-	if entityName != "" {
-		inflowsQ += " AND r.entity_name = $3"
-		inflowArgs = append(inflowArgs, entityName)
-	}
-	if currency != "" {
-		if len(inflowArgs) == 2 {
-			inflowsQ += " AND r.currency_code = $3"
-		} else {
-			inflowsQ += " AND r.currency_code = $4"
-		}
-		inflowArgs = append(inflowArgs, currency)
-	}
+	inflowsQ += " AND r.entity_name = ANY($3)"
+	inflowArgs = append(inflowArgs, scope.Entities)
+	inflowsQ += " AND UPPER(TRIM(COALESCE(r.currency_code, ''))) = ANY($4)"
+	inflowArgs = append(inflowArgs, scope.Currencies)
 	inflowsQ += " GROUP BY r.due_date::date, r.currency_code;"
-	inflowRows, err := pgxPool.Query(context.Background(), inflowsQ, inflowArgs...)
+	inflowRows, err := pgxPool.Query(ctx, inflowsQ, inflowArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("inflows per date: %w", err)
 	}
@@ -609,20 +640,12 @@ func DetailedDailyCashFlowRows(pgxPool *pgxpool.Pool, horizon int, entityName st
 		JOIN auditactionpayable a ON a.payable_id = p.payable_id AND a.processing_status='APPROVED'
 		WHERE p.due_date BETWEEN $1 AND $2`
 	outflowArgs := []interface{}{startDate, endDate}
-	if entityName != "" {
-		outflowsQ += " AND p.entity_name = $3"
-		outflowArgs = append(outflowArgs, entityName)
-	}
-	if currency != "" {
-		if len(outflowArgs) == 2 {
-			outflowsQ += " AND p.currency_code = $3"
-		} else {
-			outflowsQ += " AND p.currency_code = $4"
-		}
-		outflowArgs = append(outflowArgs, currency)
-	}
+	outflowsQ += " AND p.entity_name = ANY($3)"
+	outflowArgs = append(outflowArgs, scope.Entities)
+	outflowsQ += " AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($4)"
+	outflowArgs = append(outflowArgs, scope.Currencies)
 	outflowsQ += " GROUP BY p.due_date::date, p.currency_code;"
-	outflowRows, err := pgxPool.Query(context.Background(), outflowsQ, outflowArgs...)
+	outflowRows, err := pgxPool.Query(ctx, outflowsQ, outflowArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("outflows per date: %w", err)
 	}

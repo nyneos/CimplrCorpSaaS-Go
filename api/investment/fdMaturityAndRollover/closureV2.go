@@ -9,6 +9,7 @@ import (
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
+	"CimplrCorpSaas/internal/ctxutil"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -47,6 +48,31 @@ const (
 	txClosurePrematureEdit   = "FD_CLOSURE_PREMATURE_EDIT"
 	txClosurePrematureDelete = "FD_CLOSURE_PREMATURE_DELETE"
 )
+
+func requireCimplrClosureParentScope(ctx context.Context, pool *pgxpool.Pool, w http.ResponseWriter, closureInitiateID, closureConfirmID string) bool {
+	var entityID, bankID string
+	var err error
+	if strings.TrimSpace(closureConfirmID) != "" {
+		err = pool.QueryRow(ctx, `
+			SELECT COALESCE(entity_id,''), COALESCE(bank_id,'')
+			FROM cimplr.fd_closure_confirm
+			WHERE closure_confirm_id=$1 AND COALESCE(is_deleted,false)=false`,
+			closureConfirmID,
+		).Scan(&entityID, &bankID)
+	} else {
+		err = pool.QueryRow(ctx, `
+			SELECT COALESCE(entity_id,''), COALESCE(bank_id,'')
+			FROM cimplr.fd_closure_initiate
+			WHERE closure_initiate_id=$1 AND COALESCE(is_deleted,false)=false`,
+			closureInitiateID,
+		).Scan(&entityID, &bankID)
+	}
+	if err != nil {
+		api.RespondWithError(w, http.StatusNotFound, constants.ErrClosureRequestNotFound)
+		return false
+	}
+	return requireClosureScope(ctx, w, entityID, bankID)
+}
 
 // --- Notification Trigger Helpers for FD Closure V2 ---
 func cimplrGetClosureTypes(ctx context.Context, pool *pgxpool.Pool, table string, ids []string) map[string]string {
@@ -378,6 +404,9 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
+		if !requireClosureScope(ctx, w, src.EntityID, src.BankID) {
+			return
+		}
 		calc, err := calculateCimplrClosure(ctx, pool, src, req.ClosureType, cimplrDefaultCalcDate(src, req.ClosureType, req.RequestedClosureDate), false)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
@@ -572,6 +601,9 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		src, err := loadCimplrFDSource(ctx, pool, fmt.Sprint(oldRow["fd_id"]))
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
+			return
+		}
+		if !requireClosureScope(ctx, w, src.EntityID, src.BankID) {
 			return
 		}
 		if req.ClosureType == "" {
@@ -834,6 +866,9 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
+		if !requireClosureScope(ctx, w, src.EntityID, src.BankID) {
+			return
+		}
 		closureType := fmt.Sprint(initiate["closure_type"])
 		enforceMaturity := closureType == "PAYOUT" || closureType == "ROLLOVER"
 		calc, err := calculateCimplrClosure(ctx, pool, src, closureType, firstNonEmpty(req.RequestedClosureDate, fmt.Sprint(initiate["requested_closure_date"])), enforceMaturity)
@@ -1038,6 +1073,9 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 			return
 		}
+		if !requireClosureScope(ctx, w, src.EntityID, src.BankID) {
+			return
+		}
 		calc, err := calculateCimplrClosure(ctx, pool, src, "PREMATURE", req.RequestedClosureDate, false)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "premature calculation failed: "+err.Error())
@@ -1236,6 +1274,9 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		src, err := loadCimplrFDSource(ctx, pool, fmt.Sprint(oldRow["fd_id"]))
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
+			return
+		}
+		if !requireClosureScope(ctx, w, src.EntityID, src.BankID) {
 			return
 		}
 		closureType := fmt.Sprint(oldRow["closure_type"])
@@ -1776,6 +1817,9 @@ func CimplrInitiateDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrClosureInitiateRecordNotFound)
 			return
 		}
+		if !requireClosureScope(r.Context(), w, fmt.Sprint(header["entity_id"]), fmt.Sprint(header["bank_id"])) {
+			return
+		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"initiate":          header,
 			"calculation":       fetchCimplrCalculations(r.Context(), pool, "closure_initiate_id", id),
@@ -1802,6 +1846,9 @@ func CimplrConfirmDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		header, err := loadCimplrConfirmOld(r.Context(), pool, id)
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, constants.ConfirmRecordNotFound)
+			return
+		}
+		if !requireClosureScope(r.Context(), w, fmt.Sprint(header["entity_id"]), fmt.Sprint(header["bank_id"])) {
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -1883,6 +1930,9 @@ func CimplrClosureUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "file_type, stored_file_name and upload_s3_key are required")
 			return
 		}
+		if !requireCimplrClosureParentScope(r.Context(), pool, w, req.ClosureInitiateID, req.ClosureConfirmID) {
+			return
+		}
 		if isCimplrPrematureClosureRoute(r.URL.Path) {
 			if req.ClosureConfirmID == "" {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
@@ -1951,6 +2001,9 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 	}
 	if fileType == "" {
 		api.RespondWithError(w, http.StatusBadRequest, "file_type is required")
+		return
+	}
+	if !requireCimplrClosureParentScope(r.Context(), pool, w, closureInitiateID, closureConfirmID) {
 		return
 	}
 	file, header, err := r.FormFile("file")
@@ -3593,7 +3646,12 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 		add("t.fd_id=$%d", req.FDID)
 	}
 	if req.EntityID != "" {
+		if !ctxutil.FromContext(ctx).HasEntityAccess(req.EntityID) {
+			return nil, 0, fmt.Errorf("entity id %q is outside authorized scope", req.EntityID)
+		}
 		add("t.entity_id=$%d", req.EntityID)
+	} else if scope := ctxutil.FromContext(ctx); len(scope.EntityIDs) > 0 {
+		add("t.entity_id = ANY($%d::text[])", scope.EntityIDs)
 	}
 	if req.ClosureType != "" {
 		add("t.closure_type=$%d", strings.ToUpper(req.ClosureType))
@@ -4671,13 +4729,32 @@ func CimplrExecutionLogsAll(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.Page > 0 {
 			offset = (req.Page - 1) * req.PageSize
 		}
-		_ = ensureCimplrExecutionLogTable(r.Context(), pool)
-		rows, err := pool.Query(r.Context(), `
-			SELECT log_id, closure_initiate_id, fd_id, closure_type, closure_confirm_id,
-			       execution_source, status, message, created_at
-			FROM cimplr.fd_closure_execution_log
-			ORDER BY created_at DESC, log_id DESC
-			LIMIT $1 OFFSET $2`, req.PageSize, offset)
+		ctx := r.Context()
+		_ = ensureCimplrExecutionLogTable(ctx, pool)
+		args := []interface{}{}
+		argIdx := 1
+		scopeWhere := ""
+		if scope := ctxutil.FromContext(ctx); len(scope.EntityIDs) > 0 {
+			scopeWhere = fmt.Sprintf(`
+			  AND COALESCE(ci.entity_id, cc.entity_id, m.entity_id, '') = ANY($%d::text[])`, argIdx)
+			args = append(args, scope.EntityIDs)
+			argIdx++
+		}
+		args = append(args, req.PageSize, offset)
+		rows, err := pool.Query(ctx, fmt.Sprintf(`
+			SELECT l.log_id, l.closure_initiate_id, l.fd_id, l.closure_type, l.closure_confirm_id,
+			       l.execution_source, l.status, l.message, l.created_at
+			FROM cimplr.fd_closure_execution_log l
+			LEFT JOIN cimplr.fd_closure_initiate ci
+				ON ci.closure_initiate_id = l.closure_initiate_id AND COALESCE(ci.is_deleted,false)=false
+			LEFT JOIN cimplr.fd_closure_confirm cc
+				ON cc.closure_confirm_id = l.closure_confirm_id AND COALESCE(cc.is_deleted,false)=false
+			LEFT JOIN investment.fd_master m
+				ON m.fd_id = COALESCE(NULLIF(l.fd_id,''), ci.fd_id, cc.fd_id) AND COALESCE(m.is_deleted,false)=false
+			WHERE 1=1
+			%s
+			ORDER BY l.created_at DESC, l.log_id DESC
+			LIMIT $%d OFFSET $%d`, scopeWhere, argIdx, argIdx+1), args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch execution logs: "+err.Error())
 			return

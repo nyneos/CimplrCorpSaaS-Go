@@ -15,7 +15,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/dash/ticker"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
 )
@@ -58,7 +58,7 @@ func contains(arr []string, s string) bool {
 
 // Handler for forward dashboard for Hedging Proposal
 // Handler: GetBuMaturityCurrencySummaryJoined
-func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
+func GetForwardBookingMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -74,7 +74,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.Query(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.base_currency,
@@ -89,7 +89,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			) fbl ON TRUE
 			WHERE fb.entity_level_0 = ANY($1)
 			  AND LOWER(fb.processing_status) = 'approved'
-		`, pq.Array(buNames))
+		`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
@@ -191,7 +191,7 @@ func format2f(x float64) string {
 }
 
 // Handler: GetForwardBookingsDashboard
-func GetForwardBookingsDashboard(db *sql.DB) http.HandlerFunc {
+func GetForwardBookingsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames := api.GetEntityNamesFromCtx(r.Context())
 		if len(buNames) == 0 {
@@ -199,7 +199,7 @@ func GetForwardBookingsDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.Query(r.Context(), `
 			SELECT 
 				internal_reference_id, counterparty, entity_level_0, base_currency, local_currency,
 				value_quote_currency, spot_rate, total_rate, bank_margin, value_local_currency,
@@ -207,7 +207,7 @@ func GetForwardBookingsDashboard(db *sql.DB) http.HandlerFunc {
 			FROM forward_bookings
 			WHERE entity_level_0 = ANY($1)
 			  AND (processing_status = 'Approved' OR processing_status = 'approved')
-		`, pq.Array(buNames))
+		`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return

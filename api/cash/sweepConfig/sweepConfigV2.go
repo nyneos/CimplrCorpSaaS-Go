@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func validateSweepConfigV2Scope(ctx context.Context, entityName, sourceBank, sourceAccount, targetBank, targetAccount string) string {
+	return validation.ValidateCashMasterReferences(ctx, map[string]interface{}{
+		"entity_name":           entityName,
+		"bank_names":            []string{sourceBank, targetBank},
+		"source_account_number": sourceAccount,
+		"to_account_number":     targetAccount,
+	})
+}
 
 // CreateSweepConfigurationV2 inserts a sweep configuration into sweepconfiguration table and creates a CREATE audit action (PENDING_APPROVAL)
 func CreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -58,30 +68,10 @@ func CreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		// if strings.TrimSpace(req.SourceBankName) != "" {
-		// 	if !api.IsBankAllowed(ctx, req.SourceBankName) {
-		// 		api.RespondWithResult(w, false, "unauthorized source bank")
-		// 		return
-		// 	}
-		// }
-		// if strings.TrimSpace(req.TargetBankName) != "" {
-		// 	if !api.IsBankAllowed(ctx, req.TargetBankName) {
-		// 		api.RespondWithResult(w, false, "unauthorized target bank")
-		// 		return
-		// 	}
-		// }
-		// if strings.TrimSpace(req.SourceBankAccount) != "" {
-		// 	if !ctxHasApprovedBankAccountFor(ctx, req.SourceBankAccount, req.SourceBankName, req.EntityName) {
-		// 		api.RespondWithResult(w, false, "unauthorized source bank account")
-		// 		return
-		// 	}
-		// }
-		// if strings.TrimSpace(req.TargetBankAccount) != "" {
-		// 	if !ctxHasApprovedBankAccountFor(ctx, req.TargetBankAccount, req.TargetBankName, req.EntityName) {
-		// 		api.RespondWithResult(w, false, "unauthorized target bank account")
-		// 		return
-		// 	}
-		// }
+		if msg := validateSweepConfigV2Scope(ctx, req.EntityName, req.SourceBankName, req.SourceBankAccount, req.TargetBankName, req.TargetBankAccount); msg != "" {
+			api.RespondWithResult(w, false, msg)
+			return
+		}
 
 		// Validate sweep_type (must be ZBA, CONCENTRATION, or TARGET_BALANCE)
 		sweepTypeUpper := strings.ToUpper(strings.TrimSpace(req.SweepType))
@@ -233,30 +223,10 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 			}
-			// if strings.TrimSpace(cfg.SourceBankName) != "" {
-			// 	if !api.IsBankAllowed(ctx, cfg.SourceBankName) {
-			// 		api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized source bank %s", i, cfg.SourceBankName))
-			// 		return
-			// 	}
-			// }
-			// if strings.TrimSpace(cfg.TargetBankName) != "" {
-			// 	if !api.IsBankAllowed(ctx, cfg.TargetBankName) {
-			// 		api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized target bank %s", i, cfg.TargetBankName))
-			// 		return
-			// 	}
-			// }
-			// if strings.TrimSpace(cfg.SourceBankAccount) != "" {
-			// 	if !ctxHasApprovedBankAccountFor(ctx, cfg.SourceBankAccount, cfg.SourceBankName, cfg.EntityName) {
-			// 		api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized source bank account %s", i, cfg.SourceBankAccount))
-			// 		return
-			// 	}
-			// }
-			// if strings.TrimSpace(cfg.TargetBankAccount) != "" {
-			// 	if !ctxHasApprovedBankAccountFor(ctx, cfg.TargetBankAccount, cfg.TargetBankName, cfg.EntityName) {
-			// 		api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized target bank account %s", i, cfg.TargetBankAccount))
-			// 		return
-			// 	}
-			// }
+			if msg := validateSweepConfigV2Scope(ctx, cfg.EntityName, cfg.SourceBankName, cfg.SourceBankAccount, cfg.TargetBankName, cfg.TargetBankAccount); msg != "" {
+				api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: %s", i, msg))
+				return
+			}
 
 			// Validate sweep_type
 			sweepTypeUpper := strings.ToUpper(strings.TrimSpace(cfg.SweepType))
@@ -478,12 +448,11 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pos += 2
 		}
 
-		// track the final values so we can validate accounts against final bank/entity
-		// finalEntity := strings.TrimSpace(fmt.Sprint(curEntity.ValueOrZero()))
-		// finalSourceBank := strings.TrimSpace(fmt.Sprint(curSourceBank.ValueOrZero()))
-		// finalSourceAccount := strings.TrimSpace(fmt.Sprint(curSourceAccount.ValueOrZero()))
-		// finalTargetBank := strings.TrimSpace(fmt.Sprint(curTargetBank.ValueOrZero()))
-		// finalTargetAccount := strings.TrimSpace(fmt.Sprint(curTargetAccount.ValueOrZero()))
+		finalEntity := strings.TrimSpace(fmt.Sprint(curEntity.ValueOrZero()))
+		finalSourceBank := strings.TrimSpace(fmt.Sprint(curSourceBank.ValueOrZero()))
+		finalSourceAccount := strings.TrimSpace(fmt.Sprint(curSourceAccount.ValueOrZero()))
+		finalTargetBank := strings.TrimSpace(fmt.Sprint(curTargetBank.ValueOrZero()))
+		finalTargetAccount := strings.TrimSpace(fmt.Sprint(curTargetAccount.ValueOrZero()))
 
 		for k, v := range req.Fields {
 			switch k {
@@ -494,7 +463,7 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						return
 					}
 				}
-				// finalEntity = strings.TrimSpace(fmt.Sprint(v))
+				finalEntity = strings.TrimSpace(fmt.Sprint(v))
 				addStrField("entity_name", "old_entity_name", v, curEntity)
 
 			case "source_bank_name":
@@ -504,11 +473,11 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						return
 					}
 				}
-				// finalSourceBank = strings.TrimSpace(fmt.Sprint(v))
+				finalSourceBank = strings.TrimSpace(fmt.Sprint(v))
 				addStrField("source_bank_name", "old_source_bank_name", v, curSourceBank)
 
 			case "source_bank_account":
-				// finalSourceAccount = strings.TrimSpace(fmt.Sprint(v))
+				finalSourceAccount = strings.TrimSpace(fmt.Sprint(v))
 				addStrField("source_bank_account", "old_source_bank_account", v, curSourceAccount)
 
 			case "target_bank_name":
@@ -518,11 +487,11 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						return
 					}
 				}
-				// finalTargetBank = strings.TrimSpace(fmt.Sprint(v))
+				finalTargetBank = strings.TrimSpace(fmt.Sprint(v))
 				addStrField("target_bank_name", "old_target_bank_name", v, curTargetBank)
 
 			case "target_bank_account":
-				// finalTargetAccount = strings.TrimSpace(fmt.Sprint(v))
+				finalTargetAccount = strings.TrimSpace(fmt.Sprint(v))
 				addStrField("target_bank_account", "old_target_bank_account", v, curTargetAccount)
 
 			case "sweep_type":
@@ -573,22 +542,12 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// validate the final accounts match bank/entity and allowed entities
-		// if strings.TrimSpace(finalSourceAccount) != "" {
-		// 	if !ctxHasApprovedBankAccountFor(ctx, finalSourceAccount, finalSourceBank, finalEntity) {
-		// 		api.RespondWithResult(w, false, "unauthorized source bank account")
-		// 		return
-		// 	}
-		// }
-		// if strings.TrimSpace(finalTargetAccount) != "" {
-		// 	if !ctxHasApprovedBankAccountFor(ctx, finalTargetAccount, finalTargetBank, finalEntity) {
-		// 		api.RespondWithResult(w, false, "unauthorized target bank account")
-		// 		return
-		// 	}
-		// }
-
 		if len(sets) == 0 {
 			api.RespondWithResult(w, false, "no valid fields to update")
+			return
+		}
+		if msg := validateSweepConfigV2Scope(ctx, finalEntity, finalSourceBank, finalSourceAccount, finalTargetBank, finalTargetAccount); msg != "" {
+			api.RespondWithResult(w, false, msg)
 			return
 		}
 
@@ -1370,6 +1329,15 @@ func GetApprovedActiveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFun
 			); err != nil {
 				api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 				return
+			}
+			if msg := validateSweepConfigV2Scope(ctx,
+				fmt.Sprint(entity.ValueOrZero()),
+				fmt.Sprint(sourceBank.ValueOrZero()),
+				fmt.Sprint(sourceAccount.ValueOrZero()),
+				fmt.Sprint(targetBank.ValueOrZero()),
+				fmt.Sprint(targetAccount.ValueOrZero()),
+			); msg != "" {
+				continue
 			}
 
 			m := map[string]interface{}{

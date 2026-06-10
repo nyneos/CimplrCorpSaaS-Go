@@ -1022,9 +1022,30 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					AND m.initiation_id NOT IN (
 						SELECT initiation_id FROM investment.investment_confirmation 
 					)
-			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
-		rows, err := pgxPool.Query(ctx, q)
+		args := []interface{}{}
+		pos := 1
+		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
+			q += fmt.Sprintf(" AND (COALESCE(m.entity_name,'') = '' OR m.entity_name = ANY($%d::text[]))", pos)
+			args = append(args, entityNames)
+			pos++
+		}
+		if schemeRefs := suiteMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			q += fmt.Sprintf(" AND m.scheme_id = ANY($%d::text[])", pos)
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := suiteMFFolioRefs(ctx); len(folioRefs) > 0 {
+			q += fmt.Sprintf(" AND (COALESCE(m.folio_id,'') = '' OR m.folio_id = ANY($%d::text[]))", pos)
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := suiteMFDematRefs(ctx); len(dematRefs) > 0 {
+			q += fmt.Sprintf(" AND (COALESCE(m.demat_id,'') = '' OR m.demat_id = ANY($%d::text[]))", pos)
+			args = append(args, dematRefs)
+		}
+		q += " ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
@@ -1242,7 +1263,29 @@ func fetchInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []strin
 		q = baseSQL + " WHERE m.initiation_id = ANY($1) ORDER BY m.entity_name, m.initiation_id"
 		args = []interface{}{ids}
 	} else {
-		q = baseSQL + " WHERE COALESCE(m.is_deleted, false) = false ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+		args = []interface{}{}
+		pos := 1
+		where := " WHERE COALESCE(m.is_deleted, false) = false"
+		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
+			where += fmt.Sprintf(" AND (COALESCE(m.entity_name,'') = '' OR m.entity_name = ANY($%d::text[]))", pos)
+			args = append(args, entityNames)
+			pos++
+		}
+		if schemeRefs := suiteMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			where += fmt.Sprintf(" AND m.scheme_id = ANY($%d::text[])", pos)
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := suiteMFFolioRefs(ctx); len(folioRefs) > 0 {
+			where += fmt.Sprintf(" AND (COALESCE(m.folio_id,'') = '' OR m.folio_id = ANY($%d::text[]))", pos)
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := suiteMFDematRefs(ctx); len(dematRefs) > 0 {
+			where += fmt.Sprintf(" AND (COALESCE(m.demat_id,'') = '' OR m.demat_id = ANY($%d::text[]))", pos)
+			args = append(args, dematRefs)
+		}
+		q = baseSQL + where + " ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
 	}
 
 	rows, err := pgxPool.Query(ctx, q, args...)

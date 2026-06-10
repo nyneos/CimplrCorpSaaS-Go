@@ -109,6 +109,12 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
+		entityID, scopeMsg := resolveFDDashboardSingleEntity(ctx, req.EntityID)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
+			return
+		}
+		req.EntityID = entityID
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {

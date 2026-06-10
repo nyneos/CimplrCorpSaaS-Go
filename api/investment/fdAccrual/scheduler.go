@@ -12,6 +12,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 
@@ -21,6 +22,24 @@ import (
 )
 
 // ─── 1. CreateScheduleConfig ──────────────────────────────────────────────────
+
+func requireScheduleConfigScope(ctx context.Context, pgxPool *pgxpool.Pool, configID string) (string, bool, error) {
+	var entityID string
+	err := pgxPool.QueryRow(ctx, `
+		SELECT COALESCE(entity_id,'')
+		FROM investment.fd_accrual_schedule_config
+		WHERE config_id=$1 AND COALESCE(is_deleted,false)=false`, configID).Scan(&entityID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
+		return entityID, false, nil
+	}
+	return entityID, true, nil
+}
 
 func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +104,17 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		scope := ctxutil.FromContext(ctx)
+		if !scope.HasEntityAccess(req.EntityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+			return
+		}
+		if strings.TrimSpace(req.DefaultBankIDFilter) != "" && !scope.HasApprovedBank(req.DefaultBankIDFilter) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Bank '%s' is not within your approved bank scope.", req.DefaultBankIDFilter))
+			return
+		}
 
 		// Block if entity already has a config with the same (frequency, granularity) combination.
 		// Same entity may have e.g. MONTHLY+MONTHLY and YEARLY+MONTHLY as separate configs,
@@ -208,6 +238,22 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		entityID, ok, scopeErr := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID)
+		if scopeErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Schedule config lookup failed: "+scopeErr.Error())
+			return
+		}
+		if !ok {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
+			return
+		}
+		if bankFilter, has := req.Fields["default_bank_id_filter"]; has {
+			if bank := strings.TrimSpace(fmt.Sprint(bankFilter)); bank != "" && !ctxutil.FromContext(ctx).HasApprovedBank(bank) {
+				api.RespondWithError(w, http.StatusForbidden,
+					fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bank))
+				return
+			}
+		}
 
 		// Allowlist of updatable columns
 		allowed := map[string]bool{
@@ -308,9 +354,6 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			oldFreq, oldRunDay, oldRunTime, oldRunMode, oldBankFilter, oldFDFilter,
 			oldAutoSubmit, string(oldNotifRecipients), oldPeriodCoverage)
 
-		var entityID string
-		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_accrual_schedule_config WHERE config_id=$1`, req.ConfigID).Scan(&entityID)
-
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"config_id":         req.ConfigID,
 			"updated":           true,
@@ -350,6 +393,7 @@ func GetScheduleConfigs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		ctx := r.Context()
+		scope := ctxutil.FromContext(ctx)
 		query := `
 			SELECT
 				config_id,
@@ -368,8 +412,16 @@ func GetScheduleConfigs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE is_active = true`
 		args := []interface{}{}
 		if req.EntityID != "" {
+			if !scope.HasEntityAccess(req.EntityID) {
+				api.RespondWithError(w, http.StatusForbidden,
+					fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				return
+			}
 			query += " AND entity_id = $1"
 			args = append(args, req.EntityID)
+		} else if len(scope.EntityIDs) > 0 {
+			query += " AND entity_id = ANY($1::text[])"
+			args = append(args, scope.EntityIDs)
 		}
 		query += " ORDER BY created_at DESC"
 
@@ -430,6 +482,13 @@ func DisableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if _, ok, scopeErr := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID); scopeErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Schedule config lookup failed: "+scopeErr.Error())
+			return
+		} else if !ok {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
+			return
+		}
 		ct, err := pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_schedule_config
 			SET is_active=false, updated_by=$1, updated_at=now()
@@ -481,6 +540,13 @@ func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if _, ok, scopeErr := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID); scopeErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Schedule config lookup failed: "+scopeErr.Error())
+			return
+		} else if !ok {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
+			return
+		}
 		ct, err := pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_schedule_config
 			SET is_active=true, updated_by=$1, updated_at=now()
@@ -902,6 +968,15 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		entityID, ok, scopeErr := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID)
+		if scopeErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Schedule config lookup failed: "+scopeErr.Error())
+			return
+		}
+		if !ok {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
+			return
+		}
 
 		// Snapshot old values before delete
 		var dOldFreq, dOldRunMode, dOldBankFilter, dOldFDFilter, dOldPeriodCoverage string
@@ -946,9 +1021,6 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Delete audit insert failed: "+err.Error())
 			return
 		}
-
-		var entityID string
-		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_accrual_schedule_config WHERE config_id=$1`, req.ConfigID).Scan(&entityID)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"config_id":         req.ConfigID,
@@ -1700,9 +1772,15 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		argIdx := 1
 
 		if req.EntityID != "" {
+			if code, msg := validateAccrualEntityParam(ctx, req.EntityID); code != 0 {
+				api.RespondWithError(w, code, msg)
+				return
+			}
 			query += fmt.Sprintf(" AND c.entity_id = $%d", argIdx)
 			args = append(args, req.EntityID)
 			argIdx++
+		} else {
+			query += accrualEntityScopePredicate(ctx, "c", &argIdx, &args)
 		}
 		query += " ORDER BY c.created_at DESC"
 
@@ -1862,6 +1940,10 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&histCreatedBy, &histCreatedAt, &histEditedBy, &histEditedAt, &histDeletedBy, &histDeletedAt,
 		); err != nil {
 			api.RespondWithError(w, http.StatusNotFound, "Schedule config not found: "+err.Error())
+			return
+		}
+		if code, msg := validateAccrualEntityParam(ctx, entityID); code != 0 {
+			api.RespondWithError(w, code, msg)
 			return
 		}
 
@@ -2197,14 +2279,27 @@ func GetScheduleExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		configArgs := []interface{}{}
 		argIdx := 1
 		if req.ConfigID != "" {
+			if _, ok, err := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Schedule config lookup failed: "+err.Error())
+				return
+			} else if !ok {
+				api.RespondWithError(w, http.StatusForbidden, "Schedule config is not within your authorized entity scope.")
+				return
+			}
 			configQuery += fmt.Sprintf(" AND c.config_id = $%d", argIdx)
 			configArgs = append(configArgs, req.ConfigID)
 			argIdx++
 		}
 		if req.EntityID != "" {
+			if code, msg := validateAccrualEntityParam(ctx, req.EntityID); code != 0 {
+				api.RespondWithError(w, code, msg)
+				return
+			}
 			configQuery += fmt.Sprintf(" AND c.entity_id = $%d", argIdx)
 			configArgs = append(configArgs, req.EntityID)
 			argIdx++
+		} else {
+			configQuery += accrualEntityScopePredicate(ctx, "c", &argIdx, &configArgs)
 		}
 		configQuery += " ORDER BY c.next_run_at NULLS LAST, c.created_at DESC"
 

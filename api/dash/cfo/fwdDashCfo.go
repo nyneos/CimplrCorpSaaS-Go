@@ -2,7 +2,6 @@ package cfo
 
 import (
 	"CimplrCorpSaas/api"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -12,7 +11,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
 )
@@ -27,7 +26,7 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	})
 }
 
-func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
+func GetAvgForwardMaturity(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -41,7 +40,7 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		rows, err := db.Query(`
+		rows, err := db.Query(r.Context(), `
     SELECT 
         fb.system_transaction_id AS booking_id,
         fb.base_currency,
@@ -59,7 +58,7 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
     WHERE fb.maturity_date IS NOT NULL
       AND fb.entity_level_0 = ANY($1)
       AND LOWER(fb.processing_status) = 'approved'
-`, pq.Array(buNames))
+`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
@@ -100,7 +99,7 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
+func GetForwardBuySellTotals(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -116,7 +115,7 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.Query(r.Context(), `
 			SELECT 
 				fb.system_transaction_id AS booking_id,
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
@@ -133,7 +132,7 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 			WHERE fb.booking_amount IS NOT NULL
 			  AND fb.entity_level_0 = ANY($1)
 			  AND LOWER(fb.processing_status) = 'approved'
-		`, pq.Array(buNames))
+		`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
@@ -178,7 +177,7 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: GetUserCurrency
-func GetUserCurrency(db *sql.DB) http.HandlerFunc {
+func GetUserCurrency(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -188,7 +187,7 @@ func GetUserCurrency(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		var defaultCurrency string
-		err := db.QueryRow(`
+		err := db.QueryRow(r.Context(), `
 			SELECT ec.base_operating_currency
 			FROM user_entity_mappings uem
 			JOIN masterentitycash ec ON ec.entity_id::text = uem.entity_id
@@ -205,7 +204,7 @@ func GetUserCurrency(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: GetActiveForwardsCount
-func GetActiveForwardsCount(db *sql.DB) http.HandlerFunc {
+func GetActiveForwardsCount(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -222,7 +221,7 @@ func GetActiveForwardsCount(db *sql.DB) http.HandlerFunc {
 		}
 		now := time.Now().Format(constants.DateFormat)
 		var count int
-		err := db.QueryRow("SELECT COUNT(*) FROM forward_bookings WHERE maturity_date > $1 AND entity_level_0 = ANY($2) AND LOWER(processing_status) = 'approved'", now, pq.Array(buNames)).Scan(&count)
+		err := db.QueryRow(r.Context(), "SELECT COUNT(*) FROM forward_bookings WHERE maturity_date > $1 AND entity_level_0 = ANY($2) AND LOWER(processing_status) = 'approved'", now, buNames).Scan(&count)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Error fetching active forwards count")
 			return
@@ -233,7 +232,7 @@ func GetActiveForwardsCount(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func GetRecentTradesDashboard(db *sql.DB) http.HandlerFunc {
+func GetRecentTradesDashboard(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -253,7 +252,7 @@ func GetRecentTradesDashboard(db *sql.DB) http.HandlerFunc {
 		sevenDaysAgo := now.AddDate(0, 0, -7).Format(constants.DateFormat)
 		nowStr := now.Format(constants.DateFormat)
 
-		rows, err := db.Query(`
+		rows, err := db.Query(r.Context(), `
 			SELECT 
 				fb.system_transaction_id AS booking_id,
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
@@ -273,7 +272,7 @@ func GetRecentTradesDashboard(db *sql.DB) http.HandlerFunc {
 			  AND fb.maturity_date <= $2
 			  AND fb.entity_level_0 = ANY($3)
 			  AND LOWER(fb.processing_status) = 'approved'
-		`, sevenDaysAgo, nowStr, pq.Array(buNames))
+		`, sevenDaysAgo, nowStr, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Error fetching recent trades dashboard")
 			return
@@ -384,7 +383,7 @@ func contains(arr []string, s string) bool {
 	return false
 }
 
-func GetTotalUsdSumDashboard(db *sql.DB) http.HandlerFunc {
+func GetTotalUsdSumDashboard(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -400,7 +399,7 @@ func GetTotalUsdSumDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.Query(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.quote_currency
@@ -414,7 +413,7 @@ func GetTotalUsdSumDashboard(db *sql.DB) http.HandlerFunc {
 			) fbl ON TRUE
 			WHERE fb.entity_level_0 = ANY($1)
 			  AND LOWER(fb.processing_status) = 'approved'
-		`, pq.Array(buNames))
+		`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
@@ -449,7 +448,7 @@ func GetTotalUsdSumDashboard(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
+func GetOpenAmountToBookingRatioDashboard(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -466,7 +465,7 @@ func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		// -------- OPEN AMOUNT ----------
-		openRows, err := db.Query(`
+		openRows, err := db.Query(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.quote_currency
@@ -481,7 +480,7 @@ func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
 			WHERE fb.entity_level_0 = ANY($1)
 			  AND fb.status = 'OPEN'
 			  AND LOWER(fb.processing_status) = 'approved'
-		`, pq.Array(buNames))
+		`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "DB error (open)")
 			return
@@ -505,7 +504,7 @@ func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		// -------- TOTAL BOOKED AMOUNT ----------
-		totalRows, err := db.Query(`
+		totalRows, err := db.Query(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.quote_currency
@@ -519,7 +518,7 @@ func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
 			) fbl ON TRUE
 			WHERE fb.entity_level_0 = ANY($1)
 			  AND LOWER(fb.processing_status) = 'approved'
-		`, pq.Array(buNames))
+		`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "DB error (total)")
 			return
@@ -557,7 +556,7 @@ func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func GetTotalUsdSumByCurrencyDashboard(db *sql.DB) http.HandlerFunc {
+func GetTotalUsdSumByCurrencyDashboard(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -573,7 +572,7 @@ func GetTotalUsdSumByCurrencyDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.Query(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.quote_currency
@@ -587,7 +586,7 @@ func GetTotalUsdSumByCurrencyDashboard(db *sql.DB) http.HandlerFunc {
 			) fbl ON TRUE
 			WHERE fb.entity_level_0 = ANY($1)
 			  AND LOWER(fb.processing_status) = 'approved'
-		`, pq.Array(buNames))
+		`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
@@ -632,7 +631,7 @@ func GetTotalUsdSumByCurrencyDashboard(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
+func GetForwardBookingMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -648,7 +647,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(`
+		rows, err := db.Query(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.quote_currency,
@@ -663,7 +662,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			) fbl ON TRUE
 			WHERE fb.entity_level_0 = ANY($1)
 			  AND LOWER(fb.processing_status) = 'approved'
-		`, pq.Array(buNames))
+		`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
@@ -764,7 +763,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: GetRolloverCountsByCurrency
-func GetRolloverCountsByCurrency(db *sql.DB) http.HandlerFunc {
+func GetRolloverCountsByCurrency(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -778,7 +777,7 @@ func GetRolloverCountsByCurrency(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		rows, err := db.Query(`SELECT fb.quote_currency, COUNT(fr.rollover_id) AS rollover_count FROM forward_bookings fb LEFT JOIN forward_rollovers fr ON fr.booking_id = fb.system_transaction_id WHERE fb.entity_level_0 = ANY($1)  AND LOWER(fb.processing_status) = 'approved' GROUP BY fb.quote_currency`, pq.Array(buNames))
+		rows, err := db.Query(r.Context(), `SELECT fb.quote_currency, COUNT(fr.rollover_id) AS rollover_count FROM forward_bookings fb LEFT JOIN forward_rollovers fr ON fr.booking_id = fb.system_transaction_id WHERE fb.entity_level_0 = ANY($1)  AND LOWER(fb.processing_status) = 'approved' GROUP BY fb.quote_currency`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Error fetching rollover counts")
 			return
@@ -813,7 +812,7 @@ func GetRolloverCountsByCurrency(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func GetBankTradesData(db *sql.DB) http.HandlerFunc {
+func GetBankTradesData(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -830,7 +829,7 @@ func GetBankTradesData(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Ledger-aware query: prefer latest ledger.running_open_amount, fallback to booking_amount
-		rows, err := db.Query(`
+		rows, err := db.Query(r.Context(), `
 			SELECT 
 				fb.counterparty,
 				fb.order_type,
@@ -846,7 +845,7 @@ func GetBankTradesData(db *sql.DB) http.HandlerFunc {
 			) fbl ON TRUE
 			WHERE fb.entity_level_0 = ANY($1)
 			  AND LOWER(fb.processing_status) = 'approved'
-		`, pq.Array(buNames))
+		`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Error fetching bank trades data")
 			return
@@ -921,7 +920,7 @@ func GetBankTradesData(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func GetMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
+func GetMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames := api.GetEntityNamesFromCtx(r.Context())
 		if len(buNames) == 0 {
@@ -930,7 +929,7 @@ func GetMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Ledger-aware query
-		rows, err := db.Query(`
+		rows, err := db.Query(r.Context(), `
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
 				fb.quote_currency,
@@ -946,7 +945,7 @@ func GetMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			WHERE fb.maturity_date IS NOT NULL
 			  AND fb.entity_level_0 = ANY($1)
 			  AND LOWER(fb.processing_status) = 'approved'
-		`, pq.Array(buNames))
+		`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
@@ -1029,20 +1028,20 @@ func GetMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: GetTotalBankMarginFromForwardBookings
-func GetTotalBankMarginFromForwardBookings(db *sql.DB) http.HandlerFunc {
+func GetTotalBankMarginFromForwardBookings(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames := api.GetEntityNamesFromCtx(r.Context())
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		rows, err := db.Query(`
+		rows, err := db.Query(r.Context(), `
 	SELECT bank_margin, quote_currency 
 	FROM forward_bookings 
 	WHERE entity_level_0 = ANY($1) 
 	AND bank_margin IS NOT NULL 
 	AND LOWER(processing_status) = 'approved'
-`, pq.Array(buNames))
+`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
@@ -1073,7 +1072,7 @@ func GetTotalBankMarginFromForwardBookings(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: GetOpenAmountToBookingRatioSimple
-func GetOpenAmountToBookingRatioSimple(db *sql.DB) http.HandlerFunc {
+func GetOpenAmountToBookingRatioSimple(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames := api.GetEntityNamesFromCtx(r.Context())
 		if len(buNames) == 0 {
@@ -1083,7 +1082,7 @@ func GetOpenAmountToBookingRatioSimple(db *sql.DB) http.HandlerFunc {
 
 		var totalOpen, totalBooking float64
 
-		err := db.QueryRow(`
+		err := db.QueryRow(r.Context(), `
 			WITH booking_totals AS (
 				SELECT 
 					COALESCE(SUM(ABS(eh.total_open_amount)), 0) AS total_open
@@ -1108,7 +1107,7 @@ func GetOpenAmountToBookingRatioSimple(db *sql.DB) http.HandlerFunc {
 			)
 			SELECT bt.total_open, ba.total_booking
 			FROM booking_totals bt, booking_amounts ba
-		`, pq.Array(buNames)).Scan(&totalOpen, &totalBooking)
+		`, buNames).Scan(&totalOpen, &totalBooking)
 
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Error calculating open amount to booking ratio")

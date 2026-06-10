@@ -46,6 +46,10 @@ func GetAccrualRunAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if code, msg := requireAccrualRunAccess(ctx, pgxPool, req.RunID); code != 0 {
+			api.RespondWithError(w, code, msg)
+			return
+		}
 
 		rows, err := pgxPool.Query(ctx, `
 			SELECT
@@ -158,6 +162,12 @@ func GetAccrualLedgerAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if req.RunID != "" {
+			if code, msg := requireAccrualRunAccess(ctx, pgxPool, req.RunID); code != 0 {
+				api.RespondWithError(w, code, msg)
+				return
+			}
+		}
 
 		baseQuery := `
 			SELECT
@@ -208,6 +218,7 @@ func GetAccrualLedgerAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, req.LedgerID)
 			argIdx++
 		}
+		baseQuery += accrualEntityScopePredicate(ctx, "a", &argIdx, &args)
 		baseQuery += ` ORDER BY a.requested_at DESC`
 
 		rows, err := pgxPool.Query(ctx, baseQuery, args...)
@@ -292,6 +303,13 @@ func GetScheduleConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if _, ok, err := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Schedule config lookup failed: "+err.Error())
+			return
+		} else if !ok {
+			api.RespondWithError(w, http.StatusForbidden, "Schedule config is not within your authorized entity scope.")
+			return
+		}
 
 		rows, err := pgxPool.Query(ctx, `
 			SELECT

@@ -5,7 +5,6 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type AccountStatement struct {
@@ -196,7 +195,7 @@ func camelJSONKey(snake string) string {
 	return strings.Join(parts, "")
 }
 
-func GetKpiHandler(db *sql.DB) http.Handler {
+func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
@@ -300,10 +299,10 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 
 		extraFilters := make([]string, 0, 3)
 		args := []interface{}{
-			pq.Array(allowedAccountNumbers),
-			pq.Array(allowedEntityIDs),
-			pq.Array(allowedBanksNorm),
-			pq.Array(allowedCurrenciesNorm),
+			allowedAccountNumbers,
+			allowedEntityIDs,
+			allowedBanksNorm,
+			allowedCurrenciesNorm,
 			evalAsOn,
 		}
 		argIdx := 6
@@ -343,7 +342,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		const tempTx = "_rtb_kpi_tx"
 		const tempAb = "_rtb_kpi_ab"
 
-		txn, err := db.BeginTx(ctx, &sql.TxOptions{})
+		txn, err := pool.Begin(ctx)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -351,16 +350,16 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		committed := false
 		defer func() {
 			if !committed {
-				_ = txn.Rollback()
+				_ = txn.Rollback(ctx)
 			}
 		}()
 
-		_, err = txn.ExecContext(ctx, `DROP TABLE IF EXISTS `+tempTx+`; DROP TABLE IF EXISTS `+tempAb)
+		_, err = txn.Exec(ctx, `DROP TABLE IF EXISTS `+tempTx+`; DROP TABLE IF EXISTS `+tempAb)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		_, err = txn.ExecContext(ctx, `CREATE TEMP TABLE `+tempTx+` ON COMMIT DROP AS `+warmTxSelect, args...)
+		_, err = txn.Exec(ctx, `CREATE TEMP TABLE `+tempTx+` ON COMMIT DROP AS `+warmTxSelect, args...)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -439,7 +438,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 				AND f.acct_key = c.acct_key
 				AND f.currency_code = c.currency_code
 		`
-		_, err = txn.ExecContext(ctx, approvedFromTempSQL, evalAsOn)
+		_, err = txn.Exec(ctx, approvedFromTempSQL, evalAsOn)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -447,7 +446,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 
 		// Build old-style response structures — all reads hit small temp tables (no repeated base joins).
 		varianceBars := []VarianceBar{}
-		vbRows, err := txn.QueryContext(ctx, `
+		vbRows, err := txn.Query(ctx, `
 			SELECT mec.entity_name, COALESCE(b.bank_name,'') AS bank_name, COALESCE(SUM(b.closing_balance),0) AS value
 			FROM `+tempAb+` b
 			JOIN public.masterentitycash mec ON b.entity_id = mec.entity_id
@@ -467,7 +466,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		vbRows.Close()
 
 		donutSlices := []DonutSlice{}
-		dRows, err := txn.QueryContext(ctx, `
+		dRows, err := txn.Query(ctx, `
 			SELECT currency_code, COALESCE(SUM(closing_balance),0) AS value
 			FROM `+tempAb+`
 			GROUP BY currency_code
@@ -486,7 +485,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		dRows.Close()
 
 		entityRows := []EntityRow{}
-		eRows, err := txn.QueryContext(ctx, `
+		eRows, err := txn.Query(ctx, `
 			SELECT
 				b.entity_id,
 				mec.entity_name,
@@ -517,7 +516,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			"JPY": "#e64a19",
 		}
 		topCurrencies := []TopCurrency{}
-		tcRows, err := txn.QueryContext(ctx, `
+		tcRows, err := txn.Query(ctx, `
 			SELECT currency_code, COALESCE(SUM(closing_balance),0) AS amount
 			FROM `+tempAb+`
 			GROUP BY currency_code
@@ -553,7 +552,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			GROUP BY mec.entity_name, b.bank_name, b.currency_code
 			ORDER BY mec.entity_name, b.bank_name, b.currency_code`
 
-		aggRows, err := txn.QueryContext(ctx, aggSQL)
+		aggRows, err := txn.Query(ctx, aggSQL)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -622,7 +621,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			WHERE rn <= 200
 			ORDER BY entity_name, bank_name, currency_code, dt DESC, transaction_id DESC`
 
-		trendTxnRows, err := txn.QueryContext(ctx, trendTxnSQL)
+		trendTxnRows, err := txn.Query(ctx, trendTxnSQL)
 		if err == nil {
 			stmtsByKey := map[string][]AccountStatement{}
 			for trendTxnRows.Next() {
@@ -657,7 +656,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 
 		var kpi Kpi
 		var dayChangeAbs, yesterdayClosing float64
-		kpiRow := txn.QueryRowContext(ctx, `
+		kpiRow := txn.QueryRow(ctx, `
 			SELECT
 				COALESCE((SELECT SUM(closing_balance) FROM `+tempAb+`), 0),
 				COALESCE((SELECT SUM(opening_balance) FROM `+tempAb+`), 0),
@@ -713,7 +712,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			JOIN public.masterentitycash mec ON b.entity_id = mec.entity_id
 			ORDER BY mec.entity_name, b.bank_name, b.account_no`
 
-		abRows, err := txn.QueryContext(ctx, abSQL)
+		abRows, err := txn.Query(ctx, abSQL)
 		if err == nil {
 			for abRows.Next() {
 				var entityID, entityName, bankName, accountNo, ccy string
@@ -761,7 +760,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			ORDER BY ts.account_no, ts.eff_ts DESC, ts.transaction_id DESC
 			LIMIT 5000`
 
-		stmt2Rows, err := txn.QueryContext(ctx, stmtSQL2)
+		stmt2Rows, err := txn.Query(ctx, stmtSQL2)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -794,7 +793,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		}
 		stmt2Rows.Close()
 
-		if err := txn.Commit(); err != nil {
+		if err := txn.Commit(ctx); err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}

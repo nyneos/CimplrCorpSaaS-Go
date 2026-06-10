@@ -4,16 +4,15 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// HomePageRequest carries optional knobs; entity scope comes from BusinessUnitMiddleware.
+// HomePageRequest carries optional knobs; entity scope comes from the v2 master middleware chain.
 type HomePageRequest struct {
 	UserID      string `json:"user_id"`
 	HorizonDays int    `json:"horizon_days,omitempty"` // for cash-on-hand simulation; default 90
@@ -44,7 +43,7 @@ type HomePageDashboardResponse struct {
 }
 
 // GetHomePageDashboard aggregates liquidity, investment, and risk/leverage sections.
-func GetHomePageDashboard(db *sql.DB) http.HandlerFunc {
+func GetHomePageDashboard(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req HomePageRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -96,7 +95,7 @@ func GetHomePageDashboard(db *sql.DB) http.HandlerFunc {
 }
 
 // computeFXOpsDashboard mirrors GetFXOpsDashboard logic but callable internally with context.
-func computeFXOpsDashboard(ctx context.Context, db *sql.DB, req FXOpsDashboardRequest) (FXOpsDashboardResponse, error) {
+func computeFXOpsDashboard(ctx context.Context, db *pgxpool.Pool, req FXOpsDashboardRequest) (FXOpsDashboardResponse, error) {
 	days := 0
 	if req.TimePeriod > 0 {
 		days = req.TimePeriod
@@ -135,7 +134,7 @@ func computeFXOpsDashboard(ctx context.Context, db *sql.DB, req FXOpsDashboardRe
 }
 
 // computeHomeRiskLeverage crafts KPIs closer to the homepage design (hedged ratio, unhedged bars, VaR).
-func computeHomeRiskLeverage(ctx context.Context, db *sql.DB, entities []string) (FXOpsDashboardResponse, error) {
+func computeHomeRiskLeverage(ctx context.Context, db *pgxpool.Pool, entities []string) (FXOpsDashboardResponse, error) {
 	hedgedINR, unhedgedINR, err := getHedgedVsUnhedged(ctx, db, entities)
 	if err != nil {
 		return FXOpsDashboardResponse{}, err
@@ -175,7 +174,7 @@ func computeHomeRiskLeverage(ctx context.Context, db *sql.DB, entities []string)
 }
 
 // buildGlobalLiquidity aggregates cash balance, burn, net operating cashflow, and runway days.
-func buildGlobalLiquidity(ctx context.Context, db *sql.DB, entities []string, horizon int) (GlobalLiquidity, error) {
+func buildGlobalLiquidity(ctx context.Context, db *pgxpool.Pool, entities []string, horizon int) (GlobalLiquidity, error) {
 	today := time.Now().UTC()
 	yesterday := today.AddDate(0, 0, -1)
 
@@ -224,7 +223,7 @@ func buildGlobalLiquidity(ctx context.Context, db *sql.DB, entities []string, ho
 }
 
 // buildPortfolioInvestments derives balance and yield from portfolio_snapshot.
-func buildPortfolioInvestments(ctx context.Context, db *sql.DB, entities []string) (PortfolioInvestments, error) {
+func buildPortfolioInvestments(ctx context.Context, db *pgxpool.Pool, entities []string) (PortfolioInvestments, error) {
 	filterSQL := ""
 	args := []interface{}{}
 	if len(entities) > 0 {
@@ -237,7 +236,7 @@ func buildPortfolioInvestments(ctx context.Context, db *sql.DB, entities []strin
 		FROM investment.portfolio_snapshot ps%s`, filterSQL)
 
 	var totalCurrent, totalInvested float64
-	if err := db.QueryRowContext(ctx, query, args...).Scan(&totalCurrent, &totalInvested); err != nil {
+	if err := db.QueryRow(ctx, query, args...).Scan(&totalCurrent, &totalInvested); err != nil {
 		return PortfolioInvestments{}, err
 	}
 
@@ -250,7 +249,7 @@ func buildPortfolioInvestments(ctx context.Context, db *sql.DB, entities []strin
 }
 
 // getHedgedVsUnhedged aggregates approved exposures into hedged and unhedged INR buckets.
-func getHedgedVsUnhedged(ctx context.Context, db *sql.DB, entities []string) (float64, float64, error) {
+func getHedgedVsUnhedged(ctx context.Context, db *pgxpool.Pool, entities []string) (float64, float64, error) {
 	entityFilter := ""
 	args := []interface{}{}
 	if len(entities) > 0 {
@@ -265,7 +264,7 @@ func getHedgedVsUnhedged(ctx context.Context, db *sql.DB, entities []string) (fl
 		) hl ON hl.exposure_header_id = eh.exposure_header_id
 		WHERE LOWER(eh.approval_status) = 'approved'%s AND (eh.value_date IS NULL OR eh.value_date >= CURRENT_DATE)`, entityFilter)
 
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -291,7 +290,7 @@ func getHedgedVsUnhedged(ctx context.Context, db *sql.DB, entities []string) (fl
 }
 
 // getTopUnhedgedByCurrency returns top N unhedged exposures grouped by currency (INR converted).
-func getTopUnhedgedByCurrency(ctx context.Context, db *sql.DB, entities []string, topN int) ([]NetPosition, error) {
+func getTopUnhedgedByCurrency(ctx context.Context, db *pgxpool.Pool, entities []string, topN int) ([]NetPosition, error) {
 	entityFilter := ""
 	args := []interface{}{}
 	argPos := 1
@@ -311,7 +310,7 @@ func getTopUnhedgedByCurrency(ctx context.Context, db *sql.DB, entities []string
 		ORDER BY amt DESC
 		LIMIT %d`, entityFilter, topN)
 
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +332,7 @@ func getTopUnhedgedByCurrency(ctx context.Context, db *sql.DB, entities []string
 }
 
 // getValueAtRisk approximates VaR as total unhedged exposure in the next 30 days, with delta vs prior 30 days.
-func getValueAtRisk(ctx context.Context, db *sql.DB, entities []string) (float64, float64, error) {
+func getValueAtRisk(ctx context.Context, db *pgxpool.Pool, entities []string) (float64, float64, error) {
 	today := time.Now().Format(constants.DateFormat)
 	next30 := time.Now().AddDate(0, 0, 30).Format(constants.DateFormat)
 	prevStart := time.Now().AddDate(0, 0, -30).Format(constants.DateFormat)
@@ -356,7 +355,7 @@ func getValueAtRisk(ctx context.Context, db *sql.DB, entities []string) (float64
 }
 
 // sumUnhedgedBetween sums unhedged exposures between two dates (inclusive) converted to INR.
-func sumUnhedgedBetween(ctx context.Context, db *sql.DB, entities []string, startDate, endDate string) (float64, error) {
+func sumUnhedgedBetween(ctx context.Context, db *pgxpool.Pool, entities []string, startDate, endDate string) (float64, error) {
 	entityFilter := ""
 	args := []interface{}{startDate, endDate}
 	if len(entities) > 0 {
@@ -371,7 +370,7 @@ func sumUnhedgedBetween(ctx context.Context, db *sql.DB, entities []string, star
 		) hl ON hl.exposure_header_id = eh.exposure_header_id
 		WHERE LOWER(eh.approval_status) = 'approved' AND hl.exposure_header_id IS NULL AND eh.value_date BETWEEN $1 AND $2%s`, entityFilter)
 
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -390,7 +389,7 @@ func sumUnhedgedBetween(ctx context.Context, db *sql.DB, entities []string, star
 }
 
 // getLatestBalanceINR sums latest balance per account up to asOfDate in INR.
-func getLatestBalanceINR(ctx context.Context, db *sql.DB, asOfDate time.Time, entities []string) (float64, error) {
+func getLatestBalanceINR(ctx context.Context, db *pgxpool.Pool, asOfDate time.Time, entities []string) (float64, error) {
 	dateStr := asOfDate.Format(constants.DateFormat)
 	args := []interface{}{}
 	filter := ""
@@ -428,7 +427,7 @@ func getLatestBalanceINR(ctx context.Context, db *sql.DB, asOfDate time.Time, en
 		WHERE true %s
 	) t`, filter)
 
-	mbRows, err := db.QueryContext(ctx, mbQuery, mbArgs...)
+	mbRows, err := db.Query(ctx, mbQuery, mbArgs...)
 	if err != nil {
 		return 0, err
 	}
@@ -478,7 +477,7 @@ func getLatestBalanceINR(ctx context.Context, db *sql.DB, asOfDate time.Time, en
 		WHERE mba.is_deleted = false AND s.statement_period_end <= $1 %s
 		GROUP BY mba.currency`, bsFilter)
 
-	bsRows, err := db.QueryContext(ctx, bsQuery, bsArgs...)
+	bsRows, err := db.Query(ctx, bsQuery, bsArgs...)
 	if err != nil {
 		return 0, err
 	}
@@ -497,7 +496,7 @@ func getLatestBalanceINR(ctx context.Context, db *sql.DB, asOfDate time.Time, en
 }
 
 // getPayablesSumINR aggregates approved payables in INR between dates (inclusive). Empty end means open-ended.
-func getPayablesSumINR(ctx context.Context, db *sql.DB, entities []string, start, end time.Time) (float64, error) {
+func getPayablesSumINR(ctx context.Context, db *pgxpool.Pool, entities []string, start, end time.Time) (float64, error) {
 	args := []interface{}{start.Format(constants.DateFormat)}
 	where := "WHERE p.due_date >= $1"
 	idx := 2
@@ -517,7 +516,7 @@ func getPayablesSumINR(ctx context.Context, db *sql.DB, entities []string, start
 		JOIN auditactionpayable a ON a.payable_id = p.payable_id AND a.processing_status = 'APPROVED'
 		%s GROUP BY p.currency_code`, where)
 
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -536,7 +535,7 @@ func getPayablesSumINR(ctx context.Context, db *sql.DB, entities []string, start
 }
 
 // getReceivablesSumINR aggregates approved receivables in INR between dates (inclusive). Empty end means open-ended.
-func getReceivablesSumINR(ctx context.Context, db *sql.DB, entities []string, start, end time.Time) (float64, error) {
+func getReceivablesSumINR(ctx context.Context, db *pgxpool.Pool, entities []string, start, end time.Time) (float64, error) {
 	args := []interface{}{start.Format(constants.DateFormat)}
 	where := "WHERE r.due_date >= $1"
 	idx := 2
@@ -556,7 +555,7 @@ func getReceivablesSumINR(ctx context.Context, db *sql.DB, entities []string, st
 		JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND a.processing_status = 'APPROVED'
 		%s GROUP BY r.currency_code`, where)
 
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -575,7 +574,7 @@ func getReceivablesSumINR(ctx context.Context, db *sql.DB, entities []string, st
 }
 
 // computeCashOnHandDays simulates daily balances using receivables/payables and projections to derive runway.
-func computeCashOnHandDays(ctx context.Context, db *sql.DB, entities []string, openingBalance float64, horizon int) (int, int, int, error) {
+func computeCashOnHandDays(ctx context.Context, db *pgxpool.Pool, entities []string, openingBalance float64, horizon int) (int, int, int, error) {
 	if horizon < 30 {
 		horizon = 30
 	}
@@ -631,7 +630,7 @@ func computeCashOnHandDays(ctx context.Context, db *sql.DB, entities []string, o
 }
 
 // buildDailyMaps returns INR inflow/outflow per day combining receivables, payables, and approved projections.
-func buildDailyMaps(ctx context.Context, db *sql.DB, entities []string, start, end time.Time) (map[string]float64, map[string]float64, error) {
+func buildDailyMaps(ctx context.Context, db *pgxpool.Pool, entities []string, start, end time.Time) (map[string]float64, map[string]float64, error) {
 	inflows := map[string]float64{}
 	outflows := map[string]float64{}
 
@@ -647,7 +646,7 @@ func buildDailyMaps(ctx context.Context, db *sql.DB, entities []string, start, e
 	recQ := fmt.Sprintf(`SELECT r.due_date::date, COALESCE(SUM(r.invoice_amount),0)::float8, COALESCE(r.currency_code,'INR') FROM tr_receivables r
 		JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND a.processing_status = 'APPROVED'
 		%s GROUP BY r.due_date::date, r.currency_code`, recWhere)
-	recRows, err := db.QueryContext(ctx, recQ, recArgs...)
+	recRows, err := db.Query(ctx, recQ, recArgs...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -676,7 +675,7 @@ func buildDailyMaps(ctx context.Context, db *sql.DB, entities []string, start, e
 	payQ := fmt.Sprintf(`SELECT p.due_date::date, COALESCE(SUM(p.amount),0)::float8, COALESCE(p.currency_code,'INR') FROM tr_payables p
 		JOIN auditactionpayable a ON a.payable_id = p.payable_id AND a.processing_status = 'APPROVED'
 		%s GROUP BY p.due_date::date, p.currency_code`, payWhere)
-	payRows, err := db.QueryContext(ctx, payQ, payArgs...)
+	payRows, err := db.Query(ctx, payQ, payArgs...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -711,7 +710,7 @@ func buildDailyMaps(ctx context.Context, db *sql.DB, entities []string, start, e
 		WHERE aa.processing_status = 'APPROVED' AND (cpm.year*12 + cpm.month) BETWEEN $1 AND $2%s
 		GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cp.currency_code, cpi.start_date`, projWhere)
 
-	projRows, err := db.QueryContext(ctx, projQ, projArgs...)
+	projRows, err := db.Query(ctx, projQ, projArgs...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -765,5 +764,5 @@ func buildDailyMaps(ctx context.Context, db *sql.DB, entities []string, start, e
 
 // pqStringArray ensures []string works with ANY($n).
 func pqStringArray(list []string) interface{} {
-	return pq.Array(list)
+	return list
 }

@@ -154,6 +154,10 @@ func GetBankBalanceDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if code, msg := ensureBalanceIDsAccessible(ctx, pgxPool, []string{req.BalanceID}); code != 0 {
+			api.RespondWithError(w, code, msg)
+			return
+		}
 		var uploadS3Key sqlNullString
 		err := pgxPool.QueryRow(ctx, `
 			SELECT b.upload_s3_key
@@ -201,6 +205,10 @@ func GetBankBalanceBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if code, msg := ensureBalanceIDsAccessible(ctx, pgxPool, req.BalanceIDs); code != 0 {
+			api.RespondWithError(w, code, msg)
+			return
+		}
 		files := make([]map[string]string, 0, len(req.BalanceIDs))
 		failedIDs := make([]string, 0)
 		requestedBy := requestedByFromCtx(ctx, req.UserID)

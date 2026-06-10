@@ -13,11 +13,16 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/validation"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func validateFundPlanScope(ctx context.Context, fields map[string]interface{}) string {
+	return validation.ValidateCashMasterReferences(ctx, fields)
+}
 
 var (
 	schemaCache struct {
@@ -1125,6 +1130,36 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "at least one group is required")
 			return
 		}
+		if msg := validateFundPlanScope(ctx, map[string]interface{}{"entity_name": req.EntityName}); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
+		for _, group := range req.Groups {
+			_, currency, primaryKey, primaryValue, err := parseGroupID(group.GroupID)
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			fields := map[string]interface{}{
+				"entity_name": req.EntityName,
+				"currency":    currency,
+			}
+			if strings.EqualFold(primaryKey, "counterparty") {
+				fields["counterparty_name"] = primaryValue
+			}
+			accountIDs := make([]string, 0, len(group.AllocatedAccounts)+len(group.Lines))
+			for _, allocation := range group.AllocatedAccounts {
+				accountIDs = append(accountIDs, allocation.AccountID)
+			}
+			for _, line := range group.Lines {
+				accountIDs = append(accountIDs, line.AllocatedBankAccount)
+			}
+			fields["account_ids"] = accountIDs
+			if msg := validateFundPlanScope(ctx, fields); msg != "" {
+				api.RespondWithError(w, http.StatusForbidden, msg)
+				return
+			}
+		}
 
 		// Get user email from active sessions
 		userEmail := ""
@@ -1412,6 +1447,9 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailed+err.Error())
 				return
 			}
+			if msg := validateFundPlanScope(ctx, map[string]interface{}{"entity_name": entityName}); msg != "" {
+				continue
+			}
 
 			plan := map[string]interface{}{
 				"plan_id":           planID,
@@ -1543,6 +1581,16 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailed+err.Error())
 				return
+			}
+			scopeFields := map[string]interface{}{
+				"entity_name": entityName,
+				"currency":    currency,
+			}
+			if strings.EqualFold(primaryKey, "counterparty") {
+				scopeFields["counterparty_name"] = primaryValue
+			}
+			if msg := validateFundPlanScope(ctx, scopeFields); msg != "" {
+				continue
 			}
 
 			// Set plan info on first iteration

@@ -28,8 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/lib/pq"
 	"github.com/shakinm/xlsReader/xls"
 	"github.com/xuri/excelize/v2"
 )
@@ -68,7 +68,7 @@ func tryExtractNumbersAsXLSX(data []byte) []byte {
 
 // UploadBankStatementV2WithCategorization wraps UploadBankStatementV2 and adds category intelligence and KPIs to the response.
 
-func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, file multipart.File, fileHash string, opts UploadOpts) (map[string]interface{}, error) {
+func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.Pool, file multipart.File, fileHash string, opts UploadOpts) (map[string]interface{}, error) {
 	useMapping := opts.UseMapping
 	mappings := opts.Mappings
 	accountNumberOverride := opts.AccountNumberOverride
@@ -77,7 +77,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	// 1. Idempotency: Check if file hash already exists
 	var exists bool
-	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1 AND COALESCE(is_deleted, false) = false)`, fileHash).Scan(&exists)
+	err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1 AND COALESCE(is_deleted, false) = false)`, fileHash).Scan(&exists)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check file hash: %w", err)
 	}
@@ -439,7 +439,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// Lookup entity_id and bank_name from masterbankaccount/masterbank
 	var bankName string
 	logger.LogInfo("[BANK-UPLOAD-DEBUG] Looking up account in masterbankaccount for accountNumber=%q", accountNumber)
-	err = db.QueryRowContext(ctx, `
+	err = pool.QueryRow(ctx, `
 		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
 		FROM public.masterbankaccount mba
 		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
@@ -560,28 +560,26 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// Single batch DB query instead of N serial round-trips
 			matched := false
 			if len(candidates) > 0 {
-				rows2, qErr := db.QueryContext(ctx, `
+				rows2, qErr := pool.Query(ctx, `
     SELECT mba.account_number, mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
     FROM public.masterbankaccount mba
     LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
     WHERE mba.account_number = ANY($1) AND mba.is_deleted = false
-`, pq.Array(candidates))
+`, candidates)
 				if qErr != nil {
 					return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, qErr)
 				}
 				// Build a map of accountNumber → (entityID, bankName, accountName) for all DB matches
 				type acctRow struct{ eID, bName, aName string }
 				dbMatches := map[string]acctRow{}
-				if qErr == nil {
-					for rows2.Next() {
-						var acNum string
-						var ar acctRow
-						if sErr := rows2.Scan(&acNum, &ar.eID, &ar.bName, &ar.aName); sErr == nil {
-							dbMatches[acNum] = ar
-						}
+				for rows2.Next() {
+					var acNum string
+					var ar acctRow
+					if sErr := rows2.Scan(&acNum, &ar.eID, &ar.bName, &ar.aName); sErr == nil {
+						dbMatches[acNum] = ar
 					}
-					_ = rows2.Close()
 				}
+				rows2.Close()
 				// Pick the first candidate (in priority order) that the DB confirmed
 				for _, cand := range candidates {
 					if ar, ok := dbMatches[cand]; ok {
@@ -632,7 +630,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// Currency enforcement (entity -> bank -> account -> currency)
 	var acctCurrency sql.NullString
 	if curCodes := ctxApprovedCurrencies(ctx); len(curCodes) > 0 {
-		_ = db.QueryRowContext(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
+		_ = pool.QueryRow(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
 		if acctCurrency.Valid && strings.TrimSpace(acctCurrency.String) != "" {
 			if !ctxutil.FromContext(ctx).HasApprovedCurrency(acctCurrency.String) {
 				return nil, errors.New(constants.ErrCurrencyNotAllowed)
@@ -664,7 +662,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	if acctCurrency.Valid {
 		currencyCode = acctCurrency.String
 	}
-	rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID, currencyCode)
+	rules, err := loadCategoryRuleComponentsPgx(ctx, pool, accountNumber, entityID, currencyCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch category rules: %w", err)
 	}
@@ -2502,16 +2500,16 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		logger.LogInfo("[BANK-UPLOAD-DEBUG] Recalculated balances starting from opening balance %.2f", openingBalance)
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin db transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
 	// Preload existing transactions for this account so we can identify which
 	// rows from the uploaded file are truly new vs already present.
 	existingTxnKeys := make(map[string]bool)
-	rowsExisting, err := tx.QueryContext(ctx, `
+	rowsExisting, err := tx.Query(ctx, `
 			SELECT t.account_number, t.transaction_date, t.description, t.withdrawal_amount, t.deposit_amount
 			FROM cimplrcorpsaas.bank_statement_transactions t
 			JOIN cimplrcorpsaas.bank_statements s ON s.bank_statement_id = t.bank_statement_id
@@ -2545,7 +2543,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	}
 	logger.LogInfo("[BANK-UPLOAD-DEBUG] Inserting bank_statements: account=%q period=%s→%s openingBalance=%.6f closingBalance=%.6f",
 		accountNumber, statementPeriodStart.Format(constants.DateFormat), statementPeriodEnd.Format(constants.DateFormat), openingBalance, closingBalance)
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 		     INSERT INTO cimplrcorpsaas.bank_statements (
     entity_id,
     account_number,
@@ -2560,9 +2558,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 RETURNING bank_statement_id
 		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, uploadS3Key).Scan(&bankStatementID)
 	if err != nil {
-		tx.Rollback()
+		tx.Rollback(ctx)
 		// Detect uniq_stmt (entity+account+period composite) constraint violation → clear user error
-		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" && pqErr.Constraint == "uniq_stmt" {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" && pgErr.ConstraintName == "uniq_stmt" {
 			return nil, fmt.Errorf("%w: account %s already has a statement for this period", ErrStatementPeriodExists, accountNumber)
 		}
 		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
@@ -2636,8 +2634,8 @@ RETURNING bank_statement_id
 				joinStrings(valueStrings, ",") +
 				` ON CONFLICT (account_number, transaction_date, description, withdrawal_amount, deposit_amount) DO NOTHING`
 			logger.LogInfo("[BANK-UPLOAD-DEBUG] Attempting to insert %d new transactions", len(newTransactions))
-			if _, err := tx.ExecContext(ctx, stmt, valueArgs...); err != nil {
-				tx.Rollback()
+			if _, err := tx.Exec(ctx, stmt, valueArgs...); err != nil {
+				tx.Rollback(ctx)
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] Bulk insert FAILED. First 5 transactions with amounts:")
 				for i := 0; i < 5 && i < len(newTransactions); i++ {
 					t := newTransactions[i]
@@ -2663,16 +2661,16 @@ RETURNING bank_statement_id
 			requestedBy = s.UserID
 		}
 	}
-	_, err = tx.ExecContext(ctx, `
+	_, err = tx.Exec(ctx, `
 			       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
 				       bankstatementid, actiontype, processing_status, requested_by, requested_at
 			       ) VALUES ($1, $2, $3, $4, $5)
 		       `, bankStatementID, "CREATE", constants.StatusPendingApproval, requestedBy, time.Now())
 	if err != nil {
-		tx.Rollback()
+		tx.Rollback(ctx)
 		return nil, fmt.Errorf(constants.ErrFailedToInsertAuditAction, err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit: %w", err)
 	}
 
@@ -2874,7 +2872,7 @@ func parseFileToRows(fileBytes []byte) ([][]string, error) {
 //     builds a per-account CSV, computes idempotent `fileHash = sha256(csvBytes + account_number)`,
 //     and calls UploadBankStatementV2WithCategorization for each account.
 //   - Aggregates results per-account and isolates failures to the account level.
-func UploadMultiAccountBankStatementHandler(db *sql.DB, pgxPool ...*pgxpool.Pool) http.Handler {
+func UploadMultiAccountBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if r.Method != http.MethodPost {
@@ -3343,11 +3341,7 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB, pgxPool ...*pgxpool.Pool
 			fileHash := fmt.Sprintf("%x", h.Sum(nil))
 
 			// Call structured ingestion
-			var poolArg *pgxpool.Pool
-			if len(pgxPool) > 0 {
-				poolArg = pgxPool[0]
-			}
-			res, upErr := ProcessBankStatementFromStructuredInput(ctx, db, stm, fileHash, poolArg)
+			res, upErr := ProcessBankStatementFromStructuredInput(ctx, pool, stm, fileHash)
 			if upErr != nil {
 				results[resultKey] = map[string]interface{}{"success": false, "message": userFriendlyUploadError(upErr)}
 				continue

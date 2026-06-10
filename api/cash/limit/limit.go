@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,29 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func validateLimitCashScope(ctx context.Context, refs map[string]interface{}) string {
+	return validation.ValidateCashMasterReferences(ctx, refs)
+}
+
+func validateBankLimitRecordScope(ctx context.Context, pgxPool *pgxpool.Pool, limitID, overrideCurrency string) string {
+	var entityName, bankName, currencyCode string
+	if err := pgxPool.QueryRow(ctx, `
+		SELECT COALESCE(entity_name, ''), COALESCE(bank_name, ''), COALESCE(currency_code, '')
+		FROM cimplrcorpsaas.bank_limit
+		WHERE limit_id = $1
+	`, limitID).Scan(&entityName, &bankName, &currencyCode); err != nil {
+		return "failed to validate limit scope: " + err.Error()
+	}
+	if strings.TrimSpace(overrideCurrency) != "" {
+		currencyCode = overrideCurrency
+	}
+	return validateLimitCashScope(ctx, map[string]interface{}{
+		"entity_name":   entityName,
+		"bank_name":     bankName,
+		"currency_code": currencyCode,
+	})
+}
 
 // CreateBankLimit creates a new bank limit with PENDING_APPROVAL audit status
 func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -52,6 +76,14 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Validate entity access
 		if !ctxutil.FromContext(ctx).HasEntityAccess(req.EntityName) {
 			api.RespondWithResult(w, false, "unauthorized entity")
+			return
+		}
+		if msg := validateLimitCashScope(ctx, map[string]interface{}{
+			"entity_name":   req.EntityName,
+			"bank_name":     req.BankName,
+			"currency_code": req.CurrencyCode,
+		}); msg != "" {
+			api.RespondWithResult(w, false, msg)
 			return
 		}
 
@@ -220,6 +252,16 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if !ctxutil.FromContext(ctx).HasEntityAccess(lim.EntityName) {
 				result["success"] = false
 				result["error"] = "unauthorized entity: " + lim.EntityName
+				results = append(results, result)
+				continue
+			}
+			if msg := validateLimitCashScope(ctx, map[string]interface{}{
+				"entity_name":   lim.EntityName,
+				"bank_name":     lim.BankName,
+				"currency_code": lim.CurrencyCode,
+			}); msg != "" {
+				result["success"] = false
+				result["error"] = msg
 				results = append(results, result)
 				continue
 			}
@@ -479,6 +521,25 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.QueryRow(ctx, sel, req.LimitID).Scan(&curEntity, &curBank, &curCoreLimit, &curLimitType, &curLimitSub, &curSanctionDate, &curEffectiveDate, &curCurrency, &curSanctionedAmount, &curFungibilityType, &curFungibilityPct, &curSecurity, &curRemarks, &curInitialUtilization); err != nil {
 			api.RespondWithResult(w, false, "failed to fetch current limit: "+err.Error())
+			return
+		}
+		effectiveRefs := map[string]interface{}{
+			"entity_name":   stringOrEmpty(curEntity),
+			"bank_name":     stringOrEmpty(curBank),
+			"currency_code": stringOrEmpty(curCurrency),
+		}
+		for k, v := range req.Fields {
+			switch strings.ToLower(k) {
+			case "entity_name":
+				effectiveRefs["entity_name"] = v
+			case "bank_name":
+				effectiveRefs["bank_name"] = v
+			case "currency_code":
+				effectiveRefs["currency_code"] = v
+			}
+		}
+		if msg := validateLimitCashScope(ctx, effectiveRefs); msg != "" {
+			api.RespondWithResult(w, false, msg)
 			return
 		}
 

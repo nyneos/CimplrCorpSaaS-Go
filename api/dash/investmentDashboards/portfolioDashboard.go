@@ -38,7 +38,8 @@ import (
 	"math"
 	"net/http"
 	"sort"
-	"strings"
+
+	// "strings"
 	"sync"
 	"time"
 
@@ -63,23 +64,22 @@ func PortfolioDashboardHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Request parsing ────────────────────────────────────────────────────
 		var req struct {
-			EntityName string `json:"entity_name,omitempty"`
-			GroupBy    string `json:"group_by,omitempty"` // for aum_breakdown; default "amc"
-			Limit      int    `json:"limit,omitempty"`    // for top_performing; default 5
-			Year       int    `json:"year,omitempty"`     // FY start year; default current FY
-			Benchmark  string `json:"benchmark,omitempty"`
+			EntityName  string `json:"entity_name,omitempty"`
+			GroupBy     string `json:"group_by,omitempty"` // for aum_breakdown; default "amc"
+			Limit       int    `json:"limit,omitempty"`    // for top_performing; default 5
+			Year        int    `json:"year,omitempty"`     // FY start year; default current FY
+			Benchmark   string `json:"benchmark,omitempty"`
 			PeriodStart string `json:"period_start,omitempty"`
 			PeriodEnd   string `json:"period_end,omitempty"`
 		}
 		// Body may be empty; ignore decode error.
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		entityFilter := strings.TrimSpace(req.EntityName)
-		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
+		entityFilter, allowedEntities, scopeMsg := investmentDashboardEntityScope(ctx, req.EntityName)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
 			return
 		}
-		allowedEntities := api.GetEntityNamesFromCtx(ctx)
 
 		// Defaults
 		if req.Limit <= 0 {
@@ -410,7 +410,7 @@ func computeKPIs(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter string
 			"cash_balance": totalCash, "sellable_mf": sellableMF, "liquidity_total": liquidityTotal,
 			"xirr_annualized": xirrVal * 100,
 			"financial_year":  fmt.Sprintf("FY %d-%d", fyStart.Year(), fyStart.Year()+1),
-			"period_start": fyStart.Format(constants.DateFormat), "period_end": now.Format(constants.DateFormat),
+			"period_start":    fyStart.Format(constants.DateFormat), "period_end": now.Format(constants.DateFormat),
 		},
 		"aum_detail":         aumDetails,
 		"transaction_detail": rawTransactions,
@@ -577,7 +577,7 @@ func computeAMCWaterfall(ctx context.Context, pgxPool *pgxpool.Pool, entityFilte
 	defer rows.Close()
 
 	type rowOut struct {
-		AMCName string
+		AMCName               string
 		sv, ev, delta, ot, ct float64
 	}
 	var amcRows []rowOut
@@ -799,11 +799,11 @@ func computePerformanceAttribution(ctx context.Context, pgxPool *pgxpool.Pool, e
 	return map[string]interface{}{
 		"attribution": attribution, "benchmark": benchmark,
 		"benchmark_return": benchmarkReturn, "portfolio_return": portfolioReturn,
-		"excess_return": math.Round((portfolioReturn-benchmarkReturn)*100) / 100,
+		"excess_return":     math.Round((portfolioReturn-benchmarkReturn)*100) / 100,
 		"allocation_effect": allocationEffect, "selection_effect": selectionEffect,
 		"other_effects": otherEffects, "portfolio_detail": aumDetails,
 		"financial_year": fmt.Sprintf(constants.FormatFiscalYear, year, year+1),
-		"period_start": fyStart.Format(constants.DateFormat), "period_end": fyEnd.Format(constants.DateFormat),
+		"period_start":   fyStart.Format(constants.DateFormat), "period_end": fyEnd.Format(constants.DateFormat),
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
@@ -1350,10 +1350,10 @@ func computeCombinedOverview(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 	defer rows.Close()
 
 	type holdingRow struct {
-		EntityName, AmcName, SchemeName, SchemeID, AmfiSchemeCode, FolioNumber, RiskRating string
+		EntityName, AmcName, SchemeName, SchemeID, AmfiSchemeCode, FolioNumber, RiskRating    string
 		Units, Nav, CurrentValue, AmfiNav, GainLoss, GainLossPct, InvestedAmount, PurchaseNav float64
-		InternalRiskScore                                                                       int
-		Isin, SchemeCategory, SchemeSubCategory, SchemeType                                    string
+		InternalRiskScore                                                                     int
+		Isin, SchemeCategory, SchemeSubCategory, SchemeType                                   string
 	}
 	portfolio := make([]holdingRow, 0)
 	var totalAUM float64
@@ -1466,7 +1466,7 @@ func computeCombinedOverview(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 		},
 		"market": map[string]interface{}{
 			"mutual_funds": ticker, "portfolio_detail": portfolioDetail,
-			"summary": map[string]interface{}{"total_schemes": len(ticker), "total_value": totalAUM},
+			"summary":      map[string]interface{}{"total_schemes": len(ticker), "total_value": totalAUM},
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
 		},
 	}, nil

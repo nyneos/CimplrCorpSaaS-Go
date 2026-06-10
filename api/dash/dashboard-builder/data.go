@@ -3,7 +3,7 @@ package dashboardbuilder
 // Data source handler — serves live rows from investment tables to the
 // dashboard builder frontend so each widget can render with real data.
 //
-// Route (registered in dash.go with PreValidationMiddleware):
+// Route (registered in dash.go with the v2 master middleware chain):
 //
 //   POST /dash/builder/data
 //
@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"CimplrCorpSaas/api"
@@ -52,6 +53,9 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(req.EntityIDs) == 0 {
 			req.EntityIDs = api.CtxEntityIDs(r.Context())
+		} else if msg := validateRequestedEntityIDs(r.Context(), req.EntityIDs); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
 		}
 		if req.Limit <= 0 || req.Limit > 2000 {
 			req.Limit = 500
@@ -90,6 +94,26 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
+
+func validateRequestedEntityIDs(ctx context.Context, requested []string) string {
+	allowed := api.GetEntityIDsFromCtx(ctx)
+	if len(allowed) == 0 {
+		return constants.ErrNoAccessibleBusinessUnit
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, id := range allowed {
+		allowedSet[strings.ToLower(strings.TrimSpace(id))] = struct{}{}
+	}
+	for _, id := range requested {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		if _, ok := allowedSet[strings.ToLower(strings.TrimSpace(id))]; !ok {
+			return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", id)
+		}
+	}
+	return ""
+}
 
 func scanRows(rows pgx.Rows) ([]map[string]any, error) {
 	defer rows.Close()

@@ -143,10 +143,11 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if strings.TrimSpace(req.EntityName) == "" {
-			if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{"entity_name": req.EntityName}); errMsg != "" {
-				api.RespondWithError(w, http.StatusBadRequest, errMsg)
-				return
-			}
+			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{"entity_name": req.EntityName}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -589,10 +590,7 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate required fields
 		if strings.TrimSpace(req.EntityName) == "" {
-			if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{"entity_name": req.EntityName}); errMsg != "" {
-				api.RespondWithError(w, http.StatusBadRequest, errMsg)
-				return
-			}
+			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
 			return
 		}
 		if strings.TrimSpace(req.SchemeID) == "" {
@@ -601,6 +599,15 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.FolioNumber == nil && req.DematAccNumber == nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Either folio_number or demat_acc_number is required")
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{
+			"entity_name":      req.EntityName,
+			"scheme_id":        req.SchemeID,
+			"folio_number":     req.FolioNumber,
+			"demat_acc_number": req.DematAccNumber,
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 

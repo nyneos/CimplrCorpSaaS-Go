@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"CimplrCorpSaas/api"
@@ -13,6 +14,20 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func payRecDashScope(ctx context.Context) ([]string, []string, string) {
+	entities := api.GetEntityNamesFromCtx(ctx)
+	currencies := make([]string, 0, len(api.GetCurrencyCodesFromCtx(ctx)))
+	for _, currency := range api.GetCurrencyCodesFromCtx(ctx) {
+		if s := strings.ToUpper(strings.TrimSpace(currency)); s != "" {
+			currencies = append(currencies, s)
+		}
+	}
+	if len(entities) == 0 || len(currencies) == 0 {
+		return nil, nil, constants.ErrNoAccessibleBusinessUnit
+	}
+	return entities, currencies, ""
+}
 
 type PayRecRow struct {
 	Counterparty string  `json:"counterparty"`
@@ -57,6 +72,11 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// tie queries to the request context and add a timeout to avoid runaway queries
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()
+		allowedEntities, allowedCurrencies, scopeMsg := payRecDashScope(ctx)
+		if scopeMsg != "" {
+			api.RespondWithResult(w, false, scopeMsg)
+			return
+		}
 
 		out := make([]PayRecRow, 0)
 
@@ -72,9 +92,11 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		  ORDER BY payable_id, requested_at DESC
 		) a ON a.payable_id = p.payable_id
 		WHERE a.processing_status = 'APPROVED'
+		  AND p.entity_name = ANY($1)
+		  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($2)
 		ORDER BY p.due_date
 	`
-		rows, err := pgxPool.Query(ctx, payQ)
+		rows, err := pgxPool.Query(ctx, payQ, allowedEntities, allowedCurrencies)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
@@ -115,9 +137,11 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		  ORDER BY receivable_id, requested_at DESC
 		) a ON a.receivable_id = r.receivable_id
 		WHERE a.processing_status = 'APPROVED'
+		  AND r.entity_name = ANY($1)
+		  AND UPPER(TRIM(COALESCE(r.currency_code, ''))) = ANY($2)
 		ORDER BY r.due_date
 	`
-		rows2, err := pgxPool.Query(ctx, recQ)
+		rows2, err := pgxPool.Query(ctx, recQ, allowedEntities, allowedCurrencies)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
@@ -191,6 +215,11 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// bind to request context with timeout to guard long-running forecasts
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
+		allowedEntities, allowedCurrencies, scopeMsg := payRecDashScope(ctx)
+		if scopeMsg != "" {
+			api.RespondWithResult(w, false, scopeMsg)
+			return
+		}
 
 		// fetch canonical payables within max range using the due_date index only
 		// then fetch latest audit processing_status only for those ids (avoids scanning the whole audit table)
@@ -208,9 +237,11 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			JOIN mastercounterparty c ON p.counterparty_name = c.counterparty_name
 			LEFT JOIN masterentitycash me ON p.entity_name = me.entity_name
 			WHERE p.due_date BETWEEN $1 AND $2
+			  AND p.entity_name = ANY($3)
+			  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($4)
 		`
 		payRows := make([]payRow, 0)
-		rows, err := pgxPool.Query(ctx, payQ, start, next90)
+		rows, err := pgxPool.Query(ctx, payQ, start, next90, allowedEntities, allowedCurrencies)
 		if err == nil {
 			for rows.Next() {
 				var pr payRow
@@ -286,9 +317,11 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			JOIN mastercounterparty c ON r.counterparty_name = c.counterparty_name
 			LEFT JOIN masterentitycash me ON r.entity_name = me.entity_name
 			WHERE r.due_date BETWEEN $1 AND $2
+			  AND r.entity_name = ANY($3)
+			  AND UPPER(TRIM(COALESCE(r.currency_code, ''))) = ANY($4)
 		`
 		recRows := make([]recRow, 0)
-		rows2, err := pgxPool.Query(ctx, recQ, start, next90)
+		rows2, err := pgxPool.Query(ctx, recQ, start, next90, allowedEntities, allowedCurrencies)
 		if err == nil {
 			for rows2.Next() {
 				var rr recRow

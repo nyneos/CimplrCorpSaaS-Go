@@ -1,146 +1,148 @@
 package validation
 
 import (
+	"CimplrCorpSaas/api"
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 )
 
 // ValidateCashMasterReferences cross-references incoming request fields against the active master data loaded into the context by CashMiddleware.
 // It returns an error message string if any validation fails, or an empty string if everything is valid.
 func ValidateCashMasterReferences(ctx context.Context, fields map[string]interface{}) string {
-	// 1. Validate Entity Name
-	if val, ok := fields["entity_name"]; ok {
-		entityName := strings.TrimSpace(fmt.Sprint(val))
-		if entityName != "" {
-			if allowedEntities, ok := ctx.Value("entity_names").([]string); ok {
-				found := false
-				for _, allowed := range allowedEntities {
-					if strings.EqualFold(allowed, entityName) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					return fmt.Sprintf("Entity '%s' is not within your authorized access scope.", entityName)
-				}
-			}
-		}
+	if errMsg := validateEntityRefs(ctx, fields); errMsg != "" {
+		return errMsg
 	}
-
-	// 2. Validate Bank
-	if val, ok := fields["bank_name"]; ok {
-		bankName := strings.TrimSpace(fmt.Sprint(val))
-		if bankName != "" {
-			if banks, ok := ctx.Value("BankInfo").([]map[string]string); ok {
-				found := false
-				for _, b := range banks {
-					if strings.EqualFold(b["bank_name"], bankName) || strings.EqualFold(b["bank_id"], bankName) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					return fmt.Sprintf("Bank '%s' is not valid or not approved.", bankName)
-				}
-			}
-		}
+	if errMsg := validateRows(ctx, fields, "BankInfo", []string{"bank_id", "bank_ids", "bank_name", "bank_names", "bank_code", "bank_codes", "bank_short_name"}, []string{"bank_id", "bank_name", "bank_code", "bank_short_name"}, "Bank"); errMsg != "" {
+		return errMsg
 	}
-
-	// 3. Validate Bank Account
-	if val, ok := fields["bank_account_number"]; ok {
-		accountNum := strings.TrimSpace(fmt.Sprint(val))
-		if accountNum != "" {
-			if accounts, ok := ctx.Value("ApprovedBankAccounts").([]map[string]string); ok {
-				found := false
-				for _, a := range accounts {
-					if strings.EqualFold(a["account_number"], accountNum) || strings.EqualFold(a["account_id"], accountNum) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					return fmt.Sprintf("Bank Account '%s' is not valid or not approved.", accountNum)
-				}
-			}
-		}
+	if errMsg := validateRowsWithFallback(ctx, fields, "ApprovedBankAccounts", api.ApprovedBankAccountsKey, []string{"bank_account_id", "bank_account_ids", "account_id", "account_ids", "bank_account_number", "bank_account_numbers", "account_number", "account_numbers", "source_account_number", "from_account_number", "to_account_number"}, []string{"account_id", "bank_account_id", "account_number"}, "Bank Account"); errMsg != "" {
+		return errMsg
 	}
-
-	// 4. Validate Currency
-	if val, ok := fields["currency"]; ok {
-		currency := strings.TrimSpace(fmt.Sprint(val))
-		if currency != "" {
-			if currencies, ok := ctx.Value("ActiveCurrencies").([]map[string]string); ok {
-				found := false
-				for _, c := range currencies {
-					if strings.EqualFold(c["currency_code"], currency) || strings.EqualFold(c["currency_id"], currency) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					return fmt.Sprintf("Currency '%s' is not valid or active.", currency)
-				}
-			}
-		}
+	if errMsg := validateRows(ctx, fields, "ActiveCurrencies", []string{"currency", "currencies", "currency_code", "currency_codes", "currency_id", "currency_ids"}, []string{"currency_id", "currency_code", "currency_name"}, "Currency"); errMsg != "" {
+		return errMsg
 	}
-
-	// 5. Validate Category
-	if val, ok := fields["category_id"]; ok {
-		category := strings.TrimSpace(fmt.Sprint(val))
-		if category != "" {
-			if categories, ok := ctx.Value("CashFlowCategories").([]map[string]string); ok {
-				found := false
-				for _, c := range categories {
-					if strings.EqualFold(c["category_id"], category) || strings.EqualFold(c["category_name"], category) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					return fmt.Sprintf("Category '%s' is not valid or approved.", category)
-				}
-			}
-		}
+	if errMsg := validateRows(ctx, fields, "CashFlowCategories", []string{"category_id", "category_ids", "category_name", "category_names", "cashflow_category_id"}, []string{"category_id", "category_name"}, "Category"); errMsg != "" {
+		return errMsg
 	}
-
-	// 6. Validate Counterparty
-	if val, ok := fields["counterparty_id"]; ok {
-		counterparty := strings.TrimSpace(fmt.Sprint(val))
-		if counterparty != "" {
-			if counterparties, ok := ctx.Value("ApprovedCounterparties").([]map[string]string); ok {
-				found := false
-				for _, c := range counterparties {
-					if strings.EqualFold(c["counterparty_id"], counterparty) || strings.EqualFold(c["counterparty_name"], counterparty) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					return fmt.Sprintf("Counterparty '%s' is not valid or approved.", counterparty)
-				}
-			}
-		}
+	if errMsg := validateRows(ctx, fields, "ApprovedCounterparties", []string{"counterparty_id", "counterparty_ids", "counterparty_name", "counterparty_names"}, []string{"counterparty_id", "counterparty_name"}, "Counterparty"); errMsg != "" {
+		return errMsg
 	}
-	
-	// 7. Validate Profit Center
-	if val, ok := fields["centre_id"]; ok {
-		center := strings.TrimSpace(fmt.Sprint(val))
-		if center != "" {
-			if centers, ok := ctx.Value("ApprovedCostProfitCenters").([]map[string]string); ok {
-				found := false
-				for _, c := range centers {
-					if strings.EqualFold(c["centre_id"], center) || strings.EqualFold(c["centre_name"], center) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					return fmt.Sprintf("Cost/Profit Center '%s' is not valid or approved.", center)
-				}
-			}
-		}
+	if errMsg := validateRows(ctx, fields, "ApprovedCostProfitCenters", []string{"centre_id", "centre_ids", "center_id", "center_ids", "cost_profit_center_id", "cost_profit_center_ids", "centre_name", "center_name"}, []string{"centre_id", "center_id", "centre_name", "center_name"}, "Cost/Profit Center"); errMsg != "" {
+		return errMsg
+	}
+	if errMsg := validateRows(ctx, fields, "ApprovedGLAccounts", []string{"gl_account_id", "gl_account_ids", "gl_account_code", "gl_account_codes", "gl_account_name"}, []string{"gl_account_id", "gl_account_code", "gl_account_name"}, "GL Account"); errMsg != "" {
+		return errMsg
 	}
 
 	return ""
+}
+
+func validateEntityRefs(ctx context.Context, fields map[string]interface{}) string {
+	for _, entityID := range fieldValues(fields, []string{"entity_id", "entity_ids"}) {
+		if allowedEntities, ok := ctx.Value("entity_ids").([]string); ok && len(allowedEntities) > 0 && !containsFold(allowedEntities, entityID) {
+			return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID)
+		}
+	}
+	for _, entityName := range fieldValues(fields, []string{"entity_name", "entity_names"}) {
+		if allowedEntities, ok := ctx.Value("entity_names").([]string); ok && len(allowedEntities) > 0 && !containsFold(allowedEntities, entityName) {
+			return fmt.Sprintf("Entity '%s' is not within your authorized access scope.", entityName)
+		}
+	}
+	return ""
+}
+
+func validateRows(ctx context.Context, fields map[string]interface{}, ctxKey string, fieldNames, rowKeys []string, label string) string {
+	rows, ok := ctx.Value(ctxKey).([]map[string]string)
+	if !ok || len(rows) == 0 {
+		return ""
+	}
+	for _, value := range fieldValues(fields, fieldNames) {
+		if !rowContains(rows, rowKeys, value) {
+			return fmt.Sprintf("%s '%s' is not valid or approved.", label, value)
+		}
+	}
+	return ""
+}
+
+func validateRowsWithFallback(ctx context.Context, fields map[string]interface{}, stringCtxKey string, typedCtxKey interface{}, fieldNames, rowKeys []string, label string) string {
+	rows, ok := ctx.Value(typedCtxKey).([]map[string]string)
+	if !ok || len(rows) == 0 {
+		rows, ok = ctx.Value(stringCtxKey).([]map[string]string)
+	}
+	if !ok || len(rows) == 0 {
+		return ""
+	}
+	for _, value := range fieldValues(fields, fieldNames) {
+		if !rowContains(rows, rowKeys, value) {
+			return fmt.Sprintf("%s '%s' is not valid or approved.", label, value)
+		}
+	}
+	return ""
+}
+
+func fieldValues(fields map[string]interface{}, names []string) []string {
+	out := []string{}
+	for _, name := range names {
+		val, ok := fields[name]
+		if !ok || val == nil {
+			continue
+		}
+		out = append(out, flattenValue(val)...)
+	}
+	return out
+}
+
+func flattenValue(val interface{}) []string {
+	if val == nil {
+		return nil
+	}
+	if s, ok := val.(string); ok {
+		return splitStrings(s)
+	}
+	rv := reflect.ValueOf(val)
+	if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
+		out := []string{}
+		for i := 0; i < rv.Len(); i++ {
+			out = append(out, flattenValue(rv.Index(i).Interface())...)
+		}
+		return out
+	}
+	return splitStrings(fmt.Sprint(val))
+}
+
+func splitStrings(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func rowContains(rows []map[string]string, keys []string, value string) bool {
+	for _, row := range rows {
+		for _, key := range keys {
+			if strings.EqualFold(strings.TrimSpace(row[key]), strings.TrimSpace(value)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsFold(values []string, value string) bool {
+	for _, candidate := range values {
+		if strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(value)) {
+			return true
+		}
+	}
+	return false
 }
