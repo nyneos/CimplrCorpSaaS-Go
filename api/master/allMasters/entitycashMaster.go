@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/ctxutil"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"compress/gzip"
 	"context"
 	"database/sql"
@@ -398,7 +400,7 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		currCodes := api.GetCurrencyCodesFromCtx(ctx)
-		accessibleEntityNames := api.GetEntityNamesFromCtx(ctx)
+		accessibleEntityNames := ctxutil.FromContext(ctx).EntityNames
 
 		entityIDs := make(map[string]string)
 		inserted := []map[string]interface{}{}
@@ -572,7 +574,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		start := time.Now()
 
 		// Get user's accessible entities from context
-		accessibleEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		accessibleEntityIDs := ctxutil.FromContext(ctx).EntityIDs
 		// Debug: log accessible IDs and a small sample
 		if len(accessibleEntityIDs) == 0 {
 			api.RespondWithPayload(w, true, "No entities accessible with your current permissions", []map[string]interface{}{})
@@ -1761,7 +1763,30 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// ── 7. Insert audit entries (NO delete yet) ─────────
+		// ── 7. Block delete if ANY entity has core records (FDs, bank statements, etc.)
+		// Check here so the delete request itself fails fast — never reach PENDING_DELETE_APPROVAL.
+		var blockedEntities []map[string]interface{}
+		for _, eid := range allIDs {
+			blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterentitycash", eid)
+			if len(blockers) > 0 {
+				blockedEntities = append(blockedEntities, map[string]interface{}{
+					"entity_id":  eid,
+					"blocked_by": dependency.BlockersSummary(blockers),
+				})
+			}
+		}
+		if len(blockedEntities) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+				constants.ValueSuccess: false,
+				"error":                "Cannot request deletion: one or more entities have active records that must be resolved first.",
+				"blocked":              blockedEntities,
+			})
+			return
+		}
+
+		// ── 8. Insert audit entries (NO delete yet) ─────────
 		var auditErrors []string
 
 		for _, eid := range allIDs {
@@ -1972,6 +1997,24 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					anyError = derr
 					break
 				}
+
+				// Block deletion if any descendant entity has core records (FDs, bank statements, etc.)
+				var entityBlockSummary []string
+				for _, desc := range descendants {
+					blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterentitycash", desc)
+					if len(blockers) > 0 {
+						entityBlockSummary = append(entityBlockSummary, desc+": "+dependency.BlockersSummary(blockers))
+					}
+				}
+				if len(entityBlockSummary) > 0 {
+					allUpdated = append(allUpdated, map[string]interface{}{
+						"entity_id":         eid,
+						constants.KeyStatus: "Blocked",
+						"blocked_by":        strings.Join(entityBlockSummary, "; "),
+					})
+					continue
+				}
+
 				rows, err := tx.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, descendants)
 				if err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to mark entities as deleted")
@@ -1993,6 +2036,16 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				rows.Close()
+
+				// Cascade-delete non-core children of every deleted entity
+				// (bank accounts, GL accounts, folios, demat accounts).
+				// Uses pgxPool directly (outside the entity tx) so each child
+				// gets its own soft-delete + audit row via CascadeDelete.
+				for _, desc := range descendants {
+					if err := dependency.CascadeDelete(ctx, pgxPool, "masterentitycash", desc, checkerBy); err != nil {
+						api.LogError("[EntityDelete] cascade failed for %s: %v", desc, err)
+					}
+				}
 
 				// Also update the audit rows for these descendants: mark their delete actions as APPROVED
 				auditRows, aerr := tx.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, descendants)
@@ -2102,7 +2155,7 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Get user's accessible entities from context
-		accessibleEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		accessibleEntityIDs := ctxutil.FromContext(ctx).EntityIDs
 		if len(accessibleEntityIDs) == 0 {
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2198,7 +2251,7 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Get user's accessible entities from context (hierarchy-based filtering)
-		accessibleEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		accessibleEntityIDs := ctxutil.FromContext(ctx).EntityIDs
 		if len(accessibleEntityIDs) == 0 {
 			api.RespondWithPayload(w, true, "No entities accessible with your current permissions", []map[string]interface{}{})
 			return
@@ -2856,7 +2909,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 4. Context: accessible currencies & entities ──────────────────
 		currCodes := api.GetCurrencyCodesFromCtx(ctx)
-		accessibleEntityNames := api.GetEntityNamesFromCtx(ctx)
+		accessibleEntityNames := ctxutil.FromContext(ctx).EntityNames
 
 		// ── 5. Parse all rows into typed structs ──────────────────────────
 		parsed := make([]csvEntityRow, 0, len(dataRows))

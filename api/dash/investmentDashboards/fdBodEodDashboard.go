@@ -44,17 +44,17 @@ import (
 // ─── request type ─────────────────────────────────────────────────────────────
 
 type fdBodEodDashRequest struct {
-	UserID             string `json:"user_id"`
-	EntityID           string `json:"entity_id"`
-	Currency           string `json:"currency"`
-	Mode               string `json:"mode"`                // "BOD" | "EOD" — default "BOD"
-	Period             string `json:"period"`              // "Today" | "This Week" | "This Month"
-	StartDate          string `json:"start_date"`          // for custom range
-	EndDate            string `json:"end_date"`
-	BankID             string `json:"bank_id"`             // filter by specific bank
-	FDType             string `json:"fd_type"`             // e.g. "SIMPLE" | "COMPOUNDING"
-	InterestFrequency  string `json:"interest_frequency"`  // e.g. "PAYOUT" | "COMPOUNDING"
-	AsOnDate           string `json:"as_on_date"`          // override today's date for historical BOD/EOD view
+	UserID            string `json:"user_id"`
+	EntityID          string `json:"entity_id"`
+	Currency          string `json:"currency"`
+	Mode              string `json:"mode"`       // "BOD" | "EOD" — default "BOD"
+	Period            string `json:"period"`     // "Today" | "This Week" | "This Month"
+	StartDate         string `json:"start_date"` // for custom range
+	EndDate           string `json:"end_date"`
+	BankID            string `json:"bank_id"`            // filter by specific bank
+	FDType            string `json:"fd_type"`            // e.g. "SIMPLE" | "COMPOUNDING"
+	InterestFrequency string `json:"interest_frequency"` // e.g. "PAYOUT" | "COMPOUNDING"
+	AsOnDate          string `json:"as_on_date"`         // override today's date for historical BOD/EOD view
 }
 
 // ─── handler ──────────────────────────────────────────────────────────────────
@@ -86,10 +86,14 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		threeDaysOut := now.AddDate(0, 0, 3).Format(constants.DateFormat)
 		ctx := r.Context()
-		entityFilter        := req.EntityID
-		bankFilter          := req.BankID
-		fdTypeFilter        := req.FDType
-		interestFreqFilter  := req.InterestFrequency
+		entityFilter, scopeMsg := resolveFDDashboardEntity(ctx, req.EntityID)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
+			return
+		}
+		bankFilter := req.BankID
+		fdTypeFilter := req.FDType
+		interestFreqFilter := req.InterestFrequency
 
 		type subResult struct {
 			data interface{}
@@ -139,7 +143,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				) cr ON true
 				WHERE m.is_deleted=false
 				  AND m.maturity_date = $1::date
-				  AND ($2::text='' OR m.entity_id=$2)
+				  AND (m.entity_id = ANY(string_to_array($2, ',')))
 				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
 				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))
 				  AND ($5::text='' OR UPPER(COALESCE(m.frequency_id,''))=UPPER($5))
@@ -208,7 +212,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE m.is_deleted=false
 				  AND m.maturity_date > $1::date
 				  AND m.maturity_date <= $2::date
-				  AND ($3::text='' OR m.entity_id=$3)
+				  AND (m.entity_id = ANY(string_to_array($3, ',')))
 				  AND ($4::text='' OR m.bank_id=$4 OR m.bank_name=$4)
 				  AND ($5::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($5))
 				  AND ($6::text='' OR UPPER(COALESCE(m.frequency_id,''))=UPPER($6))
@@ -275,7 +279,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE b.is_deleted=false
 				  AND b.booking_status IN ('SENT_TO_BANK','APPROVAL_PENDING')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2)
 				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code, b.interest_type_code,''))=UPPER($3))
 				ORDER BY b.created_at ASC
@@ -357,7 +361,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_accrual_run
 				WHERE is_deleted=false
 				  AND DATE(run_date) = $1::date
-				  AND ($2::text='' OR entity_id=$2)
+				  AND (entity_id = ANY(string_to_array($2, ',')))
 				ORDER BY run_date DESC
 				LIMIT 20`, today, entityFilter)
 			if err != nil {
@@ -418,7 +422,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE cf.is_deleted=false
 				  AND cf.event_date = $1::date
 				  AND cf.event_type IN ('INTEREST_RECEIPT','MATURITY')
-				  AND ($2::text='' OR m.entity_id=$2)
+				  AND (m.entity_id = ANY(string_to_array($2, ',')))
 				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
 				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))
 				ORDER BY cf.net_cash_flow DESC NULLS LAST
@@ -479,7 +483,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_master
 				  WHERE is_deleted = false
 				    AND fd_status   = 'ACTIVE'
-				    AND ($1::text='' OR entity_id = $1)
+				    AND (entity_id = ANY(string_to_array($1, ',')))
 				    AND ($2::text='' OR bank_id=$2 OR bank_name=$2)
 				    AND ($3::text='' OR UPPER(COALESCE(interest_type_code,''))=UPPER($3))
 				)
@@ -557,7 +561,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				WHERE m.is_deleted = false
 				  AND m.fd_status = 'ACTIVE'
-				  AND ($1::text='' OR m.entity_id=$1)
+				  AND (m.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)
 				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($3))
 				  AND ($4::text='' OR UPPER(COALESCE(m.frequency_id,''))=UPPER($4))
@@ -618,7 +622,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE b.is_deleted=false
 				  AND b.booking_status IN ('DRAFT','APPROVAL_PENDING','SENT_TO_BANK')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2)
 				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code, b.interest_type_code,''))=UPPER($3))
 				UNION ALL
@@ -645,7 +649,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE COALESCE(ci.is_deleted, false) = false
 				  AND COALESCE(la.processing_status, ci.closure_status, '') NOT IN ('POSTED', 'REJECTED', 'DELETED')
 				  AND NOT (`+sqlCimplrClosureProcessed+`)
-				  AND ($1::text = '' OR COALESCE(ci.entity_id, m.entity_id) = $1)
+				  AND (COALESCE(ci.entity_id, m.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)
 				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code, ''))=UPPER($3))
 				UNION ALL
@@ -662,7 +666,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				JOIN investment.fd_master m ON m.fd_id = cr.fd_id AND m.is_deleted=false
 				WHERE cr.is_deleted=false
 				  AND cr.closure_status IN ('PENDING_APPROVAL','APPROVED')
-				  AND ($1::text='' OR cr.entity_id=$1)
+				  AND (cr.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)
 				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code, ''))=UPPER($3))
 				ORDER BY aging_days DESC
@@ -720,7 +724,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND b.booking_status NOT IN ('APPROVED','REJECTED')
 				  AND EXTRACT(DAY FROM NOW()-b.created_at) >= 2
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				ORDER BY aging_days DESC
 				LIMIT 50`, entityFilter)
 			if err != nil {
@@ -763,7 +767,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE b.is_deleted=false
 				  AND DATE(b.created_at) = $1::date
-				  AND ($2::text='' OR b.entity_id=$2)
+				  AND (b.entity_id = ANY(string_to_array($2, ',')))
 				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3 OR b.bank_id=$3 OR b.bank_name=$3)
 				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code, b.interest_type_code,''))=UPPER($4))
 				ORDER BY b.created_at DESC
@@ -822,7 +826,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.booking_id = cf.booking_id AND m.is_deleted=false
 				WHERE cf.is_deleted=false
 				  AND DATE(cf.created_at) = $1::date
-				  AND ($2::text='' OR b.entity_id=$2)
+				  AND (b.entity_id = ANY(string_to_array($2, ',')))
 				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3 OR b.bank_id=$3 OR b.bank_name=$3)
 				  AND ($4::text='' OR UPPER(COALESCE(cf.confirmed_interest_type_code, m.interest_type_code, b.interest_type_code,''))=UPPER($4))
 				ORDER BY cf.created_at DESC
@@ -885,7 +889,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.fd_id = ir.fd_id AND m.is_deleted=false
 				WHERE ir.is_deleted=false
 				  AND DATE(ir.created_at) = $1::date
-				  AND ($2::text='' OR ir.entity_id=$2)
+				  AND (ir.entity_id = ANY(string_to_array($2, ',')))
 				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
 				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))`, today, entityFilter, bankFilter, fdTypeFilter).Scan(&ingested, &matched, &unmatched, &totalIngested)
 			if err != nil {
@@ -917,7 +921,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id AND m.is_deleted=false
 				WHERE COALESCE(ae.is_deleted,false)=false
 				  AND DATE(ae.created_at) = $1::date
-				  AND ($2::text='' OR m.entity_id=$2)
+				  AND (m.entity_id = ANY(string_to_array($2, ',')))
 				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
 				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))`, today, entityFilter, bankFilter, fdTypeFilter).Scan(&opened, &closed, &escalated)
 			if err != nil {
@@ -941,7 +945,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				JOIN investment.fd_master m ON m.fd_id = cf.fd_id AND m.is_deleted=false
 				WHERE cf.is_deleted=false
 				  AND DATE(cf.last_modified_at) = $1::date
-				  AND ($2::text='' OR m.entity_id=$2)
+				  AND (m.entity_id = ANY(string_to_array($2, ',')))
 				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
 				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))`, today, entityFilter, bankFilter, fdTypeFilter).Scan(&posted, &failed, &notPosted, &totalPosted)
 			if err != nil {
@@ -976,7 +980,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(TO_CHAR(completed_at,'YYYY-MM-DD"T"HH24:MI:SS'),'') AS completed_at
 				FROM investment.fd_accrual_run
 				WHERE is_deleted=false
-				  AND ($1::text='' OR entity_id=$1)
+				  AND (entity_id = ANY(string_to_array($1, ',')))
 				ORDER BY run_date DESC
 				LIMIT 1`, entityFilter).Scan(
 				&runID, &runType, &runStatus, &entity,
@@ -1033,37 +1037,37 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_interest_receipt
 				WHERE is_deleted=false AND DATE(created_at)=$1::date
 				AND COALESCE(reconciliation_status,'UNMATCHED') IN ('UNMATCHED','PENDING','')
-				AND ($2::text='' OR entity_id=$2)`, today, entityFilter).Scan(&unmatchedCount)
+				AND (entity_id = ANY(string_to_array($2, ',')))`, today, entityFilter).Scan(&unmatchedCount)
 
 			// C2: high variance cases addressed
 			var openVariance int64
 			pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_confirmation
 				WHERE is_deleted=false AND variance_flag=true
 				AND COALESCE(variance_action,'PENDING') = 'PENDING'
-				AND ($1::text='' OR EXISTS(
-				    SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=fd_confirmation.booking_id AND ($1::text='' OR b.entity_id=$1)
-				))`, entityFilter).Scan(&openVariance)
+				AND EXISTS(
+				    SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=fd_confirmation.booking_id AND (b.entity_id = ANY(string_to_array($1, ',')))
+				)`, entityFilter).Scan(&openVariance)
 
 			// C3: GL postings clear
 			var failedPostings int64
 			pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_cashflow_schedule cf
 				JOIN investment.fd_master m ON m.fd_id=cf.fd_id AND m.is_deleted=false
 				WHERE cf.is_deleted=false AND cf.posting_status='FAILED'
-				AND ($1::text='' OR m.entity_id=$1)`, entityFilter).Scan(&failedPostings)
+				AND (m.entity_id = ANY(string_to_array($1, ',')))`, entityFilter).Scan(&failedPostings)
 
 			// C4: no critical exceptions open
 			var criticalExceptions int64
 			pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_accrual_exception ae
 				WHERE COALESCE(ae.is_deleted,false)=false
 				AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				AND ($1::text='' OR EXISTS (
-				    SELECT 1 FROM investment.fd_master m WHERE m.fd_id=ae.fd_id AND m.entity_id=$1
-				))`, entityFilter).Scan(&criticalExceptions)
+				AND EXISTS (
+				    SELECT 1 FROM investment.fd_master m WHERE m.fd_id=ae.fd_id AND m.entity_id = ANY(string_to_array($1, ','))
+				)`, entityFilter).Scan(&criticalExceptions)
 
 			// C5: latest accrual run completed
 			var latestRunStatus string
 			pool.QueryRow(ctx, `SELECT COALESCE(run_status,'') FROM investment.fd_accrual_run
-				WHERE is_deleted=false AND ($1::text='' OR entity_id=$1)
+				WHERE is_deleted=false AND (entity_id = ANY(string_to_array($1, ',')))
 				ORDER BY run_date DESC LIMIT 1`, entityFilter).Scan(&latestRunStatus)
 
 			// C6: maturities processed (closure requests completed for today maturities)
@@ -1072,7 +1076,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE m.is_deleted=false AND m.maturity_date=$1::date
 				AND m.fd_status IN ('ACTIVE','MATURED')
 				AND NOT (`+sqlAnyClosureProcessed+`)
-				AND ($2::text='' OR m.entity_id=$2)`, today, entityFilter).Scan(&pendingMaturities)
+				AND (m.entity_id = ANY(string_to_array($2, ',')))`, today, entityFilter).Scan(&pendingMaturities)
 
 			accrualDone := latestRunStatus == "COMPLETED" || latestRunStatus == "POSTED"
 
@@ -1170,7 +1174,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				WHERE m.is_deleted=false
 				  AND m.fd_status IN ('ACTIVE','PENDING_ACTIVATION')
-				  AND ($1::text='' OR m.entity_id=$1)
+				  AND (m.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)
 				  AND ($3::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($3))
 				  AND ($4::text='' OR UPPER(COALESCE(m.frequency_id,''))=UPPER($4))
@@ -1487,7 +1491,7 @@ func loadEodChecklistPersistedState(ctx context.Context, pool *pgxpool.Pool, tod
 		  COALESCE(TO_CHAR(updated_at,'YYYY-MM-DD"T"HH24:MI:SS'),'') AS updated_at
 		FROM investment.fd_eod_checklist_item_status
 		WHERE as_of_date = $1::date
-		  AND ($2::text='' OR entity_id = $2)
+		  AND (entity_id = ANY(string_to_array($2, ',')))
 		  AND COALESCE(is_deleted,false) = false
 		ORDER BY updated_at DESC`, today, entityID)
 	if err != nil {

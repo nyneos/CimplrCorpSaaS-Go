@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -172,13 +173,16 @@ func LogAuditCtx(ctx context.Context, msg string, args ...interface{}) {
 type LoggerService struct {
 	Config        map[string]interface{}
 	file          *os.File
+	dbFile        *os.File
 	mu            sync.Mutex
 	stopCh        chan struct{}
 	wg            sync.WaitGroup
 	currentLog    string
+	currentDBLog  string
 	maxFileBytes  int64
 	retentionDays int
 	folderPath    string
+	dbLogger      *log.Logger
 }
 
 func NewLoggerService(config map[string]interface{}) *LoggerService {
@@ -223,7 +227,14 @@ func (l *LoggerService) Start() error {
 	if err != nil {
 		return err
 	}
+	dbLogFile := l.nextDBLogFileName()
+	dbFile, err := os.OpenFile(dbLogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		_ = file.Close()
+		return err
+	}
 	l.file = file
+	l.dbFile = dbFile
 	l.currentLog = logFile
 
 	multiWriter := io.MultiWriter(file, os.Stdout)
@@ -251,6 +262,11 @@ func (l *LoggerService) Stop() error {
 func (l *LoggerService) nextLogFileName() string {
 	timestamp := time.Now().Format("20060102_150405")
 	return filepath.Join(l.folderPath, fmt.Sprintf("app_%s.log", timestamp))
+}
+
+func (l *LoggerService) nextDBLogFileName() string {
+	timestamp := time.Now().Format("20060102_150405")
+	return filepath.Join(l.folderPath, fmt.Sprintf("db_%s.log", timestamp))
 }
 
 func (l *LoggerService) rotateIfNeeded() error {
@@ -342,6 +358,16 @@ func (l *LoggerService) zipAndCleanOldLogs() {
 
 func (l *LoggerService) LogAudit(msg string) {
 	LogAudit("%s", msg)
+}
+
+func (l *LoggerService) LogDBf(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.dbLogger != nil {
+		l.dbLogger.Printf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
 }
 
 var GlobalLogger *LoggerService

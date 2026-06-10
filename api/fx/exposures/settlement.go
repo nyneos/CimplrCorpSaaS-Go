@@ -1,12 +1,12 @@
 package exposures
 
 import (
-	"CimplrCorpSaas/api"
 	"database/sql"
 	"encoding/json"
 	"net/http"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/lib/pq"
 )
@@ -26,8 +26,9 @@ func FilterForwardBookingsForSettlement(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "user_id, exposure_header_ids (array), entity, and currency are required")
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -98,8 +99,9 @@ func GetForwardBookingsByEntityAndCurrency(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "user_id, entity, and currency are required")
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}

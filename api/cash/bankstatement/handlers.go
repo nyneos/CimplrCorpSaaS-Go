@@ -1,12 +1,13 @@
 package bankstatement
 
 import (
-	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/validation"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -22,8 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/lib/pq"
 
 	"CimplrCorpSaas/internal/logger"
 )
@@ -59,8 +60,22 @@ func auditActorDisplayName(ctx context.Context, userID string) string {
 	return strings.TrimSpace(userID)
 }
 
+func validateCashMasterScope(ctx context.Context, fields map[string]interface{}) string {
+	return validation.ValidateCashMasterReferences(ctx, fields)
+}
+
+func scopeValues(rows []map[string]string, key string) []string {
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if value := strings.TrimSpace(row[key]); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 // 1. Get all bank statements (POST, req: user_id)
-func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
+func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -74,12 +89,16 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 			return
 		}
 		ctx := r.Context()
-		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
+		scope := ctxutil.FromContext(ctx)
+		entityIDs := scope.EntityIDs
 		if len(entityIDs) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusUnauthorized)
 			return
 		}
-		rows, err := db.QueryContext(ctx, `
+		accountNumbers := scopeValues(scope.BankAccounts, "account_number")
+		bankIDs := scopeValues(scope.Banks, "bank_id")
+		currencyCodes := scopeValues(scope.Currencies, "currency_code")
+		rows, err := pool.Query(ctx, `
 										WITH latest_audit AS (
 											SELECT a.*
 											FROM cimplrcorpsaas.auditactionbankstatement a
@@ -101,9 +120,12 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 										LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 										LEFT JOIN latest_audit la ON la.bankstatementid = s.bank_statement_id
 										WHERE s.entity_id = ANY($1)
+										  AND (cardinality($2::text[]) = 0 OR s.account_number = ANY($2::text[]))
+										  AND (cardinality($3::text[]) = 0 OR mba.bank_id = ANY($3::text[]))
+										  AND (cardinality($4::text[]) = 0 OR mba.currency = ANY($4::text[]))
 										  AND COALESCE(s.is_deleted, false) = false
 										ORDER BY s.uploaded_at DESC
-						`, pq.Array(entityIDs))
+						`, entityIDs, accountNumbers, bankIDs, currencyCodes)
 		if err != nil {
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
@@ -160,7 +182,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 }
 
 // 2. Get all transactions for a bank statement (POST, req: user_id, bank_statement_id)
-func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
+func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -179,12 +201,16 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 		}
 
 		ctx := r.Context()
-		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
+		scope := ctxutil.FromContext(ctx)
+		entityIDs := scope.EntityIDs
 		if len(entityIDs) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusUnauthorized)
 			return
 		}
-		rows, err := db.QueryContext(ctx, `
+		accountNumbers := scopeValues(scope.BankAccounts, "account_number")
+		bankIDs := scopeValues(scope.Banks, "bank_id")
+		currencyCodes := scopeValues(scope.Currencies, "currency_code")
+		rows, err := pool.Query(ctx, `
 			SELECT
 				t.transaction_id,
 				e.entity_name,
@@ -212,6 +238,8 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				ON t.bank_statement_id = s.bank_statement_id
 			JOIN public.masterentitycash e
 				ON s.entity_id = e.entity_id
+			LEFT JOIN public.masterbankaccount mba
+				ON mba.account_number = s.account_number AND mba.is_deleted = false
 			LEFT JOIN public.mastercashflowcategory c
 				ON t.category_id = c.category_id
 			LEFT JOIN LATERAL (
@@ -226,8 +254,11 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				ON sq.category_id::text = q.suggested_cat::text
 			WHERE t.bank_statement_id = $1
 			  AND s.entity_id = ANY($2)
+			  AND (cardinality($3::text[]) = 0 OR s.account_number = ANY($3::text[]))
+			  AND (cardinality($4::text[]) = 0 OR mba.bank_id = ANY($4::text[]))
+			  AND (cardinality($5::text[]) = 0 OR mba.currency = ANY($5::text[]))
 			ORDER BY t.value_date
-		`, body.BankStatementID, pq.Array(entityIDs))
+		`, body.BankStatementID, entityIDs, accountNumbers, bankIDs, currencyCodes)
 
 		if err != nil {
 			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
@@ -347,7 +378,7 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 	})
 }
 
-func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
+func GetBankStatementDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			UserID          string `json:"user_id"`
@@ -364,22 +395,38 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 		var uploadS3Key sql.NullString
 		var entityName sql.NullString
 		var auditFileID sql.NullString
-		err := db.QueryRowContext(ctx, `
-			SELECT s.upload_s3_key, COALESCE(e.entity_name, '') AS entity_name, p.id
+		var entityID, accountNumber, bankID, currency string
+		err := pool.QueryRow(ctx, `
+			SELECT s.upload_s3_key, COALESCE(e.entity_name, '') AS entity_name, p.id,
+			       COALESCE(s.entity_id, ''), COALESCE(s.account_number, ''),
+			       COALESCE(mba.bank_id, ''), COALESCE(mba.currency, '')
 			FROM cimplrcorpsaas.bank_statements s
 			LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
 			LEFT JOIN cimplrcorpsaas.bank_pdf_uploads p ON p.storage_path = s.upload_s3_key
+			LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.is_deleted = false
 			WHERE s.bank_statement_id = $1
-		`, body.BankStatementID).Scan(&uploadS3Key, &entityName, &auditFileID)
+		`, body.BankStatementID).Scan(&uploadS3Key, &entityName, &auditFileID, &entityID, &accountNumber, &bankID, &currency)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			if errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 				w.WriteHeader(http.StatusNotFound)
 				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "bank_statement_id not found"})
 				return
 			}
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": pqUserFriendlyMessage(err)})
+			return
+		}
+		if msg := validateCashMasterScope(ctx, map[string]interface{}{
+			"entity_id":      entityID,
+			"entity_name":    entityName.String,
+			"account_number": accountNumber,
+			"bank_id":        bankID,
+			"currency":       currency,
+		}); msg != "" {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": msg})
 			return
 		}
 
@@ -405,9 +452,9 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 		if requestedBy != "" {
 			auditFileID.String = strings.TrimSpace(auditFileID.String)
 			auditFileID.Valid = auditFileID.String != ""
-			if err := insertDownloadAudit(
+			if err := insertDownloadAuditPgx(
 				ctx,
-				db,
+				pool,
 				auditFileID,
 				sql.NullString{String: strings.TrimSpace(body.BankStatementID), Valid: strings.TrimSpace(body.BankStatementID) != ""},
 				requestedBy,
@@ -428,7 +475,7 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 	})
 }
 
-func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
+func GetBankStatementBulkDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			UserID           string   `json:"user_id"`
@@ -454,14 +501,28 @@ func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 			var uploadS3Key sql.NullString
 			var entityName sql.NullString
 			var auditFileID sql.NullString
-			err := db.QueryRowContext(ctx, `
-				SELECT s.upload_s3_key, COALESCE(e.entity_name, '') AS entity_name, p.id
+			var entityID, accountNumber, bankID, currency string
+			err := pool.QueryRow(ctx, `
+				SELECT s.upload_s3_key, COALESCE(e.entity_name, '') AS entity_name, p.id,
+				       COALESCE(s.entity_id, ''), COALESCE(s.account_number, ''),
+				       COALESCE(mba.bank_id, ''), COALESCE(mba.currency, '')
 				FROM cimplrcorpsaas.bank_statements s
 				LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
 				LEFT JOIN cimplrcorpsaas.bank_pdf_uploads p ON p.storage_path = s.upload_s3_key
+				LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.is_deleted = false
 				WHERE s.bank_statement_id = $1
-			`, bankStatementID).Scan(&uploadS3Key, &entityName, &auditFileID)
+			`, bankStatementID).Scan(&uploadS3Key, &entityName, &auditFileID, &entityID, &accountNumber, &bankID, &currency)
 			if err != nil {
+				failedIDs = append(failedIDs, bankStatementID)
+				continue
+			}
+			if msg := validateCashMasterScope(ctx, map[string]interface{}{
+				"entity_id":      entityID,
+				"entity_name":    entityName.String,
+				"account_number": accountNumber,
+				"bank_id":        bankID,
+				"currency":       currency,
+			}); msg != "" {
 				failedIDs = append(failedIDs, bankStatementID)
 				continue
 			}
@@ -485,9 +546,9 @@ func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 			if requestedBy != "" {
 				auditFileID.String = strings.TrimSpace(auditFileID.String)
 				auditFileID.Valid = auditFileID.String != ""
-				if err := insertDownloadAudit(
+				if err := insertDownloadAuditPgx(
 					ctx,
-					db,
+					pool,
 					auditFileID,
 					sql.NullString{String: strings.TrimSpace(bankStatementID), Valid: strings.TrimSpace(bankStatementID) != ""},
 					requestedBy,
@@ -529,7 +590,7 @@ func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 }
 
 // 2a. Mark transactions as misclassified
-func MarkBankStatementTransactionsMisclassifiedHandler(db *sql.DB) http.Handler {
+func MarkBankStatementTransactionsMisclassifiedHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -547,17 +608,52 @@ func MarkBankStatementTransactionsMisclassifiedHandler(db *sql.DB) http.Handler 
 		}
 
 		ctx := r.Context()
-		res, err := db.ExecContext(ctx, `
+		scopeRows, err := pool.Query(ctx, `
+			SELECT DISTINCT COALESCE(s.entity_id, ''), COALESCE(t.account_number, ''),
+			       COALESCE(mba.bank_id, ''), COALESCE(mba.currency, '')
+			FROM cimplrcorpsaas.bank_statement_transactions t
+			JOIN cimplrcorpsaas.bank_statements s ON s.bank_statement_id = t.bank_statement_id
+			LEFT JOIN public.masterbankaccount mba ON mba.account_number = t.account_number AND mba.is_deleted = false
+			WHERE t.transaction_id = ANY($1)
+			  AND COALESCE(s.is_deleted, false) = false
+		`, body.TransactionIDs)
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer scopeRows.Close()
+		for scopeRows.Next() {
+			var entityID, accountNumber, bankID, currency string
+			if err := scopeRows.Scan(&entityID, &accountNumber, &bankID, &currency); err != nil {
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if msg := validateCashMasterScope(ctx, map[string]interface{}{
+				"entity_id":      entityID,
+				"account_number": accountNumber,
+				"bank_id":        bankID,
+				"currency":       currency,
+			}); msg != "" {
+				http.Error(w, msg, http.StatusForbidden)
+				return
+			}
+		}
+		if err := scopeRows.Err(); err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		res, err := pool.Exec(ctx, `
 			UPDATE cimplrcorpsaas.bank_statement_transactions
 			SET misclassified_flag = true
 			WHERE transaction_id = ANY($1)
-		`, pq.Array(body.TransactionIDs))
+		`, body.TransactionIDs)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		rowsAffected, _ := res.RowsAffected()
+		rowsAffected := res.RowsAffected()
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -568,7 +664,7 @@ func MarkBankStatementTransactionsMisclassifiedHandler(db *sql.DB) http.Handler 
 }
 
 // 2b. Recompute KPIs and uncategorized data for an existing bank statement
-func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
+func RecomputeBankStatementSummaryHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -587,13 +683,13 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 
 		var entityID, accountNumber string
 		var statementPeriodStart, statementPeriodEnd time.Time
-		err := db.QueryRowContext(ctx, `
+		err := pool.QueryRow(ctx, `
 				SELECT entity_id, account_number, statement_period_start, statement_period_end
 				FROM cimplrcorpsaas.bank_statements
 				WHERE bank_statement_id = $1
 			`, body.BankStatementID).Scan(&entityID, &accountNumber, &statementPeriodStart, &statementPeriodEnd)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 				http.Error(w, "bank_statement_id not found", http.StatusNotFound)
 				return
 			}
@@ -602,7 +698,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 		}
 
 		var acctCurrency sql.NullString
-		err = db.QueryRowContext(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
+		err = pool.QueryRow(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
 		if err != nil {
 			http.Error(w, "failed to fetch account currency: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -612,13 +708,13 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 		if acctCurrency.Valid {
 			currencyCode = acctCurrency.String
 		}
-		rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID, currencyCode)
+		rules, err := loadCategoryRuleComponentsPgx(ctx, pool, accountNumber, entityID, currencyCode)
 		if err != nil {
 			http.Error(w, "failed to fetch category rules: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		rows, err := db.QueryContext(ctx, `
+		rows, err := pool.Query(ctx, `
 			SELECT transaction_id, tran_id, value_date, transaction_date, description,
 			       withdrawal_amount, deposit_amount, balance, raw_json, category_id
 			FROM cimplrcorpsaas.bank_statement_transactions
@@ -664,7 +760,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 				} else {
 					catParam = nil
 				}
-				if _, err := db.ExecContext(ctx, `
+				if _, err := pool.Exec(ctx, `
 					UPDATE cimplrcorpsaas.bank_statement_transactions
 					SET category_id = $1
 					WHERE transaction_id = $2
@@ -782,7 +878,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 }
 
 // 3. Approve a bank statement (POST, req: user_id, bank_statement_id)
-func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler {
+func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -802,9 +898,9 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 		actorName := auditActorDisplayName(ctx, body.UserID)
 		for _, bsid := range body.BankStatementIDs {
 			var entityID string
-			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
-				if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
-					if !apictx.IsEntityAllowed(ctx, entityID) {
+			if err := pool.QueryRow(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
+				if ids := ctxutil.FromContext(ctx).EntityIDs; len(ids) > 0 {
+					if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
@@ -818,7 +914,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 			// entries that the smart-cat cron may have inserted after the delete request,
 			// which would otherwise mask the DELETE intent when querying the latest row.
 			var hasPendingDelete bool
-			_ = db.QueryRowContext(ctx, `
+			_ = pool.QueryRow(ctx, `
 				SELECT EXISTS (
 					SELECT 1 FROM cimplrcorpsaas.auditactionbankstatement
 					WHERE bankstatementid = $1
@@ -832,7 +928,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				actionType = constants.AuditActionDelete
 				processingStatus = constants.StatusPendingDeleteApproval
 			} else {
-				err := db.QueryRowContext(ctx, `
+				err := pool.QueryRow(ctx, `
 					SELECT actiontype, processing_status FROM cimplrcorpsaas.auditactionbankstatement
 					WHERE bankstatementid = $1
 					  AND actiontype IN ('CREATE', 'EDIT', 'RECAT')
@@ -855,7 +951,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				}
 			}
 			if actionType == constants.AuditActionDelete && processingStatus == constants.StatusPendingDeleteApproval {
-				tx, err := db.BeginTx(ctx, nil)
+				tx, err := pool.Begin(ctx)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -864,11 +960,11 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					})
 					continue
 				}
-				defer tx.Rollback()
-				// _, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statement_transactions WHERE bank_statement_id = $1`, bsid)
-				// _, err = tx.Exec(`DELETE FROM public.bank_balances_manual WHERE balance_id = $1`, bsid)
-				// _, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid)
-				_, err = tx.Exec(`
+				defer tx.Rollback(ctx)
+				// _, err = tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.bank_statement_transactions WHERE bank_statement_id = $1`, bsid)
+				// _, err = tx.Exec(ctx, `DELETE FROM public.bank_balances_manual WHERE balance_id = $1`, bsid)
+				// _, err = tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid)
+				_, err = tx.Exec(ctx, `
 					UPDATE cimplrcorpsaas.auditactionbankstatement
 					SET processing_status = 'APPROVED',
 						checker_by = $2,
@@ -892,7 +988,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					})
 					continue
 				}
-				_, err = tx.Exec(`
+				_, err = tx.Exec(ctx, `
 					UPDATE cimplrcorpsaas.bank_statements
 					SET is_deleted = TRUE,
 						deleted_at = now(),
@@ -914,7 +1010,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					})
 					continue
 				}
-				_, err = tx.Exec(`
+				_, err = tx.Exec(ctx,`
 					UPDATE public.bank_balances_manual
 					SET is_deleted = TRUE,
 						deleted_at = now(),
@@ -950,7 +1046,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					"message":           "Bank statement soft deleted after approval",
 				})
 			} else {
-				tx, err := db.BeginTx(ctx, nil)
+				tx, err := pool.Begin(ctx)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -959,7 +1055,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					})
 					continue
 				}
-				defer tx.Rollback()
+				defer tx.Rollback(ctx)
 
 				var accountNumber string
 				var statementPeriodEnd time.Time
@@ -980,7 +1076,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				}
 
 				var bankName, currencyCode, nickname, country string
-				err = tx.QueryRowContext(ctx, `
+				err = tx.QueryRow(ctx, `
 				       SELECT mb.bank_name, mba.currency, COALESCE(mba.account_nickname, mb.bank_name), mba.country
 				       FROM public.masterbankaccount mba
 				       JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
@@ -995,8 +1091,8 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					continue
 				}
 
-				if names := apictx.GetBankNamesFromCtx(ctx); len(names) > 0 {
-					if bankName != "" && !apictx.IsBankAllowed(ctx, bankName) {
+				if true {
+					if bankName != "" && !ctxutil.FromContext(ctx).HasApprovedBank(bankName) {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
@@ -1005,8 +1101,8 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 						continue
 					}
 				}
-				if ctx.Value(apictx.ApprovedBankAccountsKey) != nil {
-					if !ctxHasApprovedBankAccount(ctx, accountNumber) {
+				if len(ctxutil.FromContext(ctx).BankAccounts) > 0 {
+					if !ctxutil.FromContext(ctx).HasApprovedBankAccount(accountNumber) {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
@@ -1015,7 +1111,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 						continue
 					}
 				}
-				if !ctxHasApprovedCurrency(ctx, currencyCode) {
+				if !ctxutil.FromContext(ctx).HasApprovedCurrency(currencyCode) {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
 						"success":           false,
@@ -1025,7 +1121,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				}
 
 				var totalCredits, totalDebits float64
-				err = tx.QueryRowContext(ctx, `
+				err = tx.QueryRow(ctx, `
 				       SELECT COALESCE(SUM(deposit_amount), 0), COALESCE(SUM(withdrawal_amount), 0)
 				       FROM cimplrcorpsaas.bank_statement_transactions
 				       WHERE bank_statement_id = $1
@@ -1039,7 +1135,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					continue
 				}
 
-				_, err = tx.Exec(`
+				_, err = tx.Exec(ctx, `
 				       INSERT INTO public.bank_balances_manual (
 					       balance_id, bank_name, account_no, currency_code, nickname, country, as_of_date, balance_type, balance_amount, opening_balance, total_credits, total_debits, closing_balance, statement_type, source_channel, upload_s3_key
 				       ) VALUES (
@@ -1092,7 +1188,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				// does not need a separate approval cycle.
 				// Use WHERE NOT EXISTS to prevent duplicate audit rows if approval is called twice.
 				actionTime := time.Now()
-				_, err = tx.Exec(`
+				_, err = tx.Exec(ctx, `
 				       INSERT INTO auditactionbankbalances (
 					       balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
 				       )
@@ -1120,13 +1216,13 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					continue
 				}
 
-				// _, err = tx.Exec(`INSERT INTO auditactionbankbalances (
+				// _, err = tx.Exec(ctx, `INSERT INTO auditactionbankbalances (
 				//        balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
 				// ) SELECT $1, $2, $3, $4, $5, $6, $7, $8 WHERE NOT EXISTS (
 				//        SELECT 1 FROM auditactionbankbalances WHERE balance_id = $9 AND actiontype = 'APPROVE'
 				// )`, bsid, "APPROVE", constants.StatusApproved, actorName, actionTime, actorName, actionTime, body.Comment, bsid)
-				// _, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, bsid, "APPROVE", constants.StatusApproved, actorName, actionTime, actorName, actionTime, body.Comment)
-				_, err = tx.Exec(`
+				// _, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, bsid, "APPROVE", constants.StatusApproved, actorName, actionTime, actorName, actionTime, body.Comment)
+				_, err = tx.Exec(ctx, `
 					UPDATE cimplrcorpsaas.auditactionbankstatement
 					SET processing_status = 'APPROVED',
 						checker_by = $2,
@@ -1157,7 +1253,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					continue
 				}
 				var hasMainStatus bool
-				err = tx.QueryRowContext(ctx, `
+				err = tx.QueryRow(ctx, `
 					SELECT EXISTS (
 						SELECT 1
 						FROM information_schema.columns
@@ -1175,7 +1271,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					continue
 				}
 				if hasMainStatus {
-					_, err = tx.Exec(`
+					_, err = tx.Exec(ctx, `
 						UPDATE cimplrcorpsaas.bank_statements
 						SET status = 'APPROVED'
 						WHERE bank_statement_id = $1
@@ -1190,7 +1286,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					}
 				}
 
-				if err := tx.Commit(); err != nil {
+				if err := tx.Commit(ctx); err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
 						"success":           false,
@@ -1201,9 +1297,9 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 
 				capturedID := bsid
 				capturedUser := body.UserID
-				payload := BuildBankStatementNotifPayload(context.Background(), pgxPool, []string{capturedID}, "APPROVE", capturedUser)
+				payload := BuildBankStatementNotifPayload(context.Background(), pool, []string{capturedID}, "APPROVE", capturedUser)
 				go catalog.TriggerNotification(
-					context.Background(), pgxPool,
+					context.Background(), pool,
 					"/cash/bank-statements/v2/approve",
 					fmt.Sprintf("BSAPPROVE/%s/%d", bsid, time.Now().UnixMilli()),
 					payload,
@@ -1232,7 +1328,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 }
 
 // 4. Reject a bank statement (POST, req: user_id, bank_statement_id)
-func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler {
+func RejectBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -1252,9 +1348,9 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 		actorName := auditActorDisplayName(ctx, body.UserID)
 		for _, bsid := range body.BankStatementIDs {
 			var entityID string
-			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
-				if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
-					if !apictx.IsEntityAllowed(ctx, entityID) {
+			if err := pool.QueryRow(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
+				if ids := ctxutil.FromContext(ctx).EntityIDs; len(ids) > 0 {
+					if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
@@ -1264,7 +1360,7 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 					}
 				}
 			}
-			tx, err := db.BeginTx(ctx, nil)
+			tx, err := pool.Begin(ctx)
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
@@ -1273,9 +1369,9 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 				})
 				continue
 			}
-			defer tx.Rollback()
-			// _, err = db.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, bsid, "REJECT", constants.StatusRejected, actorName, actionTime, actorName, actionTime, body.Comment)
-			_, err = tx.ExecContext(ctx, `
+			defer tx.Rollback(ctx)
+			// _, err = pool.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, bsid, "REJECT", constants.StatusRejected, actorName, actionTime, actorName, actionTime, body.Comment)
+			_, err = tx.Exec(ctx, `
 				UPDATE cimplrcorpsaas.auditactionbankstatement
 				SET processing_status = 'REJECTED',
 					checker_by = $2,
@@ -1299,7 +1395,7 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 				})
 				continue
 			}
-			if err := tx.Commit(); err != nil {
+			if err := tx.Commit(ctx); err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
 					"success":           false,
@@ -1325,14 +1421,14 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 			"success": overallSuccess,
 			"results": results,
 		})
-		if pgxPool != nil {
+		if pool != nil {
 			capturedIDs := body.BankStatementIDs
 			capturedUser := body.UserID
 			capturedComment := body.Comment
-			payload := BuildBankStatementNotifPayload(context.Background(), pgxPool, capturedIDs, "REJECT", capturedUser)
+			payload := BuildBankStatementNotifPayload(context.Background(), pool, capturedIDs, "REJECT", capturedUser)
 			payload["Comment"] = capturedComment
 			go catalog.TriggerNotification(
-				context.Background(), pgxPool,
+				context.Background(), pool,
 				"/cash/bank-statements/v2/reject",
 				fmt.Sprintf("BSREJECT/%s/%d", capturedUser, time.Now().UnixMilli()),
 				payload,
@@ -1342,7 +1438,7 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 }
 
 // 5. Delete bank statement (POST, req: user_id, bank_statement_id)
-func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler {
+func DeleteBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -1362,9 +1458,9 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 		ctx := r.Context()
 		for _, bsid := range body.BankStatementIDs {
 			var entityID string
-			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
-				if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
-					if !apictx.IsEntityAllowed(ctx, entityID) {
+			if err := pool.QueryRow(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
+				if ids := ctxutil.FromContext(ctx).EntityIDs; len(ids) > 0 {
+					if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
@@ -1375,7 +1471,7 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 				}
 			}
 			var latestActionType, latestProcessingStatus string
-			latestAuditErr := db.QueryRowContext(ctx, `
+			latestAuditErr := pool.QueryRow(ctx, `
 				SELECT actiontype, processing_status
 				FROM cimplrcorpsaas.auditactionbankstatement
 				WHERE bankstatementid = $1
@@ -1396,7 +1492,7 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 				deleteComment = body.Reason
 			}
 			requestedBy := auditActorDisplayName(ctx, body.UserID)
-			_, err := db.ExecContext(ctx, `
+			_, err := pool.Exec(ctx, `
 				       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
 					       bankstatementid, actiontype, processing_status, requested_by, requested_at, reason
 				       ) VALUES ($1, $2, $3, $4, $5, $6)
@@ -1427,7 +1523,7 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 			"success": overallSuccess,
 			"results": results,
 		})
-		if pgxPool != nil {
+		if pool != nil {
 			capturedIDs := body.BankStatementIDs
 			capturedUser := body.UserID
 			capturedComment := body.Comment
@@ -1435,7 +1531,7 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 				capturedComment = body.Reason
 			}
 			go catalog.TriggerNotification(
-				context.Background(), pgxPool,
+				context.Background(), pool,
 				"/cash/bank-statements/v2/delete",
 				fmt.Sprintf("BSDELETE/%s/%d", capturedUser, time.Now().UnixMilli()),
 				map[string]interface{}{
@@ -1451,7 +1547,7 @@ func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 	})
 }
 
-func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler {
+func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
@@ -1467,7 +1563,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 
 		if isPDF {
 			logger.LogInfo("[BANK_STATEMENT] PDF flag detected, processing from bank.json")
-			result, err := ProcessBankStatementFromJSON(r.Context(), db)
+			result, err := ProcessBankStatementFromJSON(r.Context(), pgxPool)
 			if err != nil {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"success": false,
@@ -1501,7 +1597,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		multiFlag := r.FormValue("multi") == "true"
 		if multiFlag {
 			// explicit multi=true: only try multi approach, surface error if it fails
-			UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(w, r)
+			UploadMultiAccountBankStatementHandler(pgxPool).ServeHTTP(w, r)
 			return
 		}
 		// No explicit multi flag: run normal single-account V2 first.
@@ -1611,7 +1707,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		if !multiFlag {
 			if isLikelyMultiAccountStatement(uploadFileName, fileBytes) {
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] Auto-detected multi-account statement for %s; routing to multi handler", uploadFileName)
-				UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(w, r)
+				UploadMultiAccountBankStatementHandler(pgxPool).ServeHTTP(w, r)
 				return
 			}
 		}
@@ -1657,7 +1753,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			if parsedRows, parseErr := parseFileToRows(fileBytes); parseErr == nil {
 				fileContent = parsedRows
 			}
-			matched := matchAccountNumberToFile(r.Context(), db, uploadFileName, "", accountNumbers, fileContent)
+			matched := matchAccountNumberToFile(r.Context(), pgxPool, uploadFileName, "", accountNumbers, fileContent)
 			if matched != "" {
 				accountOverride = matched
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] Matched file to account %s via weighted scoring", matched)
@@ -1670,7 +1766,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		}
 		result, err := UploadBankStatementV2WithCategorization(
 			r.Context(),
-			db,
+			pgxPool,
 			mf,
 			fileHash,
 			UploadOpts{
@@ -1687,7 +1783,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			// V2 failed — try multi as a last-resort fallback (e.g. multi-account sheet)
 			logger.LogError("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
 			multiRec := httptest.NewRecorder()
-			UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(multiRec, r)
+			UploadMultiAccountBankStatementHandler(pgxPool).ServeHTTP(multiRec, r)
 			// Multi handler returns outer "success":true even when ALL individual accounts fail.
 			// We must check that at least one account in data{} actually succeeded.
 			var multiResp struct {
@@ -1859,7 +1955,7 @@ func isLikelyMultiAccountStatement(filename string, fileBytes []byte) bool {
 
 // UploadZippedBankStatementsHandler accepts a zip file containing multiple bank statement files,
 // unzips them, processes each file one by one, and returns aggregated results.
-func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
+func UploadZippedBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
@@ -2086,7 +2182,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 				if parsedRows, parseErr := parseFileToRows(ze.data); parseErr == nil {
 					fileContent = parsedRows
 				}
-				matched := matchAccountNumberToFile(ctx, db, ze.name, "", accountNumbers, fileContent)
+				matched := matchAccountNumberToFile(ctx, pool, ze.name, "", accountNumbers, fileContent)
 				if matched != "" {
 					accountOverride = matched
 					logger.LogInfo("[ZIP-UPLOAD] matched: file %s → account %s", ze.name, matched)
@@ -2112,7 +2208,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 
 			result, err := UploadBankStatementV2WithCategorization(
 				ctx,
-				db,
+				pool,
 				file,
 				ze.fileHash,
 				UploadOpts{

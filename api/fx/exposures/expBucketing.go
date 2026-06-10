@@ -3,9 +3,9 @@ package exposures
 // expBucketing.go: Handles exposure bucketing logic and APIs.
 
 import (
-	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
+	"CimplrCorpSaas/internal/ctxutil"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -123,7 +123,6 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		// }
 
 		// Middleware: Get business units from context
-		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		// if !ok {
 		// 	respondWithError(w, http.StatusInternalServerError, "Business units not found in context")
 		// 	return
@@ -390,8 +389,9 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		// }
 
 		// Get business units from context (set by middleware)
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}

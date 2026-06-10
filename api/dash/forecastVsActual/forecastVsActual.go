@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,6 +28,47 @@ var rates = map[string]float64{
 	"JPY": 0.0067,
 	"SEK": 0.095,
 	"INR": 0.0117,
+}
+
+type requestScope struct {
+	Entities   []string
+	Currencies []string
+}
+
+func resolveRequestScope(ctx context.Context, entityName, currency string) (requestScope, string) {
+	entityName = strings.TrimSpace(entityName)
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+
+	entities := api.GetEntityNamesFromCtx(ctx)
+	if entityName != "" {
+		if !api.IsEntityAllowed(ctx, entityName) {
+			return requestScope{}, constants.ErrNoAccessibleBusinessUnit
+		}
+		entities = []string{entityName}
+	}
+
+	currencies := normalizeCurrencyScope(api.GetCurrencyCodesFromCtx(ctx))
+	if currency != "" {
+		if !api.IsCurrencyAllowed(ctx, currency) {
+			return requestScope{}, constants.ErrNoAccessibleBusinessUnit
+		}
+		currencies = []string{currency}
+	}
+
+	if len(entities) == 0 || len(currencies) == 0 {
+		return requestScope{}, constants.ErrNoAccessibleBusinessUnit
+	}
+	return requestScope{Entities: entities, Currencies: currencies}, ""
+}
+
+func normalizeCurrencyScope(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if s := strings.ToUpper(strings.TrimSpace(value)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 type CatRow struct {
@@ -73,7 +115,12 @@ func GetForecastVsActualRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 30
 		}
-		rows, err := GetForecastVsActualRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
+		scope, msg := resolveRequestScope(r.Context(), req.EntityName, req.Currency)
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		rows, err := GetForecastVsActualRows(pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -104,7 +151,12 @@ func GetForecastVsActualKPIHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 30
 		}
-		k, err := GetForecastVsActualKPIs(pgxPool, req.Horizon, req.EntityName, req.Currency)
+		scope, msg := resolveRequestScope(r.Context(), req.EntityName, req.Currency)
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		k, err := GetForecastVsActualKPIs(pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -134,7 +186,12 @@ func GetForecastVsActualByDateHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 30
 		}
-		rows, err := GetForecastVsActualByDateRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
+		scope, msg := resolveRequestScope(r.Context(), req.EntityName, req.Currency)
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		rows, err := GetForecastVsActualByDateRows(pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -166,7 +223,12 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 90
 		}
-		rows, err := GetForecastVsActualByMonthRows(pgxPool, req.Horizon, req.EntityName, req.Currency, req.AccountID)
+		scope, msg := resolveRequestScope(r.Context(), req.EntityName, req.Currency)
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		rows, err := GetForecastVsActualByMonthRows(pgxPool, req.Horizon, scope, req.AccountID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -177,7 +239,7 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func GetForecastVsActualRows(pgxPool *pgxpool.Pool, horizon int, entityName, currency string) ([]CatRow, error) {
+func GetForecastVsActualRows(pgxPool *pgxpool.Pool, horizon int, scope requestScope) ([]CatRow, error) {
 
 	today := time.Now().UTC()
 	end := today.AddDate(0, 0, horizon-1)
@@ -191,15 +253,9 @@ func GetForecastVsActualRows(pgxPool *pgxpool.Pool, horizon int, entityName, cur
         WHERE aa.processing_status = 'APPROVED'
           AND (UPPER(fpl.source_ref) LIKE 'TR-PAY-%' OR UPPER(fpl.source_ref) LIKE 'TR-REC-%')
     `
-	aargs := []interface{}{}
-	if currency != "" {
-		actualQ += fmt.Sprintf(constants.QuerryFplCurrency, len(aargs)+1)
-		aargs = append(aargs, currency)
-	}
-	if entityName != "" {
-		actualQ += fmt.Sprintf(constants.QuerryFilterGroup, len(aargs)+1)
-		aargs = append(aargs, entityName)
-	}
+	aargs := []interface{}{scope.Currencies, scope.Entities}
+	actualQ += " AND UPPER(TRIM(fpl.currency)) = ANY($1)"
+	actualQ += " AND fg.primary_key = 'entity_name' AND fg.primary_value = ANY($2)"
 
 	arows, err := pgxPool.Query(context.Background(), actualQ, aargs...)
 	if err != nil {
@@ -268,14 +324,9 @@ func GetForecastVsActualRows(pgxPool *pgxpool.Pool, horizon int, entityName, cur
           AND (cpm.year * 12 + cpm.month) BETWEEN $1 AND $2
     `
 	fargs := []interface{}{startKey, endKey}
-	if entityName != "" {
-		forecastQ += fmt.Sprintf(constants.QuerryEntityName, len(fargs)+1)
-		fargs = append(fargs, entityName)
-	}
-	if currency != "" {
-		forecastQ += fmt.Sprintf(constants.QuerryCurrencyCode, len(fargs)+1)
-		fargs = append(fargs, currency)
-	}
+	forecastQ += " AND cpi.entity_name = ANY($3)"
+	forecastQ += " AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($4)"
+	fargs = append(fargs, scope.Entities, scope.Currencies)
 	forecastQ += " GROUP BY cpi.category_id, cpi.cashflow_type, cp.currency_code"
 
 	frows, err := pgxPool.Query(context.Background(), forecastQ, fargs...)
@@ -336,7 +387,7 @@ func GetForecastVsActualRows(pgxPool *pgxpool.Pool, horizon int, entityName, cur
 	return out, nil
 }
 
-func GetForecastVsActualByDateRows(pgxPool *pgxpool.Pool, horizon int, entityName, currency string) ([]DateCatRow, error) {
+func GetForecastVsActualByDateRows(pgxPool *pgxpool.Pool, horizon int, scope requestScope) ([]DateCatRow, error) {
 	today := time.Now().UTC()
 	end := today.AddDate(0, 0, horizon-1)
 
@@ -350,15 +401,9 @@ func GetForecastVsActualByDateRows(pgxPool *pgxpool.Pool, horizon int, entityNam
         WHERE aa.processing_status = 'APPROVED'
           AND (UPPER(fpl.source_ref) LIKE 'TR-PAY-%' OR UPPER(fpl.source_ref) LIKE 'TR-REC-%')
     `
-	aargs := []interface{}{}
-	if currency != "" {
-		actualQ += fmt.Sprintf(constants.QuerryFplCurrency, len(aargs)+1)
-		aargs = append(aargs, currency)
-	}
-	if entityName != "" {
-		actualQ += fmt.Sprintf(constants.QuerryFilterGroup, len(aargs)+1)
-		aargs = append(aargs, entityName)
-	}
+	aargs := []interface{}{scope.Currencies, scope.Entities}
+	actualQ += " AND UPPER(TRIM(fpl.currency)) = ANY($1)"
+	actualQ += " AND fg.primary_key = 'entity_name' AND fg.primary_value = ANY($2)"
 
 	arows, err := pgxPool.Query(context.Background(), actualQ, aargs...)
 	if err != nil {
@@ -432,14 +477,9 @@ func GetForecastVsActualByDateRows(pgxPool *pgxpool.Pool, horizon int, entityNam
           AND (cpm.year * 12 + cpm.month) BETWEEN $1 AND $2
     `
 	fargs := []interface{}{startKey, endKey}
-	if entityName != "" {
-		forecastQ += fmt.Sprintf(constants.QuerryEntityName, len(fargs)+1)
-		fargs = append(fargs, entityName)
-	}
-	if currency != "" {
-		forecastQ += fmt.Sprintf(constants.QuerryCurrencyCode, len(fargs)+1)
-		fargs = append(fargs, currency)
-	}
+	forecastQ += " AND cpi.entity_name = ANY($3)"
+	forecastQ += " AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($4)"
+	fargs = append(fargs, scope.Entities, scope.Currencies)
 	forecastQ += " GROUP BY cpm.year, cpm.month, cpi.category_id, cpi.cashflow_type, cpi.start_date, cp.currency_code ORDER BY cpm.year, cpm.month"
 
 	frows, err := pgxPool.Query(context.Background(), forecastQ, fargs...)
@@ -507,9 +547,9 @@ func GetForecastVsActualByDateRows(pgxPool *pgxpool.Pool, horizon int, entityNam
 	return out, nil
 }
 
-func GetForecastVsActualKPIs(pgxPool *pgxpool.Pool, horizon int, entityName, currency string) (KPIs, error) {
+func GetForecastVsActualKPIs(pgxPool *pgxpool.Pool, horizon int, scope requestScope) (KPIs, error) {
 	var k KPIs
-	rows, err := GetForecastVsActualRows(pgxPool, horizon, entityName, currency)
+	rows, err := GetForecastVsActualRows(pgxPool, horizon, scope)
 	if err != nil {
 		return k, err
 	}
@@ -557,7 +597,8 @@ func findLast(s, sub string) int {
 func GetForecastVsActualByMonthRows(
 	pgxPool *pgxpool.Pool,
 	horizon int,
-	entityName, currency, accountID string,
+	scope requestScope,
+	accountID string,
 ) ([]DateCatRow, error) {
 
 	if horizon <= 0 {
@@ -587,15 +628,9 @@ func GetForecastVsActualByMonthRows(
             OR UPPER(fpl.source_ref) LIKE 'TR-REC-%'
             OR UPPER(fpl.source_ref) LIKE 'PROP-%')
     `
-	args := []interface{}{}
-	if currency != "" {
-		q += fmt.Sprintf(constants.QuerryFplCurrency, len(args)+1)
-		args = append(args, currency)
-	}
-	if entityName != "" {
-		q += fmt.Sprintf(constants.QuerryFilterGroup, len(args)+1)
-		args = append(args, entityName)
-	}
+	args := []interface{}{scope.Currencies, scope.Entities}
+	q += " AND UPPER(TRIM(fpl.currency)) = ANY($1)"
+	q += " AND fg.primary_key = 'entity_name' AND fg.primary_value = ANY($2)"
 	if accountID != "" {
 		q += fmt.Sprintf(" AND COALESCE(fpl.allocated_account_id::text,'') = $%d", len(args)+1)
 		args = append(args, accountID)

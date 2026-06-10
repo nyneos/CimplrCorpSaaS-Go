@@ -154,8 +154,8 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Get business units from context (set by middleware)
-		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		// if !ok || len(buNames) == 0 {
+		// buNames := api.GetEntityNamesFromCtx(r.Context())
+		// if len(buNames) == 0 {
 		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }
@@ -295,8 +295,8 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 		}
 		// Middleware: check business units
 		// Uncomment if you want to restrict by business units
-		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		// if !ok || len(buNames) == 0 {
+		// buNames := api.GetEntityNamesFromCtx(r.Context())
+		// if len(buNames) == 0 {
 		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }
@@ -389,8 +389,8 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Middleware: check business units
-		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		// if !ok || len(buNames) == 0 {
+		// buNames := api.GetEntityNamesFromCtx(r.Context())
+		// if len(buNames) == 0 {
 		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }
@@ -448,8 +448,8 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Middleware: check business units
-		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		// if !ok || len(buNames) == 0 {
+		// buNames := api.GetEntityNamesFromCtx(r.Context())
+		// if len(buNames) == 0 {
 		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }
@@ -712,8 +712,8 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 			editor = userID
 		}
 		// Middleware: check business units (uncomment if needed)
-		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		// if !ok || len(buNames) == 0 {
+		// buNames := api.GetEntityNamesFromCtx(r.Context())
+		// if len(buNames) == 0 {
 		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }

@@ -3,10 +3,12 @@ package portfolio
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	// "context"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	// "time"
 
@@ -30,6 +32,19 @@ func RefreshPortfolioSnapshots(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		scope := ctxutil.FromContext(ctx)
+		var entityNames []string
+		if req.EntityName != nil && strings.TrimSpace(*req.EntityName) != "" {
+			entityName := strings.TrimSpace(*req.EntityName)
+			if !scope.HasEntityNameAccess(entityName) {
+				api.RespondWithError(w, http.StatusForbidden, "entity_name is not within your authorized access scope")
+				return
+			}
+			entityNames = []string{entityName}
+		} else if len(scope.EntityNames) > 0 {
+			entityNames = scope.EntityNames
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -39,9 +54,9 @@ func RefreshPortfolioSnapshots(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		batchID := uuid.New().String()
 
-		// Delete existing snapshots for the entity (or all if not provided)
-		if req.EntityName != nil && *req.EntityName != "" {
-			if _, err := tx.Exec(ctx, `DELETE FROM investment.portfolio_snapshot WHERE entity_name = $1`, *req.EntityName); err != nil {
+		// Delete existing snapshots for the scoped entity set. Only admin/no-scope contexts refresh all.
+		if len(entityNames) > 0 {
+			if _, err := tx.Exec(ctx, `DELETE FROM investment.portfolio_snapshot WHERE entity_name = ANY($1::text[])`, entityNames); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "delete snapshots failed: "+err.Error())
 				return
 			}
@@ -76,7 +91,7 @@ WITH scheme_resolved AS (
     LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = ot.folio_id
     LEFT JOIN investment.masterscheme ms ON ms.scheme_id = fsm.scheme_id
     LEFT JOIN investment.masterscheme ms2 ON (ms2.scheme_id::text = ot.scheme_id OR ms2.internal_scheme_code = ot.scheme_internal_code)
-    WHERE ($1::text IS NULL OR COALESCE(mf.entity_name, md.entity_name, ot.entity_name) = $1)
+    WHERE ($1::text[] IS NULL OR COALESCE(mf.entity_name, md.entity_name, ot.entity_name) = ANY($1::text[]))
 ),
 transaction_summary AS (
     SELECT
@@ -138,8 +153,8 @@ WHERE ts.total_units > 0;
 
 		// Execute insert with entity filter (nil => NULL)
 		var entityArg interface{}
-		if req.EntityName != nil && *req.EntityName != "" {
-			entityArg = *req.EntityName
+		if len(entityNames) > 0 {
+			entityArg = entityNames
 		} else {
 			entityArg = nil
 		}
@@ -155,6 +170,6 @@ WHERE ts.total_units > 0;
 			return
 		}
 
-		api.RespondWithPayload(w, true, "snapshots refreshed", map[string]any{"batch_id": batchID, "entity_name": req.EntityName})
+		api.RespondWithPayload(w, true, "snapshots refreshed", map[string]any{"batch_id": batchID, "entity_names": entityNames})
 	}
 }

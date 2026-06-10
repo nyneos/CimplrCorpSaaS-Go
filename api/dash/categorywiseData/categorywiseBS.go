@@ -211,12 +211,12 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		allowedEntityNames := api.GetEntityNamesFromCtx(ctx)
 		allowedAccountNumbers := ctxApprovedAccountNumbers(ctx)
 		allowedBanksNorm := normalizeLowerTrimSlice(api.GetBankNamesFromCtx(ctx))
 		allowedCurrenciesNorm := normalizeUpperTrimSlice(api.GetCurrencyCodesFromCtx(ctx))
 
-		if len(allowedEntityIDs) == 0 || len(allowedAccountNumbers) == 0 || len(allowedBanksNorm) == 0 || len(allowedCurrenciesNorm) == 0 {
+		if len(allowedEntityNames) == 0 || len(allowedAccountNumbers) == 0 || len(allowedBanksNorm) == 0 || len(allowedCurrenciesNorm) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
@@ -234,8 +234,8 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		arg++
 
 		// mandatory scope filters from prevalidation context
-		filters = append(filters, fmt.Sprintf("bs.entity_id = ANY($%d)", arg))
-		args = append(args, allowedEntityIDs)
+		filters = append(filters, fmt.Sprintf("($%d::text[] IS NULL OR array_length($%d::text[], 1) IS NULL OR LOWER(TRIM(me.entity_name)) = ANY($%d))", arg, arg, arg))
+		args = append(args, allowedEntityNames)
 		arg++
 		filters = append(filters, fmt.Sprintf("bs.account_number = ANY($%d)", arg))
 		args = append(args, allowedAccountNumbers)
@@ -316,6 +316,8 @@ LEFT JOIN public.masterbankaccount mba
 	ON mba.account_number = bs.account_number
 LEFT JOIN public.masterbank mb
 	ON mb.bank_id = mba.bank_id
+LEFT JOIN public.masterentitycash me
+	ON me.entity_id = mba.entity_id
 JOIN (
 	SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
 	FROM cimplrcorpsaas.auditactionbankstatement
@@ -537,7 +539,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		kpiArgs = append(kpiArgs, allowedAccountNumbers)
 		kArg++
 		kpiFilters = append(kpiFilters, fmt.Sprintf("mba.entity_id = ANY($%d)", kArg))
-		kpiArgs = append(kpiArgs, allowedEntityIDs)
+		kpiArgs = append(kpiArgs, allowedEntityNames)
 		kArg++
 		kpiFilters = append(kpiFilters, fmt.Sprintf("lower(trim(COALESCE(b.bank_name, ''))) = ANY($%d)", kArg))
 		kpiArgs = append(kpiArgs, allowedBanksNorm)
@@ -663,7 +665,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 			snapArgs := []interface{}{asOnDate}
 			sn := 2
 			snapParts = append(snapParts, fmt.Sprintf("bs.entity_id = ANY($%d)", sn))
-			snapArgs = append(snapArgs, allowedEntityIDs)
+			snapArgs = append(snapArgs, allowedEntityNames)
 			sn++
 			snapParts = append(snapParts, fmt.Sprintf("bs.account_number = ANY($%d)", sn))
 			snapArgs = append(snapArgs, allowedAccountNumbers)
@@ -782,6 +784,8 @@ LEFT JOIN public.masterbankaccount mba
 LEFT JOIN public.masterbank mb
 	ON mb.bank_id = mba.bank_id
 LEFT JOIN public.masterentitycash me
+	ON me.entity_id = mba.entity_id
+LEFT JOIN public.masterentitycash me
 	ON bs.entity_id = me.entity_id
 JOIN (
 	SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
@@ -879,7 +883,7 @@ LIMIT ` + strconv.Itoa(txnLimit) + `;
 			`
 			var stmtCount int64
 			if err := pgxPool.QueryRow(ctx, stmtCountSQL,
-				allowedEntityIDs,
+				allowedEntityNames,
 				allowedAccountNumbers,
 				allowedBanksNorm,
 				allowedCurrenciesNorm,
@@ -897,7 +901,7 @@ LIMIT ` + strconv.Itoa(txnLimit) + `;
 				"entity_filter":            entityF,
 				"bank_filter":              bankF,
 				"currency_filter":          currencyF,
-				"allowed_entity_ids":       len(allowedEntityIDs),
+				"allowed_entity_ids":       len(allowedEntityNames),
 				"allowed_accounts":         len(allowedAccountNumbers),
 				"allowed_banks":            len(allowedBanksNorm),
 				"allowed_currencies":       len(allowedCurrenciesNorm),

@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/dependency"
+	"CimplrCorpSaas/internal/validation"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -168,7 +170,7 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Validate banks before transaction
 			shouldSkip := false
 			for _, b := range rrow.Banks {
-				if strings.TrimSpace(b.BankName) != "" && !api.IsBankAllowed(ctx, b.BankName) {
+				if strings.TrimSpace(b.BankName) != "" && validation.ValidateCashMasterReferences(ctx, map[string]interface{}{"bank_name": b.BankName}) != "" {
 					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized bank: " + b.BankName, "counterparty_name": rrow.CounterpartyName})
 					shouldSkip = true
 					break
@@ -1127,7 +1129,6 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-
 		session := middlewares.GetSessionFromContext(r.Context())
 		if session == nil {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
@@ -1155,6 +1156,8 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		foundTypes := map[string]bool{}
 		cannotApprove := []string{}
 		actionTypeByID := map[string]string{}
+		var blockedRecords []map[string]interface{}
+
 		for rows.Next() {
 			var aid, cid, atype, pstatus string
 			if err := rows.Scan(&aid, &cid, &atype, &pstatus); err != nil {
@@ -1162,10 +1165,23 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			foundTypes[cid] = true
-			actionIDs = append(actionIDs, aid)
-			actionTypeByID[cid] = atype
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved {
+
+			ps := strings.ToUpper(strings.TrimSpace(pstatus))
+			if ps == constants.StatusApproved {
 				cannotApprove = append(cannotApprove, cid)
+			} else {
+				if strings.ToUpper(strings.TrimSpace(atype)) == "DELETE" {
+					blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "mastercounterparty", cid)
+					if len(blockers) > 0 {
+						blockedRecords = append(blockedRecords, map[string]interface{}{
+							"counterparty_id": cid,
+							"blocked_by":      dependency.BlockersSummary(blockers),
+						})
+						continue
+					}
+				}
+				actionIDs = append(actionIDs, aid)
+				actionTypeByID[cid] = atype
 			}
 		}
 		missing := []string{}
@@ -1183,6 +1199,12 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				msg += fmt.Sprintf("cannot approve already approved counterparty_ids: %v", cannotApprove)
 			}
 			api.RespondWithError(w, http.StatusBadRequest, msg)
+			return
+		}
+		if len(actionIDs) == 0 {
+			api.RespondWithPayload(w, false, "No actionable records found or all are blocked", map[string]interface{}{
+				"blocked": blockedRecords,
+			})
 			return
 		}
 
@@ -1209,6 +1231,9 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(deleteIDs) > 0 {
+			for _, cid := range deleteIDs {
+				_ = dependency.CascadeDelete(ctx, pgxPool, "mastercounterparty", cid, checkerBy)
+			}
 			// perform soft delete by setting is_deleted = true
 			delQ := `UPDATE mastercounterparty SET is_deleted = true WHERE counterparty_id = ANY($1)`
 			if _, err := tx.Exec(ctx, delQ, deleteIDs); err != nil {
@@ -1220,7 +1245,7 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", updated)
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated, "blocked": blockedRecords})
 	}
 }
 

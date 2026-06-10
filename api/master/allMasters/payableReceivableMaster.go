@@ -6,6 +6,8 @@ import (
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/utils"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/dependency"
+	"CimplrCorpSaas/internal/validation"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -191,7 +193,7 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Validate business_unit_division (entity)
-			if !api.IsEntityAllowed(ctx, rrow.BusinessUnitDivision) {
+			if validation.ValidateCashMasterReferences(ctx, map[string]interface{}{"entity_name": rrow.BusinessUnitDivision}) != "" {
 				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized business_unit_division (entity)", "type_name": rrow.TypeName})
 				continue
 			}
@@ -923,7 +925,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				// Validate entity, currency, category if being updated
 				if val, ok := row.Fields["business_unit_division"]; ok {
-					if valStr := fmt.Sprint(val); !api.IsEntityAllowed(ctx, valStr) {
+					if valStr := fmt.Sprint(val); validation.ValidateCashMasterReferences(ctx, map[string]interface{}{"entity_name": valStr}) != "" {
 						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized business_unit_division: " + valStr, "type_id": row.TypeID})
 						return
 					}
@@ -1219,6 +1221,8 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		foundTypes := map[string]bool{}
 		cannotApprove := []string{}
 		actionTypeByType := map[string]string{}
+		var blockedRecords []map[string]interface{}
+
 		for rows.Next() {
 			var aid, tid, atype, pstatus string
 			if err := rows.Scan(&aid, &tid, &atype, &pstatus); err != nil {
@@ -1226,10 +1230,23 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 				return
 			}
 			foundTypes[tid] = true
-			actionIDs = append(actionIDs, aid)
-			actionTypeByType[tid] = atype
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved {
+
+			ps := strings.ToUpper(strings.TrimSpace(pstatus))
+			if ps == constants.StatusApproved {
 				cannotApprove = append(cannotApprove, tid)
+			} else {
+				if strings.ToUpper(strings.TrimSpace(atype)) == "DELETE" {
+					blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterpayablereceivabletype", tid)
+					if len(blockers) > 0 {
+						blockedRecords = append(blockedRecords, map[string]interface{}{
+							"type_id":    tid,
+							"blocked_by": dependency.BlockersSummary(blockers),
+						})
+						continue
+					}
+				}
+				actionIDs = append(actionIDs, aid)
+				actionTypeByType[tid] = atype
 			}
 		}
 
@@ -1248,6 +1265,12 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 				msg += fmt.Sprintf("cannot approve already approved type_ids: %v", cannotApprove)
 			}
 			api.RespondWithError(w, http.StatusBadRequest, msg)
+			return
+		}
+		if len(actionIDs) == 0 {
+			api.RespondWithPayload(w, false, "No actionable records found or all are blocked", map[string]interface{}{
+				"blocked": blockedRecords,
+			})
 			return
 		}
 
@@ -1276,6 +1299,9 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 
 		if len(deleteTypeIDs) > 0 {
+			for _, tid := range deleteTypeIDs {
+				_ = dependency.CascadeDelete(ctx, pgxPool, "masterpayablereceivabletype", tid, checkerBy)
+			}
 			softDelQ := `UPDATE masterpayablereceivabletype SET is_deleted = true WHERE type_id = ANY($1)`
 			if _, err := tx.Exec(ctx, softDelQ, deleteTypeIDs); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to soft-delete master rows: "+err.Error())
@@ -1288,7 +1314,7 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			return
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated, "blocked": blockedRecords})
 	}
 }
 func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {

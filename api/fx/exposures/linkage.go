@@ -1,9 +1,9 @@
 package exposures
 
 import (
-	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
+	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 	"database/sql"
 	"encoding/json"
@@ -43,8 +43,9 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -101,8 +102,9 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -285,8 +287,9 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// request decoded
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}

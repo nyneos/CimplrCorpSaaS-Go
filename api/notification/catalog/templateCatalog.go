@@ -2389,8 +2389,8 @@ func populateRecipientsForTemplate(ctx context.Context, pgxPool *pgxpool.Pool, t
 	switch mode {
 	case "EXPLICIT":
 		// expect 'recipients' : [{recipient_type, recipient_user_id, recipient_role, is_active}]
-		recs, ok := strategy["recipients"].([]interface{})
-		if !ok || len(recs) == 0 {
+		recs, _ := strategy["recipients"].([]interface{})
+		if len(recs) == 0 {
 			return 0, fmt.Errorf("no explicit recipients provided")
 		}
 		rows := make([][]interface{}, 0, len(recs))
@@ -2484,8 +2484,8 @@ func populateRecipientsForTemplate(ctx context.Context, pgxPool *pgxpool.Pool, t
 		return 1, nil
 	case "USER":
 		// expect 'user_ids' : ["u1","u2"]
-		uids, ok := strategy["user_ids"].([]interface{})
-		if !ok || len(uids) == 0 {
+		uids, _ := strategy["user_ids"].([]interface{})
+		if len(uids) == 0 {
 			return 0, fmt.Errorf("user_ids required for USER mode")
 		}
 		rows := make([][]interface{}, 0, len(uids))
@@ -2530,8 +2530,8 @@ func populateRecipientsOnTx(ctx context.Context, tx pgx.Tx, pgxPool *pgxpool.Poo
 	mode := strings.ToUpper(strings.TrimSpace(modeRaw))
 	switch mode {
 	case "EXPLICIT":
-		recs, ok := strategy["recipients"].([]interface{})
-		if !ok || len(recs) == 0 {
+		recs, _ := strategy["recipients"].([]interface{})
+		if len(recs) == 0 {
 			return 0, fmt.Errorf("no explicit recipients provided")
 		}
 		var rows [][]interface{}
@@ -2577,8 +2577,8 @@ func populateRecipientsOnTx(ctx context.Context, tx pgx.Tx, pgxPool *pgxpool.Poo
 		return 1, nil
 
 	case "USER":
-		uids, ok := strategy["user_ids"].([]interface{})
-		if !ok || len(uids) == 0 {
+		uids, _ := strategy["user_ids"].([]interface{})
+		if len(uids) == 0 {
 			return 0, fmt.Errorf("user_ids required for USER mode")
 		}
 		userPriority := 3

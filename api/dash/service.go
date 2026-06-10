@@ -8,11 +8,10 @@ import (
 
 type DashService struct {
 	config map[string]interface{}
-	db     *sql.DB
 }
 
 func NewDashService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
-	return &DashService{config: cfg, db: db}
+	return &DashService{config: cfg}
 }
 
 func (s *DashService) Name() string {
@@ -33,7 +32,7 @@ func (s *DashService) Start() error {
 			}
 		}
 	}
-	go StartDashService(s.db, port)
+	go StartDashService(port)
 	return nil
 }
 

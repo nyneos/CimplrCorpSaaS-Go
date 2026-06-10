@@ -1,18 +1,25 @@
 package fdAccrual
 
 import (
-	"CimplrCorpSaas/api"
-	"database/sql"
 	"net/http"
+
+	middlewares "CimplrCorpSaas/api/middlewares"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // RegisterFDAccrualRoutes registers all FD Accrual Engine routes on mux.
-// Every handler is wrapped with BusinessUnitMiddleware so the entity/BU context
-// is available on every request.
-func RegisterFDAccrualRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB) {
-	mid := api.BusinessUnitMiddleware(db)
+// Middleware chain: Session → GlobalIndependent → GlobalDependent → InvestmentFD
+func RegisterFDAccrualRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
+	mid := func(h http.Handler) http.Handler {
+		return middlewares.SessionMiddleware(pool)(
+			middlewares.GlobalIndependentMiddleware(pool)(
+				middlewares.GlobalDependentMiddleware(pool)(
+					middlewares.InvestmentFDMiddleware(pool)(h),
+				),
+			),
+		)
+	}
 
 	// ── Accrual Run lifecycle ────────────────────────────────────────────────
 	// Workflow order: create → validate → execute → submit → approve/reject

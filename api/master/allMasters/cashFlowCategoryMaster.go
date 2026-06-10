@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/dependency"
 
 	// "bufio"
 	"context"
@@ -1579,7 +1580,6 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-
 		ctx := r.Context()
 		session := api.GetSessionFromCtx(ctx)
 		if session == nil || session.UserID != req.UserID {
@@ -1642,6 +1642,33 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 
+		// Dependency validation for deletes
+		var safeToApprove []string
+		var blockedCategories []map[string]interface{}
+
+		for _, cid := range allToApprove {
+			var actionType, procStatus string
+			err := pgxPool.QueryRow(ctx, "SELECT actiontype, processing_status FROM auditactioncashflowcategory WHERE category_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC LIMIT 1", cid).Scan(&actionType, &procStatus)
+			if err == nil && strings.ToUpper(actionType) == "DELETE" && strings.ToUpper(procStatus) == "PENDING_DELETE_APPROVAL" {
+				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "mastercashflowcategory", cid)
+				if len(blockers) > 0 {
+					blockedCategories = append(blockedCategories, map[string]interface{}{
+						"category_id": cid,
+						"blocked_by":  dependency.BlockersSummary(blockers),
+					})
+					continue
+				}
+			}
+			safeToApprove = append(safeToApprove, cid)
+		}
+
+		if len(safeToApprove) == 0 {
+			api.RespondWithPayload(w, false, "All selected categories are blocked from deletion", map[string]interface{}{
+				"blocked": blockedCategories,
+			})
+			return
+		}
+
 		// Approve actions and perform cascading deletes for DELETE actions.
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -1662,7 +1689,7 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}()
 
 		query := `UPDATE auditactioncashflowcategory SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE category_id = ANY($3) RETURNING action_id, category_id, actiontype`
-		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToApprove)
+		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, safeToApprove)
 		if err != nil {
 			tx.Rollback(ctx)
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to approve category actions")
@@ -1690,6 +1717,9 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		// Perform cascade for all DELETE actions in bulk to avoid N+1 queries.
 		if len(deleteCategoryIDs) > 0 {
+			for _, cid := range deleteCategoryIDs {
+				_ = dependency.CascadeDelete(ctx, pgxPool, "mastercashflowcategory", cid, checkerBy)
+			}
 			// 1. Soft-delete master categories
 			if _, err := tx.Exec(ctx, `UPDATE mastercashflowcategory SET is_deleted = true WHERE category_id = ANY($1)`, pq.Array(deleteCategoryIDs)); err != nil {
 				tx.Rollback(ctx)
@@ -1760,10 +1790,10 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		success := len(updated) > 0
 		if !success {
-			api.RespondWithPayload(w, false, constants.ErrNoRowsUpdated, map[string]interface{}{"updated": updated})
+			api.RespondWithPayload(w, false, constants.ErrNoRowsUpdated, map[string]interface{}{"updated": updated, "blocked": blockedCategories})
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated, "blocked": blockedCategories})
 	}
 }
 

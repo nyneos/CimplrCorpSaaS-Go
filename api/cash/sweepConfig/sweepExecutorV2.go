@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	"context"
 	"database/sql"
@@ -576,7 +577,7 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate sweep scope against prevalidation context
 		if strings.TrimSpace(entityName) != "" {
-			if !api.IsEntityAllowed(ctx, entityName) {
+			if !ctxutil.FromContext(ctx).HasEntityAccess(entityName) {
 				api.RespondWithResult(w, false, "unauthorized entity")
 				return
 			}
@@ -975,7 +976,7 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// NOTE: ALL sweeps now use initiation workflow (requires_initiation flag removed)		// Validate sweep scope against prevalidation context
 		if strings.TrimSpace(entityName) != "" {
-			if !api.IsEntityAllowed(ctx, entityName) {
+			if !ctxutil.FromContext(ctx).HasEntityAccess(entityName) {
 				api.RespondWithResult(w, false, "unauthorized entity")
 				return
 			}
@@ -1473,7 +1474,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 				}
 
 				// Validate entity authorization
-				if !api.IsEntityAllowed(ctx, sweep.EntityName) {
+				if !ctxutil.FromContext(ctx).HasEntityAccess(sweep.EntityName) {
 					tx.Rollback(ctx)
 					result.Status = "failed"
 					result.Error = fmt.Sprintf("sweep[%d]: unauthorized entity %s", i, sweep.EntityName)
@@ -1579,7 +1580,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 
 				// Validate entity authorization
 				if strings.TrimSpace(entityName) != "" {
-					if !api.IsEntityAllowed(ctx, entityName) {
+					if !ctxutil.FromContext(ctx).HasEntityAccess(entityName) {
 						tx.Rollback(ctx)
 						result.Status = "failed"
 						result.Error = fmt.Sprintf("sweep[%d]: unauthorized entity", i)

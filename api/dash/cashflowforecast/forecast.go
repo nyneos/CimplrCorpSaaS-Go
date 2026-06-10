@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/dash/ticker"
 
@@ -21,6 +23,63 @@ func toUSD(cur string) float64 {
 		return 1.0
 	}
 	return rate
+}
+
+type forecastScope struct {
+	Entities   []string
+	Currencies []string
+	Accounts   []string
+}
+
+func resolveForecastScope(ctx context.Context, entityName, currency string) (forecastScope, string) {
+	entityName = strings.TrimSpace(entityName)
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+
+	entities := api.GetEntityNamesFromCtx(ctx)
+	if entityName != "" {
+		if !api.IsEntityAllowed(ctx, entityName) {
+			return forecastScope{}, constants.ErrNoAccessibleBusinessUnit
+		}
+		entities = []string{entityName}
+	}
+
+	currencies := normalizeUpperList(api.GetCurrencyCodesFromCtx(ctx))
+	if currency != "" {
+		if !api.IsCurrencyAllowed(ctx, currency) {
+			return forecastScope{}, constants.ErrNoAccessibleBusinessUnit
+		}
+		currencies = []string{currency}
+	}
+
+	if len(entities) == 0 || len(currencies) == 0 {
+		return forecastScope{}, constants.ErrNoAccessibleBusinessUnit
+	}
+	return forecastScope{
+		Entities:   entities,
+		Currencies: currencies,
+		Accounts:   approvedAccountNumbers(ctx),
+	}, ""
+}
+
+func normalizeUpperList(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if s := strings.ToUpper(strings.TrimSpace(value)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func approvedAccountNumbers(ctx context.Context) []string {
+	accounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
+	out := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		if s := strings.TrimSpace(account["account_number"]); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 type ForecastKPIs struct {
@@ -71,13 +130,18 @@ func GetCashflowForecastHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 90
 		}
+		scope, msg := resolveForecastScope(r.Context(), req.EntityName, req.Currency)
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
 
-		kpis, err := GetForecastKPIs(pgxPool, req.Horizon, req.EntityName, req.Currency)
+		kpis, err := GetForecastKPIs(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		rows, err := GetForecastRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
+		rows, err := GetForecastRows(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -93,14 +157,16 @@ func GetCashflowForecastHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // getStartingBalanceUSD returns the normalized USD starting balance as of the given date (inclusive)
-func getStartingBalanceUSD(pgxPool *pgxpool.Pool, asOf time.Time) (float64, error) {
+func getStartingBalanceUSD(ctx context.Context, pgxPool *pgxpool.Pool, asOf time.Time, scope forecastScope) (float64, error) {
 	// Use balance_amount (latest entry per account up to asOf date) as requested
 	startDate := asOf.Format(constants.DateFormat)
 	openingQ := `SELECT DISTINCT ON (COALESCE(account_no, iban, nickname)) balance_amount, currency_code
         FROM bank_balances_manual
         WHERE as_of_date <= $1
+          AND account_no = ANY($2)
+          AND UPPER(TRIM(COALESCE(currency_code, ''))) = ANY($3)
         ORDER BY COALESCE(account_no, iban, nickname), as_of_date DESC, as_of_time DESC`
-	openingRows, err := pgxPool.Query(context.Background(), openingQ, startDate)
+	openingRows, err := pgxPool.Query(ctx, openingQ, startDate, scope.Accounts, scope.Currencies)
 	if err != nil {
 		return 0, fmt.Errorf("opening balances query: %w", err)
 	}
@@ -119,13 +185,13 @@ func getStartingBalanceUSD(pgxPool *pgxpool.Pool, asOf time.Time) (float64, erro
 }
 
 // GetForecastKPIs computes the KPI summary for the given horizon and optional filters
-func GetForecastKPIs(pgxPool *pgxpool.Pool, horizon int, entityName, currency string) (ForecastKPIs, error) {
+func GetForecastKPIs(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope forecastScope) (ForecastKPIs, error) {
 	var k ForecastKPIs
 	today := time.Now().UTC()
 	start := today
 	end := today.AddDate(0, 0, horizon-1)
 
-	sb, err := getStartingBalanceUSD(pgxPool, start)
+	sb, err := getStartingBalanceUSD(ctx, pgxPool, start, scope)
 	if err != nil {
 		return k, err
 	}
@@ -149,20 +215,14 @@ func GetForecastKPIs(pgxPool *pgxpool.Pool, horizon int, entityName, currency st
 	// append GROUP BY after optional filters to ensure WHERE clause is complete
 	aggGroup := ` GROUP BY cpi.cashflow_type, cp.currency_code`
 	args := []interface{}{startKey, endKey}
-	if entityName != "" {
-		ph := len(args) + 1
-		aggQ += fmt.Sprintf(constants.QuerryEntityName, ph)
-		args = append(args, entityName)
-	}
-	if currency != "" {
-		ph := len(args) + 1
-		aggQ += fmt.Sprintf(constants.QuerryCurrencyCode, ph)
-		args = append(args, currency)
-	}
+	aggQ += fmt.Sprintf(" AND cpi.entity_name = ANY($%d)", len(args)+1)
+	args = append(args, scope.Entities)
+	aggQ += fmt.Sprintf(" AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($%d)", len(args)+1)
+	args = append(args, scope.Currencies)
 
 	// finalize query
 	finalAggQ := aggQ + aggGroup
-	rows, err := pgxPool.Query(context.Background(), finalAggQ, args...)
+	rows, err := pgxPool.Query(ctx, finalAggQ, args...)
 	if err != nil {
 		return k, fmt.Errorf("aggregate projections: %v | query: %s | args: %v", err, finalAggQ, args)
 	}
@@ -192,7 +252,7 @@ func GetForecastKPIs(pgxPool *pgxpool.Pool, horizon int, entityName, currency st
 }
 
 // GetForecastRows returns detailed monthly projection rows (one row per year-month/type/category/description)
-func GetForecastRows(pgxPool *pgxpool.Pool, horizon int, entityName, currency string) ([]ForecastRow, error) {
+func GetForecastRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope forecastScope) ([]ForecastRow, error) {
 	var rowsOut []ForecastRow
 	today := time.Now().UTC()
 	start := today
@@ -212,21 +272,15 @@ func GetForecastRows(pgxPool *pgxpool.Pool, horizon int, entityName, currency st
           AND aa.processing_status = 'APPROVED'
     `
 	args := []interface{}{startKey, endKey}
-	if entityName != "" {
-		ph := len(args) + 1
-		fetchQ += fmt.Sprintf(constants.QuerryEntityName, ph)
-		args = append(args, entityName)
-	}
-	if currency != "" {
-		ph := len(args) + 1
-		fetchQ += fmt.Sprintf(constants.QuerryCurrencyCode, ph)
-		args = append(args, currency)
-	}
+	fetchQ += fmt.Sprintf(" AND cpi.entity_name = ANY($%d)", len(args)+1)
+	args = append(args, scope.Entities)
+	fetchQ += fmt.Sprintf(" AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($%d)", len(args)+1)
+	args = append(args, scope.Currencies)
 	fetchGroup := ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cpi.category_id, cpi.description, cp.currency_code ORDER BY cpm.year, cpm.month;`
 
 	finalFetchQ := fetchQ + fetchGroup
 
-	prow, err := pgxPool.Query(context.Background(), finalFetchQ, args...)
+	prow, err := pgxPool.Query(ctx, finalFetchQ, args...)
 	if err != nil {
 		return rowsOut, fmt.Errorf("fetch projections: %v | query: %s | args: %v", err, finalFetchQ, args)
 	}
@@ -257,14 +311,20 @@ func GetForecastRows(pgxPool *pgxpool.Pool, horizon int, entityName, currency st
 }
 
 // GetForecastDailyRows computes daily opening/net/closing balances (USD-normalized)
-func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, currency string) ([]DailyRow, error) {
+func GetForecastDailyRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope forecastScope) ([]DailyRow, error) {
 	var out []DailyRow
 	today := time.Now().UTC()
 	end := today.AddDate(0, 0, horizon-1)
 
 	// 1) find most recent balance date <= today
 	var baseDate time.Time
-	err := pgxPool.QueryRow(context.Background(), `SELECT MAX(as_of_date) FROM bank_balances_manual WHERE as_of_date <= $1`, today.Format(constants.DateFormat)).Scan(&baseDate)
+	err := pgxPool.QueryRow(ctx, `
+		SELECT MAX(as_of_date)
+		FROM bank_balances_manual
+		WHERE as_of_date <= $1
+		  AND account_no = ANY($2)
+		  AND UPPER(TRIM(COALESCE(currency_code, ''))) = ANY($3)
+	`, today.Format(constants.DateFormat), scope.Accounts, scope.Currencies).Scan(&baseDate)
 	if err != nil {
 		return out, fmt.Errorf("find base date: %w", err)
 	}
@@ -276,8 +336,10 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
 	openingQ := `SELECT DISTINCT ON (COALESCE(account_no, iban, nickname)) balance_amount, currency_code
         FROM bank_balances_manual
         WHERE as_of_date <= $1
+          AND account_no = ANY($2)
+          AND UPPER(TRIM(COALESCE(currency_code, ''))) = ANY($3)
         ORDER BY COALESCE(account_no, iban, nickname), as_of_date DESC, as_of_time DESC`
-	rows, err := pgxPool.Query(context.Background(), openingQ, baseDate.Format(constants.DateFormat))
+	rows, err := pgxPool.Query(ctx, openingQ, baseDate.Format(constants.DateFormat), scope.Accounts, scope.Currencies)
 	if err != nil {
 		return out, fmt.Errorf("opening balances query: %w", err)
 	}
@@ -309,21 +371,15 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
           AND (cpm.year * 12 + cpm.month) BETWEEN $1 AND $2
     `
 	margs := []interface{}{startKey, endKey}
-	if entityName != "" {
-		ph := len(margs) + 1
-		monthlyQ += fmt.Sprintf(constants.QuerryEntityName, ph)
-		margs = append(margs, entityName)
-	}
-	if currency != "" {
-		ph := len(margs) + 1
-		monthlyQ += fmt.Sprintf(constants.QuerryCurrencyCode, ph)
-		margs = append(margs, currency)
-	}
+	monthlyQ += fmt.Sprintf(" AND cpi.entity_name = ANY($%d)", len(margs)+1)
+	margs = append(margs, scope.Entities)
+	monthlyQ += fmt.Sprintf(" AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($%d)", len(margs)+1)
+	margs = append(margs, scope.Currencies)
 	monthlyGroup := ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cp.currency_code, cpi.start_date ORDER BY cpm.year, cpm.month;`
 
 	finalMonthlyQ := monthlyQ + monthlyGroup
 
-	mrows, err := pgxPool.Query(context.Background(), finalMonthlyQ, margs...)
+	mrows, err := pgxPool.Query(ctx, finalMonthlyQ, margs...)
 	if err != nil {
 		return out, fmt.Errorf("fetch monthly projections: %v | query: %s | args: %v", err, finalMonthlyQ, margs)
 	}
@@ -469,7 +525,12 @@ func GetForecastDailyHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 30
 		}
-		rows, err := GetForecastDailyRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
+		scope, msg := resolveForecastScope(r.Context(), req.EntityName, req.Currency)
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		rows, err := GetForecastDailyRows(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -502,7 +563,12 @@ func GetForecastKPIsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 90
 		}
-		kpis, err := GetForecastKPIs(pgxPool, req.Horizon, req.EntityName, req.Currency)
+		scope, msg := resolveForecastScope(r.Context(), req.EntityName, req.Currency)
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		kpis, err := GetForecastKPIs(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -534,7 +600,12 @@ func GetForecastRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 90
 		}
-		rows, err := GetForecastRows(pgxPool, req.Horizon, req.EntityName, req.Currency)
+		scope, msg := resolveForecastScope(r.Context(), req.EntityName, req.Currency)
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		rows, err := GetForecastRows(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -546,7 +617,7 @@ func GetForecastRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // GetForecastCategorySums returns sum per unique category with cashflow type appended, normalized to USD
-func GetForecastCategorySums(pgxPool *pgxpool.Pool, horizon int, entityName, currency string) (map[string]float64, error) {
+func GetForecastCategorySums(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope forecastScope) (map[string]float64, error) {
 	// We're summing per-item expected_amount (not monthly projections) and normalizing to USD.
 	baseQ := `
 		SELECT cpi.category_id, cpi.cashflow_type, COALESCE(cp.currency_code, 'USD') AS currency_code, COALESCE(SUM(cpi.expected_amount),0)::float8 AS amount
@@ -558,21 +629,16 @@ func GetForecastCategorySums(pgxPool *pgxpool.Pool, horizon int, entityName, cur
 		WHERE aa.processing_status = 'APPROVED'
 	`
 
-	// Build WHERE clause params
 	whereClauses := ""
 	args := []interface{}{}
-	if entityName != "" {
-		args = append(args, entityName)
-		whereClauses += fmt.Sprintf(constants.QuerryEntityName, len(args))
-	}
-	if currency != "" {
-		args = append(args, currency)
-		whereClauses += fmt.Sprintf(constants.QuerryCurrencyCode, len(args))
-	}
+	args = append(args, scope.Entities)
+	whereClauses += fmt.Sprintf(" AND cpi.entity_name = ANY($%d)", len(args))
+	args = append(args, scope.Currencies)
+	whereClauses += fmt.Sprintf(" AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($%d)", len(args))
 
 	q := baseQ + whereClauses + " GROUP BY cpi.category_id, cpi.cashflow_type, cp.currency_code"
 
-	rows, err := pgxPool.Query(context.Background(), q, args...)
+	rows, err := pgxPool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("fetch category sums: %w", err)
 	}
@@ -613,7 +679,12 @@ func GetForecastCategorySumsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 90
 		}
-		sums, err := GetForecastCategorySums(pgxPool, req.Horizon, req.EntityName, req.Currency)
+		scope, msg := resolveForecastScope(r.Context(), req.EntityName, req.Currency)
+		if msg != "" {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		sums, err := GetForecastCategorySums(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

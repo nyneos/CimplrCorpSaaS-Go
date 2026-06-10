@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"CimplrCorpSaas/internal/logger"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
@@ -21,7 +22,7 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 }
 
 // Handler: GetDashboard
-func GetDashboard(db *sql.DB) http.HandlerFunc {
+func GetDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := `
 		WITH exposure_summary AS (
@@ -37,6 +38,7 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 		       THEN ABS(e.total_original_amount) ELSE 0 END
 		) AS total_payable_exposure
 		  FROM exposure_headers e
+		  WHERE e.entity = ANY($1)
 		  GROUP BY e.entity, e.currency
 		),
 		cover_summary AS (
@@ -50,6 +52,7 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 		      ON e.exposure_header_id = l.exposure_header_id
 		  LEFT JOIN forward_bookings fb
 		      ON l.booking_id = fb.system_transaction_id
+		  WHERE e.entity = ANY($1)
 		  GROUP BY e.entity, e.currency
 		)
 		SELECT 
@@ -76,12 +79,12 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusInternalServerError, "Business units not found in context")
 			return
 		}
-		rows, err := db.QueryContext(r.Context(), query)
+		rows, err := pool.Query(r.Context(), query, buNames)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Server error"})

@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
 	"errors"
@@ -118,75 +119,6 @@ func ctxApprovedCurrencies(ctx context.Context) []string {
 	return out
 }
 
-func ctxHasApprovedCurrency(ctx context.Context, currency string) bool {
-	currency = strings.TrimSpace(currency)
-	if currency == "" {
-		return false
-	}
-	v := ctx.Value("CurrencyInfo")
-	if v == nil {
-		v = ctx.Value("ApprovedCurrencies")
-	}
-	if v == nil {
-		return true
-	}
-	curList, ok := v.([]map[string]string)
-	if !ok {
-		return true
-	}
-	for _, c := range curList {
-		if strings.EqualFold(strings.TrimSpace(c["currency_code"]), currency) {
-			return true
-		}
-	}
-	return false
-}
-
-func ctxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
-	accountNumber = strings.TrimSpace(accountNumber)
-	if accountNumber == "" {
-		return false
-	}
-	v := ctx.Value(api.ApprovedBankAccountsKey)
-	if v == nil {
-		return true
-	}
-	accounts, ok := v.([]map[string]string)
-	if !ok {
-		return true
-	}
-	for _, a := range accounts {
-		if strings.EqualFold(strings.TrimSpace(a["account_number"]), accountNumber) {
-			return true
-		}
-	}
-	return false
-}
-
-func ctxHasApprovedBankName(ctx context.Context, bankName string) bool {
-	bankName = strings.TrimSpace(bankName)
-	if bankName == "" {
-		return false
-	}
-	v := ctx.Value("BankInfo")
-	fmt.Println("CTX BANK INFO:", v)
-	if v == nil {
-		return true
-	}
-	banks, ok := v.([]map[string]string)
-	if !ok {
-		return true
-	}
-	for _, b := range banks {
-		if strings.EqualFold(strings.TrimSpace(b["bank_name"]), bankName) ||
-			strings.EqualFold(strings.TrimSpace(b["bank_short_name"]), bankName) ||
-			strings.EqualFold(strings.TrimSpace(b["bank_id"]), bankName) {
-			return true
-		}
-	}
-	return false
-}
-
 func ctxEntityIDs(ctx context.Context) []string {
 	// prefer the key used by the prevalidation middleware
 	v := ctx.Value(api.EntityIDsKey)
@@ -222,6 +154,10 @@ func GetBankBalanceDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if code, msg := ensureBalanceIDsAccessible(ctx, pgxPool, []string{req.BalanceID}); code != 0 {
+			api.RespondWithError(w, code, msg)
+			return
+		}
 		var uploadS3Key sqlNullString
 		err := pgxPool.QueryRow(ctx, `
 			SELECT b.upload_s3_key
@@ -269,6 +205,10 @@ func GetBankBalanceBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if code, msg := ensureBalanceIDsAccessible(ctx, pgxPool, req.BalanceIDs); code != 0 {
+			api.RespondWithError(w, code, msg)
+			return
+		}
 		files := make([]map[string]string, 0, len(req.BalanceIDs))
 		failedIDs := make([]string, 0)
 		requestedBy := requestedByFromCtx(ctx, req.UserID)
@@ -357,7 +297,7 @@ func ensureBalanceIDsAccessible(ctx context.Context, pgxPool *pgxpool.Pool, bala
 		if !ok {
 			return http.StatusBadRequest, "Invalid balance_id: " + id
 		}
-		if !ctxHasApprovedBankAccount(ctx, acct) {
+		if !ctxutil.FromContext(ctx).HasApprovedBankAccount(acct) {
 			return http.StatusForbidden, constants.ErrInvalidAccount
 		}
 	}
@@ -424,17 +364,17 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !ctxHasApprovedBankName(ctx, req.BankName) {
+		if !ctxutil.FromContext(ctx).HasApprovedBank(req.BankName) {
 			api.RespondWithResult(w, false, constants.ErrBankInvalidOrInactive)
 			return
 		}
-		if !ctxHasApprovedBankAccount(ctx, req.AccountNo) {
+		if !ctxutil.FromContext(ctx).HasApprovedBankAccount(req.AccountNo) {
 			api.RespondWithResult(w, false, constants.ErrInvalidAccount)
 			return
 		}
 
 		// currency validation (middleware may provide approved currencies)
-		if !ctxHasApprovedCurrency(ctx, req.CurrencyCode) {
+		if !ctxutil.FromContext(ctx).HasApprovedCurrency(req.CurrencyCode) {
 			api.RespondWithResult(w, false, "Invalid or inactive currency")
 			return
 		}
@@ -643,7 +583,6 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-
 
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, "failed to commit approve: "+pgUserFriendlyMessage(err))
@@ -1366,11 +1305,11 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "failed to fetch existing balance: "+pgUserFriendlyMessage(err))
 			return
 		}
-		if curBankName.Valid && !ctxHasApprovedBankName(ctx, curBankName.S) {
+		if curBankName.Valid && !ctxutil.FromContext(ctx).HasApprovedBank(curBankName.S) {
 			api.RespondWithError(w, http.StatusForbidden, constants.ErrBankInvalidOrInactive)
 			return
 		}
-		if curAccountNo.Valid && !ctxHasApprovedBankAccount(ctx, curAccountNo.S) {
+		if curAccountNo.Valid && !ctxutil.FromContext(ctx).HasApprovedBankAccount(curAccountNo.S) {
 			api.RespondWithError(w, http.StatusForbidden, constants.ErrInvalidAccount)
 			return
 		}
@@ -1407,13 +1346,13 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for k, v := range req.Fields {
 			switch k {
 			case "bank_name":
-				if !ctxHasApprovedBankName(ctx, fmt.Sprint(v)) {
+				if !ctxutil.FromContext(ctx).HasApprovedBank(fmt.Sprint(v)) {
 					api.RespondWithError(w, http.StatusForbidden, constants.ErrBankInvalidOrInactive)
 					return
 				}
 				addStrField("bank_name", "old_bank_name", v, curBankName)
 			case "account_no":
-				if !ctxHasApprovedBankAccount(ctx, fmt.Sprint(v)) {
+				if !ctxutil.FromContext(ctx).HasApprovedBankAccount(fmt.Sprint(v)) {
 					api.RespondWithError(w, http.StatusForbidden, constants.ErrInvalidAccount)
 					return
 				}
@@ -1421,7 +1360,7 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			case "iban":
 				addStrField("iban", "old_iban", v, curIban)
 			case "currency_code":
-				if !ctxHasApprovedCurrency(ctx, fmt.Sprint(v)) {
+				if !ctxutil.FromContext(ctx).HasApprovedCurrency(fmt.Sprint(v)) {
 					api.RespondWithError(w, http.StatusForbidden, "Invalid or inactive currency")
 					return
 				}

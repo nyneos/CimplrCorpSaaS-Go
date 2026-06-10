@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/utils"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	crand "crypto/rand"
 	"database/sql"
@@ -142,7 +143,7 @@ func entityIDSet(entityIDs []string) map[string]bool {
 }
 
 func prevalidationEntityScope(ctx context.Context) ([]string, bool) {
-	entityIDs := api.GetEntityIDsFromCtx(ctx)
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	isAdminOverride, _ := ctx.Value("is_admin_override").(bool)
 	return entityIDs, isAdminOverride
 }

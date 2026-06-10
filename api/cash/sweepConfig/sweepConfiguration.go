@@ -3,6 +3,7 @@ package sweepconfig
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -54,7 +55,7 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// validate entity / bank / account against middleware-provided context
 		if strings.TrimSpace(req.EntityName) != "" {
-			if !api.IsEntityAllowed(ctx, req.EntityName) {
+			if !ctxutil.FromContext(ctx).HasEntityAccess(req.EntityName) {
 				api.RespondWithResult(w, false, "unauthorized entity")
 				return
 			}
@@ -219,7 +220,7 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			case "entity_name":
 				// validate requested entity is allowed in context
 				if s := fmt.Sprint(v); strings.TrimSpace(s) != "" {
-					if !api.IsEntityAllowed(ctx, s) {
+					if !ctxutil.FromContext(ctx).HasEntityAccess(s) {
 						api.RespondWithResult(w, false, "unauthorized entity")
 						return
 					}
@@ -408,7 +409,7 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			if accountStr != "" {
-				if !ctxHasApprovedBankAccount(ctx, accountStr) {
+				if !ctxutil.FromContext(ctx).HasApprovedBankAccount(accountStr) {
 					continue
 				}
 			}
@@ -811,26 +812,6 @@ func (n sqlNullFloat) ValueOrZero() interface{} {
 }
 
 // ctxHasApprovedBankAccount checks middleware-provided ApprovedBankAccounts in context
-func ctxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
-	accountNumber = strings.TrimSpace(accountNumber)
-	if accountNumber == "" {
-		return false
-	}
-	v := ctx.Value(api.ApprovedBankAccountsKey)
-	if v == nil {
-		return true
-	}
-	accounts, ok := v.([]map[string]string)
-	if !ok {
-		return true
-	}
-	for _, a := range accounts {
-		if strings.EqualFold(strings.TrimSpace(a["account_number"]), accountNumber) {
-			return true
-		}
-	}
-	return false
-}
 
 // ctxHasApprovedBankAccountFor checks ApprovedBankAccounts for account_number and optionally
 // enforces that the account belongs to the expected bank/entity.
@@ -866,7 +847,7 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 
 		// Account must belong to an entity the user is allowed for.
 		if strings.TrimSpace(accEntity) != "" {
-			if !api.IsEntityAllowed(ctx, accEntity) {
+			if !ctxutil.FromContext(ctx).HasEntityAccess(accEntity) {
 				logger.LogInfo("[CTX-ACC-CHECK] account=%s found but entity='%s' not allowed by context", accountNumber, accEntity)
 				return false
 			}

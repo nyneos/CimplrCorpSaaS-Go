@@ -13,6 +13,7 @@ package fdMaturityAndRollover
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -96,25 +97,42 @@ func GetFDMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 		masterWhere := []string{"(m.is_deleted IS NULL OR m.is_deleted = false)"}
 		args := []interface{}{}
 		idx := 1
+		scope := ctxutil.FromContext(ctx)
 
 		if len(req.EntityIDs) > 0 {
 			placeholders := make([]string, len(req.EntityIDs))
 			for i, eid := range req.EntityIDs {
+				if !scope.HasEntityAccess(eid) {
+					api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", eid))
+					return
+				}
 				placeholders[i] = fmt.Sprintf("$%d", idx)
 				args = append(args, eid)
 				idx++
 			}
 			masterWhere = append(masterWhere, "m.entity_id IN ("+strings.Join(placeholders, ",")+")")
+		} else if len(scope.EntityIDs) > 0 {
+			masterWhere = append(masterWhere, fmt.Sprintf("m.entity_id = ANY($%d::text[])", idx))
+			args = append(args, scope.EntityIDs)
+			idx++
 		}
 
 		if len(req.BankIDs) > 0 {
 			placeholders := make([]string, len(req.BankIDs))
 			for i, bid := range req.BankIDs {
+				if !scope.HasApprovedBank(bid) {
+					api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bid))
+					return
+				}
 				placeholders[i] = fmt.Sprintf("$%d", idx)
 				args = append(args, bid)
 				idx++
 			}
 			masterWhere = append(masterWhere, "m.bank_id IN ("+strings.Join(placeholders, ",")+")")
+		} else if bankIDs := scope.BankIDs(); len(bankIDs) > 0 {
+			masterWhere = append(masterWhere, fmt.Sprintf("(m.bank_id = '' OR m.bank_id = ANY($%d::text[]))", idx))
+			args = append(args, bankIDs)
+			idx++
 		}
 
 		if len(req.FDStatuses) > 0 {

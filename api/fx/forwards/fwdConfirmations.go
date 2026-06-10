@@ -1,8 +1,8 @@
 package forwards
 
 import (
-	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/fx/auditutil"
+	"CimplrCorpSaas/internal/ctxutil"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -143,8 +143,9 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "system_transaction_ids (array) and valid processing_status (Approved/Rejected) required"})
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
@@ -364,8 +365,9 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "system_transaction_ids (array) required"})
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
@@ -460,8 +462,9 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return

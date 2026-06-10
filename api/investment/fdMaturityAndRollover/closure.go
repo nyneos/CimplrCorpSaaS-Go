@@ -21,6 +21,7 @@ import (
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -62,6 +63,55 @@ func nullStrOrNil(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+func appendClosureScopeConditions(ctx context.Context, w http.ResponseWriter, conditions *[]string, args *[]interface{}, argIdx *int, entityCol, bankCol, entityID, bankID string) bool {
+	scope := ctxutil.FromContext(ctx)
+	entityID = strings.TrimSpace(entityID)
+	bankID = strings.TrimSpace(bankID)
+
+	if entityID != "" {
+		if !scope.HasEntityAccess(entityID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return false
+		}
+		*args = append(*args, entityID)
+		*conditions = append(*conditions, fmt.Sprintf("%s = $%d", entityCol, *argIdx))
+		*argIdx++
+	} else if len(scope.EntityIDs) > 0 {
+		*args = append(*args, scope.EntityIDs)
+		*conditions = append(*conditions, fmt.Sprintf("%s = ANY($%d::text[])", entityCol, *argIdx))
+		*argIdx++
+	}
+
+	if bankID != "" {
+		if !scope.HasApprovedBank(bankID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bankID))
+			return false
+		}
+		*args = append(*args, bankID)
+		*conditions = append(*conditions, fmt.Sprintf("%s = $%d", bankCol, *argIdx))
+		*argIdx++
+	} else if bankIDs := scope.BankIDs(); len(bankIDs) > 0 {
+		*args = append(*args, bankIDs)
+		*conditions = append(*conditions, fmt.Sprintf("(%s = '' OR %s = ANY($%d::text[]))", bankCol, bankCol, *argIdx))
+		*argIdx++
+	}
+
+	return true
+}
+
+func requireClosureScope(ctx context.Context, w http.ResponseWriter, entityID, bankID string) bool {
+	scope := ctxutil.FromContext(ctx)
+	if !scope.HasEntityAccess(entityID) {
+		api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+		return false
+	}
+	if strings.TrimSpace(bankID) != "" && !scope.HasApprovedBank(bankID) {
+		api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bankID))
+		return false
+	}
+	return true
 }
 
 func roundToFour(v float64) float64 {
@@ -159,15 +209,8 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			conditions = append(conditions, fmt.Sprintf(
 				"m.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '%d days'", req.DaysAhead))
 		}
-		if req.EntityID != "" {
-			args = append(args, req.EntityID)
-			conditions = append(conditions, fmt.Sprintf("b.entity_id = $%d", argIdx))
-			argIdx++
-		}
-		if req.BankID != "" {
-			args = append(args, req.BankID)
-			conditions = append(conditions, fmt.Sprintf("m.bank_id = $%d", argIdx))
-			argIdx++
+		if !appendClosureScopeConditions(ctx, w, &conditions, &args, &argIdx, "b.entity_id", "m.bank_id", req.EntityID, req.BankID) {
+			return
 		}
 		where := strings.Join(conditions, " AND ")
 
@@ -268,26 +311,30 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 		// If no records found, and no entity/bank filter was provided, return all ACTIVE FDs (ignore date window).
 		if len(records) == 0 && req.EntityID == "" && req.BankID == "" {
 			// Query without the date condition to return all active FDs
-			allWhere := `m.is_deleted = false AND m.fd_status IN ('ACTIVE','MATURED')
-			  AND NOT EXISTS (
+			allConditions := []string{`m.is_deleted = false`, `m.fd_status IN ('ACTIVE','MATURED')`, `NOT EXISTS (
 			    SELECT 1 FROM investment.fd_closure_request xcr
 			    WHERE xcr.fd_id = m.fd_id
 			      AND xcr.is_deleted = false
 			      AND xcr.closure_status IN ('PENDING_APPROVAL','APPROVED','POSTED')
-			  )
-			  AND NOT EXISTS (
+			  )`, `NOT EXISTS (
 			    SELECT 1 FROM cimplr.fd_closure_initiate ncr
 			    WHERE ncr.fd_id = m.fd_id
 			      AND ncr.is_deleted = false
-			  )
-			  AND NOT EXISTS (
+			  )`, `NOT EXISTS (
 			    SELECT 1 FROM cimplr.fd_closure_confirm ncc
 			    WHERE ncc.fd_id = m.fd_id
 			      AND ncc.is_deleted = false
-			  )`
+			  )`}
+			allArgs := []interface{}{}
+			allArgIdx := 1
+			if !appendClosureScopeConditions(ctx, w, &allConditions, &allArgs, &allArgIdx, "b.entity_id", "m.bank_id", "", "") {
+				return
+			}
+			allWhere := strings.Join(allConditions, " AND ")
 			var totalAll int
 			_ = pool.QueryRow(ctx,
-				"SELECT COUNT(DISTINCT m.fd_id) FROM investment.fd_master m LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id WHERE "+allWhere).Scan(&totalAll)
+				"SELECT COUNT(DISTINCT m.fd_id) FROM investment.fd_master m LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id WHERE "+allWhere,
+				allArgs...).Scan(&totalAll)
 
 			allSQL := `
 				SELECT
@@ -358,7 +405,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE ` + allWhere + `
 				ORDER BY m.maturity_date ASC`
 
-			rowsAll, err := pool.Query(ctx, allSQL)
+			rowsAll, err := pool.Query(ctx, allSQL, allArgs...)
 			if err != nil {
 				api.LogError("[FDClosure] GetFDsNearMaturity (all) query error: %v", err)
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch maturity dashboard")
@@ -598,6 +645,10 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		if currentStatus != constants.StatusActive && currentStatus != "MATURED" {
 			api.RespondWithError(w, http.StatusBadRequest,
 				fmt.Sprintf("FD is in status %s — closure requires ACTIVE or MATURED", currentStatus))
+			return
+		}
+		if !requireClosureScope(ctx, w, entityID, bankID) {
+			cleanupUpload()
 			return
 		}
 
@@ -1052,6 +1103,13 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
+		if !requireClosureScope(ctx, w, oldEntityID, oldBankID) {
+			return
+		}
+		if strings.TrimSpace(req.BankID) != "" && !ctxutil.FromContext(ctx).HasApprovedBank(req.BankID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", req.BankID))
+			return
+		}
 		if oldStatus != constants.StatusPendingApproval {
 			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot update closure in status %s", oldStatus))
 			return
@@ -1447,8 +1505,16 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 		argIdx := 1
 
 		if req.EntityID != "" {
+			if !ctxutil.FromContext(ctx).HasEntityAccess(req.EntityID) {
+				api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				return
+			}
 			args = append(args, req.EntityID)
 			conditions = append(conditions, fmt.Sprintf("cr.entity_id = $%d", argIdx))
+			argIdx++
+		} else if scope := ctxutil.FromContext(ctx); len(scope.EntityIDs) > 0 {
+			args = append(args, scope.EntityIDs)
+			conditions = append(conditions, fmt.Sprintf("cr.entity_id = ANY($%d::text[])", argIdx))
 			argIdx++
 		}
 		if req.ClosureStatus != "" {
@@ -1680,6 +1746,9 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to load closure detail")
 			}
+			return
+		}
+		if !requireClosureScope(ctx, w, entityID, bankIDEnriched) {
 			return
 		}
 
@@ -3462,8 +3531,16 @@ func GetClosureApprovalList(pool *pgxpool.Pool) http.HandlerFunc {
 		argIdx := 1
 
 		if req.EntityID != "" {
+			if !ctxutil.FromContext(ctx).HasEntityAccess(req.EntityID) {
+				api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				return
+			}
 			args = append(args, req.EntityID)
 			conditions = append(conditions, fmt.Sprintf("cr.entity_id = $%d", argIdx))
+			argIdx++
+		} else if scope := ctxutil.FromContext(ctx); len(scope.EntityIDs) > 0 {
+			args = append(args, scope.EntityIDs)
+			conditions = append(conditions, fmt.Sprintf("cr.entity_id = ANY($%d::text[])", argIdx))
 			argIdx++
 		}
 		if req.ClosureType != "" {

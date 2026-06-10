@@ -3,6 +3,7 @@ package fdAccrual
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -13,7 +14,9 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -31,6 +34,45 @@ func nullIfEmpty(v string) interface{} {
 		return nil
 	}
 	return v
+}
+
+func accrualEntityScopePredicate(ctx context.Context, alias string, argIdx *int, args *[]interface{}) string {
+	scope := ctxutil.FromContext(ctx)
+	if len(scope.EntityIDs) == 0 {
+		return ""
+	}
+	predicate := fmt.Sprintf(" AND %s.entity_id = ANY($%d::text[])", alias, *argIdx)
+	*args = append(*args, scope.EntityIDs)
+	*argIdx += 1
+	return predicate
+}
+
+func validateAccrualEntityParam(ctx context.Context, entityID string) (int, string) {
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" {
+		return 0, ""
+	}
+	if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
+		return http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID)
+	}
+	return 0, ""
+}
+
+func requireAccrualRunAccess(ctx context.Context, pool *pgxpool.Pool, runID string) (int, string) {
+	var entityID string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(entity_id,'')
+		FROM investment.fd_accrual_run
+		WHERE run_id=$1 AND COALESCE(is_deleted,false)=false`, runID).Scan(&entityID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return http.StatusNotFound, "accrual run not found"
+		}
+		return http.StatusInternalServerError, "Run lookup failed: " + err.Error()
+	}
+	if code, msg := validateAccrualEntityParam(ctx, entityID); code != 0 {
+		return code, msg
+	}
+	return 0, ""
 }
 
 // ─── 1. CreateAccrualRun ──────────────────────────────────────────────────────
@@ -102,6 +144,13 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		scope := ctxutil.FromContext(r.Context())
+		if !scope.HasEntityAccess(req.EntityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
 			return
 		}
 
@@ -438,10 +487,42 @@ func GetAccrualLedger(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		scope := ctxutil.FromContext(ctx)
+		var runEntityID string
+		if err := pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(entity_id,'')
+			FROM investment.fd_accrual_run
+			WHERE run_id=$1 AND COALESCE(is_deleted,false)=false`, req.RunID).Scan(&runEntityID); err != nil {
+			if err == pgx.ErrNoRows {
+				api.RespondWithError(w, http.StatusNotFound, "accrual run not found")
+				return
+			}
+			api.RespondWithError(w, http.StatusInternalServerError, "Run lookup failed: "+err.Error())
+			return
+		}
+		if !scope.HasEntityAccess(runEntityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", runEntityID))
+			return
+		}
+		if req.EntityID != "" && !scope.HasEntityAccess(req.EntityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+			return
+		}
+		if req.BankID != "" && !scope.HasApprovedBank(req.BankID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Bank '%s' is not within your approved bank scope.", req.BankID))
+			return
+		}
 
 		extraFilter := ""
 		var args []interface{}
 		args = append(args, req.RunID)
+		if req.EntityID != "" {
+			args = append(args, req.EntityID)
+			extraFilter += fmt.Sprintf(" AND l.entity_id = $%d", len(args))
+		}
 		if req.BankID != "" {
 			args = append(args, req.BankID)
 			extraFilter += fmt.Sprintf(" AND l.bank_id = $%d", len(args))
@@ -628,6 +709,8 @@ func GetAccrualCalculationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			whereClause = "l.run_id = $1 AND l.fd_id = $2"
 			whereArgs = []interface{}{req.RunID, req.FDID}
 		}
+		argIdx := len(whereArgs) + 1
+		scopeWhere := accrualEntityScopePredicate(ctx, "l", &argIdx, &whereArgs)
 
 		query := `
 			SELECT
@@ -701,6 +784,7 @@ func GetAccrualCalculationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN investment.fd_master f ON f.fd_id = l.fd_id
 			WHERE ` + whereClause + `
 			  AND COALESCE(l.is_deleted,false) = false
+			  ` + scopeWhere + `
 			ORDER BY l.accrual_period_start ASC`
 
 		rows, err := pgxPool.Query(ctx, query, whereArgs...)
@@ -1391,6 +1475,10 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		ctx := r.Context()
+		if code, msg := validateAccrualEntityParam(ctx, req.EntityID); code != 0 {
+			api.RespondWithError(w, code, msg)
+			return
+		}
 		query := `
 			SELECT
 				r.run_id,
@@ -1460,6 +1548,8 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			query += fmt.Sprintf(" AND r.entity_id = $%d", argIdx)
 			args = append(args, req.EntityID)
 			argIdx++
+		} else {
+			query += accrualEntityScopePredicate(ctx, "r", &argIdx, &args)
 		}
 
 		if req.RunType != "" {
@@ -1661,6 +1751,10 @@ func GetValidationFindings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if code, msg := requireAccrualRunAccess(ctx, pgxPool, req.RunID); code != 0 {
+			api.RespondWithError(w, code, msg)
+			return
+		}
 		rows, err := pgxPool.Query(ctx, `
 			SELECT finding_id, fd_id,
 			       COALESCE(fd_ref_no,''), COALESCE(bank_name,''),
@@ -1719,6 +1813,10 @@ func GetExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var args []interface{}
 
 		if req.RunID != "" {
+			if code, msg := requireAccrualRunAccess(ctx, pgxPool, req.RunID); code != 0 {
+				api.RespondWithError(w, code, msg)
+				return
+			}
 			// Single run - original behavior
 			query = `
 				SELECT log_id, run_id,
@@ -1732,6 +1830,8 @@ func GetExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, req.RunID)
 		} else if req.ScheduleID != "" {
 			// All execution logs for scheduler runs tied to this schedule (entity match or detail.config_id)
+			argIdx := 2
+			args = append(args, req.ScheduleID)
 			query = `
 				SELECT el.log_id, el.run_id,
 				       COALESCE(el.fd_id,'') AS fd_id,
@@ -1749,17 +1849,21 @@ func GetExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					    OR COALESCE(el.detail->>'schedule_config_id','') = sc.config_id::text
 					  )
 				  )
+				` + accrualEntityScopePredicate(ctx, "r", &argIdx, &args) + `
 				ORDER BY el.logged_at DESC`
-			args = append(args, req.ScheduleID)
 		} else {
-			// No filter - dump ALL execution logs across all runs
+			// No filter - return execution logs only for runs in the caller's entity scope.
+			argIdx := 1
 			query = `
-				SELECT log_id, run_id,
-				       COALESCE(fd_id,'') AS fd_id,
-				       log_level, event_type, message,
-				       COALESCE(detail::text,'{}') AS detail,
-				       logged_at
-				FROM investment.fd_accrual_run_execution_log
+				SELECT el.log_id, el.run_id,
+				       COALESCE(el.fd_id,'') AS fd_id,
+				       el.log_level, el.event_type, el.message,
+				       COALESCE(el.detail::text,'{}') AS detail,
+				       el.logged_at
+				FROM investment.fd_accrual_run_execution_log el
+				JOIN investment.fd_accrual_run r ON r.run_id = el.run_id
+				WHERE COALESCE(r.is_deleted,false)=false
+				` + accrualEntityScopePredicate(ctx, "r", &argIdx, &args) + `
 				ORDER BY logged_at DESC`
 		}
 
@@ -1814,6 +1918,12 @@ func GetAccrualLedgerAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if req.RunID != "" {
+			if code, msg := requireAccrualRunAccess(ctx, pgxPool, req.RunID); code != 0 {
+				api.RespondWithError(w, code, msg)
+				return
+			}
+		}
 
 		query := `
 			SELECT
@@ -1861,6 +1971,7 @@ func GetAccrualLedgerAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, req.LedgerID)
 			argIdx++
 		}
+		query += accrualEntityScopePredicate(ctx, "a", &argIdx, &args)
 		query += " ORDER BY a.requested_at DESC"
 
 		rows, err := pgxPool.Query(ctx, query, args...)
@@ -1917,6 +2028,10 @@ func GetAccrualExceptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if code, msg := requireAccrualRunAccess(ctx, pgxPool, req.RunID); code != 0 {
+			api.RespondWithError(w, code, msg)
+			return
+		}
 		query := `
 			SELECT
 				e.exception_id, e.run_id, e.ledger_id, e.fd_id,
@@ -3882,6 +3997,17 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.FDStatusFilter == "" {
 			req.FDStatusFilter = constants.StatusActive
 		}
+		scope := ctxutil.FromContext(r.Context())
+		if !scope.HasEntityAccess(req.EntityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+			return
+		}
+		if strings.TrimSpace(req.BankIDFilter) != "" && !scope.HasApprovedBank(req.BankIDFilter) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Bank '%s' is not within your approved bank scope.", req.BankIDFilter))
+			return
+		}
 		// SkipExisting defaults to true unless caller explicitly sets false
 		skipExisting := true
 		if !req.SkipExisting {
@@ -4440,6 +4566,10 @@ func CheckPeriodLockStatus(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if code, msg := validateAccrualEntityParam(ctx, req.EntityID); code != 0 {
+			api.RespondWithError(w, code, msg)
+			return
+		}
 		var posted int
 		var lastStatus, lastRunID string
 		query := `
@@ -4449,9 +4579,16 @@ func CheckPeriodLockStatus(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(MAX(run_id),'')     AS last_run_id
 			FROM investment.fd_accrual_run
 			WHERE financial_period = $1
-			  AND ($2 = '' OR entity_id = $2)
 			  AND COALESCE(run_mode,'FINAL') = 'FINAL'`
-		if err := pgxPool.QueryRow(ctx, query, fp, req.EntityID).Scan(&posted, &lastStatus, &lastRunID); err != nil {
+		args := []interface{}{fp}
+		argIdx := 2
+		if strings.TrimSpace(req.EntityID) != "" {
+			query += fmt.Sprintf(" AND entity_id = $%d", argIdx)
+			args = append(args, strings.TrimSpace(req.EntityID))
+		} else {
+			query += accrualEntityScopePredicate(ctx, "fd_accrual_run", &argIdx, &args)
+		}
+		if err := pgxPool.QueryRow(ctx, query, args...).Scan(&posted, &lastStatus, &lastRunID); err != nil {
 			api.LogError("[FDAccrual] CheckPeriodLockStatus query error: %v", err)
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
 				"is_locked": false,

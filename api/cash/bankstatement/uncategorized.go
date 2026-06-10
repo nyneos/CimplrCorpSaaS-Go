@@ -2,14 +2,18 @@ package bankstatement
 
 import (
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // GetUncategorizedTransactionsHandler returns all uncategorized transactions across all bank statements
 // Supports pagination with limit/offset, if no limit provided returns all data
-func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
+func GetUncategorizedTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -36,6 +40,13 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		offset := 0
 		if req.Offset != nil {
 			offset = *req.Offset
+		}
+
+		ctx := r.Context()
+		entityIDs := ctxutil.FromContext(ctx).EntityIDs
+		if len(entityIDs) == 0 {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusUnauthorized)
+			return
 		}
 
 		// Build query with optional limit
@@ -68,16 +79,18 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			LEFT JOIN public.mastercashflowcategory mc ON t.category_id = mc.category_id
 			WHERE (t.category_id IS NULL OR t.category_id = '')
 			  AND COALESCE(bs.is_deleted, false) = false
+			  AND bs.entity_id = ANY($1::text[])
 			ORDER BY t.transaction_date DESC, t.transaction_id DESC
 		`
 
-		args := []interface{}{}
+		args := []interface{}{entityIDs}
+		argIdx := 2
 		if req.Limit != nil && *req.Limit > 0 {
-			query += " LIMIT $1 OFFSET $2"
+			query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
 			args = append(args, *req.Limit, offset)
 		}
 
-		rows, err := db.Query(query, args...)
+		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
 			http.Error(w, "Database query failed: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -198,8 +211,9 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
 			WHERE (t.category_id IS NULL OR t.category_id = '')
 			  AND COALESCE(bs.is_deleted, false) = false
+			  AND bs.entity_id = ANY($1::text[])
 		`
-		db.QueryRow(countQuery).Scan(&totalCount)
+		_ = pool.QueryRow(ctx, countQuery, entityIDs).Scan(&totalCount)
 
 		response := map[string]interface{}{
 			"success":      true,

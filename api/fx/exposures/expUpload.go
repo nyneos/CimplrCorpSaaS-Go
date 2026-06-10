@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/fx/auditutil"
 	"CimplrCorpSaas/api/utils"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"database/sql"
 	"encoding/csv"
@@ -97,8 +98,9 @@ func UploadExposure(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-	if !ok {
+	scope := ctxutil.FromContext(r.Context())
+	buNames := scope.EntityNames
+	if len(buNames) == 0 {
 		http.Error(w, "Business units not found in context", http.StatusInternalServerError)
 		return
 	}
@@ -331,8 +333,9 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Get buNames from context
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusInternalServerError, "Business units not found in context")
 			return
 		}
@@ -571,7 +574,8 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		buNames := api.GetEntityNamesFromCtx(ctx)
+		scope := ctxutil.FromContext(ctx)
+		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
@@ -682,7 +686,8 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		buNames := api.GetEntityNamesFromCtx(ctx)
+		scope := ctxutil.FromContext(ctx)
+		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
@@ -1247,7 +1252,8 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 
 		// Prefer prevalidation context if available, otherwise fallback to DB-approved entity lookup
 		ctx := r.Context()
-		buNames := api.GetEntityNamesFromCtx(ctx)
+		scope := ctxutil.FromContext(ctx)
+		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return

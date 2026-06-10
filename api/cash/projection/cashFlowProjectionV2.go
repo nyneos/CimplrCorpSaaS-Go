@@ -17,10 +17,54 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
+	"CimplrCorpSaas/internal/validation"
 )
 
 // V2 API handlers for new schema with base_currency_code, maturity_date, bank info
 // PERFORMANCE OPTIMIZED for bulk operations (10K-100K records)
+
+func validateProjectionCashScope(ctx context.Context, refs map[string]interface{}) error {
+	if msg := validation.ValidateCashMasterReferences(ctx, refs); msg != "" {
+		return fmt.Errorf("%s", msg)
+	}
+	return nil
+}
+
+func validateProjectionProposalScope(ctx context.Context, pgxPool *pgxpool.Pool, proposalID, baseCurrency string) error {
+	if err := validateProjectionCashScope(ctx, map[string]interface{}{"currency_code": baseCurrency}); err != nil {
+		return err
+	}
+	rows, err := pgxPool.Query(ctx, `
+		SELECT
+			COALESCE(entity_name, ''),
+			COALESCE(category_id, ''),
+			COALESCE(currency_code, ''),
+			COALESCE(bank_name, ''),
+			COALESCE(bank_account_number, '')
+		FROM cimplrcorpsaas.cashflow_proposal_item
+		WHERE proposal_id = $1
+	`, proposalID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var entityName, categoryID, currencyCode, bankName, bankAccountNumber string
+		if err := rows.Scan(&entityName, &categoryID, &currencyCode, &bankName, &bankAccountNumber); err != nil {
+			return err
+		}
+		if err := validateProjectionCashScope(ctx, map[string]interface{}{
+			"entity_name":         entityName,
+			"category_id":         categoryID,
+			"currency_code":       currencyCode,
+			"bank_name":           bankName,
+			"bank_account_number": bankAccountNumber,
+		}); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
 
 // calculateMonthlyProjections auto-calculates monthly breakdown from maturity date
 // Based on is_recurring and recurrence_frequency (Weekly/Monthly/Quarterly/HalfYearly/Yearly)
@@ -549,6 +593,24 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if err := validateProjectionCashScope(ctx, map[string]interface{}{
+			"currency_code": req.Proposal.BaseCurrencyCode,
+		}); err != nil {
+			api.RespondWithError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		for _, item := range req.Items {
+			if err := validateProjectionCashScope(ctx, map[string]interface{}{
+				"entity_name":         item.EntityName,
+				"category_id":         item.CategoryID,
+				"currency_code":       item.CurrencyCode,
+				"bank_name":           item.BankName,
+				"bank_account_number": item.BankAccountNumber,
+			}); err != nil {
+				api.RespondWithError(w, http.StatusForbidden, err.Error())
+				return
+			}
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
@@ -755,6 +817,12 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, "Proposal not found: "+err.Error())
 			return
 		}
+		if err := validateProjectionCashScope(ctx, map[string]interface{}{
+			"currency_code": baseCurrency,
+		}); err != nil {
+			api.RespondWithError(w, http.StatusForbidden, err.Error())
+			return
+		}
 
 		deletedAtStr := ""
 		if deletedAt != nil {
@@ -822,6 +890,16 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldBankName, &oldBankAccountNumber,
 			); err != nil {
 				continue
+			}
+			if err := validateProjectionCashScope(ctx, map[string]interface{}{
+				"entity_name":         ifaceToString(entityName),
+				"category_id":         categoryID,
+				"currency_code":       currencyCode,
+				"bank_name":           ifaceToString(bankName),
+				"bank_account_number": ifaceToString(bankAccountNumber),
+			}); err != nil {
+				api.RespondWithError(w, http.StatusForbidden, err.Error())
+				return
 			}
 
 			itemIDs = append(itemIDs, itemID)
@@ -993,6 +1071,9 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read proposals: "+err.Error())
 				return
 			}
+			if err := validateProjectionProposalScope(ctx, pgxPool, proposalID, baseCurrency); err != nil {
+				continue
+			}
 			proposals = append(proposals, map[string]interface{}{
 				"proposal_id":        proposalID,
 				"proposal_name":      proposalName,
@@ -1033,13 +1114,18 @@ func GetProjectionDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		var uploadS3Key interface{}
+		var baseCurrency string
 		if err := pgxPool.QueryRow(ctx, `
-			SELECT upload_s3_key
+			SELECT upload_s3_key, base_currency_code
 			FROM cimplrcorpsaas.cashflow_proposal
 			WHERE proposal_id = $1
 			  AND COALESCE(is_deleted, false) = false
-		`, req.ProposalID).Scan(&uploadS3Key); err != nil {
+		`, req.ProposalID).Scan(&uploadS3Key, &baseCurrency); err != nil {
 			api.RespondWithResult(w, false, "Proposal not found or query error: "+err.Error())
+			return
+		}
+		if err := validateProjectionProposalScope(ctx, pgxPool, req.ProposalID, baseCurrency); err != nil {
+			api.RespondWithError(w, http.StatusForbidden, err.Error())
 			return
 		}
 
@@ -1097,12 +1183,17 @@ func GetProjectionBulkDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			var uploadS3Key interface{}
+			var baseCurrency string
 			if err := pgxPool.QueryRow(ctx, `
-				SELECT upload_s3_key
+				SELECT upload_s3_key, base_currency_code
 				FROM cimplrcorpsaas.cashflow_proposal
 				WHERE proposal_id = $1
 				  AND COALESCE(is_deleted, false) = false
-			`, proposalID).Scan(&uploadS3Key); err != nil {
+			`, proposalID).Scan(&uploadS3Key, &baseCurrency); err != nil {
+				failedIDs = append(failedIDs, proposalID)
+				continue
+			}
+			if err := validateProjectionProposalScope(ctx, pgxPool, proposalID, baseCurrency); err != nil {
 				failedIDs = append(failedIDs, proposalID)
 				continue
 			}
@@ -1206,6 +1297,24 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if err := validateProjectionCashScope(ctx, map[string]interface{}{
+			"currency_code": req.Proposal.BaseCurrencyCode,
+		}); err != nil {
+			api.RespondWithError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		for _, item := range req.Items {
+			if err := validateProjectionCashScope(ctx, map[string]interface{}{
+				"entity_name":         item.EntityName,
+				"category_id":         item.CategoryID,
+				"currency_code":       item.CurrencyCode,
+				"bank_name":           item.BankName,
+				"bank_account_number": item.BankAccountNumber,
+			}); err != nil {
+				api.RespondWithError(w, http.StatusForbidden, err.Error())
+				return
+			}
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())

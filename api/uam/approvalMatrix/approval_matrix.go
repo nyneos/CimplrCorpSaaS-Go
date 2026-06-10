@@ -3,6 +3,7 @@ package approvalMatrix
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
 	"errors"
@@ -356,6 +357,12 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.EntityCode == "" || req.TransactionType == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "entity_code and transaction_type are required")
+			return
+		}
+		scope := ctxutil.FromContext(r.Context())
+		if !scope.HasEntityAccess(req.EntityCode) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityCode))
 			return
 		}
 		// Master SLA column is used by list/grid views; if omitted, mirror the highest per-eye SLA (when any).

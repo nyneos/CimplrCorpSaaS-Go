@@ -2,9 +2,12 @@ package allMaster
 
 import (
 	api "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/ctxutil"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,8 +17,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-
-	"CimplrCorpSaas/api/constants"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -114,20 +115,21 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 
-		// Validate entity - user must have access to this entity
-		if !api.IsEntityAllowed(ctx, req.EntityID) {
-			api.RespondWithError(w, http.StatusForbidden, "Access denied: You don't have permission to create bank accounts for entity '"+req.EntityID+constants.ErrBankAccountUpdateFailed)
+		scope := ctxutil.FromContext(ctx)
+		if !scope.HasEntityAccess(req.EntityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
 			return
 		}
 
 		// Validate bank - user must have access to this bank
-		if strings.TrimSpace(req.BankName) != "" && !api.IsBankAllowed(ctx, req.BankName) {
+		if strings.TrimSpace(req.BankName) != "" && !scope.HasApprovedBank(req.BankName) {
 			api.RespondWithError(w, http.StatusForbidden, "Access denied: You don't have permission to use bank '"+req.BankName+constants.ErrBankAccountUpdateFailed)
 			return
 		}
 
 		// Validate currency - user must have access to this currency
-		if strings.TrimSpace(req.Currency) != "" && !api.IsCurrencyAllowed(ctx, req.Currency) {
+		if strings.TrimSpace(req.Currency) != "" && !scope.HasApprovedCurrency(req.Currency) {
 			api.RespondWithError(w, http.StatusForbidden, "Access denied: You don't have permission to use currency '"+req.Currency+constants.ErrBankAccountUpdateFailed)
 			return
 		}
@@ -703,6 +705,41 @@ func BulkDeleteBankAccountAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
+		// Check blockers: registry (FD bookings via UUID FK) + bank statements (natural-key FK)
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "masterbankaccount", req.AccountIDs)
+		blockedSet := make(map[string]bool)
+		for _, b := range blocked {
+			blockedSet[b["id"].(string)] = true
+		}
+		// Bank statements use account_number (natural key), not account_id UUID — check manually
+		for _, accountID := range req.AccountIDs {
+			if blockedSet[accountID] {
+				continue
+			}
+			var stmtCount int
+			_ = pgxPool.QueryRow(r.Context(), `
+				SELECT COUNT(*) FROM cimplrcorpsaas.bank_statements bs
+				JOIN masterbankaccount ma ON ma.account_number = bs.account_number
+				WHERE ma.account_id = $1 AND COALESCE(ma.is_deleted, false) = false`, accountID,
+			).Scan(&stmtCount)
+			if stmtCount > 0 {
+				blocked = append(blocked, map[string]interface{}{
+					"id":         accountID,
+					"blocked_by": dependency.BlockersSummary([]dependency.BlockingDep{{Label: "Bank Statements", Count: stmtCount}}),
+				})
+				blockedSet[accountID] = true
+			}
+		}
+		if len(blockedSet) > 0 {
+			var unblocked []string
+			for _, id := range req.AccountIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.AccountIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 		requestedBy := api.GetUserNameFromCtx(r.Context())
 		if requestedBy == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
@@ -784,7 +821,7 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		// First, handle audit rows that requested DELETE (Soft Delete)
+		// Handle audit rows that requested DELETE — blockers were already enforced at delete-request time.
 		var delRows pgx.Rows
 		var delErr error
 		var deleted []string
@@ -801,9 +838,22 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		// Soft-delete associated master account records (mark is_deleted = true)
+		// Soft-delete all approved accounts and cascade non-core children.
+		ctx := r.Context()
+		for _, accountID := range accountIDsToDelete {
+			_, _ = pgxPool.Exec(ctx, `
+				UPDATE bank_balances_manual SET is_deleted = true
+				WHERE account_no = (SELECT account_number FROM masterbankaccount WHERE account_id = $1)
+				  AND COALESCE(is_deleted, false) = false`, accountID)
+			_, _ = pgxPool.Exec(ctx, `
+				INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, requested_by, requested_at)
+				SELECT balance_id, 'DELETE', 'APPROVED', $2, now()
+				FROM bank_balances_manual
+				WHERE account_no = (SELECT account_number FROM masterbankaccount WHERE account_id = $1)
+				ON CONFLICT DO NOTHING`, accountID, checkerBy)
+			_ = dependency.CascadeDelete(ctx, pgxPool, "masterbankaccount", accountID, checkerBy)
+		}
 		if len(accountIDsToDelete) > 0 {
-			// mark accounts as deleted; keep clearing codes for historical record
 			_, _ = pgxPool.Exec(r.Context(), `UPDATE masterbankaccount SET is_deleted = true WHERE account_id = ANY($1)`, pq.Array(accountIDsToDelete))
 		}
 
@@ -904,7 +954,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		ctx := r.Context()
-		entityIDs := api.GetEntityIDsFromCtx(ctx)
+		entityIDs := ctxutil.FromContext(ctx).EntityIDs
 		bankNames := api.GetBankNamesFromCtx(ctx)
 		currCodes := api.GetCurrencyCodesFromCtx(ctx)
 
@@ -1436,8 +1486,8 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						var entityNameToID map[string]string
 						if entityColIdx != -1 {
 							entityNameToID = make(map[string]string)
-							names := api.GetEntityNamesFromCtx(ctx)
-							ids := api.GetEntityIDsFromCtx(ctx)
+							names := ctxutil.FromContext(ctx).EntityNames
+							ids := ctxutil.FromContext(ctx).EntityIDs
 							if len(names) == len(ids) {
 								for i := range names {
 									n := strings.ToLower(strings.TrimSpace(names[i]))
@@ -1505,7 +1555,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 													newCopyRows[ri][entityColIdx+1] = id
 												} else {
 													// also allow direct id if matches any known id
-													for _, idCandidate := range api.GetEntityIDsFromCtx(ctx) {
+													for _, idCandidate := range ctxutil.FromContext(ctx).EntityIDs {
 														if strings.EqualFold(strings.TrimSpace(idCandidate), sval) {
 															newCopyRows[ri][entityColIdx+1] = idCandidate
 															goto entityDone
@@ -1871,7 +1921,7 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		entityIDs := api.GetEntityIDsFromCtx(ctx)
+		entityIDs := ctxutil.FromContext(ctx).EntityIDs
 		bankNames := api.GetBankNamesFromCtx(ctx)
 		currCodes := api.GetCurrencyCodesFromCtx(ctx)
 
@@ -1992,8 +2042,6 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
                         'old_code_value', COALESCE(c.old_code_value, '')
                     ))
                     FROM masterclearingcode c
-                    WHERE c.account_id = a.account_id AND COALESCE(c.is_deleted, false) = false
-                    ORDER BY c.clearing_id
                     WHERE c.account_id = a.account_id AND COALESCE(c.is_deleted, false) = false
                     ORDER BY c.clearing_id
                 ), '[]'::json
@@ -2436,7 +2484,7 @@ func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		ctx := r.Context()
 
-		entityIDs := api.GetEntityIDsFromCtx(ctx)
+		entityIDs := ctxutil.FromContext(ctx).EntityIDs
 		bankNames := api.GetBankNamesFromCtx(ctx)
 		currCodes := api.GetCurrencyCodesFromCtx(ctx)
 

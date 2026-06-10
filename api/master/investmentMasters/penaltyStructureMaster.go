@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1098,6 +1099,28 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			found[id] = true
 		}
 
+		// Block delete request if any penalty structure is referenced by live FD bookings
+		var deleteBlockers []map[string]interface{}
+		for pid := range found {
+			blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_penalty_structure_master", pid)
+			if len(blockers) > 0 {
+				deleteBlockers = append(deleteBlockers, map[string]interface{}{
+					"penalty_id": pid,
+					"blocked_by": dependency.BlockersSummary(blockers),
+				})
+			}
+		}
+		if len(deleteBlockers) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Cannot request deletion: one or more items are referenced by live FD bookings.",
+				"blocked": deleteBlockers,
+			})
+			return
+		}
+
 		var auditValues []string
 		var auditArgs []interface{}
 		var errorsList []map[string]interface{}
@@ -1223,10 +1246,20 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var success []map[string]interface{}
 		var errorsList []map[string]interface{}
+		var blockedItems []map[string]interface{}
 
 		for _, a := range audits {
-			// If this is a DELETE request, mark master row as deleted
+			// If this is a DELETE request, check dependencies before soft-deleting
 			if strings.ToUpper(a.ActionType) == "DELETE" {
+				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_penalty_structure_master", a.PenaltyID)
+				if len(blockers) > 0 {
+					blockedItems = append(blockedItems, map[string]interface{}{
+						"penalty_id": a.PenaltyID,
+						"audit_id":   a.AuditID,
+						"blocked_by": dependency.BlockersSummary(blockers),
+					})
+					continue
+				}
 				if _, err := tx.Exec(ctx, `UPDATE investment.fd_penalty_structure_master SET is_deleted = true WHERE penalty_id = $1`, a.PenaltyID); err != nil {
 					errorsList = append(errorsList, map[string]interface{}{"penalty_id": a.PenaltyID, "audit_id": a.AuditID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
 					continue
@@ -1249,9 +1282,12 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		allResults := append(success, errorsList...)
-		api.RespondWithPayload(w, len(success) > 0, "", allResults)
-		api.LogInfo("Bulk approve completed: %d approved, %d errors", len(success), len(errorsList))
+		api.RespondWithPayload(w, len(success) > 0, "", map[string]interface{}{
+			"approved": success,
+			"errors":   errorsList,
+			"blocked":  blockedItems,
+		})
+		api.LogInfo("Bulk approve completed: %d approved, %d errors, %d blocked", len(success), len(errorsList), len(blockedItems))
 	}
 }
 

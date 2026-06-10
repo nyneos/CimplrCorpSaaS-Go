@@ -4,6 +4,7 @@ import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"errors"
 	"fmt"
@@ -289,7 +290,7 @@ func deleteBankBalanceAdditionalFileExec(ctx context.Context, exec bankBalanceFi
 }
 
 func bankBalanceAccessScope(ctx context.Context, startPosition int) (string, []interface{}, error) {
-	entityIDs := api.GetEntityIDsFromCtx(ctx)
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	entityNames := api.GetEntityNamesFromCtx(ctx)
 	accountNos := api.CtxApprovedAccountNumbers(ctx)
 	bankNames := loweredBankBalanceValues(api.CtxApprovedBankNames(ctx))

@@ -1,9 +1,11 @@
 package projectiondash
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"CimplrCorpSaas/api"
@@ -12,6 +14,28 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func projectionScope(ctx context.Context) ([]string, []string, string) {
+	entities := api.GetEntityNamesFromCtx(ctx)
+	currencies := api.GetCurrencyCodesFromCtx(ctx)
+	if len(entities) == 0 {
+		return nil, nil, constants.ErrNoAccessibleBusinessUnit
+	}
+	if len(currencies) == 0 {
+		return nil, nil, constants.ErrNoAccessibleBusinessUnit
+	}
+	return entities, normalizeUpperStrings(currencies), ""
+}
+
+func normalizeUpperStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if s := strings.ToUpper(strings.TrimSpace(value)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
 
 type KPIResponse struct {
 	TotalProposals    int     `json:"totalProposals"`
@@ -37,6 +61,11 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		allowedEntities, allowedCurrencies, scopeMsg := projectionScope(ctx)
+		if scopeMsg != "" {
+			api.RespondWithResult(w, false, scopeMsg)
+			return
+		}
 		var resp KPIResponse
 
 		// spot rates for conversion to USD (fallbacks)
@@ -53,7 +82,13 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// 1) Total proposals
-		if err := pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM cashflow_proposal`).Scan(&resp.TotalProposals); err != nil {
+		if err := pgxPool.QueryRow(ctx, `
+			SELECT COUNT(DISTINCT p.proposal_id)
+			FROM cashflow_proposal p
+			JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id
+			WHERE COALESCE(i.entity_name, '') = ANY($1)
+			  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($2)
+		`, allowedEntities, allowedCurrencies).Scan(&resp.TotalProposals); err != nil {
 			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
@@ -61,13 +96,16 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 2) Pending approvals - use latest audit processing_status per proposal and count those that are pending
 		pendingQ := `
 			SELECT COUNT(*) FROM (
-				SELECT p.proposal_id,
+				SELECT DISTINCT p.proposal_id,
 					   (SELECT a.processing_status FROM audit_action_cashflow_proposal a WHERE a.proposal_id = p.proposal_id ORDER BY requested_at DESC LIMIT 1) AS processing_status
 				FROM cashflow_proposal p
+				JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id
+				WHERE COALESCE(i.entity_name, '') = ANY($1)
+				  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($2)
 			) t
 			WHERE processing_status LIKE 'PENDING%'
 		`
-		if err := pgxPool.QueryRow(ctx, pendingQ).Scan(&resp.PendingApproval); err != nil {
+		if err := pgxPool.QueryRow(ctx, pendingQ, allowedEntities, allowedCurrencies).Scan(&resp.PendingApproval); err != nil {
 			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
@@ -78,8 +116,10 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM cashflow_proposal p
 			JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id
 			WHERE (SELECT a.processing_status FROM audit_action_cashflow_proposal a WHERE a.proposal_id = p.proposal_id ORDER BY requested_at DESC LIMIT 1) = 'PENDING_APPROVAL'
+			  AND COALESCE(i.entity_name, '') = ANY($1)
+			  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($2)
 		`
-		rows, err := pgxPool.Query(ctx, sumQ)
+		rows, err := pgxPool.Query(ctx, sumQ, allowedEntities, allowedCurrencies)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
@@ -110,7 +150,15 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND checker_at IS NOT NULL
 			  AND EXTRACT(YEAR FROM checker_at) = $1
 			  AND EXTRACT(MONTH FROM checker_at) = $2
-		`, year, month).Scan(&resp.ApprovedThisMonth); err != nil {
+			  AND EXISTS (
+			  	SELECT 1
+			  	FROM cashflow_proposal p
+			  	JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id
+			  	WHERE p.proposal_id = audit_action_cashflow_proposal.proposal_id
+			  	  AND COALESCE(i.entity_name, '') = ANY($3)
+			  	  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($4)
+			  )
+		`, year, month, allowedEntities, allowedCurrencies).Scan(&resp.ApprovedThisMonth); err != nil {
 			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
@@ -164,6 +212,11 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		allowedEntities, allowedCurrencies, scopeMsg := projectionScope(ctx)
+		if scopeMsg != "" {
+			api.RespondWithResult(w, false, scopeMsg)
+			return
+		}
 
 		// Query: join proposals -> items and left join latest audit_action per proposal
 		rows, err := pgxPool.Query(ctx, `
@@ -179,8 +232,10 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON true
+			WHERE COALESCE(i.entity_name, '') = ANY($1)
+			  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($2)
 			ORDER BY a.requested_at DESC NULLS LAST, p.proposal_id, i.item_id
-		`)
+		`, allowedEntities, allowedCurrencies)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
@@ -282,6 +337,11 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		allowedEntities, allowedCurrencies, scopeMsg := projectionScope(ctx)
+		if scopeMsg != "" {
+			api.RespondWithResult(w, false, scopeMsg)
+			return
+		}
 
 		q := `
 			SELECT COALESCE(i.entity_name, '') AS entity_name,
@@ -291,9 +351,11 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   (SELECT a.processing_status FROM audit_action_cashflow_proposal a WHERE a.proposal_id = p.proposal_id ORDER BY a.requested_at DESC LIMIT 1) AS processing_status
 			FROM cashflow_proposal p
 			JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id
+			WHERE COALESCE(i.entity_name, '') = ANY($1)
+			  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($2)
 		`
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, allowedEntities, allowedCurrencies)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return

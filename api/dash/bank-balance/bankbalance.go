@@ -87,8 +87,8 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get allowed business units from context (set by BU middleware)
-		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		// if !ok || len(buNames) == 0 {
+		// buNames := api.GetEntityNamesFromCtx(r.Context())
+		// if len(buNames) == 0 {
 		// 	http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusNotFound)
 		// 	return
 		// }
@@ -684,8 +684,8 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		// if !ok || len(buNames) == 0 {
+		// buNames := api.GetEntityNamesFromCtx(r.Context())
+		// if len(buNames) == 0 {
 		// 	http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusNotFound)
 		// 	return
 		// }
