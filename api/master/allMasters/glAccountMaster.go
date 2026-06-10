@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/dependency"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1406,6 +1407,33 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Dependency validation for deletes
+		var safeToApprove []string
+		var blockedGLAccounts []map[string]interface{}
+
+		for _, gid := range allToApprove {
+			var actionType, procStatus string
+			err := pgxPool.QueryRow(ctx, "SELECT actiontype, processing_status FROM auditactionglaccount WHERE gl_account_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC LIMIT 1", gid).Scan(&actionType, &procStatus)
+			if err == nil && strings.ToUpper(actionType) == "DELETE" && strings.ToUpper(procStatus) == "PENDING_DELETE_APPROVAL" {
+				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterglaccount", gid)
+				if len(blockers) > 0 {
+					blockedGLAccounts = append(blockedGLAccounts, map[string]interface{}{
+						"gl_account_id": gid,
+						"blocked_by":    dependency.BlockersSummary(blockers),
+					})
+					continue
+				}
+			}
+			safeToApprove = append(safeToApprove, gid)
+		}
+
+		if len(safeToApprove) == 0 {
+			api.RespondWithPayload(w, false, "All selected GL accounts are blocked from deletion", map[string]interface{}{
+				"blocked": blockedGLAccounts,
+			})
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrTxStartFailed)
@@ -1420,7 +1448,7 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		query := `UPDATE auditactionglaccount SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE gl_account_id = ANY($3) RETURNING action_id, gl_account_id, actiontype`
-		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToApprove)
+		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, safeToApprove)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to approve GL account actions")
 			if statusCode == http.StatusOK {
@@ -1446,6 +1474,9 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(deleteIDs) > 0 {
+			for _, gid := range deleteIDs {
+				_ = dependency.CascadeDelete(ctx, pgxPool, "masterglaccount", gid, checkerBy)
+			}
 			updQ := `UPDATE masterglaccount SET is_deleted=true WHERE gl_account_id = ANY($1)`
 			if _, err := tx.Exec(ctx, updQ, deleteIDs); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to set is_deleted: "+err.Error())
@@ -1455,7 +1486,7 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
-		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
+		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated, "blocked": blockedGLAccounts}
 		if !success {
 			resp["message"] = constants.ErrNoRowsUpdated
 		}

@@ -1230,7 +1230,29 @@ func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []str
 		q = baseSQL + " WHERE m.confirmation_id = ANY($1) ORDER BY m.confirmation_id"
 		args = []interface{}{ids}
 	} else {
-		q = baseSQL + " WHERE COALESCE(m.is_deleted, false) = false ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+		args = []interface{}{}
+		pos := 1
+		where := " WHERE COALESCE(m.is_deleted, false) = false"
+		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
+			where += fmt.Sprintf(" AND (COALESCE(i.entity_name,'') = '' OR i.entity_name = ANY($%d::text[]))", pos)
+			args = append(args, entityNames)
+			pos++
+		}
+		if schemeRefs := suiteMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			where += fmt.Sprintf(" AND i.scheme_id = ANY($%d::text[])", pos)
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := suiteMFFolioRefs(ctx); len(folioRefs) > 0 {
+			where += fmt.Sprintf(" AND (COALESCE(i.folio_id,'') = '' OR i.folio_id = ANY($%d::text[]))", pos)
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := suiteMFDematRefs(ctx); len(dematRefs) > 0 {
+			where += fmt.Sprintf(" AND (COALESCE(i.demat_id,'') = '' OR i.demat_id = ANY($%d::text[]))", pos)
+			args = append(args, dematRefs)
+		}
+		q = baseSQL + where + " ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
 	}
 
 	rows, err := pgxPool.Query(ctx, q, args...)
@@ -1404,10 +1426,32 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				d.default_settlement_account = i.demat_id OR
 				d.demat_account_number = i.demat_id
 			)
-			ORDER BY m.nav_date DESC, m.initiation_id;
 		`
+		args := []interface{}{}
+		pos := 1
+		where := " WHERE 1=1"
+		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
+			where += fmt.Sprintf(" AND (COALESCE(i.entity_name,'') = '' OR i.entity_name = ANY($%d::text[]))", pos)
+			args = append(args, entityNames)
+			pos++
+		}
+		if schemeRefs := suiteMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			where += fmt.Sprintf(" AND i.scheme_id = ANY($%d::text[])", pos)
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := suiteMFFolioRefs(ctx); len(folioRefs) > 0 {
+			where += fmt.Sprintf(" AND (COALESCE(i.folio_id,'') = '' OR i.folio_id = ANY($%d::text[]))", pos)
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := suiteMFDematRefs(ctx); len(dematRefs) > 0 {
+			where += fmt.Sprintf(" AND (COALESCE(i.demat_id,'') = '' OR i.demat_id = ANY($%d::text[]))", pos)
+			args = append(args, dematRefs)
+		}
+		q += where + " ORDER BY m.nav_date DESC, m.initiation_id"
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
@@ -1536,10 +1580,31 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE 
 				UPPER(l.processing_status) = 'APPROVED'
 				AND COALESCE(m.is_deleted,false)=false
-			ORDER BY m.nav_date DESC;
 		`
+		args := []interface{}{}
+		pos := 1
+		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
+			q += fmt.Sprintf(" AND (COALESCE(i.entity_name,'') = '' OR i.entity_name = ANY($%d::text[]))", pos)
+			args = append(args, entityNames)
+			pos++
+		}
+		if schemeRefs := suiteMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			q += fmt.Sprintf(" AND i.scheme_id = ANY($%d::text[])", pos)
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := suiteMFFolioRefs(ctx); len(folioRefs) > 0 {
+			q += fmt.Sprintf(" AND (COALESCE(i.folio_id,'') = '' OR i.folio_id = ANY($%d::text[]))", pos)
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := suiteMFDematRefs(ctx); len(dematRefs) > 0 {
+			q += fmt.Sprintf(" AND (COALESCE(i.demat_id,'') = '' OR i.demat_id = ANY($%d::text[]))", pos)
+			args = append(args, dematRefs)
+		}
+		q += " ORDER BY m.nav_date DESC"
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return

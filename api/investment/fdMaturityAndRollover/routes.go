@@ -1,16 +1,25 @@
 package fdMaturityAndRollover
 
 import (
-	"CimplrCorpSaas/api"
-	"database/sql"
 	"net/http"
+
+	middlewares "CimplrCorpSaas/api/middlewares"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // RegisterFDMaturityRoutes wires all FD Closure / Maturity lifecycle endpoints into the given mux.
-func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB) {
-	mid := api.BusinessUnitMiddleware(db)
+// Middleware chain: Session → GlobalIndependent → GlobalDependent → InvestmentFD
+func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
+	mid := func(h http.Handler) http.Handler {
+		return middlewares.SessionMiddleware(pool)(
+			middlewares.GlobalIndependentMiddleware(pool)(
+				middlewares.GlobalDependentMiddleware(pool)(
+					middlewares.InvestmentFDMiddleware(pool)(h),
+				),
+			),
+		)
+	}
 
 	mux.Handle("/investment/fd/closure/maturity-dashboard",
 		mid(http.HandlerFunc(GetFDsNearMaturity(pool))))
@@ -42,16 +51,6 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 		mid(http.HandlerFunc(GetFDMaturitySummary(pool))))
 	mux.Handle("/investment/fd/closure/maturity-summary",
 		mid(http.HandlerFunc(CimplrMaturitySummary(pool))))
-	mux.Handle("/investment/fd/closure/maturity-summary/files/list",
-		mid(http.HandlerFunc(CimplrMaturitySummaryFilesList(pool))))
-	mux.Handle("/investment/fd/closure/maturity-summary/files/download",
-		mid(http.HandlerFunc(CimplrMaturitySummaryFilesDownload(pool))))
-	mux.Handle("/investment/fd/closure/maturity-summary/files/download-bulk",
-		mid(http.HandlerFunc(CimplrMaturitySummaryFilesDownloadBulk(pool))))
-	mux.Handle("/investment/fd/closure/maturity-summary/files/upload",
-		mid(http.HandlerFunc(CimplrMaturitySummaryFilesUpload(pool))))
-	mux.Handle("/investment/fd/closure/maturity-summary/files/audit",
-		mid(http.HandlerFunc(CimplrMaturitySummaryFilesAudit(pool))))
 
 	mux.Handle("/investment/fd/closure/audit",
 		mid(http.HandlerFunc(GetClosureAuditHandler(pool))))

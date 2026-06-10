@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/dependency"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -180,7 +181,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get context-based access controls
-		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		approvedEntities := api.GetEntityNamesFromCtx(ctx)
 		if len(approvedEntities) == 0 {
 			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
 			return
@@ -460,7 +461,7 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Validate entity access
-		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		approvedEntities := api.GetEntityNamesFromCtx(ctx)
 		entityFound := false
 		for _, e := range approvedEntities {
 			if strings.EqualFold(e, req.EntityName) {
@@ -592,7 +593,7 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		approvedEntities := api.GetEntityNamesFromCtx(ctx)
 		approvedDPs, _ := ctx.Value("ApprovedDPs").([]map[string]string)
 		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 
@@ -1023,6 +1024,23 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE approvals only
+		pendingDel := dependency.GetPendingDeleteIDs(r.Context(), pgxPool, "investment.auditactiondemat", "demat_id", req.DematIDs)
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "masterdemataccount", pendingDel)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.DematIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.DematIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 		checkerBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -1060,6 +1078,7 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var toApprove []string
 		var toDeleteActionIDs []string
 		var deleteMasterIDs []string
+		var blockedDemats []map[string]interface{}
 
 		for rows.Next() {
 			var aid, did, atype, pstatus string
@@ -1071,6 +1090,15 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if ps == constants.StatusPendingDeleteApproval {
+				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterdemataccount", did)
+				if len(blockers) > 0 {
+					blockedDemats = append(blockedDemats, map[string]interface{}{
+						"demat_id":   did,
+						"blocked_by": dependency.BlockersSummary(blockers),
+					})
+					continue
+				}
+
 				toDeleteActionIDs = append(toDeleteActionIDs, aid)
 				deleteMasterIDs = append(deleteMasterIDs, did)
 				continue
@@ -1129,6 +1157,7 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"approved_action_ids": toApprove,
 			"deleted_demats":      deleteMasterIDs,
+			"blocked":             blockedDemats,
 		})
 	}
 }
@@ -1236,7 +1265,7 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Get context-based filtering
-		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		approvedEntities := api.GetEntityNamesFromCtx(ctx)
 		if len(approvedEntities) == 0 {
 			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
 			return
@@ -1374,7 +1403,7 @@ func GetApprovedActiveDemats(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Get context-based filtering
-		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		approvedEntities := api.GetEntityNamesFromCtx(ctx)
 		if len(approvedEntities) == 0 {
 			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
 			return

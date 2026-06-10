@@ -12,6 +12,8 @@ type varianceListFilters struct {
 	ReconcileRunID  string
 	FdID            string
 	ExceptionStatus string
+	EntityIDs       []string
+	BankIDs         []string
 }
 
 // loadVarianceListRows returns exceptions with latest audit row (ordered by latest audit time).
@@ -73,6 +75,9 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 			aie.sla_deadline,
 			COALESCE(aie.is_escalated,false)
 		FROM investment.fd_receipt_exception e
+		LEFT JOIN investment.fd_master m
+			ON m.fd_id = e.fd_id
+			AND COALESCE(m.is_deleted,false) = false
 		LEFT JOIN uam.approval_instance ai
 			ON ai.record_id = e.exception_id
 			AND ai.module_code = 'FIXED_DEPOSIT'
@@ -119,6 +124,16 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 	if f.ExceptionStatus != "" {
 		sql += fmt.Sprintf(" AND e.exception_status=$%d", argIdx)
 		args = append(args, f.ExceptionStatus)
+		argIdx++
+	}
+	if len(f.EntityIDs) > 0 {
+		sql += fmt.Sprintf(" AND m.entity_id = ANY($%d::text[])", argIdx)
+		args = append(args, f.EntityIDs)
+		argIdx++
+	}
+	if len(f.BankIDs) > 0 {
+		sql += fmt.Sprintf(" AND (m.bank_id = '' OR m.bank_id = ANY($%d::text[]))", argIdx)
+		args = append(args, f.BankIDs)
 		argIdx++
 	}
 	sql += " ORDER BY COALESCE(la.requested_at, e.raised_at) DESC NULLS LAST"

@@ -149,7 +149,7 @@ func getInvestmentDashboardCacheEntry(key string, now time.Time) (investmentDash
 	investmentDashboardCacheState.Lock()
 	defer investmentDashboardCacheState.Unlock()
 	entry, ok := investmentDashboardCacheState.entries[key]
-	if !ok || now.After(entry.expires) {
+	if now.After(entry.expires) {
 		if ok {
 			delete(investmentDashboardCacheState.entries, key)
 		}

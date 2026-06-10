@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/dash/ticker"
 
@@ -37,6 +38,47 @@ func cleanFilter(val string) string {
 		return ""
 	}
 	return v
+}
+
+func normalizedLower(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if s := strings.ToLower(strings.TrimSpace(value)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func normalizedUpper(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if s := strings.ToUpper(strings.TrimSpace(value)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func approvedAccountNumbers(ctx context.Context) []string {
+	accounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
+	out := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		if s := strings.TrimSpace(account["account_number"]); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func containsString(values []string, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // GetLandingCashDashboard returns aggregated data for the landing page cash dashboard.
@@ -113,6 +155,30 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		allowedAccounts := approvedAccountNumbers(ctx)
+		allowedBanks := normalizedLower(api.GetBankNamesFromCtx(ctx))
+		allowedCurrencies := normalizedUpper(api.GetCurrencyCodesFromCtx(ctx))
+		if len(allowedEntityIDs) == 0 || len(allowedAccounts) == 0 || len(allowedBanks) == 0 || len(allowedCurrencies) == 0 {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			return
+		}
+		if filterEntity != "" && !api.IsEntityAllowed(ctx, filterEntity) {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			return
+		}
+		if filterBank != "" && !api.IsBankAllowed(ctx, filterBank) {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			return
+		}
+		if filterAccount != "" && !containsString(allowedAccounts, filterAccount) {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			return
+		}
+		if filterCurrency != "" && !api.IsCurrencyAllowed(ctx, filterCurrency) {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			return
+		}
 
 		// ── Determine date window ──
 		// Always backward-looking: end = today (or to_date), start = end - horizon (or from_date).
@@ -174,6 +240,10 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND ($3 = '' OR mba.account_number                      = $3)
 				  AND ($4 = '' OR mba.entity_id::text                     = $4)
 				  AND ($5 = '' OR UPPER(TRIM(COALESCE(mba.currency, ''))) = UPPER(TRIM($5)))
+				  AND mba.entity_id::text = ANY($6)
+				  AND mba.account_number = ANY($7)
+				  AND LOWER(TRIM(COALESCE(mba.bank_name, ''))) = ANY($8)
+				  AND UPPER(TRIM(COALESCE(mba.currency, ''))) = ANY($9)
 				ORDER BY mba.account_number, COALESCE(tx.transaction_date, tx.value_date) DESC, tx.transaction_id DESC
 			)
 			SELECT
@@ -189,7 +259,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN masterentitycash me  ON me.entity_id::text = mba.entity_id
 			ORDER BY lab.account_no
 			`
-			qArgs = []interface{}{filterAsOnDate, filterBank, filterAccount, filterEntity, filterCurrency}
+			qArgs = []interface{}{filterAsOnDate, filterBank, filterAccount, filterEntity, filterCurrency, allowedEntityIDs, allowedAccounts, allowedBanks, allowedCurrencies}
 		} else {
 			// Manual approved balance snapshot within the date window
 			q = `
@@ -212,6 +282,10 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND ($4 = '' OR UPPER(TRIM(COALESCE(bbm.currency_code, '')))            = UPPER(TRIM($4)))
 				  AND ($5 = '' OR bbm.as_of_date >= $5::date)
 				  AND ($6 = '' OR bbm.as_of_date <= $6::date)
+				  AND mba.entity_id::text = ANY($7)
+				  AND mba.account_number = ANY($8)
+				  AND LOWER(TRIM(COALESCE(mba.bank_name, ''))) = ANY($9)
+				  AND UPPER(TRIM(COALESCE(bbm.currency_code, ''))) = ANY($10)
 				ORDER BY bbm.account_no, bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
 			)
 			SELECT
@@ -227,7 +301,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN masterentitycash me  ON me.entity_id::text = mba.entity_id
 			ORDER BY lab.account_no
 			`
-			qArgs = []interface{}{filterBank, filterAccount, filterEntity, filterCurrency, balDateStart, balDateEnd}
+			qArgs = []interface{}{filterBank, filterAccount, filterEntity, filterCurrency, balDateStart, balDateEnd, allowedEntityIDs, allowedAccounts, allowedBanks, allowedCurrencies}
 		}
 
 		rows, err := pgxPool.Query(ctx, q, qArgs...)
@@ -326,6 +400,10 @@ WHERE t.value_date BETWEEN $1 AND $2
   AND ($4 = '' OR m.account_number            = $4)
   AND ($5 = '' OR m.entity_id::text           = $5)
   AND ($6 = '' OR UPPER(TRIM(COALESCE(m.currency,''))) = UPPER(TRIM($6)))
+  AND m.entity_id::text = ANY($7)
+  AND m.account_number = ANY($8)
+  AND LOWER(TRIM(COALESCE(m.bank_name, ''))) = ANY($9)
+  AND UPPER(TRIM(COALESCE(m.currency, ''))) = ANY($10)
 GROUP BY COALESCE(NULLIF(m.currency,''),'INR')`
 		}
 
@@ -336,8 +414,15 @@ GROUP BY COALESCE(NULLIF(m.currency,''),'INR')`
 
 		var rawCount int
 		if err := pgxPool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM cimplrcorpsaas.cashflow_projection_monthly cpm WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2`,
-			monthStartKey, monthEndKey,
+			`SELECT COUNT(*)
+			FROM cimplrcorpsaas.cashflow_projection_monthly cpm
+			JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
+			JOIN cimplrcorpsaas.cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
+			LEFT JOIN masterentitycash me ON LOWER(TRIM(me.entity_name)) = LOWER(TRIM(COALESCE(cpi.entity_name,'')))
+			WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
+			  AND me.entity_id::text = ANY($3)
+			  AND UPPER(TRIM(COALESCE(cp.base_currency_code, cpi.currency_code, ''))) = ANY($4)`,
+			monthStartKey, monthEndKey, allowedEntityIDs, allowedCurrencies,
 		).Scan(&rawCount); err != nil {
 			logger.LogError("[DEBUG] diag raw count error: %v", err)
 		} else {
@@ -360,10 +445,12 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
   AND aa.processing_status = 'APPROVED'
   AND ($3 = '' OR me.entity_id::text = $3)
   AND ($4 = '' OR UPPER(TRIM(COALESCE(cp.base_currency_code,''))) = UPPER(TRIM($4)))
+  AND me.entity_id::text = ANY($5)
+  AND UPPER(TRIM(COALESCE(cp.base_currency_code, cpi.currency_code, ''))) = ANY($6)
 GROUP BY COALESCE(NULLIF(cpi.currency_code,''), COALESCE(cp.base_currency_code,'INR'))`
 
 		var projectedInflowsINR, projectedOutflowsINR float64
-		if aggRows, err := pgxPool.Query(ctx, projAggQ, monthStartKey, monthEndKey, filterEntity, filterCurrency); err != nil {
+		if aggRows, err := pgxPool.Query(ctx, projAggQ, monthStartKey, monthEndKey, filterEntity, filterCurrency, allowedEntityIDs, allowedCurrencies); err != nil {
 			logger.LogError("[DEBUG] projection agg error: %v", err)
 		} else {
 			for aggRows.Next() {
@@ -391,11 +478,13 @@ LEFT JOIN LATERAL (
 WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
   AND aa.processing_status = 'APPROVED'
   AND ($3 = '' OR me.entity_id::text = $3)
-  AND ($4 = '' OR UPPER(TRIM(COALESCE(cp.base_currency_code,''))) = UPPER(TRIM($4)))`
+  AND ($4 = '' OR UPPER(TRIM(COALESCE(cp.base_currency_code,''))) = UPPER(TRIM($4)))
+  AND me.entity_id::text = ANY($5)
+  AND UPPER(TRIM(COALESCE(cp.base_currency_code, cpi.currency_code, ''))) = ANY($6)`
 
 		projectedDailyInflow := map[string]float64{}
 		projectedDailyOutflow := map[string]float64{}
-		if projRows, err := pgxPool.Query(ctx, projDetailQ, monthStartKey, monthEndKey, filterEntity, filterCurrency); err != nil {
+		if projRows, err := pgxPool.Query(ctx, projDetailQ, monthStartKey, monthEndKey, filterEntity, filterCurrency, allowedEntityIDs, allowedCurrencies); err != nil {
 			logger.LogError("[DEBUG] projection detail error: %v", err)
 		} else {
 			for projRows.Next() {
@@ -508,7 +597,16 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 			wsStr := ws.Format(constants.DateFormat)
 			weStr := we.Format(constants.DateFormat)
 
-			filters := txnRangeFilters{Bank: filterBank, Account: filterAccount, Entity: filterEntity, Currency: filterCurrency}
+			filters := txnRangeFilters{
+				Bank:              filterBank,
+				Account:           filterAccount,
+				Entity:            filterEntity,
+				Currency:          filterCurrency,
+				AllowedEntityIDs:  allowedEntityIDs,
+				AllowedAccounts:   allowedAccounts,
+				AllowedBankNames:  allowedBanks,
+				AllowedCurrencies: allowedCurrencies,
+			}
 			aIn := sumTxnRange(ctx, pgxPool, txnFilter("t.deposit_amount"), wsStr, weStr, filters)
 			aOut := sumTxnRange(ctx, pgxPool, txnFilter("t.withdrawal_amount"), wsStr, weStr, filters)
 
@@ -548,16 +646,20 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 }
 
 type txnRangeFilters struct {
-	Bank     string
-	Account  string
-	Entity   string
-	Currency string
+	Bank              string
+	Account           string
+	Entity            string
+	Currency          string
+	AllowedEntityIDs  []string
+	AllowedAccounts   []string
+	AllowedBankNames  []string
+	AllowedCurrencies []string
 }
 
 // sumTxnRange executes a transaction aggregation query for the given period and filters,
 // returns the total in INR.
 func sumTxnRange(ctx context.Context, pgxPool *pgxpool.Pool, q, startStr, endStr string, f txnRangeFilters) float64 {
-	rs, err := pgxPool.Query(ctx, q, startStr, endStr, f.Bank, f.Account, f.Entity, f.Currency)
+	rs, err := pgxPool.Query(ctx, q, startStr, endStr, f.Bank, f.Account, f.Entity, f.Currency, f.AllowedEntityIDs, f.AllowedAccounts, f.AllowedBankNames, f.AllowedCurrencies)
 	if err != nil {
 		return 0
 	}

@@ -66,6 +66,10 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, err.Error())
 			return
 		}
+		if msg := validateBankLimitRecordScope(ctx, pgxPool, req.LimitID, req.CurrencyCode); msg != "" {
+			api.RespondWithResult(w, false, msg)
+			return
+		}
 
 		entryMode := strings.ToUpper(strings.TrimSpace(req.EntryMode))
 		if entryMode == "" {
@@ -335,6 +339,8 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "failed to fetch current utilization: "+err.Error())
 			return
 		}
+		effectiveLimitID := stringOrEmpty(curLimitID)
+		effectiveCurrency := stringOrEmpty(curCurrency)
 
 		oldSets := []string{}
 		newSets := []string{}
@@ -358,6 +364,7 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			switch strings.ToLower(k) {
 			case "limit_id":
 				if s, ok := v.(string); ok {
+					effectiveLimitID = s
 					addStr("limit_id", s)
 				}
 			case "utilization_date":
@@ -366,7 +373,8 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			case "currency_code":
 				if s, ok := v.(string); ok {
-					addStr("currency_code", strings.ToUpper(s))
+					effectiveCurrency = strings.ToUpper(s)
+					addStr("currency_code", effectiveCurrency)
 				}
 			case "utilized_amount":
 				switch t := v.(type) {
@@ -390,6 +398,10 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(newSets) == 0 {
 			api.RespondWithResult(w, false, "no valid fields provided to update")
+			return
+		}
+		if msg := validateBankLimitRecordScope(ctx, pgxPool, effectiveLimitID, effectiveCurrency); msg != "" {
+			api.RespondWithResult(w, false, msg)
 			return
 		}
 
@@ -640,6 +652,13 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				continue
 			}
+			if msg := validateLimitCashScope(ctx, map[string]interface{}{
+				"entity_name":   lEntityName,
+				"bank_name":     lBankName,
+				"currency_code": currencyCode,
+			}); msg != "" {
+				continue
+			}
 
 			// KPI computations: available headroom and utilization percentage
 			var lInitial float64
@@ -805,6 +824,13 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				continue
 			}
+			if msg := validateLimitCashScope(ctx, map[string]interface{}{
+				"entity_name":   lEntityName,
+				"bank_name":     lBankName,
+				"currency_code": currencyCode,
+			}); msg != "" {
+				continue
+			}
 
 			// KPI computations for approved utilizations
 			var lInitial float64
@@ -928,6 +954,13 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&lSanctionDate, &lEffectiveDate, &lLimitCurrencyCode, &lSanctionedAmount,
 				&lFungibilityType, &lFungibilityPct, &lSecurityType, &lLimitRemarks, &lInitialUtilization,
 			); err != nil {
+				continue
+			}
+			if msg := validateLimitCashScope(ctx, map[string]interface{}{
+				"entity_name":   lEntityName,
+				"bank_name":     lBankName,
+				"currency_code": currencyCode,
+			}); msg != "" {
 				continue
 			}
 
@@ -1459,6 +1492,12 @@ func processUtilizationRows(ctx context.Context, pgxPool *pgxpool.Pool, rows [][
 			results = append(results, result)
 			continue
 		}
+		if msg := validateBankLimitRecordScope(ctx, pgxPool, limitID, currencyCode); msg != "" {
+			result["success"] = false
+			result["error"] = msg
+			results = append(results, result)
+			continue
+		}
 
 		// Add to valid rows for bulk validation
 		validRows = append(validRows, struct {
@@ -1614,15 +1653,20 @@ func DownloadUtilizationUploadFile(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		var limitID, currencyCode string
 		var uploadS3Key *string
 		err := pgxPool.QueryRow(ctx, `
-			SELECT upload_s3_key
+			SELECT limit_id, COALESCE(currency_code, ''), upload_s3_key
 			FROM cimplrcorpsaas.bank_limit_utilization
 			WHERE utilization_id = $1
 			  AND COALESCE(is_deleted, false) = false
-		`, req.UtilizationID).Scan(&uploadS3Key)
+		`, req.UtilizationID).Scan(&limitID, &currencyCode, &uploadS3Key)
 		if err != nil {
 			api.RespondWithResult(w, false, "utilization not found")
+			return
+		}
+		if msg := validateBankLimitRecordScope(ctx, pgxPool, limitID, currencyCode); msg != "" {
+			api.RespondWithResult(w, false, msg)
 			return
 		}
 
@@ -1669,14 +1713,19 @@ func DownloadSelectedUtilizationUploadFiles(pgxPool *pgxpool.Pool) http.HandlerF
 				continue
 			}
 
+			var limitID, currencyCode string
 			var uploadS3Key *string
 			err := pgxPool.QueryRow(ctx, `
-				SELECT upload_s3_key
+				SELECT limit_id, COALESCE(currency_code, ''), upload_s3_key
 				FROM cimplrcorpsaas.bank_limit_utilization
 				WHERE utilization_id = $1
 				  AND COALESCE(is_deleted, false) = false
-			`, utilizationID).Scan(&uploadS3Key)
+			`, utilizationID).Scan(&limitID, &currencyCode, &uploadS3Key)
 			if err != nil {
+				failedIDs = append(failedIDs, utilizationID)
+				continue
+			}
+			if msg := validateBankLimitRecordScope(ctx, pgxPool, limitID, currencyCode); msg != "" {
 				failedIDs = append(failedIDs, utilizationID)
 				continue
 			}

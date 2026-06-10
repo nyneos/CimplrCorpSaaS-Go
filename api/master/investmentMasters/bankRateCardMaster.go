@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/dependency"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1243,6 +1244,23 @@ func BulkApproveBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE approvals only
+		pendingDel := dependency.GetPendingDeleteIDs(r.Context(), pgxPool, "investment.fd_audit_bank_rate_card", "rate_card_id", req.RateCardIDs)
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "fd_bank_rate_card_master", pendingDel)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.RateCardIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.RateCardIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 		if len(req.RateCardIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRateCardIDsProvided)
 			return

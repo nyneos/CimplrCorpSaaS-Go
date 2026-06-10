@@ -71,7 +71,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		snapshotDate := now.Format(constants.DateFormat)
 
 		ctx := r.Context()
-		entityFilter := req.EntityID
+		entityFilter, scopeMsg := resolveFDDashboardEntity(ctx, req.EntityID)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
+			return
+		}
 		bankFilter := req.Bank
 		fdTypeFilter := req.FDType
 
@@ -136,7 +140,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				      AND COALESCE(cr.is_deleted, false) = false
 				      AND cr.closure_status IN ('COMPLETED','POSTED','CLOSED')
 				  )
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.interest_type_code=$2)
 				  AND ($3::text='' OR m.bank_id=$3)`+snapshotFilter,
 				entityFilter, fdTypeFilter, bankFilter).Scan(&activeAmt, &activeCnt)
@@ -147,7 +151,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted = false
 				  AND m.fd_status = 'PENDING_ACTIVATION'
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.interest_type_code=$2)
 				  AND ($3::text='' OR m.bank_id=$3)`+snapshotFilter,
 				entityFilter, fdTypeFilter, bankFilter).Scan(&pendingAmt, &pendingCnt)
@@ -171,7 +175,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.interest_type_code=$2)
 				  AND ($3::text='' OR m.bank_id=$3)`+snapshotFilter,
 				entityFilter, fdTypeFilter, bankFilter).Scan(&cnt)
@@ -200,7 +204,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_bank_rate_negotiation n
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = n.booking_id
 				WHERE COALESCE(n.is_deleted,false)=false
-				  AND ($1::text='' OR n.entity_id=$1)`+snapNegotiationFilter+`
+				  AND (n.entity_id = ANY(string_to_array($1, ',')))`+snapNegotiationFilter+`
 				ORDER BY n.created_at DESC
 				LIMIT 50`, entityFilter)
 			if err != nil {
@@ -323,7 +327,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    SELECT 1 FROM cimplr.fd_closure_confirm ncc
 				    WHERE ncc.fd_id = m.fd_id AND COALESCE(ncc.is_deleted,false) = false
 				  )
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.interest_type_code=$2)
 				  AND ($3::text='' OR m.bank_id=$3)`+
 				snapshotFilter+`
@@ -401,7 +405,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.interest_type_code=$2)
 				  AND ($3::text='' OR m.bank_id=$3)`+
 				snapshotFilter+`
@@ -440,7 +444,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.interest_type_code=$2)
 				  AND ($3::text='' OR m.bank_id=$3)`+
 				snapshotFilter+`
@@ -503,7 +507,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				      AND COALESCE(cr.is_deleted,false) = false
 				      AND cr.closure_status IN ('COMPLETED','POSTED','CLOSED')
 				  )
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.interest_type_code=$2)
 				  AND ($3::text='' OR m.bank_id=$3)`+
 				snapshotFilter+`
@@ -552,7 +556,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.interest_type_code=$2)
 				  AND ($3::text='' OR m.bank_id=$3)`+
 				snapshotFilter+`
@@ -640,7 +644,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND b.booking_status IN ('APPROVAL_PENDING','SENT_TO_BANK','APPROVED','DRAFT','CONFIRMED','ACTIVE')
-				  AND ($1::text='' OR b.entity_id=$1)`+snapBookingFilter+`
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))`+snapBookingFilter+`
 				ORDER BY b.created_at ASC
 				LIMIT 100`, entityFilter)
 			if err != nil {
@@ -794,7 +798,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE COALESCE(c.is_deleted,false)=false
 				  AND `+sqlConfirmationAwaitingApproval+`
 				  AND `+sqlExcludeTerminalFdOnBooking+`
-				  AND ($1::text='' OR b.entity_id=$1)`+snapConfirmationFilter+`
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))`+snapConfirmationFilter+`
 				ORDER BY c.created_at ASC
 				LIMIT 100`, entityFilter)
 			if err != nil {
@@ -867,7 +871,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE COALESCE(c.is_deleted,false)=false
 				  AND c.confirmation_status IN ('CONFIRMED','APPROVED','VARIANCE_ACCEPTED')
 				  AND `+sqlExcludeTerminalFdOnBooking+`
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				ORDER BY c.created_at DESC
 				LIMIT 100`, entityFilter)
 			if err != nil {
@@ -960,7 +964,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    AND UPPER(COALESCE(ci.closure_type, '')) IN ('ROLLOVER', 'PAYOUT')
 				    AND COALESCE(cc.closure_status, ci.closure_status, '') NOT IN ('POSTED', 'REJECTED', 'DELETED')
 				    AND NOT (`+sqlCimplrClosureProcessed+`)
-				    AND ($1::text = '' OR COALESCE(ci.entity_id, m.entity_id, b.entity_id) = $1)
+				    AND (COALESCE(ci.entity_id, m.entity_id, b.entity_id) = ANY(string_to_array($1, ',')))
 				    AND (ia.requested_at IS NULL OR ia.requested_at <= ('`+snapshotDate+`'::date + INTERVAL '1 day'))`+snapshotFilter+`
 				  UNION ALL
 				  -- ACTIVE FDs maturing soon with no closure initiate yet (needs decision)
@@ -994,7 +998,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				      SELECT 1 FROM investment.fd_closure_request cr2
 				      WHERE cr2.fd_id = m.fd_id AND COALESCE(cr2.is_deleted,false) = false
 				    )
-				    AND ($1::text = '' OR COALESCE(m.entity_id, b.entity_id) = $1)`+snapshotFilter+`
+				    AND (COALESCE(m.entity_id, b.entity_id) = ANY(string_to_array($1, ',')))`+snapshotFilter+`
 				  UNION ALL
 				  SELECT
 				    COALESCE(cr.closure_request_id::text, ''),
@@ -1015,7 +1019,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  WHERE COALESCE(cr.is_deleted, false) = false
 				    AND cr.closure_status = 'PENDING_APPROVAL'
 				    AND cr.created_at <= ('`+snapshotDate+`'::date + INTERVAL '1 day')
-				    AND ($1::text = '' OR COALESCE(m.entity_id, cr.entity_id, b.entity_id) = $1)`+snapshotFilter+`
+				    AND (COALESCE(m.entity_id, cr.entity_id, b.entity_id) = ANY(string_to_array($1, ',')))`+snapshotFilter+`
 				) pending
 				ORDER BY sort_ts ASC, maturity_date ASC NULLS LAST
 				LIMIT 100`, entityFilter)
@@ -1111,7 +1115,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				      )
 				    )
 				  )
-				  AND ($1::text='' OR COALESCE(m.entity_id, b.entity_id)=$1)
+				  AND (COALESCE(m.entity_id, b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.interest_type_code=$2)
 				  AND ($3::text='' OR m.bank_id=$3)`+
 				snapshotFilter+`
@@ -1184,7 +1188,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.interest_type_code=$2)
 				  AND ($3::text='' OR m.bank_id=$3)`+
 				snapshotFilter+`
@@ -1318,7 +1322,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND i.module_code = 'FIXED_DEPOSIT'
 				  AND i.submitted_at >= $1::date
 				  AND i.submitted_at <= ('`+snapshotDate+`'::date + INTERVAL '1 day')
-				  AND ($2::text='' OR i.entity_code=$2 OR b.entity_id=$2)
+				  AND (i.entity_code=$2 OR b.entity_id = ANY(string_to_array($2, ',')))
 				GROUP BY i.instance_id, i.transaction_type, i.record_id, i.status,
 				         i.submitted_by_email, i.submitted_at, i.resolved_by_email, i.resolved_at
 				ORDER BY i.submitted_at DESC
@@ -1424,7 +1428,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR b.entity_id=$1)`,
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))`,
 				entityFilter, startDateStr, endDateStr).Scan(&bkTotal, &bkApprovalPending, &bkAmt)
 
 			var apTotal int64
@@ -1435,7 +1439,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE is_deleted=false
 				  AND booking_status='APPROVED'
 				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR entity_id=$1)`,
+				  AND (entity_id = ANY(string_to_array($1, ',')))`,
 				entityFilter, startDateStr, endDateStr).Scan(&apTotal, &apAmt)
 
 			var sentTotal, sentStuck int64
@@ -1448,7 +1452,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE is_deleted=false
 				  AND booking_status='SENT_TO_BANK'
 				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR entity_id=$1)`,
+				  AND (entity_id = ANY(string_to_array($1, ',')))`,
 				entityFilter, startDateStr, endDateStr).Scan(&sentTotal, &sentStuck, &sentAmt)
 
 			var confTotal int64
@@ -1462,7 +1466,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND COALESCE(b.created_at, c.created_at) >= $2::date
 				  AND COALESCE(b.created_at, c.created_at) <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR COALESCE(b.entity_id,m.entity_id)=$1)`,
+				  AND (COALESCE(b.entity_id,m.entity_id) = ANY(string_to_array($1, ',')))`,
 				entityFilter, startDateStr, endDateStr).Scan(&confTotal, &confAmt)
 
 			var activeTotal int64
@@ -1472,7 +1476,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master
 				WHERE is_deleted=false
 				  AND fd_status='ACTIVE'
-				  AND ($1::text='' OR entity_id=$1)`, entityFilter).Scan(&activeTotal, &activeAmt)
+				  AND (entity_id = ANY(string_to_array($1, ',')))`, entityFilter).Scan(&activeTotal, &activeAmt)
 
 			var maturedTotal int64
 			var maturedAmt float64
@@ -1481,7 +1485,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master
 				WHERE is_deleted=false
 				  AND fd_status IN ('MATURED','CLOSED')
-				  AND ($1::text='' OR entity_id=$1)`, entityFilter).Scan(&maturedTotal, &maturedAmt)
+				  AND (entity_id = ANY(string_to_array($1, ',')))`, entityFilter).Scan(&maturedTotal, &maturedAmt)
 
 			stages := []stage{
 				{ID: "booking", Label: "Booking Created", Count: bkTotal, Amount: fdRound(bkAmt, 2), Stuck: bkApprovalPending, StuckLabel: "awaiting approval"},
@@ -1537,7 +1541,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE ir.is_deleted = false
 				  AND ir.reconcile_status = 'MATCHED'
 				  AND ir.receipt_date <= ('`+snapshotDate+`'::date)
-				  AND ($1::text='' OR ir.entity_id=$1)
+				  AND (ir.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR ir.bank_id=$2)`,
 				entityFilter, bankFilter).Scan(&mtd, &qtd, &ytd, &received)
 			if err != nil {

@@ -30,6 +30,13 @@ func DownloadSelectedSweepPlanningAdditionalFilesHandler(pool *pgxpool.Pool) htt
 	return additionalfiles.NewDownloadSelectedHandler(pool, sweepPlanningAdditionalFilesConfig())
 }
 
+func DownloadSweepPlanningPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, sweepPlanningAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "Sweep Planning",
+		IDField:     "sweep_id",
+	})
+}
+
 func DeleteSweepPlanningAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, sweepPlanningAdditionalFilesConfig())
 }
@@ -60,6 +67,13 @@ func DownloadSweepInitiationAdditionalFileHandler(pool *pgxpool.Pool) http.Handl
 
 func DownloadSelectedSweepInitiationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDownloadSelectedHandler(pool, sweepInitiationAdditionalFilesConfig())
+}
+
+func DownloadSweepInitiationPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, sweepInitiationAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "Sweep Initiation",
+		IDField:     "initiation_id",
+	})
 }
 
 func DeleteSweepInitiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {

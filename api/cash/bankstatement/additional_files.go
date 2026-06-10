@@ -1,9 +1,9 @@
 package bankstatement
 
 import (
-	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"errors"
 	"strings"
@@ -32,6 +32,14 @@ func DownloadSelectedAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc
 	return additionalfiles.NewDownloadSelectedHandler(pool, bankStatementAdditionalFilesConfig())
 }
 
+func DownloadBankStatementPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, bankStatementAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "Bank Statement",
+		IDField:     "bank_statement_id",
+		LoadMain:    loadBankStatementPackageMainFile,
+	})
+}
+
 func DeleteAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, bankStatementAdditionalFilesConfig())
 }
@@ -49,7 +57,7 @@ func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func bankStatementAdditionalFilesConfig() additionalfiles.Config {
-	return additionalfiles.Config{
+	return additionalfiles.WithCashCrossStageVisibility(additionalfiles.Config{
 		Module:                "bankstatement",
 		AuditSource:           "BANK_STATEMENT",
 		ParentIDField:         "bank_statement_id",
@@ -61,7 +69,7 @@ func bankStatementAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteBankStatementAdditionalFile,
 		SoftDeleteTx:          deleteBankStatementAdditionalFileTx,
 		RecordMainUploadAudit: recordBankStatementMainUploadAudit,
-	}
+	})
 }
 
 func recordBankStatementMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
@@ -69,7 +77,7 @@ func recordBankStatementMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID
 }
 
 func listBankStatementAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
-	entityIDs := api.GetEntityIDsFromCtx(ctx)
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	if len(entityIDs) == 0 {
 		return nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
@@ -85,8 +93,27 @@ func listBankStatementAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, p
 	`, parentID, entityIDs)
 }
 
-func createBankStatementAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
+func loadBankStatementPackageMainFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
 	entityIDs := api.GetEntityIDsFromCtx(ctx)
+	if len(entityIDs) == 0 {
+		return nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
+	}
+
+	var uploadS3Key string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(upload_s3_key, '')
+		FROM cimplrcorpsaas.bank_statements
+		WHERE bank_statement_id = $1
+		  AND entity_id = ANY($2)
+	`, rowID, entityIDs).Scan(&uploadS3Key)
+	if err != nil || strings.TrimSpace(uploadS3Key) == "" {
+		return nil, err
+	}
+	return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
+}
+
+func createBankStatementAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	if len(entityIDs) == 0 {
 		return "", errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
@@ -115,7 +142,7 @@ func getAnyBankStatementAdditionalFile(ctx context.Context, pool *pgxpool.Pool, 
 }
 
 func getBankStatementAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
-	entityIDs := api.GetEntityIDsFromCtx(ctx)
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	if len(entityIDs) == 0 {
 		return nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
@@ -137,7 +164,7 @@ func getBankStatementAdditionalFileWithDeleted(ctx context.Context, pool *pgxpoo
 }
 
 func getBankStatementAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]additionalfiles.FileRecord, []string, error) {
-	entityIDs := api.GetEntityIDsFromCtx(ctx)
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	if len(entityIDs) == 0 {
 		return nil, nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
@@ -173,7 +200,7 @@ type bankStatementFileExec interface {
 }
 
 func deleteBankStatementAdditionalFileExec(ctx context.Context, exec bankStatementFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
-	entityIDs := api.GetEntityIDsFromCtx(ctx)
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	if len(entityIDs) == 0 {
 		return false, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}

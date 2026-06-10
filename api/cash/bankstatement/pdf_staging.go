@@ -6,13 +6,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
 )
@@ -20,9 +22,9 @@ import (
 // ── DB helpers ────────────────────────────────────────────────────────────────
 
 // insertStagingBatch creates a new batch row and returns its ID.
-func insertStagingBatch(ctx context.Context, db *sql.DB, userID, sourceFilename string, totalFiles int) (string, error) {
+func insertStagingBatch(ctx context.Context, pool *pgxpool.Pool, userID, sourceFilename string, totalFiles int) (string, error) {
 	var batchID string
-	err := db.QueryRowContext(ctx, `
+	err := pool.QueryRow(ctx, `
 		INSERT INTO cimplrcorpsaas.pdf_staging_batch
 		    (user_id, source_filename, status, total_files)
 		VALUES ($1, $2, 'processing', $3)
@@ -43,7 +45,7 @@ type insertStagingStatementParams struct {
 }
 
 // insertStagingStatement creates a statement row inside a batch.
-func insertStagingStatement(ctx context.Context, db *sql.DB, p insertStagingStatementParams) (string, error) {
+func insertStagingStatement(ctx context.Context, pool *pgxpool.Pool, p insertStagingStatementParams) (string, error) {
 	raw, err := json.Marshal(p.RawStatement)
 	if err != nil {
 		return "", fmt.Errorf("marshal raw_statement: %w", err)
@@ -53,7 +55,7 @@ func insertStagingStatement(ctx context.Context, db *sql.DB, p insertStagingStat
 	if p.ErrMsg != "" {
 		errMsgParam = p.ErrMsg
 	}
-	err = db.QueryRowContext(ctx, `
+	err = pool.QueryRow(ctx, `
 		INSERT INTO cimplrcorpsaas.pdf_staging_statement
 		    (batch_id, original_filename, csv_url, raw_statement, status, error_message)
 		VALUES ($1, $2, $3, $4, $5, $6)
@@ -63,14 +65,14 @@ func insertStagingStatement(ctx context.Context, db *sql.DB, p insertStagingStat
 }
 
 // finaliseStagingBatch updates processed/failed counts and resolves the batch status.
-func finaliseStagingBatch(ctx context.Context, db *sql.DB, batchID string, processed, failed int) error {
+func finaliseStagingBatch(ctx context.Context, pool *pgxpool.Pool, batchID string, processed, failed int) error {
 	status := "ready"
 	if failed > 0 && processed == 0 {
 		status = "processing" // all failed — leave as processing so front-end shows error
 	} else if failed > 0 {
 		status = "partial_ready"
 	}
-	_, err := db.ExecContext(ctx, `
+	_, err := pool.Exec(ctx, `
 		UPDATE cimplrcorpsaas.pdf_staging_batch
 		   SET processed_files = $1, failed_files = $2, status = $3, updated_at = now()
 		 WHERE batch_id = $4
@@ -89,8 +91,8 @@ func stagingStatementDisplayStatus(dbStatus string, committedBSID sql.NullString
 }
 
 // markStagingStatementCommitted records the bank_statement_id after a commit.
-func markStagingStatementCommitted(ctx context.Context, db *sql.DB, stagingID, bankStatementID string) error {
-	_, err := db.ExecContext(ctx, `
+func markStagingStatementCommitted(ctx context.Context, pool *pgxpool.Pool, stagingID, bankStatementID string) error {
+	_, err := pool.Exec(ctx, `
 		UPDATE cimplrcorpsaas.pdf_staging_statement
 		   SET status = 'committed', committed_bs_id = $1, updated_at = now()
 		 WHERE staging_id = $2
@@ -102,7 +104,7 @@ func markStagingStatementCommitted(ctx context.Context, db *sql.DB, stagingID, b
 
 // GetStagingBatchHandler returns batch metadata and a summary of its statements.
 // POST {"batch_id":"..."}
-func GetStagingBatchHandler(db *sql.DB) http.Handler {
+func GetStagingBatchHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			BatchID string `json:"batch_id"`
@@ -128,14 +130,14 @@ func GetStagingBatchHandler(db *sql.DB) http.Handler {
 			failed         int
 			createdAt      time.Time
 		)
-		err := db.QueryRowContext(ctx, `
+		err := pool.QueryRow(ctx, `
 			SELECT batch_id, user_id, source_filename, status,
 			       total_files, processed_files, failed_files, created_at
 			FROM cimplrcorpsaas.pdf_staging_batch
 			WHERE batch_id = $1 AND user_id = $2
 		`, body.BatchID, sessionUID).Scan(&batchID, &userID, &sourceFilename, &status,
 			&totalFiles, &processed, &failed, &createdAt)
-		if err == sql.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 			respondWithError(w, nil, "batch not found", http.StatusNotFound)
 			return
 		}
@@ -144,7 +146,7 @@ func GetStagingBatchHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		rows, err := db.QueryContext(ctx, `
+		rows, err := pool.Query(ctx, `
 			SELECT staging_id, original_filename, csv_url, status, error_message,
 			       committed_bs_id, created_at
 			FROM cimplrcorpsaas.pdf_staging_statement
@@ -211,7 +213,7 @@ func GetStagingBatchHandler(db *sql.DB) http.Handler {
 // GetStagingStatementHandler returns a single staged statement including its
 // raw_statement JSON so the front-end can display and edit transactions.
 // POST {"staging_id":"..."}
-func GetStagingStatementHandler(db *sql.DB) http.Handler {
+func GetStagingStatementHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			StagingID string `json:"staging_id"`
@@ -238,7 +240,7 @@ func GetStagingStatementHandler(db *sql.DB) http.Handler {
 			committedID sql.NullString
 			createdAt   time.Time
 		)
-		err := db.QueryRowContext(ctx, `
+		err := pool.QueryRow(ctx, `
 			SELECT s.staging_id, s.batch_id, s.original_filename, s.csv_url,
 			       s.raw_statement, s.status, s.error_message, s.committed_bs_id, s.created_at
 			FROM cimplrcorpsaas.pdf_staging_statement s
@@ -248,7 +250,7 @@ func GetStagingStatementHandler(db *sql.DB) http.Handler {
 			  AND lower(coalesce(s.status, '')) <> 'committed'
 		`, body.StagingID, sessionUID).Scan(&stagingID, &batchID, &filename, &csvURL,
 			&rawStmt, &status, &errMsg, &committedID, &createdAt)
-		if err == sql.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 			respondWithError(w, nil, constants.ErrStatementNotFound, http.StatusNotFound)
 			return
 		}
@@ -288,7 +290,7 @@ func GetStagingStatementHandler(db *sql.DB) http.Handler {
 // ListStagingByUserHandler returns staged batches and non-committed statement summaries
 // for the authenticated user only (user_id from session / prevalidation context).
 // Committed statements are omitted; batches where every statement is committed are omitted entirely.
-func ListStagingByUserHandler(db *sql.DB) http.Handler {
+func ListStagingByUserHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		userID := apipreval.GetUserIDFromContext(ctx)
@@ -297,7 +299,7 @@ func ListStagingByUserHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		rows, err := db.QueryContext(ctx, `
+		rows, err := pool.Query(ctx, `
 			SELECT b.batch_id, b.source_filename, b.status,
 			       b.total_files, b.processed_files, b.failed_files, b.created_at,
 			       s.staging_id, s.original_filename, s.csv_url, s.status,
@@ -410,7 +412,7 @@ func ListStagingByUserHandler(db *sql.DB) http.Handler {
 // UpdateStagingStatementHandler lets a user update the raw_statement JSON
 // (e.g. add/remove/edit transactions) before recalculating and committing.
 // POST {"staging_id":"...", "raw_statement": {...}}
-func UpdateStagingStatementHandler(db *sql.DB) http.Handler {
+func UpdateStagingStatementHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			StagingID    string                 `json:"staging_id"`
@@ -431,7 +433,7 @@ func UpdateStagingStatementHandler(db *sql.DB) http.Handler {
 			respondWithError(w, nil, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		res, err := db.ExecContext(ctx, `
+		res, err := pool.Exec(ctx, `
 			UPDATE cimplrcorpsaas.pdf_staging_statement st
 			   SET raw_statement = $1, status = 'parsed', updated_at = now()
 			  FROM cimplrcorpsaas.pdf_staging_batch b
@@ -442,7 +444,7 @@ func UpdateStagingStatementHandler(db *sql.DB) http.Handler {
 			respondWithError(w, err, "failed to update statement", http.StatusInternalServerError)
 			return
 		}
-		n, _ := res.RowsAffected()
+		n := res.RowsAffected()
 		if n == 0 {
 			respondWithError(w, nil, "statement not found or already committed", http.StatusNotFound)
 			return
@@ -458,7 +460,7 @@ func UpdateStagingStatementHandler(db *sql.DB) http.Handler {
 // GET /cash/staging/statement/delete?staging_id=...
 //
 // If no pdf_staging_statement rows remain for the parent batch_id, pdf_staging_batch is deleted as well.
-func DeleteStagingStatementHandler(db *sql.DB) http.Handler {
+func DeleteStagingStatementHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			respondWithError(w, nil, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -477,13 +479,13 @@ func DeleteStagingStatementHandler(db *sql.DB) http.Handler {
 		}
 
 		var batchID sql.NullString
-		err := db.QueryRowContext(ctx, `
+		err := pool.QueryRow(ctx, `
 			SELECT s.batch_id::text
 			  FROM cimplrcorpsaas.pdf_staging_statement s
 			  INNER JOIN cimplrcorpsaas.pdf_staging_batch b ON b.batch_id = s.batch_id
 			 WHERE s.staging_id = $1 AND b.user_id = $2
 		`, sid, sessionUID).Scan(&batchID)
-		if err == sql.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 			respondWithError(w, nil, constants.ErrStatementNotFound, http.StatusNotFound)
 			return
 		}
@@ -492,12 +494,12 @@ func DeleteStagingStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		res, err := db.ExecContext(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1`, sid)
+		res, err := pool.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1`, sid)
 		if err != nil {
 			respondWithError(w, err, "failed to delete staging statement", http.StatusInternalServerError)
 			return
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
+		if n := res.RowsAffected(); n == 0 {
 			respondWithError(w, nil, constants.ErrStatementNotFound, http.StatusNotFound)
 			return
 		}
@@ -506,9 +508,9 @@ func DeleteStagingStatementHandler(db *sql.DB) http.Handler {
 		remaining := 0
 		if batchID.Valid && strings.TrimSpace(batchID.String) != "" {
 			bid := strings.TrimSpace(batchID.String)
-			_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.pdf_staging_statement WHERE batch_id = $1`, bid).Scan(&remaining)
+			_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.pdf_staging_statement WHERE batch_id = $1`, bid).Scan(&remaining)
 			if remaining == 0 {
-				if _, err := db.ExecContext(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1`, bid); err != nil {
+				if _, err := pool.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1`, bid); err != nil {
 					respondWithError(w, err, "failed to delete empty staging batch", http.StatusInternalServerError)
 					return
 				}
@@ -535,7 +537,7 @@ func DeleteStagingStatementHandler(db *sql.DB) http.Handler {
 // POST /cash/staging/batch/delete — JSON {"staging_ids":["..."],"reason":"...","user_id":"..."}.
 // Deletes only those statements that belong to the user's batches. If a batch has no statements left, the batch row is removed.
 // user_id is optional; when sent it must equal the session user id.
-func DeleteStagingBatchHandler(db *sql.DB) http.Handler {
+func DeleteStagingBatchHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		sessionUID := apipreval.GetUserIDFromContext(ctx)
@@ -546,55 +548,55 @@ func DeleteStagingBatchHandler(db *sql.DB) http.Handler {
 
 		switch r.Method {
 		case http.MethodGet:
-			deleteStagingBatchGET(w, r, db, ctx, sessionUID)
+			deleteStagingBatchGET(w, r, pool, ctx, sessionUID)
 		case http.MethodPost:
-			deleteStagingBatchPOST(w, r, db, ctx, sessionUID)
+			deleteStagingBatchPOST(w, r, pool, ctx, sessionUID)
 		default:
 			respondWithError(w, nil, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 		}
 	})
 }
 
-func deleteStagingBatchGET(w http.ResponseWriter, r *http.Request, db *sql.DB, ctx context.Context, sessionUID string) {
+func deleteStagingBatchGET(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, ctx context.Context, sessionUID string) {
 	bid := strings.TrimSpace(r.URL.Query().Get("batch_id"))
 	if bid == "" {
 		respondWithError(w, nil, "batch_id query parameter is required", http.StatusBadRequest)
 		return
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		respondWithError(w, err, "failed to start transaction", http.StatusInternalServerError)
 		return
 	}
 
 	var batchExists int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1 AND user_id = $2`, bid, sessionUID).Scan(&batchExists); err != nil {
-		_ = tx.Rollback()
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1 AND user_id = $2`, bid, sessionUID).Scan(&batchExists); err != nil {
+		_ = tx.Rollback(ctx)
 		respondWithError(w, err, "failed to verify batch", http.StatusInternalServerError)
 		return
 	}
 	if batchExists == 0 {
-		_ = tx.Rollback()
+		_ = tx.Rollback(ctx)
 		respondWithError(w, nil, "batch not found", http.StatusNotFound)
 		return
 	}
 
-	resSt, err := tx.ExecContext(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE batch_id = $1`, bid)
+	resSt, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE batch_id = $1`, bid)
 	if err != nil {
-		_ = tx.Rollback()
+		_ = tx.Rollback(ctx)
 		respondWithError(w, err, constants.ErrFailedToDeleteStagedStatements, http.StatusInternalServerError)
 		return
 	}
-	stRemoved, _ := resSt.RowsAffected()
+	stRemoved := resSt.RowsAffected()
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1`, bid); err != nil {
-		_ = tx.Rollback()
+	if _, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1`, bid); err != nil {
+		_ = tx.Rollback(ctx)
 		respondWithError(w, err, "failed to delete staging batch", http.StatusInternalServerError)
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		respondWithError(w, err, "failed to commit delete", http.StatusInternalServerError)
 		return
 	}
@@ -608,7 +610,7 @@ func deleteStagingBatchGET(w http.ResponseWriter, r *http.Request, db *sql.DB, c
 	})
 }
 
-func deleteStagingBatchPOST(w http.ResponseWriter, r *http.Request, db *sql.DB, ctx context.Context, sessionUID string) {
+func deleteStagingBatchPOST(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, ctx context.Context, sessionUID string) {
 	var body struct {
 		StagingIDs []string `json:"staging_ids"`
 		Reason     string   `json:"reason"`
@@ -641,22 +643,22 @@ func deleteStagingBatchPOST(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 		return
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		respondWithError(w, err, "failed to start transaction", http.StatusInternalServerError)
 		return
 	}
 
-	delRows, err := tx.QueryContext(ctx, `
+	delRows, err := tx.Query(ctx, `
 		DELETE FROM cimplrcorpsaas.pdf_staging_statement s
 		USING cimplrcorpsaas.pdf_staging_batch b
 		WHERE s.batch_id = b.batch_id
 		  AND b.user_id = $1
 		  AND s.staging_id::text = ANY($2::text[])
 		RETURNING s.batch_id::text, s.staging_id::text
-	`, sessionUID, pq.Array(ids))
+	`, sessionUID, ids)
 	if err != nil {
-		_ = tx.Rollback()
+		_ = tx.Rollback(ctx)
 		respondWithError(w, err, constants.ErrFailedToDeleteStagedStatements, http.StatusInternalServerError)
 		return
 	}
@@ -669,20 +671,20 @@ func deleteStagingBatchPOST(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 	for delRows.Next() {
 		var batchID, stagingID string
 		if err := delRows.Scan(&batchID, &stagingID); err != nil {
-			_ = tx.Rollback()
+			_ = tx.Rollback(ctx)
 			respondWithError(w, err, "failed to read delete result", http.StatusInternalServerError)
 			return
 		}
 		deleted = append(deleted, delRow{batchID, stagingID})
 	}
 	if err := delRows.Err(); err != nil {
-		_ = tx.Rollback()
+		_ = tx.Rollback(ctx)
 		respondWithError(w, err, constants.ErrFailedToDeleteStagedStatements, http.StatusInternalServerError)
 		return
 	}
 
 	if len(deleted) == 0 {
-		_ = tx.Rollback()
+		_ = tx.Rollback(ctx)
 		respondWithError(w, nil, "no staging statements deleted — check ids and ownership", http.StatusNotFound)
 		return
 	}
@@ -697,14 +699,14 @@ func deleteStagingBatchPOST(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 	var batchesRemoved []string
 	for bid := range affectedBatches {
 		var remaining int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.pdf_staging_statement WHERE batch_id = $1`, bid).Scan(&remaining); err != nil {
-			_ = tx.Rollback()
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.pdf_staging_statement WHERE batch_id = $1`, bid).Scan(&remaining); err != nil {
+			_ = tx.Rollback(ctx)
 			respondWithError(w, err, "failed to count remaining statements", http.StatusInternalServerError)
 			return
 		}
 		if remaining < 1 {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1`, bid); err != nil {
-				_ = tx.Rollback()
+			if _, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1`, bid); err != nil {
+				_ = tx.Rollback(ctx)
 				respondWithError(w, err, "failed to delete empty staging batch", http.StatusInternalServerError)
 				return
 			}
@@ -712,7 +714,7 @@ func deleteStagingBatchPOST(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		respondWithError(w, err, "failed to commit delete", http.StatusInternalServerError)
 		return
 	}

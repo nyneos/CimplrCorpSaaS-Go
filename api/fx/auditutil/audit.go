@@ -206,16 +206,18 @@ func FetchRowSnapshotPGX(ctx context.Context, pool *pgxpool.Pool, tableName, par
 
 // ActionParams groups the audit-action parameters to keep function signatures short.
 type ActionParams struct {
-	TableName    string
-	ParentColumn string
-	ParentID     string
-	ActionType   string
-	Status       string
-	Reason       string
-	RequestedBy  string
+	TableName      string
+	ParentColumn   string
+	ParentID       string
+	ActionType     string
+	Status         string
+	Reason         string
+	RequestedBy    string
 	RequestedIP  string
-	OldValues    interface{}
-	NewValues    interface{}
+	CheckerBy      string
+	CheckerComment string
+	OldValues      interface{}
+	NewValues      interface{}
 }
 
 // DecisionParams groups the audit-decision parameters.
@@ -272,9 +274,14 @@ func buildActionInsertAttempts(p ActionParams) []execAttempt {
 					columns = append([]string{"action_id"}, columns...)
 					values = append([]string{idExpression}, values...)
 				}
+				if checkerBy := strings.TrimSpace(p.CheckerBy); checkerBy != "" {
+					columns = append(columns, "checker_by", "checker_at", "checker_comment")
+					values = append(values, fmt.Sprintf("$%d", len(args)+1), "now()", fmt.Sprintf("$%d", len(args)+2))
+					args = append(args, checkerBy, NullIfBlank(p.CheckerComment))
+				}
 				if includeJSON {
 					columns = append(columns, "old_values", "new_values", "change_summary")
-					values = append(values, "$7", "$8", "$9")
+					values = append(values, fmt.Sprintf("$%d", len(args)+1), fmt.Sprintf("$%d", len(args)+2), fmt.Sprintf("$%d", len(args)+3))
 					args = append(args, JSONValue(p.OldValues), JSONValue(p.NewValues), JSONValue(BuildChangeSummary(p.OldValues, p.NewValues)))
 				}
 				attempts = append(attempts, execAttempt{

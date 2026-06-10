@@ -6,15 +6,15 @@ import (
 	"CimplrCorpSaas/api/uam/permissions" // <-- Import permissions
 	"CimplrCorpSaas/api/uam/role"        // <-- Import role
 	"CimplrCorpSaas/api/uam/user"        // <-- Import user
-	"CimplrCorpSaas/internal/observability"
 	"CimplrCorpSaas/internal/dbutil"
+	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -55,60 +55,62 @@ func StartUAMService(db *sql.DB, port string) {
 	})
 	mux.Handle("/uam/metrics", observability.MetricsHandler(serviceName))
 
-	prevalidate := middlewares.PreValidationMiddleware(pgxPool)
+	midUAM := func(h http.Handler) http.Handler {
+		return middlewares.SessionMiddleware(pgxPool)(h)
+	}
 
 	/*Approval Matrix*/
-	mux.Handle("/uam/approval-matrix/create", prevalidate(approvalMatrix.CreateApprovalMatrix(pgxPool)))
-	mux.Handle("/uam/approval-matrix/update", prevalidate(approvalMatrix.UpdateApprovalMatrix(pgxPool)))
-	mux.Handle("/uam/approval-matrix/delete", prevalidate(approvalMatrix.DeleteApprovalMatrix(pgxPool)))
-	mux.Handle("/uam/approval-matrix/bulk-approve", prevalidate(approvalMatrix.BulkApproveMatrix(pgxPool)))
-	mux.Handle("/uam/approval-matrix/bulk-reject", prevalidate(approvalMatrix.BulkRejectMatrix(pgxPool)))
-	mux.Handle("/uam/approval-matrix/all", prevalidate(approvalMatrix.GetApprovalMatrixAll(pgxPool)))
-	mux.Handle("/uam/approval-matrix/detail", prevalidate(approvalMatrix.GetApprovalMatrixDetail(pgxPool)))
-	mux.Handle("/uam/approval-matrix/audit-history", prevalidate(approvalMatrix.GetApprovalMatrixAuditHistory(pgxPool)))
-	mux.Handle("/uam/approval-matrix/approved-active", prevalidate(approvalMatrix.GetApprovedActiveMatrices(pgxPool)))
-	mux.Handle("/uam/approval-matrix/eye/add", prevalidate(approvalMatrix.AddEyeToMatrix(pgxPool)))
-	mux.Handle("/uam/approval-matrix/eye/update", prevalidate(approvalMatrix.UpdateEye(pgxPool)))
-	mux.Handle("/uam/approval-matrix/eye/delete", prevalidate(approvalMatrix.DeleteEye(pgxPool)))
-	mux.Handle("/uam/approval-matrix/eye/member/add", prevalidate(approvalMatrix.AddMemberToEye(pgxPool)))
-	mux.Handle("/uam/approval-matrix/eye/member/update", prevalidate(approvalMatrix.UpdateMember(pgxPool)))
-	mux.Handle("/uam/approval-matrix/eye/member/delete", prevalidate(approvalMatrix.DeleteMember(pgxPool)))
+	mux.Handle("/uam/approval-matrix/create", midUAM(approvalMatrix.CreateApprovalMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/update", midUAM(approvalMatrix.UpdateApprovalMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/delete", midUAM(approvalMatrix.DeleteApprovalMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/bulk-approve", midUAM(approvalMatrix.BulkApproveMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/bulk-reject", midUAM(approvalMatrix.BulkRejectMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/all", midUAM(approvalMatrix.GetApprovalMatrixAll(pgxPool)))
+	mux.Handle("/uam/approval-matrix/detail", midUAM(approvalMatrix.GetApprovalMatrixDetail(pgxPool)))
+	mux.Handle("/uam/approval-matrix/audit-history", midUAM(approvalMatrix.GetApprovalMatrixAuditHistory(pgxPool)))
+	mux.Handle("/uam/approval-matrix/approved-active", midUAM(approvalMatrix.GetApprovedActiveMatrices(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/add", midUAM(approvalMatrix.AddEyeToMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/update", midUAM(approvalMatrix.UpdateEye(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/delete", midUAM(approvalMatrix.DeleteEye(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/member/add", midUAM(approvalMatrix.AddMemberToEye(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/member/update", midUAM(approvalMatrix.UpdateMember(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/member/delete", midUAM(approvalMatrix.DeleteMember(pgxPool)))
 	/*Approval Engine Instances*/
-	mux.Handle("/uam/instance/action", prevalidate(approvalMatrix.RecordApprovalAction(pgxPool)))
-	mux.Handle("/uam/instance/pending", prevalidate(approvalMatrix.GetMyPendingApprovals(pgxPool)))
-	mux.Handle("/uam/instance/submissions", prevalidate(approvalMatrix.GetMySubmissions(pgxPool)))
-	mux.Handle("/uam/instance/detail", prevalidate(approvalMatrix.GetInstanceDetail(pgxPool)))
+	mux.Handle("/uam/instance/action", midUAM(approvalMatrix.RecordApprovalAction(pgxPool)))
+	mux.Handle("/uam/instance/pending", midUAM(approvalMatrix.GetMyPendingApprovals(pgxPool)))
+	mux.Handle("/uam/instance/submissions", midUAM(approvalMatrix.GetMySubmissions(pgxPool)))
+	mux.Handle("/uam/instance/detail", midUAM(approvalMatrix.GetInstanceDetail(pgxPool)))
 	/*users*/
-	mux.Handle("/uam/users/create-user", prevalidate(http.HandlerFunc(user.CreateUser(db, pgxPool))))
-	mux.Handle("/uam/users/get-users", prevalidate(http.HandlerFunc(user.GetUsers(db))))
-	mux.Handle("/uam/users/get-approved-user", prevalidate(http.HandlerFunc(user.GetApprovedUser(db))))
-	mux.Handle("/uam/users/get-user-by-id", prevalidate(http.HandlerFunc(user.GetUserById(db))))
-	mux.Handle("/uam/users/update-user", prevalidate(http.HandlerFunc(user.UpdateUser(db))))
-	mux.Handle("/uam/users/delete-user", prevalidate(http.HandlerFunc(user.DeleteUser(db))))
-	mux.Handle("/uam/users/approve-multiple-users", prevalidate(http.HandlerFunc(user.ApproveMultipleUsers(db))))
-	mux.Handle("/uam/users/reject-multiple-users", prevalidate(http.HandlerFunc(user.RejectMultipleUsers(db))))
-	mux.Handle("/uam/users/audit-history", prevalidate(http.HandlerFunc(user.GetUserAuditHistory(db))))
+	mux.Handle("/uam/users/create-user", midUAM(http.HandlerFunc(user.CreateUser(db, pgxPool))))
+	mux.Handle("/uam/users/get-users", midUAM(http.HandlerFunc(user.GetUsers(db))))
+	mux.Handle("/uam/users/get-approved-user", midUAM(http.HandlerFunc(user.GetApprovedUser(db))))
+	mux.Handle("/uam/users/get-user-by-id", midUAM(http.HandlerFunc(user.GetUserById(db))))
+	mux.Handle("/uam/users/update-user", midUAM(http.HandlerFunc(user.UpdateUser(db))))
+	mux.Handle("/uam/users/delete-user", midUAM(http.HandlerFunc(user.DeleteUser(db))))
+	mux.Handle("/uam/users/approve-multiple-users", midUAM(http.HandlerFunc(user.ApproveMultipleUsers(db))))
+	mux.Handle("/uam/users/reject-multiple-users", midUAM(http.HandlerFunc(user.RejectMultipleUsers(db))))
+	mux.Handle("/uam/users/audit-history", midUAM(http.HandlerFunc(user.GetUserAuditHistory(db))))
 	/*roles*/
-	mux.Handle("/uam/roles/create-role", prevalidate(http.HandlerFunc(role.CreateRole(db))))
-	mux.Handle("/uam/roles/page-data", prevalidate(http.HandlerFunc(role.GetRolesPageData(db))))
-	mux.Handle("/uam/roles/approve-multiple-roles", prevalidate(http.HandlerFunc(role.ApproveMultipleRoles(db))))
-	mux.Handle("/uam/roles/delete-role", prevalidate(http.HandlerFunc(role.DeleteRole(db))))
-	mux.Handle("/uam/roles/reject-multiple-roles", prevalidate(http.HandlerFunc(role.RejectMultipleRoles(db))))
-	mux.Handle("/uam/roles/update-role", prevalidate(http.HandlerFunc(role.UpdateRole(db))))
-	mux.Handle("/uam/roles/get-just-roles", prevalidate(http.HandlerFunc(role.GetJustRoles(db))))
-	mux.Handle("/uam/roles/get-roles-for-dropdown", prevalidate(http.HandlerFunc(role.GetRolesForDropdown(db))))
-	mux.Handle("/uam/roles/get-user-roles", prevalidate(http.HandlerFunc(role.GetJustRolesPERMISSIONapproved(db))))
-	mux.Handle("/uam/roles/get-pending-roles", prevalidate(http.HandlerFunc(role.GetPendingRoles(db))))
-	mux.Handle("/uam/roles/audit-history", prevalidate(http.HandlerFunc(role.GetRoleAuditHistory(db))))
+	mux.Handle("/uam/roles/create-role", midUAM(http.HandlerFunc(role.CreateRole(db))))
+	mux.Handle("/uam/roles/page-data", midUAM(http.HandlerFunc(role.GetRolesPageData(db))))
+	mux.Handle("/uam/roles/approve-multiple-roles", midUAM(http.HandlerFunc(role.ApproveMultipleRoles(db))))
+	mux.Handle("/uam/roles/delete-role", midUAM(http.HandlerFunc(role.DeleteRole(db))))
+	mux.Handle("/uam/roles/reject-multiple-roles", midUAM(http.HandlerFunc(role.RejectMultipleRoles(db))))
+	mux.Handle("/uam/roles/update-role", midUAM(http.HandlerFunc(role.UpdateRole(db))))
+	mux.Handle("/uam/roles/get-just-roles", midUAM(http.HandlerFunc(role.GetJustRoles(db))))
+	mux.Handle("/uam/roles/get-roles-for-dropdown", midUAM(http.HandlerFunc(role.GetRolesForDropdown(db))))
+	mux.Handle("/uam/roles/get-user-roles", midUAM(http.HandlerFunc(role.GetJustRolesPERMISSIONapproved(db))))
+	mux.Handle("/uam/roles/get-pending-roles", midUAM(http.HandlerFunc(role.GetPendingRoles(db))))
+	mux.Handle("/uam/roles/audit-history", midUAM(http.HandlerFunc(role.GetRoleAuditHistory(db))))
 	/*Permissions*/
-	mux.Handle("/uam/permissions/upsert-role-permissions", prevalidate(http.HandlerFunc(permissions.UpsertRolePermissions(db))))
-	mux.Handle("/uam/permissions/permissions-json", prevalidate(http.HandlerFunc(permissions.GetRolePermissionsJson(db))))
-	mux.Handle("/uam/permissions/status", prevalidate(http.HandlerFunc(permissions.UpdateRolePermissionsStatusByName(db))))
-	mux.Handle("/uam/permissions/approve-reject", prevalidate(http.HandlerFunc(permissions.GetRolesStatus(db))))
-	mux.Handle("/uam/permissions/get-role-permissions", prevalidate(http.HandlerFunc(permissions.GetRolePermissionsJsonByRoleName(db))))
-	mux.Handle("/uam/permissions/sidebar", prevalidate(http.HandlerFunc(permissions.GetSidebarPermissions(db))))
-	mux.Handle("/uam/permissions/requests/all", prevalidate(http.HandlerFunc(permissions.GetAllPermissionRequests(db))))
-	mux.Handle("/uam/permissions/requests/role-summary", prevalidate(http.HandlerFunc(permissions.GetRolePermissionAuditTable(db))))
+	mux.Handle("/uam/permissions/upsert-role-permissions", midUAM(http.HandlerFunc(permissions.UpsertRolePermissions(db))))
+	mux.Handle("/uam/permissions/permissions-json", midUAM(http.HandlerFunc(permissions.GetRolePermissionsJson(db))))
+	mux.Handle("/uam/permissions/status", midUAM(http.HandlerFunc(permissions.UpdateRolePermissionsStatusByName(db))))
+	mux.Handle("/uam/permissions/approve-reject", midUAM(http.HandlerFunc(permissions.GetRolesStatus(db))))
+	mux.Handle("/uam/permissions/get-role-permissions", midUAM(http.HandlerFunc(permissions.GetRolePermissionsJsonByRoleName(db))))
+	mux.Handle("/uam/permissions/sidebar", midUAM(http.HandlerFunc(permissions.GetSidebarPermissions(db))))
+	mux.Handle("/uam/permissions/requests/all", midUAM(http.HandlerFunc(permissions.GetAllPermissionRequests(db))))
+	mux.Handle("/uam/permissions/requests/role-summary", midUAM(http.HandlerFunc(permissions.GetRolePermissionAuditTable(db))))
 
 	logger.LogInfo("UAM Service started on :%s", port)
 	err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))

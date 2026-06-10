@@ -130,20 +130,33 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// ── Resolve fd_ref_no, bank_id, entity_name, bank_name, date bounds from fd_master ──
-		var fdRefNo, bankID, entityName, bankName string
+		var fdRefNo, bankID, fdEntityID, entityName, bankName string
 		var fdStart, fdMaturity time.Time
 		if err := pool.QueryRow(ctx, `
 			SELECT
 				COALESCE(bank_fd_ref_no, ''),
 				COALESCE(bank_id, ''),
+				COALESCE(entity_id, ''),
 				COALESCE(entity_name, ''),
 				COALESCE(bank_name, ''),
 				start_date,
 				maturity_date
 			FROM investment.fd_master
 			WHERE fd_id = $1 AND is_deleted = false
-			LIMIT 1`, req.FDID).Scan(&fdRefNo, &bankID, &entityName, &bankName, &fdStart, &fdMaturity); err != nil {
+			LIMIT 1`, req.FDID).Scan(&fdRefNo, &bankID, &fdEntityID, &entityName, &bankName, &fdStart, &fdMaturity); err != nil {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
+			return
+		}
+		if !strings.EqualFold(strings.TrimSpace(req.EntityID), strings.TrimSpace(fdEntityID)) {
+			api.RespondWithError(w, http.StatusForbidden, "fd_id does not belong to requested entity_id")
+			return
+		}
+		if msg := validateFDRecordAccess(ctx, pool, req.FDID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
+		if msg := validateFDInterestReceiptAccess(ctx, pool, req.ReceiptID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
 			return
 		}
 
@@ -289,6 +302,10 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if msg := validateFDRecordAccess(ctx, pool, req.FDID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
 
 		// Simple query with basic joins + audit history
 		sql := `
@@ -373,10 +390,9 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 		args := []interface{}{}
 		argIdx := 1
 
-		if req.EntityID != "" {
-			sql += fmt.Sprintf(" AND tds.entity_id = $%d", argIdx)
-			args = append(args, req.EntityID)
-			argIdx++
+		if msg := appendFDEntityScope(ctx, &sql, &args, &argIdx, "tds.entity_id", req.EntityID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
 		}
 
 		if req.FDID != "" {
@@ -468,6 +484,16 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if strings.TrimSpace(req.EntityID) != "" && !fdEntityAllowed(ctx, req.EntityID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+			return
+		}
+		for _, item := range req.ReconciliationItems {
+			if msg := validateTDSRecordAccess(ctx, pool, item.TDSID); msg != "" {
+				api.RespondWithError(w, http.StatusForbidden, msg)
+				return
+			}
+		}
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -597,6 +623,10 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if msg := validateTDSRecordAccess(ctx, pool, req.TDSID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
 
 		// Only CAPTURED entries can be approved
 		var currentStatus string
@@ -721,6 +751,10 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if msg := validateTDSRecordAccess(ctx, pool, req.TDSID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
 
 		var currentStatus, fdIDForTDS string
 		if err := pool.QueryRow(ctx,
@@ -890,8 +924,13 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		results := make([]result, 0, len(req.TDSIDs))
 		approved := 0
+		approvedIDs := make([]string, 0, len(req.TDSIDs))
 
 		for _, tdsID := range req.TDSIDs {
+			if msg := validateTDSRecordAccess(ctx, pool, tdsID); msg != "" {
+				results = append(results, result{TDSID: tdsID, OK: false, Message: msg})
+				continue
+			}
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: "tx start failed"})
@@ -917,6 +956,7 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			approved++
+			approvedIDs = append(approvedIDs, tdsID)
 			results = append(results, result{TDSID: tdsID, OK: true})
 		}
 
@@ -927,7 +967,7 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"failed":   len(req.TDSIDs) - approved,
 			"results":  results,
 		})
-		for _, tdsID := range req.TDSIDs {
+		for _, tdsID := range approvedIDs {
 			go func(tID, uID, uEmail string) {
 				defer func() {
 					if rec := recover(); rec != nil {
@@ -984,7 +1024,11 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		rejected := 0
+		rejectedIDs := make([]string, 0, len(req.TDSIDs))
 		for _, tdsID := range req.TDSIDs {
+			if msg := validateTDSRecordAccess(ctx, pool, tdsID); msg != "" {
+				continue
+			}
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				continue
@@ -1006,6 +1050,7 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			rejected++
+			rejectedIDs = append(rejectedIDs, tdsID)
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -1013,7 +1058,7 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"success":  rejected > 0,
 			"rejected": rejected,
 		})
-		for _, tdsID := range req.TDSIDs {
+		for _, tdsID := range rejectedIDs {
 			go func(tID, uID, uEmail string) {
 				defer func() {
 					if rec := recover(); rec != nil {
@@ -1069,6 +1114,10 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if msg := validateTDSRecordAccess(ctx, pool, req.TDSID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -1169,6 +1218,10 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if msg := validateTDSRecordAccess(ctx, pool, req.TDSID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
 
 		// If tds_id provided, resolve receipt_id (may be NULL) and fd_id fallback
 		if req.TDSID != "" && req.ReceiptID == "" {
@@ -1187,6 +1240,10 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if req.ReceiptID == "" && req.FDID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "one of receipt_id, tds_id or fd_id is required")
+			return
+		}
+		if msg := validateFDRecordAccess(ctx, pool, req.FDID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
 			return
 		}
 
@@ -1267,8 +1324,13 @@ func BulkDeleteTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		deleted := 0
 		failed := 0
+		deletedIDs := make([]string, 0, len(req.TDSIDs))
 
 		for _, tdsID := range req.TDSIDs {
+			if msg := validateTDSRecordAccess(ctx, pool, tdsID); msg != "" {
+				failed++
+				continue
+			}
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				failed++
@@ -1297,6 +1359,7 @@ func BulkDeleteTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			deleted++
+			deletedIDs = append(deletedIDs, tdsID)
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -1305,7 +1368,7 @@ func BulkDeleteTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"deleted": deleted,
 			"failed":  failed,
 		})
-		for _, tdsID := range req.TDSIDs {
+		for _, tdsID := range deletedIDs {
 			go func(tID, uEmail string) {
 				defer func() {
 					if rec := recover(); rec != nil {

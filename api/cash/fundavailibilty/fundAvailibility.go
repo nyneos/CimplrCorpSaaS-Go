@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -93,7 +94,8 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get middleware context filters
-		entityIDs := api.GetEntityIDsFromCtx(ctx)
+		entityIDs := ctxutil.FromContext(ctx).EntityIDs
+		entityNames := api.GetEntityNamesFromCtx(ctx)
 		bankNames := api.GetBankNamesFromCtx(ctx)
 
 		// Fetch actuals from bank statements
@@ -104,7 +106,7 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Fetch projections from cashflow proposals
-		projections, projectionsErr := fetchProjections(ctx, pgxPool, asOfDate, endDate, viewType, entityIDs, bankNames)
+		projections, projectionsErr := fetchProjections(ctx, pgxPool, asOfDate, endDate, viewType, entityNames, bankNames)
 		if projectionsErr != nil {
 			api.RespondWithResult(w, false, "Failed to fetch projections: "+projectionsErr.Error())
 			return
@@ -148,24 +150,16 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // fetchActuals retrieves bank statement transactions grouped by entity/bank/account/currency/category
 func fetchActuals(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endDate time.Time, viewType string, entityIDs, bankNames []string) ([]map[string]interface{}, error) {
-	// Build entity filter
-	entityFilter := ""
+	args := []interface{}{asOfDate, endDate}
+	filters := make([]string, 0, 2)
 	if len(entityIDs) > 0 {
-		quotedEntities := make([]string, len(entityIDs))
-		for i, e := range entityIDs {
-			quotedEntities[i] = "'" + strings.ReplaceAll(e, "'", "''") + "'"
-		}
-		entityFilter = " AND mba.entity_id IN (" + strings.Join(quotedEntities, ",") + ")"
+		args = append(args, entityIDs)
+		filters = append(filters, fmt.Sprintf("AND mba.entity_id = ANY($%d::text[])", len(args)))
 	}
-
-	// Build bank filter
-	bankFilter := ""
-	if len(bankNames) > 0 {
-		quotedBanks := make([]string, len(bankNames))
-		for i, b := range bankNames {
-			quotedBanks[i] = "'" + strings.ReplaceAll(strings.ToLower(b), "'", "''") + "'"
-		}
-		bankFilter = " AND LOWER(TRIM(mba.bank_name)) IN (" + strings.Join(quotedBanks, ",") + ")"
+	normalizedBanks := normalizeLowerStrings(bankNames)
+	if len(normalizedBanks) > 0 {
+		args = append(args, normalizedBanks)
+		filters = append(filters, fmt.Sprintf("AND LOWER(TRIM(mba.bank_name)) = ANY($%d::text[])", len(args)))
 	}
 
 	query := fmt.Sprintf(`
@@ -208,11 +202,10 @@ func fetchActuals(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endDate 
 			AND t.transaction_date <= $2
 			AND mba.is_deleted = false
 			%s
-			%s
 		ORDER BY mba.entity_id, mba.bank_name, mba.account_number, t.transaction_date
-	`, entityFilter, bankFilter)
+	`, strings.Join(filters, "\n\t\t\t"))
 
-	rows, err := pgxPool.Query(ctx, query, asOfDate, endDate)
+	rows, err := pgxPool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -313,13 +306,11 @@ func fetchActuals(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endDate 
 }
 
 // fetchProjections retrieves cashflow projections grouped by entity/bank/account/currency/category
-func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endDate time.Time, viewType string, entityIDs, bankNames []string) ([]map[string]interface{}, error) {
-	// NOTE: For projections, we don't filter by entity_id or bank_name from middleware
-	// because proposal items use free text fields which may not match master data
-	// Users create projections with their own entity/bank names, so we show all approved projections
-	// filtered only by date range
+func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endDate time.Time, viewType string, entityNames, bankNames []string) ([]map[string]interface{}, error) {
+	normalizedEntities := normalizeLowerStrings(entityNames)
+	normalizedBanks := normalizeLowerStrings(bankNames)
 
-	logger.LogInfo("[fetchProjections] Date range: %s to %s (showing ALL approved projections)",
+	logger.LogInfo("[fetchProjections] Date range: %s to %s",
 		asOfDate.Format(constants.DateFormat), endDate.Format(constants.DateFormat))
 
 	// First, check if there are ANY approved proposals
@@ -337,7 +328,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 
 	// Check how many would match WITHOUT entity/bank filters (just date range)
 	var dateMatchCount int
-	dateOnlyQ := fmt.Sprintf(`
+	dateOnlyQ := `
 		SELECT COUNT(*)
 		FROM cimplrcorpsaas.cashflow_projection_monthly pm
 		JOIN cimplrcorpsaas.cashflow_proposal_item i ON i.item_id = pm.item_id
@@ -356,7 +347,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 			pm.year < EXTRACT(YEAR FROM $2::timestamp)::int
 			OR (pm.year = EXTRACT(YEAR FROM $2::timestamp)::int AND pm.month <= EXTRACT(MONTH FROM $2::timestamp)::int)
 		)
-	`)
+	`
 	pgxPool.QueryRow(ctx, dateOnlyQ, asOfDate, endDate).Scan(&dateMatchCount)
 	logger.LogInfo("[fetchProjections] Records matching date range (no entity/bank filter): %d", dateMatchCount)
 
@@ -372,7 +363,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 	sampleRows.Close()
 	logger.LogInfo("[fetchProjections] Sample entity_name values in proposal_item: %v", sampleEntities)
 
-	query := fmt.Sprintf(`
+	query := `
 		WITH approved_proposals AS (
 			SELECT DISTINCT ON (p.proposal_id)
 				p.proposal_id,
@@ -419,11 +410,13 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 			pm.year < EXTRACT(YEAR FROM $2::timestamp)::int
 			OR (pm.year = EXTRACT(YEAR FROM $2::timestamp)::int AND pm.month <= EXTRACT(MONTH FROM $2::timestamp)::int)
 		)
+		AND (cardinality($3::text[]) = 0 OR LOWER(TRIM(i.entity_name)) = ANY($3::text[]) OR LOWER(TRIM(me.entity_name)) = ANY($3::text[]))
+		AND (cardinality($4::text[]) = 0 OR LOWER(TRIM(i.bank_name)) = ANY($4::text[]) OR LOWER(TRIM(mba.bank_name)) = ANY($4::text[]))
 		ORDER BY me.entity_id, i.bank_name, i.bank_account_number, pm.year, pm.month
-	`)
+	`
 
 	logger.LogInfo("[fetchProjections] Executing query...")
-	rows, err := pgxPool.Query(ctx, query, asOfDate, endDate)
+	rows, err := pgxPool.Query(ctx, query, asOfDate, endDate, normalizedEntities, normalizedBanks)
 	if err != nil {
 		logger.LogError("[fetchProjections] Query error: %v", err)
 		return nil, err
@@ -546,6 +539,23 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 	}
 
 	return result, nil
+}
+
+func normalizeLowerStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 // aggregateByPeriod aggregates transaction data by the specified view type

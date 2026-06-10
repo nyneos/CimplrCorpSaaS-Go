@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shakinm/xlsReader/xls"
 	"github.com/xuri/excelize/v2"
 )
@@ -26,7 +29,7 @@ import (
 // PreviewBankStatementHandler parses uploaded file(s), categorizes transactions, returns FLAT transaction list WITHOUT DB insertion
 // Uses EXACT same parsing logic as UploadBankStatementV2WithCategorization but NO database writes
 // Supports: XLSX, XLS, CSV, multi-account CSV (multi=true), PDF/DOCX (external AI), ZIP (containing any of above)
-func PreviewBankStatementHandler(db *sql.DB) http.Handler {
+func PreviewBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -110,28 +113,28 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 		// Route based on file type
 		if ext == ".zip" {
 			// ZIP with multiple files
-			allTransactions, err = processZipPreviewFlat(ctx, db, fileBytes, useMapping, mappings)
+			allTransactions, err = processZipPreviewFlat(ctx, pool, fileBytes, useMapping, mappings)
 			if err != nil {
 				http.Error(w, "ZIP processing failed: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		} else if ext == ".pdf" || ext == ".docx" {
 			// PDF/DOCX - call external AI parser (NO DB writes)
-			allTransactions, err = processPDFPreviewFlat(ctx, db, fileBytes, header.Filename)
+			allTransactions, err = processPDFPreviewFlat(ctx, pool, fileBytes, header.Filename)
 			if err != nil {
 				http.Error(w, "PDF/DOCX processing failed: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		} else if ext == ".csv" && isMultiAccount {
 			// Multi-account CSV
-			allTransactions, err = processMultiAccountCSVPreviewFlat(ctx, db, fileBytes)
+			allTransactions, err = processMultiAccountCSVPreviewFlat(ctx, pool, fileBytes)
 			if err != nil {
 				http.Error(w, "Multi-account CSV processing failed: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		} else {
 			// Single file processing (XLSX, XLS, CSV)
-			transactions, err := processSingleFilePreviewFlat(ctx, db, fileBytes, header.Filename, useMapping, mappings, accountOverride)
+			transactions, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, header.Filename, useMapping, mappings, accountOverride)
 			if err != nil {
 				http.Error(w, "File processing failed: "+err.Error(), http.StatusInternalServerError)
 				return
@@ -151,7 +154,7 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 }
 
 // processZipPreviewFlat extracts all files from ZIP and returns flat transaction list
-func processZipPreviewFlat(ctx context.Context, db *sql.DB, zipBytes []byte, useMapping bool, mappings *ColumnMappings) ([]map[string]interface{}, error) {
+func processZipPreviewFlat(ctx context.Context, pool *pgxpool.Pool, zipBytes []byte, useMapping bool, mappings *ColumnMappings) ([]map[string]interface{}, error) {
 	zipReader, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
 		return nil, fmt.Errorf("invalid ZIP file: %w", err)
@@ -185,7 +188,7 @@ func processZipPreviewFlat(ctx context.Context, db *sql.DB, zipBytes []byte, use
 			continue
 		}
 
-		transactions, err := processSingleFilePreviewFlat(ctx, db, fileBytes, f.Name, useMapping, mappings, "")
+		transactions, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, f.Name, useMapping, mappings, "")
 		if err != nil {
 			// Skip files with errors, continue processing others
 			continue
@@ -200,7 +203,7 @@ func processZipPreviewFlat(ctx context.Context, db *sql.DB, zipBytes []byte, use
 // resolveMasterBankAccountForPreview mirrors upload V2 candidate expansion: dash/space strip,
 // leading-zero strip, and filename digit runs — so preview matches master rows stored as
 // "505002795" when the statement shows "000505002795".
-func resolveMasterBankAccountForPreview(ctx context.Context, db *sql.DB, primary string, uploadFileName string, rows [][]string) (matchedAccount string, entityID string, bankName string, currency string, err error) {
+func resolveMasterBankAccountForPreview(ctx context.Context, pool *pgxpool.Pool, primary string, uploadFileName string, rows [][]string) (matchedAccount string, entityID string, bankName string, currency string, err error) {
 	primary = strings.TrimSpace(primary)
 	if primary == "" {
 		return "", "", "", "", fmt.Errorf("account number not found in file header")
@@ -264,7 +267,7 @@ func resolveMasterBankAccountForPreview(ctx context.Context, db *sql.DB, primary
 	}
 
 	for _, cand := range candidates {
-		qErr := db.QueryRowContext(ctx, `
+		qErr := pool.QueryRow(ctx, `
 			SELECT mba.account_number, mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
 			FROM public.masterbankaccount mba
 			LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
@@ -273,7 +276,7 @@ func resolveMasterBankAccountForPreview(ctx context.Context, db *sql.DB, primary
 		if qErr == nil {
 			return matchedAccount, entityID, bankName, currency, nil
 		}
-		if qErr != sql.ErrNoRows {
+		if !(errors.Is(qErr, pgx.ErrNoRows) || errors.Is(qErr, sql.ErrNoRows)) {
 			return "", "", "", "", fmt.Errorf("database lookup failed: %w", qErr)
 		}
 	}
@@ -284,7 +287,7 @@ func resolveMasterBankAccountForPreview(ctx context.Context, db *sql.DB, primary
 // processSingleFilePreviewFlat parses file and categorizes WITHOUT any DB writes
 // Uses EXACT same parsing logic as UploadBankStatementV2WithCategorization but ONLY reads DB for account lookup and rules.
 // When accountOverride is non-empty (force_override + single account from the client), it is used for master lookup instead of relying only on the file header.
-func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings, accountOverride string) ([]map[string]interface{}, error) {
+func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings, accountOverride string) ([]map[string]interface{}, error) {
 
 	ext := strings.ToLower(filepath.Ext(filename))
 	var rows [][]string
@@ -482,14 +485,14 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 	}
 
 	// DB READ ONLY: Lookup account metadata (same candidate expansion as upload V2)
-	matchedAcct, entityID, bankName, currency, err := resolveMasterBankAccountForPreview(ctx, db, accountNumber, filename, rows)
+	matchedAcct, entityID, bankName, currency, err := resolveMasterBankAccountForPreview(ctx, pool, accountNumber, filename, rows)
 	if err != nil {
 		return nil, err
 	}
 	accountNumber = matchedAcct
 
 	// DB READ ONLY: Load category rules
-	rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID, currency)
+	rules, err := loadCategoryRuleComponentsPgx(ctx, pool, accountNumber, entityID, currency)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load category rules: %w", err)
 	}
@@ -1134,7 +1137,7 @@ func isEmptyRow(row []string) bool {
 
 // processMultiAccountCSVPreviewFlat processes CSV with multiple account numbers (multi=true)
 // Each row can have different account number in the account column
-func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte) ([]map[string]interface{}, error) {
+func processMultiAccountCSVPreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte) ([]map[string]interface{}, error) {
 	rows, err := parseDelimitedTextRows(fileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse CSV: %w", err)
@@ -1188,7 +1191,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 
 	// Use background context for initial load (not tied to HTTP request timeout)
 	loadCtx := context.Background()
-	accountRows, err := db.QueryContext(loadCtx, `
+	accountRows, err := pool.Query(loadCtx, `
 		SELECT mba.account_number, mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
 		FROM public.masterbankaccount mba
 		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
@@ -1206,7 +1209,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 		}
 
 		// Also pre-load rules for this account
-		rules, err := loadCategoryRuleComponents(loadCtx, db, accNum, entityID, currency)
+		rules, err := loadCategoryRuleComponentsPgx(loadCtx, pool, accNum, entityID, currency)
 		if err != nil {
 			rules = []categoryRuleComponent{}
 		}
@@ -1359,7 +1362,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 // processPDFPreviewFlat calls external AI parser for PDF/DOCX files
 // Returns parsed transactions WITHOUT any database writes
 // Uses the EXACT same logic as UploadBankStatementV3Handler
-func processPDFPreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, filename string) ([]map[string]interface{}, error) {
+func processPDFPreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte, filename string) ([]map[string]interface{}, error) {
 	// Get external parser URL using the EXACT same logic as upload handler
 	v := q8()
 	v = attachStreamKey(v)
@@ -1436,21 +1439,21 @@ func processPDFPreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, fi
 
 		// DB READ: Lookup account metadata if we have account number
 		if accountNumber != "" {
-			err := db.QueryRowContext(ctx, `
+			err := pool.QueryRow(ctx, `
 				SELECT mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
 				FROM public.masterbankaccount mba
 				LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 				WHERE mba.account_number = $1 AND COALESCE(mba.is_deleted, false) = false
 			`, accountNumber).Scan(&entityID, &bankName, &currency)
 
-			if err != nil && err != sql.ErrNoRows {
+			if err != nil && !(errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows)) {
 				return nil, fmt.Errorf("failed to lookup account: %w", err)
 			}
 
 			// DB READ: Load category rules if account found
 			var rules []categoryRuleComponent
 			if entityID != "" {
-				rules, _ = loadCategoryRuleComponents(ctx, db, accountNumber, entityID, currency)
+				rules, _ = loadCategoryRuleComponentsPgx(ctx, pool, accountNumber, entityID, currency)
 			}
 
 			// Process each transaction from AI

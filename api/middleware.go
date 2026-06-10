@@ -524,3 +524,21 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 		})
 	}
 }
+
+// IsEntityAccessible checks if a target entity is in the user's allowed list of entities.
+// If allowedEntities is empty, it means the user has global access (e.g. Admin).
+func IsEntityAccessible(allowedEntities []string, target string) bool {
+	if len(allowedEntities) == 0 {
+		return true // global access
+	}
+	targetTrimmed := strings.ToLower(strings.TrimSpace(target))
+	if targetTrimmed == "" {
+		return true // global entity
+	}
+	for _, e := range allowedEntities {
+		if strings.ToLower(strings.TrimSpace(e)) == targetTrimmed {
+			return true
+		}
+	}
+	return false
+}

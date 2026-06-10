@@ -1,8 +1,9 @@
 package forwards
 
 import (
-	"CimplrCorpSaas/api"
+	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/fx/auditutil"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -154,15 +155,17 @@ type cancelRollStatusActionParams struct {
 
 func recordCancelRollStatusAction(ctx context.Context, db *sql.DB, params cancelRollStatusActionParams) {
 	auditutil.RecordAction(ctx, db, auditutil.ActionParams{
-		TableName:    cancelRollAuditTable(params.RequestType),
-		ParentColumn: "booking_id",
-		ParentID:     params.BookingID,
-		ActionType:   params.Action,
-		Status:       params.Status,
-		Reason:       params.Comment,
-		RequestedBy:  params.Actor,
-		OldValues:    map[string]interface{}{"status": "Pending", "request_date": params.RequestDate},
-		NewValues:    map[string]interface{}{"status": params.Status, "request_date": params.RequestDate},
+		TableName:      cancelRollAuditTable(params.RequestType),
+		ParentColumn:   "booking_id",
+		ParentID:       params.BookingID,
+		ActionType:     params.Action,
+		Status:         params.Status,
+		Reason:         params.Comment,
+		RequestedBy:    params.Actor,
+		CheckerBy:      params.Actor,
+		CheckerComment: params.Comment,
+		OldValues:      map[string]interface{}{"status": "Pending", "request_date": params.RequestDate},
+		NewValues:      map[string]interface{}{"status": params.Status, "request_date": params.RequestDate},
 	})
 }
 
@@ -465,8 +468,9 @@ func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIIsRequired})
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
@@ -845,8 +849,9 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -893,8 +898,9 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -1045,8 +1051,9 @@ func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "user_id and system_transaction_ids (array) required")
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -1357,8 +1364,9 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIIsRequired})
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return

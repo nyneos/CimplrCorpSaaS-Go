@@ -316,14 +316,14 @@ func normalizeTime(timeStr string) string {
 // 							_ = vrows.Scan(&currency)
 // 						}
 
-// 						if bankName != nil && strings.TrimSpace(*bankName) != "" && !ctxHasApprovedBankName(ctx, *bankName) {
+// 						if bankName != nil && strings.TrimSpace(*bankName) != "" && !ctxutil.FromContext(ctx).HasApprovedBank(*bankName) {
 // 							vrows.Close()
 // 							tx.Rollback(ctx)
 // 							api.RespondWithError(w, http.StatusForbidden, constants.ErrBankInvalidOrInactive)
 // 							return
 // 						}
 // 						if accountNo != nil && strings.TrimSpace(*accountNo) != "" {
-// 							if !ctxHasApprovedBankAccount(ctx, *accountNo) {
+// 							if !ctxutil.FromContext(ctx).HasApprovedBankAccount(*accountNo) {
 // 								vrows.Close()
 // 								tx.Rollback(ctx)
 // 								api.RespondWithError(w, http.StatusForbidden, constants.ErrInvalidAccount)
@@ -399,7 +399,7 @@ func normalizeTime(timeStr string) string {
 // 								}
 // 							}
 // 						}
-// 						if currency != nil && strings.TrimSpace(*currency) != "" && !ctxHasApprovedCurrency(ctx, *currency) {
+// 						if currency != nil && strings.TrimSpace(*currency) != "" && !ctxutil.FromContext(ctx).HasApprovedCurrency(*currency) {
 // 							vrows.Close()
 // 							tx.Rollback(ctx)
 // 							api.RespondWithError(w, http.StatusForbidden, "Invalid or inactive currency")

@@ -39,7 +39,7 @@ type fdAuditDashRequest struct {
 	Period     string `json:"period"`     // "Today" | "This Week" | "This Month" | "CUSTOM"
 	StartDate  string `json:"start_date"` // ISO date for CUSTOM
 	EndDate    string `json:"end_date"`
-	AsOnDate   string `json:"as_on_date"` // optional snapshot upper-bound override
+	AsOnDate   string `json:"as_on_date"`  // optional snapshot upper-bound override
 	FDID       string `json:"fd_id"`       // optional — activates transaction_trace
 	ActionType string `json:"action_type"` // optional filter: CREATE/EDIT/DELETE/ACTIVATE/STATUS_CHANGE
 }
@@ -67,7 +67,12 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		if asOn, ok := parseFDDate(req.AsOnDate); ok {
 			now = asOn
 		}
-		entityFilter := req.EntityID
+		ctx := r.Context()
+		entityFilter, scopeMsg := resolveFDDashboardEntity(ctx, req.EntityID)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
+			return
+		}
 		fdFilter := req.FDID
 		actionFilter := req.ActionType
 
@@ -97,8 +102,6 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			startDate = now.AddDate(0, 0, -30).Format(constants.DateFormat)
 			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
 		}
-		ctx := r.Context()
-
 		type subResult struct {
 			data interface{}
 			err  error
@@ -142,7 +145,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_master
 					WHERE requested_at >= $1::date AND requested_at < $2::date
-					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_master fm WHERE fm.fd_id=fd_audit_master.fd_id AND fm.entity_id=$3))`},
+					  AND (EXISTS(SELECT 1 FROM investment.fd_master fm WHERE fm.fd_id=fd_audit_master.fd_id AND fm.entity_id = ANY(string_to_array($3, ','))))`},
 				{"BOOKING", `
 					SELECT 'BOOKING',
 					  COUNT(*),
@@ -152,7 +155,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_booking_request
 					WHERE requested_at >= $1::date AND requested_at < $2::date
-					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=fd_audit_booking_request.booking_id AND b.entity_id=$3))`},
+					  AND (EXISTS(SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=fd_audit_booking_request.booking_id AND b.entity_id = ANY(string_to_array($3, ','))))`},
 				{"CONFIRMATION", `
 					SELECT 'CONFIRMATION',
 					  COUNT(*),
@@ -162,7 +165,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_confirmation
 					WHERE requested_at >= $1::date AND requested_at < $2::date
-					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_confirmation cf WHERE cf.confirmation_id=fd_audit_confirmation.confirmation_id AND EXISTS(SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=cf.booking_id AND b.entity_id=$3)))`},
+					  AND (EXISTS(SELECT 1 FROM investment.fd_confirmation cf WHERE cf.confirmation_id=fd_audit_confirmation.confirmation_id AND EXISTS(SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=cf.booking_id AND b.entity_id = ANY(string_to_array($3, ',')))))`},
 				{"CASHFLOW", `
 					SELECT 'CASHFLOW',
 					  COUNT(*),
@@ -172,7 +175,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_cashflow_schedule
 					WHERE requested_at >= $1::date AND requested_at < $2::date
-					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_master fm WHERE fm.fd_id=fd_audit_cashflow_schedule.fd_id AND fm.entity_id=$3))`},
+					  AND (EXISTS(SELECT 1 FROM investment.fd_master fm WHERE fm.fd_id=fd_audit_cashflow_schedule.fd_id AND fm.entity_id = ANY(string_to_array($3, ','))))`},
 				{"CLOSURE", `
 					SELECT 'CLOSURE',
 					  COUNT(*),
@@ -182,7 +185,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_closure_request
 					WHERE created_at >= $1::date AND created_at < $2::date
-					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_closure_request cr WHERE cr.closure_request_id=fd_audit_closure_request.closure_request_id AND cr.entity_id=$3))`},
+					  AND (EXISTS(SELECT 1 FROM investment.fd_closure_request cr WHERE cr.closure_request_id=fd_audit_closure_request.closure_request_id AND cr.entity_id = ANY(string_to_array($3, ','))))`},
 				{"BANK_CONFIG", `
 					SELECT 'BANK_CONFIG',
 					  COUNT(*),
@@ -255,7 +258,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_tds_receipt_audit
 					WHERE requested_at >= $1::date AND requested_at < $2::date
-					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_tds_receipt r JOIN investment.fd_master m ON m.fd_id=r.fd_id WHERE r.tds_id=fd_tds_receipt_audit.tds_id AND m.entity_id=$3))`},
+					  AND (EXISTS(SELECT 1 FROM investment.fd_tds_receipt r JOIN investment.fd_master m ON m.fd_id=r.fd_id WHERE r.tds_id=fd_tds_receipt_audit.tds_id AND m.entity_id = ANY(string_to_array($3, ','))))`},
 				{"ACCRUAL_SCHEDULE", `
 					SELECT 'ACCRUAL_SCHEDULE',
 					  COUNT(*),
@@ -274,7 +277,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_accrual_run_audit
 					WHERE requested_at >= $1::date AND requested_at < $2::date
-					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_accrual_run ar WHERE ar.run_id=fd_accrual_run_audit.run_id AND COALESCE(ar.entity_id,'')=$3))`},
+					  AND (EXISTS(SELECT 1 FROM investment.fd_accrual_run ar WHERE ar.run_id=fd_accrual_run_audit.run_id AND COALESCE(ar.entity_id,'') = ANY(string_to_array($3, ','))))`},
 			}
 
 			out := []summaryRow{}
@@ -383,7 +386,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    requested_at AS sort_ts
 				  FROM investment.fd_audit_master
 				  WHERE requested_at >= $1::date AND requested_at < $2::date
-				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_master fm WHERE fm.fd_id=fd_audit_master.fd_id AND fm.entity_id=$3))
+				    AND (EXISTS(SELECT 1 FROM investment.fd_master fm WHERE fm.fd_id=fd_audit_master.fd_id AND fm.entity_id = ANY(string_to_array($3, ','))))
 				    AND ($4::text='' OR action_type=$4)
 				    AND ($5::text='' OR fd_id=$5)
 
@@ -406,7 +409,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    requested_at
 				  FROM investment.fd_audit_booking_request
 				  WHERE requested_at >= $1::date AND requested_at < $2::date
-				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=fd_audit_booking_request.booking_id AND b.entity_id=$3))
+				    AND (EXISTS(SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=fd_audit_booking_request.booking_id AND b.entity_id = ANY(string_to_array($3, ','))))
 				    AND ($4::text='' OR action_type=$4)
 
 				  UNION ALL
@@ -471,7 +474,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    created_at
 				  FROM investment.fd_audit_closure_request
 				  WHERE created_at >= $1::date AND created_at < $2::date
-				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_closure_request cr WHERE cr.closure_request_id=fd_audit_closure_request.closure_request_id AND cr.entity_id=$3))
+				    AND (EXISTS(SELECT 1 FROM investment.fd_closure_request cr WHERE cr.closure_request_id=fd_audit_closure_request.closure_request_id AND cr.entity_id = ANY(string_to_array($3, ','))))
 				    AND ($4::text='' OR action_type=$4)
 
 				  UNION ALL
@@ -641,7 +644,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_tds_receipt_audit
 				  WHERE requested_at >= $1::date AND requested_at < $2::date
 				    AND ($4::text='' OR action_type=$4)
-				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_tds_receipt r JOIN investment.fd_master m ON m.fd_id=r.fd_id WHERE r.tds_id=fd_tds_receipt_audit.tds_id AND m.entity_id=$3))
+				    AND (EXISTS(SELECT 1 FROM investment.fd_tds_receipt r JOIN investment.fd_master m ON m.fd_id=r.fd_id WHERE r.tds_id=fd_tds_receipt_audit.tds_id AND m.entity_id = ANY(string_to_array($3, ','))))
 
 				  UNION ALL
 
@@ -684,7 +687,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_accrual_run_audit
 				  WHERE requested_at >= $1::date AND requested_at < $2::date
 				    AND ($4::text='' OR action_type=$4)
-				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_accrual_run ar WHERE ar.run_id=fd_accrual_run_audit.run_id AND COALESCE(ar.entity_id,'')=$3))
+				    AND (EXISTS(SELECT 1 FROM investment.fd_accrual_run ar WHERE ar.run_id=fd_accrual_run_audit.run_id AND COALESCE(ar.entity_id,'') = ANY(string_to_array($3, ','))))
 				) combined
 				ORDER BY sort_ts DESC
 				LIMIT 500`, startDate, endDate, entityFilter, actionFilter, fdFilter)
@@ -749,7 +752,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_accrual_ledger al
 				WHERE al.is_overridden=true
 				  AND al.is_deleted=false
-				  AND ($1::text='' OR al.entity_id=$1)
+				  AND (al.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR al.fd_id=$2)
 				  AND (al.override_proposed_at IS NULL OR al.override_proposed_at >= $3::date)
 				ORDER BY al.override_proposed_at DESC NULLS LAST
@@ -816,7 +819,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE is_overridden=true
 				  AND override_attachment IS NULL
 				  AND is_deleted=false
-				  AND ($1::text='' OR entity_id=$1)
+				  AND (entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR fd_id=$2)`, entityFilter, fdFilter).Scan(&count)
 			if err != nil {
 				api.LogError("[AuditDash] missing_evidence query error: %v", err)
@@ -840,7 +843,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  is_locked
 				FROM investment.fd_accrual_period_lock
 				WHERE unlocked_at IS NOT NULL
-				  AND ($1::text='' OR entity_id=$1)
+				  AND (entity_id = ANY(string_to_array($1, ',')))
 				  AND unlocked_at >= $2::date
 				ORDER BY unlocked_at DESC
 				LIMIT 50`, entityFilter, startDate)
@@ -897,7 +900,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_audit_booking_request
 				  WHERE checker_by IS NOT NULL
 				    AND requested_at >= $1::date AND requested_at < $2::date
-				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=fd_audit_booking_request.booking_id AND b.entity_id=$3))
+				    AND (EXISTS(SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=fd_audit_booking_request.booking_id AND b.entity_id = ANY(string_to_array($3, ','))))
 
 				  UNION ALL
 
@@ -915,7 +918,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_audit_master
 				  WHERE checker_by IS NOT NULL
 				    AND requested_at >= $1::date AND requested_at < $2::date
-				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_master fm WHERE fm.fd_id=fd_audit_master.fd_id AND fm.entity_id=$3))
+				    AND (EXISTS(SELECT 1 FROM investment.fd_master fm WHERE fm.fd_id=fd_audit_master.fd_id AND fm.entity_id = ANY(string_to_array($3, ','))))
 
 				  UNION ALL
 
@@ -950,7 +953,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_audit_closure_request
 				  WHERE checker_by IS NOT NULL
 				    AND created_at >= $1::date AND created_at < $2::date
-				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_closure_request cr WHERE cr.closure_request_id=fd_audit_closure_request.closure_request_id AND cr.entity_id=$3))
+				    AND (EXISTS(SELECT 1 FROM investment.fd_closure_request cr WHERE cr.closure_request_id=fd_audit_closure_request.closure_request_id AND cr.entity_id = ANY(string_to_array($3, ','))))
 
 				  UNION ALL
 
@@ -1104,7 +1107,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_tds_receipt_audit
 				  WHERE checker_by IS NOT NULL
 				    AND requested_at >= $1::date AND requested_at < $2::date
-				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_tds_receipt r JOIN investment.fd_master m ON m.fd_id=r.fd_id WHERE r.tds_id=fd_tds_receipt_audit.tds_id AND m.entity_id=$3))
+				    AND (EXISTS(SELECT 1 FROM investment.fd_tds_receipt r JOIN investment.fd_master m ON m.fd_id=r.fd_id WHERE r.tds_id=fd_tds_receipt_audit.tds_id AND m.entity_id = ANY(string_to_array($3, ','))))
 
 				  UNION ALL
 
@@ -1139,7 +1142,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_accrual_run_audit
 				  WHERE checker_by IS NOT NULL
 				    AND requested_at >= $1::date AND requested_at < $2::date
-				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_accrual_run ar WHERE ar.run_id=fd_accrual_run_audit.run_id AND COALESCE(ar.entity_id,'')=$3))
+				    AND (EXISTS(SELECT 1 FROM investment.fd_accrual_run ar WHERE ar.run_id=fd_accrual_run_audit.run_id AND COALESCE(ar.entity_id,'') = ANY(string_to_array($3, ','))))
 				) combined
 				ORDER BY requested_at DESC
 				LIMIT 200`, startDate, endDate, entityFilter)
@@ -1196,7 +1199,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  is_locked,
 				  (unlocked_at IS NOT NULL) AS has_been_reopened
 				FROM investment.fd_accrual_period_lock
-				WHERE ($1::text='' OR entity_id=$1)
+				WHERE (entity_id = ANY(string_to_array($1, ',')))
 				ORDER BY locked_at DESC
 				LIMIT 100`, entityFilter)
 			if err != nil {
@@ -1237,18 +1240,18 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE is_deleted=false
 				  AND variance_flag=true
 				  AND COALESCE(variance_action,'PENDING') = 'PENDING'
-				  AND ($1::text='' OR EXISTS(
+				  AND EXISTS(
 				    SELECT 1 FROM investment.fd_booking_request b
-				    WHERE b.booking_id=fd_confirmation.booking_id AND b.entity_id=$1
-				  ))`, entityFilter).Scan(&openVariance)
+				    WHERE b.booking_id=fd_confirmation.booking_id AND b.entity_id = ANY(string_to_array($1, ','))
+				  )`, entityFilter).Scan(&openVariance)
 
 			pool.QueryRow(ctx, `
 				SELECT COUNT(*) FROM investment.fd_accrual_exception ae
 				WHERE COALESCE(ae.is_deleted,false)=false
 				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				  AND ($1::text='' OR EXISTS (
-				    SELECT 1 FROM investment.fd_master m WHERE m.fd_id=ae.fd_id AND m.entity_id=$1
-				  ))`, entityFilter).Scan(&openAccrualExc)
+				  AND EXISTS (
+				    SELECT 1 FROM investment.fd_master m WHERE m.fd_id=ae.fd_id AND m.entity_id = ANY(string_to_array($1, ','))
+				  )`, entityFilter).Scan(&openAccrualExc)
 
 			return map[string]interface{}{
 				"open_variance_confirmations": openVariance,
@@ -1295,7 +1298,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE i.is_deleted = false
 				  AND i.module_code = 'FIXED_DEPOSIT'
 				  AND i.submitted_at >= $1::timestamptz AND i.submitted_at < $2::timestamptz
-				  AND ($3::text='' OR i.entity_code=$3)
+				  AND (i.entity_code = ANY(string_to_array($3, ',')))
 				  AND ($4::text='' OR i.record_id=$4)
 				ORDER BY i.submitted_at DESC, ie.position ASC, ia.acted_at ASC
 				LIMIT 500`, startDate, endDate, entityFilter, fdFilter)

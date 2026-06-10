@@ -251,9 +251,15 @@ func GetConfirmationAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 func validateBookingAuditAccess(ctx context.Context, pool *pgxpool.Pool, bookingID string) (int, string) {
 	var exists bool
+	scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "m", 2)
+	args := append([]interface{}{bookingID}, scopeArgs...)
 	if err := pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM investment.fd_booking_request WHERE booking_id = $1)`,
-		bookingID,
+		`SELECT EXISTS(
+			SELECT 1
+			FROM investment.fd_booking_request m
+			WHERE m.booking_id = $1`+scopeWhere+`
+		)`,
+		args...,
 	).Scan(&exists); err != nil || !exists {
 		return http.StatusNotFound, "booking not found"
 	}
@@ -262,9 +268,16 @@ func validateBookingAuditAccess(ctx context.Context, pool *pgxpool.Pool, booking
 
 func validateConfirmationAuditAccess(ctx context.Context, pool *pgxpool.Pool, confirmationID string) (int, string) {
 	var exists bool
+	scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "b", 2)
+	args := append([]interface{}{confirmationID}, scopeArgs...)
 	if err := pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM investment.fd_confirmation WHERE confirmation_id = $1)`,
-		confirmationID,
+		`SELECT EXISTS(
+			SELECT 1
+			FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE c.confirmation_id = $1`+scopeWhere+`
+		)`,
+		args...,
 	).Scan(&exists); err != nil || !exists {
 		return http.StatusNotFound, "confirmation not found"
 	}

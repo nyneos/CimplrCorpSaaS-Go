@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -133,8 +135,92 @@ type PortfolioSnapshot struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+func filterBatchInfoByScope(ctx context.Context, info *BatchInfo) {
+	scope := ctxutil.FromContext(ctx)
+	if scope.IsAdminOverride || len(scope.EntityNames) == 0 || info == nil {
+		return
+	}
+	demats := info.Entities.Demat[:0]
+	for _, row := range info.Entities.Demat {
+		if scope.HasEntityNameAccess(row.EntityName) {
+			demats = append(demats, row)
+		}
+	}
+	info.Entities.Demat = demats
+
+	folios := info.Entities.Folio[:0]
+	for _, row := range info.Entities.Folio {
+		if scope.HasEntityNameAccess(row.EntityName) {
+			folios = append(folios, row)
+		}
+	}
+	info.Entities.Folio = folios
+
+	portfolioMaps := info.PortfolioMaps[:0]
+	for _, row := range info.PortfolioMaps {
+		if scope.HasEntityNameAccess(row.EntityName) {
+			portfolioMaps = append(portfolioMaps, row)
+		}
+	}
+	info.PortfolioMaps = portfolioMaps
+
+	snapshots := info.Snapshots[:0]
+	for _, row := range info.Snapshots {
+		if scope.HasEntityNameAccess(row.EntityName) {
+			snapshots = append(snapshots, row)
+		}
+	}
+	info.Snapshots = snapshots
+
+	transactions := info.Transactions[:0]
+	for _, row := range info.Transactions {
+		if scope.HasEntityNameAccess(row.EntityName) {
+			transactions = append(transactions, row)
+		}
+	}
+	info.Transactions = transactions
+
+	allowedRefs := map[string]map[string]struct{}{
+		"AMC":    {},
+		"SCHEME": {},
+		"DP":     {},
+		"DEMAT":  {},
+		"FOLIO":  {},
+	}
+	for _, row := range info.PortfolioMaps {
+		if row.AmcID != "" {
+			allowedRefs["AMC"][row.AmcID] = struct{}{}
+		}
+		if row.SchemeID != "" {
+			allowedRefs["SCHEME"][row.SchemeID] = struct{}{}
+		}
+		if row.DematID != "" {
+			allowedRefs["DEMAT"][row.DematID] = struct{}{}
+		}
+		if row.FolioID != "" {
+			allowedRefs["FOLIO"][row.FolioID] = struct{}{}
+		}
+	}
+	for _, row := range info.Entities.Demat {
+		if row.DPID != "" {
+			allowedRefs["DP"][row.DPID] = struct{}{}
+		}
+	}
+	mappings := info.Mappings[:0]
+	for _, row := range info.Mappings {
+		refType := strings.ToUpper(strings.TrimSpace(row.ReferenceType))
+		if refs, ok := allowedRefs[refType]; ok {
+			if _, ok := refs[row.ReferenceID]; ok {
+				mappings = append(mappings, row)
+			}
+		}
+	}
+	info.Mappings = mappings
+}
+
 type TransactionSummary struct {
 	ID                 int64     `json:"id"`
+	EntityName         string    `json:"entity_name"`
 	TransactionDate    time.Time `json:"transaction_date"`
 	TransactionType    string    `json:"transaction_type"`
 	SchemeInternalCode string    `json:"scheme_internal_code"`
@@ -341,7 +427,7 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 
 	// Get Transactions
 	txRows, err := pool.Query(ctx, `
-		SELECT id, transaction_date, transaction_type, scheme_internal_code, folio_number,
+		SELECT id, COALESCE(entity_name,''), transaction_date, transaction_type, scheme_internal_code, folio_number,
 		       amount, units, nav, created_at
 		FROM investment.onboard_transaction 
 		WHERE batch_id::text = $1::text
@@ -349,7 +435,7 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 	if err == nil {
 		for txRows.Next() {
 			var tx TransactionSummary
-			txRows.Scan(&tx.ID, &tx.TransactionDate, &tx.TransactionType,
+			txRows.Scan(&tx.ID, &tx.EntityName, &tx.TransactionDate, &tx.TransactionType,
 				&tx.SchemeInternalCode, &tx.FolioNumber, &tx.Amount,
 				&tx.Units, &tx.Nav, &tx.CreatedAt)
 			batchInfo.Transactions = append(batchInfo.Transactions, tx)
@@ -388,6 +474,7 @@ func GetBatchInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, 500, "failed to get batch info: "+err.Error())
 			return
 		}
+		filterBatchInfoByScope(ctx, batchInfo)
 
 		api.RespondWithPayload(w, true, "", batchInfo)
 	}
@@ -413,6 +500,11 @@ func GetAllBatches(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, 400, constants.ErrUserIDRequired)
 			return
 		}
+		scope := ctxutil.FromContext(ctx)
+		if !scope.IsAdminOverride && len(scope.EntityNames) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
+			return
+		}
 
 		type BatchSummary struct {
 			BatchID        string         `json:"batch_id"`
@@ -431,14 +523,50 @@ func GetAllBatches(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, `
 			SELECT ob.batch_id, ob.user_id, ob.user_email, ob.source, ob.total_records, 
 			       ob.status, ob.approval_status, ob.created_at, ob.completed_at, COALESCE(ob.upload_s3_key, '') AS upload_s3_key,
-			       (SELECT COUNT(*) FROM investment.masteramc WHERE batch_id::text = ob.batch_id::text) as amc_count,
-			       (SELECT COUNT(*) FROM investment.masterscheme WHERE batch_id::text = ob.batch_id::text) as scheme_count,
-			       (SELECT COUNT(*) FROM investment.masterdepositoryparticipant WHERE batch_id::text = ob.batch_id::text) as dp_count,
-			       (SELECT COUNT(*) FROM investment.masterdemataccount WHERE batch_id::text = ob.batch_id::text) as demat_count,
-			       (SELECT COUNT(*) FROM investment.masterfolio WHERE batch_id::text = ob.batch_id::text) as folio_count
+			       CASE WHEN $1::boolean THEN
+			         (SELECT COUNT(*) FROM investment.masteramc WHERE batch_id::text = ob.batch_id::text)
+			       ELSE
+			         (SELECT COUNT(DISTINCT pom.amc_id) FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND pom.entity_name = ANY($2::text[]) AND COALESCE(pom.amc_id,'') <> '')
+			       END as amc_count,
+			       CASE WHEN $1::boolean THEN
+			         (SELECT COUNT(*) FROM investment.masterscheme WHERE batch_id::text = ob.batch_id::text)
+			       ELSE
+			         (SELECT COUNT(DISTINCT pom.scheme_id) FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND pom.entity_name = ANY($2::text[]) AND COALESCE(pom.scheme_id,'') <> '')
+			       END as scheme_count,
+			       CASE WHEN $1::boolean THEN
+			         (SELECT COUNT(*) FROM investment.masterdepositoryparticipant WHERE batch_id::text = ob.batch_id::text)
+			       ELSE
+			         (SELECT COUNT(DISTINCT mda.dp_id) FROM investment.masterdemataccount mda WHERE mda.batch_id::text = ob.batch_id::text AND mda.entity_name = ANY($2::text[]) AND COALESCE(mda.dp_id,'') <> '')
+			       END as dp_count,
+			       CASE WHEN $1::boolean THEN
+			         (SELECT COUNT(*) FROM investment.masterdemataccount WHERE batch_id::text = ob.batch_id::text)
+			       ELSE
+			         (SELECT COUNT(*) FROM investment.masterdemataccount WHERE batch_id::text = ob.batch_id::text AND entity_name = ANY($2::text[]))
+			       END as demat_count,
+			       CASE WHEN $1::boolean THEN
+			         (SELECT COUNT(*) FROM investment.masterfolio WHERE batch_id::text = ob.batch_id::text)
+			       ELSE
+			         (SELECT COUNT(*) FROM investment.masterfolio WHERE batch_id::text = ob.batch_id::text AND entity_name = ANY($2::text[]))
+			       END as folio_count
 			FROM investment.onboard_batch ob
+			WHERE $1::boolean
+			   OR EXISTS (
+			     SELECT 1 FROM investment.portfolio_onboarding_map pom
+			     WHERE pom.batch_id::text = ob.batch_id::text
+			       AND pom.entity_name = ANY($2::text[])
+			   )
+			   OR EXISTS (
+			     SELECT 1 FROM investment.onboard_transaction ot
+			     WHERE ot.batch_id::text = ob.batch_id::text
+			       AND ot.entity_name = ANY($2::text[])
+			   )
+			   OR EXISTS (
+			     SELECT 1 FROM investment.portfolio_snapshot ps
+			     WHERE ps.batch_id::text = ob.batch_id::text
+			       AND ps.entity_name = ANY($2::text[])
+			   )
 			ORDER BY ob.created_at DESC
-			LIMIT 100`)
+			LIMIT 100`, scope.IsAdminOverride, scope.EntityNames)
 
 		if err != nil {
 			api.RespondWithError(w, 500, "failed to get batches: "+err.Error())

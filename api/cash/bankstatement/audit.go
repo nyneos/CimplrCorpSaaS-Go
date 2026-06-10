@@ -3,12 +3,17 @@ package bankstatement
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type bankStatementAuditRequest struct {
@@ -21,7 +26,7 @@ type bankStatementDownloadAuditRequest struct {
 	BankStatementID string `json:"bank_statement_id"`
 }
 
-func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
+func GetBankStatementAuditHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
@@ -35,12 +40,12 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 		}
 
 		ctx := r.Context()
-		if code, msg := validateBankStatementAuditAccess(ctx, db, body.BankStatementID); code != 0 {
+		if code, msg := validateBankStatementAuditAccess(ctx, pool, body.BankStatementID); code != 0 {
 			api.RespondWithError(w, code, msg)
 			return
 		}
 
-		rows, err := db.QueryContext(ctx, `
+		rows, err := pool.Query(ctx, `
 			SELECT
 				action_id,
 				bankstatementid,
@@ -89,7 +94,7 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 				"reason":            reason.String,
 			}
 			if strings.EqualFold(action.String, "EDIT") {
-				if changes := buildBankStatementChangeSummary(ctx, db, body.BankStatementID); len(changes) > 0 {
+				if changes := buildBankStatementChangeSummary(ctx, pool, body.BankStatementID); len(changes) > 0 {
 					entry["change_summary"] = changes
 				}
 			}
@@ -110,7 +115,7 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 	})
 }
 
-func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
+func GetBankStatementDownloadAuditHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
@@ -124,12 +129,12 @@ func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 		}
 
 		ctx := r.Context()
-		if code, msg := validateBankStatementAuditAccess(ctx, db, body.BankStatementID); code != 0 {
+		if code, msg := validateBankStatementAuditAccess(ctx, pool, body.BankStatementID); code != 0 {
 			api.RespondWithError(w, code, msg)
 			return
 		}
 
-		rows, err := db.QueryContext(ctx, `
+		rows, err := pool.Query(ctx, `
 			SELECT
 				file_id,
 				bankstatementid,
@@ -187,7 +192,7 @@ func GetBankStatementDownloadAuditHandler(db *sql.DB) http.Handler {
 	})
 }
 
-func GetBankStatementBalanceImpactAuditHandler(db *sql.DB) http.Handler {
+func GetBankStatementBalanceImpactAuditHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
@@ -201,12 +206,12 @@ func GetBankStatementBalanceImpactAuditHandler(db *sql.DB) http.Handler {
 		}
 
 		ctx := r.Context()
-		if code, msg := validateBankStatementAuditAccess(ctx, db, body.BankStatementID); code != 0 {
+		if code, msg := validateBankStatementAuditAccess(ctx, pool, body.BankStatementID); code != 0 {
 			api.RespondWithError(w, code, msg)
 			return
 		}
 
-		rows, err := db.QueryContext(ctx, `
+		rows, err := pool.Query(ctx, `
 			SELECT
 				balance_id,
 				actiontype,
@@ -268,7 +273,7 @@ func GetBankStatementBalanceImpactAuditHandler(db *sql.DB) http.Handler {
 	})
 }
 
-func GetBankStatementTransactionAuditHandler(db *sql.DB) http.Handler {
+func GetBankStatementTransactionAuditHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
@@ -282,12 +287,12 @@ func GetBankStatementTransactionAuditHandler(db *sql.DB) http.Handler {
 		}
 
 		ctx := r.Context()
-		if code, msg := validateBankStatementAuditAccess(ctx, db, body.BankStatementID); code != 0 {
+		if code, msg := validateBankStatementAuditAccess(ctx, pool, body.BankStatementID); code != 0 {
 			api.RespondWithError(w, code, msg)
 			return
 		}
 
-		rows, err := db.QueryContext(ctx, `
+		rows, err := pool.Query(ctx, `
 			SELECT
 				transaction_id,
 				field_name,
@@ -350,39 +355,39 @@ func GetBankStatementTransactionAuditHandler(db *sql.DB) http.Handler {
 	})
 }
 
-func validateBankStatementAuditAccess(ctx context.Context, db *sql.DB, bankStatementID string) (int, string) {
+func validateBankStatementAuditAccess(ctx context.Context, pool *pgxpool.Pool, bankStatementID string) (int, string) {
 	var entityID string
-	if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bankStatementID).Scan(&entityID); err != nil {
-		if err == sql.ErrNoRows {
+	if err := pool.QueryRow(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bankStatementID).Scan(&entityID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 			return http.StatusNotFound, "bank statement not found"
 		}
 		return http.StatusInternalServerError, pqUserFriendlyMessage(err)
 	}
-	if ids := api.GetEntityIDsFromCtx(ctx); len(ids) > 0 && !api.IsEntityAllowed(ctx, entityID) {
+	if ids := ctxutil.FromContext(ctx).EntityIDs; len(ids) > 0 && !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 		return http.StatusForbidden, constants.ErrNoAccessToBankStatement
 	}
 	return 0, ""
 }
 
-func validateEntityAuditAccess(ctx context.Context, db *sql.DB, entityName string) (int, string) {
-	entityIDs := api.GetEntityIDsFromCtx(ctx)
+func validateEntityAuditAccess(ctx context.Context, pool *pgxpool.Pool, entityName string) (int, string) {
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	if len(entityIDs) == 0 {
 		return http.StatusUnauthorized, constants.ErrNoAccessibleBusinessUnit
 	}
 
 	var entityID string
-	if err := db.QueryRowContext(ctx, `
+	if err := pool.QueryRow(ctx, `
 		SELECT entity_id
 		FROM public.masterentitycash
 		WHERE entity_name = $1
 		LIMIT 1
 	`, entityName).Scan(&entityID); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 			return http.StatusNotFound, "entity not found"
 		}
 		return http.StatusInternalServerError, pqUserFriendlyMessage(err)
 	}
-	if !api.IsEntityAllowed(ctx, entityID) {
+	if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 		return http.StatusForbidden, constants.ErrNoAccessToBankStatement
 	}
 	return 0, ""
@@ -407,7 +412,7 @@ func respondAuditPayload(w http.ResponseWriter, payload interface{}) {
 	})
 }
 
-func buildBankStatementChangeSummary(ctx context.Context, db *sql.DB, bankStatementID string) []map[string]interface{} {
+func buildBankStatementChangeSummary(ctx context.Context, pool *pgxpool.Pool, bankStatementID string) []map[string]interface{} {
 	var (
 		entityID, oldEntityID                   string
 		accountNumber, oldAccountNumber         string
@@ -427,7 +432,7 @@ func buildBankStatementChangeSummary(ctx context.Context, db *sql.DB, bankStatem
 		modeOfTransaction, oldModeOfTransaction string
 	)
 
-	err := db.QueryRowContext(ctx, `
+	err := pool.QueryRow(ctx, `
 		SELECT
 			COALESCE(entityid, ''),
 			COALESCE(old_entityid, ''),

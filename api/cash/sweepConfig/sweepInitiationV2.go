@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/validation"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -19,6 +21,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func validateSweepCashScope(ctx context.Context, fields map[string]interface{}) string {
+	return validation.ValidateCashMasterReferences(ctx, fields)
+}
 
 func parseDate(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
@@ -157,9 +163,15 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			// Validate entity scope
-			if !api.IsEntityAllowed(ctx, req.EntityName) {
-				api.RespondWithResult(w, false, "unauthorized entity: "+req.EntityName)
+			if msg := validateSweepCashScope(ctx, map[string]interface{}{
+				"entity_name":           req.EntityName,
+				"bank_name":             []string{req.SourceBankName, req.TargetBankName},
+				"account_number":        []string{req.SourceBankAccount, req.TargetBankAccount},
+				"source_account_number": req.SourceBankAccount,
+				"from_account_number":   req.SourceBankAccount,
+				"to_account_number":     req.TargetBankAccount,
+			}); msg != "" {
+				api.RespondWithResult(w, false, msg)
 				return
 			}
 
@@ -328,51 +340,21 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Validate sweep scope against prevalidation context
-		if strings.TrimSpace(entityName) != "" {
-			if !api.IsEntityAllowed(ctx, entityName) {
-				api.RespondWithResult(w, false, "unauthorized entity")
-				return
-			}
+		accountNumbers := []string{sourceAccount, targetAccount}
+		if req.OverriddenSourceBankAccount != nil {
+			accountNumbers = append(accountNumbers, *req.OverriddenSourceBankAccount)
 		}
-		// if strings.TrimSpace(sourceBank) != "" {
-		// 	if !api.IsBankAllowed(ctx, sourceBank) {
-		// 		api.RespondWithResult(w, false, "unauthorized source bank")
-		// 		return
-		// 	}
-		// }
-		// if strings.TrimSpace(targetBank) != "" {
-		// 	if !api.IsBankAllowed(ctx, targetBank) {
-		// 		api.RespondWithResult(w, false, "unauthorized target bank")
-		// 		return
-		// 	}
-		// }
-		// if strings.TrimSpace(sourceAccount) != "" {
-		// 	if !ctxHasApprovedBankAccountFor(ctx, sourceAccount, sourceBank, entityName) {
-		// 		api.RespondWithResult(w, false, "unauthorized source bank account")
-		// 		return
-		// 	}
-		// }
-		// if strings.TrimSpace(targetAccount) != "" {
-		// 	if !ctxHasApprovedBankAccountFor(ctx, targetAccount, targetBank, entityName) {
-		// 		api.RespondWithResult(w, false, "unauthorized target bank account")
-		// 		return
-		// 	}
-		// }
-
-		// Validate overridden accounts if provided
-		// if req.OverriddenSourceBankAccount != nil && strings.TrimSpace(*req.OverriddenSourceBankAccount) != "" {
-		// 	if !ctxHasApprovedBankAccountFor(ctx, *req.OverriddenSourceBankAccount, sourceBank, entityName) {
-		// 		api.RespondWithResult(w, false, "unauthorized overridden source bank account")
-		// 		return
-		// 	}
-		// }
-		// if req.OverriddenTargetBankAccount != nil && strings.TrimSpace(*req.OverriddenTargetBankAccount) != "" {
-		// 	if !ctxHasApprovedBankAccountFor(ctx, *req.OverriddenTargetBankAccount, targetBank, entityName) {
-		// 		api.RespondWithResult(w, false, "unauthorized overridden target bank account")
-		// 		return
-		// 	}
-		// }
+		if req.OverriddenTargetBankAccount != nil {
+			accountNumbers = append(accountNumbers, *req.OverriddenTargetBankAccount)
+		}
+		if msg := validateSweepCashScope(ctx, map[string]interface{}{
+			"entity_name":    entityName,
+			"bank_name":      []string{sourceBank, targetBank},
+			"account_number": accountNumbers,
+		}); msg != "" {
+			api.RespondWithResult(w, false, msg)
+			return
+		}
 
 		// Check if sweep is approved
 		var processingStatus string
@@ -626,10 +608,10 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if targetBank != "" && !api.IsBankAllowed(ctx, targetBank) {
 				continue
 			}
-			if sourceAccount != "" && !ctxHasApprovedBankAccount(ctx, sourceAccount) {
+			if sourceAccount != "" && !ctxutil.FromContext(ctx).HasApprovedBankAccount(sourceAccount) {
 				continue
 			}
-			if targetAccount != "" && !ctxHasApprovedBankAccount(ctx, targetAccount) {
+			if targetAccount != "" && !ctxutil.FromContext(ctx).HasApprovedBankAccount(targetAccount) {
 				continue
 			}
 
@@ -1486,7 +1468,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				// Validate entity scope
-				if !api.IsEntityAllowed(ctx, init.EntityName) {
+				if !ctxutil.FromContext(ctx).HasEntityAccess(init.EntityName) {
 					tx.Rollback(ctx)
 					api.RespondWithResult(w, false, "unauthorized entity: "+init.EntityName)
 					return
@@ -1588,7 +1570,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				// Validate entity scope
-				if !api.IsEntityAllowed(ctx, entityName.String) {
+				if !ctxutil.FromContext(ctx).HasEntityAccess(entityName.String) {
 					tx.Rollback(ctx)
 					api.RespondWithResult(w, false, "unauthorized entity for sweep: "+sweepID)
 					return
@@ -2145,6 +2127,9 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 				api.RespondWithResult(w, false, "scan error: "+err.Error())
 				return
 			}
+			if msg := validateSweepConfigV2Scope(ctx, entityName, sourceBank, sourceAccount, targetBank, targetAccount); msg != "" {
+				continue
+			}
 
 			var effectiveDateStr *string
 			if effectiveDate.Valid {
@@ -2281,6 +2266,9 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 				continue
 			}
 			if sourceAccount == targetAccount {
+				continue
+			}
+			if msg := validateSweepConfigV2Scope(ctx, entityName, sourceBank, sourceAccount, targetBank, targetAccount); msg != "" {
 				continue
 			}
 

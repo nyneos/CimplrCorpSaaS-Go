@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1392,6 +1393,28 @@ func DeleteBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		verifyRows.Close()
 
+		// Block delete request if any config is referenced by live FD bookings
+		var deleteBlockers []map[string]interface{}
+		for _, id := range validIDs {
+			blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_bank_config_master", id)
+			if len(blockers) > 0 {
+				deleteBlockers = append(deleteBlockers, map[string]interface{}{
+					"config_id":  id,
+					"blocked_by": dependency.BlockersSummary(blockers),
+				})
+			}
+		}
+		if len(deleteBlockers) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Cannot request deletion: one or more items are referenced by live FD bookings.",
+				"blocked": deleteBlockers,
+			})
+			return
+		}
+
 		if len(validIDs) > 0 {
 			auditValues := make([]string, len(validIDs))
 			auditArgs := make([]interface{}, 0, len(validIDs)*3)
@@ -1479,7 +1502,30 @@ func BulkApproveBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Mark soft-deleted for approved DELETE requests
+		// Dependency check: revert DELETE approval for configs referenced by live FD bookings.
+		var blockedItems []map[string]interface{}
+		{
+			checkRows, _ := tx.Query(ctx, `SELECT DISTINCT config_id FROM investment.fd_audit_bank_config WHERE config_id = ANY($1::text[]) AND action_type='DELETE' AND processing_status='APPROVED'`, req.ConfigIDs)
+			var deleteApprovedIDs []string
+			if checkRows != nil {
+				for checkRows.Next() {
+					var id string
+					if checkRows.Scan(&id) == nil {
+						deleteApprovedIDs = append(deleteApprovedIDs, id)
+					}
+				}
+				checkRows.Close()
+			}
+			for _, id := range deleteApprovedIDs {
+				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_bank_config_master", id)
+				if len(blockers) > 0 {
+					_, _ = tx.Exec(ctx, `UPDATE investment.fd_audit_bank_config SET processing_status='PENDING_DELETE_APPROVAL', checker_by=NULL, checker_at=NULL, checker_comment=NULL WHERE config_id=$1 AND action_type='DELETE' AND processing_status='APPROVED'`, id)
+					blockedItems = append(blockedItems, map[string]interface{}{"config_id": id, "blocked_by": dependency.BlockersSummary(blockers)})
+				}
+			}
+		}
+
+		// Mark soft-deleted for approved DELETE requests (blocked ones were reverted above)
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_bank_config_master
 			SET is_deleted=true
@@ -1489,7 +1535,6 @@ func BulkApproveBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE a.config_id = ANY($1::text[])
 				  AND a.action_type='DELETE'
 				  AND a.processing_status='APPROVED'
-				  AND a.action_type IN ('CREATE','EDIT','DELETE')
 			)
 		`, req.ConfigIDs)
 		if err != nil {
@@ -1506,10 +1551,11 @@ func BulkApproveBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			constants.ValueSuccess: true,
-			"approved_count":       len(req.ConfigIDs),
+			"approved_count":       len(req.ConfigIDs) - len(blockedItems),
 			"checker":              userEmail,
+			"blocked":              blockedItems,
 		})
-		api.LogInfo("BankConfig bulk approve: %d approved by %s", len(req.ConfigIDs), userEmail)
+		api.LogInfo("BankConfig bulk approve: %d approved by %s", len(req.ConfigIDs)-len(blockedItems), userEmail)
 	}
 }
 

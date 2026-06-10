@@ -3,6 +3,7 @@ package payablerecievable
 import (
 	"CimplrCorpSaas/api/cash/additionalfiles"
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -26,6 +27,14 @@ func DownloadPayableAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 func DownloadSelectedPayableAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDownloadSelectedHandler(pool, transactionAdditionalFilesConfig("payable"))
+}
+
+func DownloadPayablePackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, transactionAdditionalFilesConfig("payable"), additionalfiles.PackageZipOptions{
+		ModuleLabel: "Payable",
+		IDField:     "payable_id",
+		LoadMain:    loadPayablePackageMainFile,
+	})
 }
 
 func DeletePayableAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -58,6 +67,14 @@ func DownloadReceivableAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFun
 
 func DownloadSelectedReceivableAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDownloadSelectedHandler(pool, transactionAdditionalFilesConfig("receivable"))
+}
+
+func DownloadReceivablePackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, transactionAdditionalFilesConfig("receivable"), additionalfiles.PackageZipOptions{
+		ModuleLabel: "Receivable",
+		IDField:     "receivable_id",
+		LoadMain:    loadReceivablePackageMainFile,
+	})
 }
 
 func DeleteReceivableAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -117,6 +134,9 @@ func recordReceivableMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID st
 }
 
 func listPayableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
+	if err := validatePayableParentScope(ctx, pool, parentID); err != nil {
+		return nil, err
+	}
 	return additionalfiles.QueryFiles(ctx, pool, payableQuery(`
 		WHERE f.payable_id = $1
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
@@ -125,7 +145,24 @@ func listPayableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentI
 	`), parentID)
 }
 
+func loadPayablePackageMainFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+	var uploadS3Key string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(upload_s3_key, '')
+		FROM public.tr_payables
+		WHERE payable_id = $1
+		  AND COALESCE(is_deleted, FALSE) = FALSE
+	`, rowID).Scan(&uploadS3Key)
+	if err != nil || strings.TrimSpace(uploadS3Key) == "" {
+		return nil, err
+	}
+	return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
+}
+
 func createPayableAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
+	if err := validatePayableParentScope(ctx, tx, input.ParentID); err != nil {
+		return "", err
+	}
 	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "public.payable_files", "payable_id", input, `
 		SELECT p.payable_id AS parent_id
 		FROM public.tr_payables p
@@ -143,6 +180,9 @@ func getAnyPayableAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parent
 }
 
 func getPayableAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
+	if err := validatePayableParentScope(ctx, pool, parentID); err != nil {
+		return nil, err
+	}
 	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
 	if includeDeleted {
 		deletedClause = ""
@@ -156,6 +196,9 @@ func getPayableAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool
 }
 
 func getPayableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]additionalfiles.FileRecord, []string, error) {
+	if err := validatePayableParentScope(ctx, pool, parentID); err != nil {
+		return nil, nil, err
+	}
 	trimmedIDs := trimTransactionAdditionalFileIDs(fileIDs)
 	files, queryErr := additionalfiles.QueryFiles(ctx, pool, payableQuery(`
 		WHERE f.payable_id = $1
@@ -171,11 +214,37 @@ func getPayableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID
 }
 
 func deletePayableAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	if err := validatePayableParentScope(ctx, pool, parentID); err != nil {
+		return false, err
+	}
 	return deletePayableAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
 }
 
 func deletePayableAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	if err := validatePayableParentScope(ctx, tx, parentID); err != nil {
+		return false, err
+	}
 	return deletePayableAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+type transactionFileQueryer interface {
+	QueryRow(context.Context, string, ...interface{}) pgx.Row
+}
+
+func validatePayableParentScope(ctx context.Context, queryer transactionFileQueryer, payableID string) error {
+	var entityName, counterpartyName, currencyCode string
+	if err := queryer.QueryRow(ctx, `
+		SELECT COALESCE(entity_name, ''), COALESCE(counterparty_name, ''), COALESCE(currency_code, '')
+		FROM public.tr_payables
+		WHERE payable_id = $1
+		  AND COALESCE(is_deleted, FALSE) = FALSE
+	`, payableID).Scan(&entityName, &counterpartyName, &currencyCode); err != nil {
+		return err
+	}
+	if msg := validatePayRecScope(ctx, entityName, counterpartyName, currencyCode); msg != "" {
+		return errors.New(msg)
+	}
+	return nil
 }
 
 type transactionFileExec interface {
@@ -202,6 +271,9 @@ func deletePayableAdditionalFileExec(ctx context.Context, exec transactionFileEx
 }
 
 func listReceivableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
+	if err := validateReceivableParentScope(ctx, pool, parentID); err != nil {
+		return nil, err
+	}
 	return additionalfiles.QueryFiles(ctx, pool, receivableQuery(`
 		WHERE f.receivable_id = $1
 		  AND COALESCE(f.is_deleted, FALSE) = FALSE
@@ -210,7 +282,24 @@ func listReceivableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, pare
 	`), parentID)
 }
 
+func loadReceivablePackageMainFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+	var uploadS3Key string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(upload_s3_key, '')
+		FROM public.tr_receivables
+		WHERE receivable_id = $1
+		  AND COALESCE(is_deleted, FALSE) = FALSE
+	`, rowID).Scan(&uploadS3Key)
+	if err != nil || strings.TrimSpace(uploadS3Key) == "" {
+		return nil, err
+	}
+	return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
+}
+
 func createReceivableAdditionalFile(ctx context.Context, tx pgx.Tx, input additionalfiles.CreateInput) (string, error) {
+	if err := validateReceivableParentScope(ctx, tx, input.ParentID); err != nil {
+		return "", err
+	}
 	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, "public.receivable_files", "receivable_id", input, `
 		SELECT r.receivable_id AS parent_id
 		FROM public.tr_receivables r
@@ -228,6 +317,9 @@ func getAnyReceivableAdditionalFile(ctx context.Context, pool *pgxpool.Pool, par
 }
 
 func getReceivableAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
+	if err := validateReceivableParentScope(ctx, pool, parentID); err != nil {
+		return nil, err
+	}
 	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
 	if includeDeleted {
 		deletedClause = ""
@@ -241,6 +333,9 @@ func getReceivableAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.P
 }
 
 func getReceivableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string, fileIDs []string) ([]additionalfiles.FileRecord, []string, error) {
+	if err := validateReceivableParentScope(ctx, pool, parentID); err != nil {
+		return nil, nil, err
+	}
 	trimmedIDs := trimTransactionAdditionalFileIDs(fileIDs)
 	files, queryErr := additionalfiles.QueryFiles(ctx, pool, receivableQuery(`
 		WHERE f.receivable_id = $1
@@ -256,11 +351,33 @@ func getReceivableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, paren
 }
 
 func deleteReceivableAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	if err := validateReceivableParentScope(ctx, pool, parentID); err != nil {
+		return false, err
+	}
 	return deleteReceivableAdditionalFileExec(ctx, pool, parentID, fileID, deletedBy, deletedAt)
 }
 
 func deleteReceivableAdditionalFileTx(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+	if err := validateReceivableParentScope(ctx, tx, parentID); err != nil {
+		return false, err
+	}
 	return deleteReceivableAdditionalFileExec(ctx, tx, parentID, fileID, deletedBy, deletedAt)
+}
+
+func validateReceivableParentScope(ctx context.Context, queryer transactionFileQueryer, receivableID string) error {
+	var entityName, counterpartyName, currencyCode string
+	if err := queryer.QueryRow(ctx, `
+		SELECT COALESCE(entity_name, ''), COALESCE(counterparty_name, ''), COALESCE(currency_code, '')
+		FROM public.tr_receivables
+		WHERE receivable_id = $1
+		  AND COALESCE(is_deleted, FALSE) = FALSE
+	`, receivableID).Scan(&entityName, &counterpartyName, &currencyCode); err != nil {
+		return err
+	}
+	if msg := validatePayRecScope(ctx, entityName, counterpartyName, currencyCode); msg != "" {
+		return errors.New(msg)
+	}
+	return nil
 }
 
 func deleteReceivableAdditionalFileExec(ctx context.Context, exec transactionFileExec, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {

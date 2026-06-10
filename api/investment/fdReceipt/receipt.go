@@ -12,6 +12,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,6 +32,94 @@ func nullStr(v string) interface{} {
 		return nil
 	}
 	return v
+}
+
+func appendFDReceiptScopeFilters(ctx context.Context, w http.ResponseWriter, query *string, args *[]interface{}, argIdx *int, entityCol, bankCol, entityID, bankID string) bool {
+	scope := ctxutil.FromContext(ctx)
+	entityID = strings.TrimSpace(entityID)
+	bankID = strings.TrimSpace(bankID)
+
+	if entityID != "" {
+		if !scope.HasEntityAccess(entityID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return false
+		}
+		*query += fmt.Sprintf(" AND %s=$%d", entityCol, *argIdx)
+		*args = append(*args, entityID)
+		*argIdx++
+	} else if len(scope.EntityIDs) > 0 {
+		*query += fmt.Sprintf(" AND %s = ANY($%d::text[])", entityCol, *argIdx)
+		*args = append(*args, scope.EntityIDs)
+		*argIdx++
+	}
+
+	if bankID != "" {
+		if !scope.HasApprovedBank(bankID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bankID))
+			return false
+		}
+		*query += fmt.Sprintf(" AND %s=$%d", bankCol, *argIdx)
+		*args = append(*args, bankID)
+		*argIdx++
+	} else if bankIDs := scope.BankIDs(); len(bankIDs) > 0 {
+		*query += fmt.Sprintf(" AND (%s = '' OR %s = ANY($%d::text[]))", bankCol, bankCol, *argIdx)
+		*args = append(*args, bankIDs)
+		*argIdx++
+	}
+
+	return true
+}
+
+func requireFDReceiptEntityScope(ctx context.Context, w http.ResponseWriter, entityID string) bool {
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" || ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
+		return true
+	}
+	api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+	return false
+}
+
+func requireFDReceiptIDScope(ctx context.Context, pool *pgxpool.Pool, w http.ResponseWriter, receiptIDs, tdsIDs []string) bool {
+	if len(receiptIDs) == 0 && len(tdsIDs) == 0 {
+		return true
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT entity_id, COALESCE(bank_id,'') AS bank_id
+		FROM investment.fd_interest_receipt
+		WHERE receipt_id = ANY($1::text[]) AND is_deleted=false
+		UNION ALL
+		SELECT entity_id, COALESCE(bank_id,'') AS bank_id
+		FROM investment.fd_tds_receipt
+		WHERE tds_id = ANY($2::text[]) AND is_deleted=false`,
+		receiptIDs, tdsIDs,
+	)
+	if err != nil {
+		api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+		return false
+	}
+	defer rows.Close()
+
+	scope := ctxutil.FromContext(ctx)
+	for rows.Next() {
+		var entityID, bankID string
+		if err := rows.Scan(&entityID, &bankID); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			return false
+		}
+		if !scope.HasEntityAccess(entityID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return false
+		}
+		if bankID != "" && !scope.HasApprovedBank(bankID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bankID))
+			return false
+		}
+	}
+	if rows.Err() != nil {
+		api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+rows.Err().Error())
+		return false
+	}
+	return true
 }
 
 type receiptSchemaQueryer interface {
@@ -222,6 +311,18 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if fdStatus != constants.StatusActive && fdStatus != "MATURED" {
 			api.RespondWithError(w, http.StatusBadRequest, "FD must be ACTIVE or MATURED")
+			return
+		}
+
+		receiptScope := ctxutil.FromContext(r.Context())
+		if !receiptScope.HasEntityAccess(entityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return
+		}
+		if !receiptScope.HasApprovedBank(bankID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bankID))
 			return
 		}
 		if errMsg := checkFDDates(fdStart, fdMaturity,
@@ -478,15 +579,27 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Fetch existing date context for approval engine and date validation.
-		var entityID, fdIDForReceipt string
+		var entityID, fdIDForReceipt, bankID string
 		var currentReceiptDate, currentPeriodStart, currentPeriodEnd *time.Time
 		err = pool.QueryRow(ctx, `
-			SELECT entity_id, fd_id, receipt_date, period_start, period_end
+			SELECT entity_id, fd_id, COALESCE(bank_id,''), receipt_date, period_start, period_end
 			FROM investment.fd_interest_receipt
 			WHERE receipt_id=$1 AND is_deleted=false`,
-			req.ReceiptID).Scan(&entityID, &fdIDForReceipt, &currentReceiptDate, &currentPeriodStart, &currentPeriodEnd)
+			req.ReceiptID).Scan(&entityID, &fdIDForReceipt, &bankID, &currentReceiptDate, &currentPeriodStart, &currentPeriodEnd)
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, constants.ReceiptNotFound)
+			return
+		}
+
+		updateReceiptScope := ctxutil.FromContext(r.Context())
+		if !updateReceiptScope.HasEntityAccess(entityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return
+		}
+		if !updateReceiptScope.HasApprovedBank(bankID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bankID))
 			return
 		}
 
@@ -1344,15 +1457,8 @@ WHERE r.is_deleted = false`
 			args = append(args, req.FdID)
 			argIdx++
 		}
-		if req.EntityID != "" {
-			baseSQL += fmt.Sprintf(" AND r.entity_id=$%d", argIdx)
-			args = append(args, req.EntityID)
-			argIdx++
-		}
-		if req.BankID != "" {
-			baseSQL += fmt.Sprintf(" AND r.bank_id=$%d", argIdx)
-			args = append(args, req.BankID)
-			argIdx++
+		if !appendFDReceiptScopeFilters(ctx, w, &baseSQL, &args, &argIdx, "r.entity_id", "r.bank_id", req.EntityID, req.BankID) {
+			return
 		}
 		if req.ReceiptStatus != "" {
 			baseSQL += fmt.Sprintf(" AND r.receipt_status=$%d", argIdx)
@@ -1482,20 +1588,13 @@ WHERE r.is_deleted = false AND l.processing_status = 'APPROVED'`
 
 		args := []interface{}{}
 		argIdx := 1
-		if req.EntityID != "" {
-			baseSQL += fmt.Sprintf(" AND r.entity_id = $%d", argIdx)
-			args = append(args, req.EntityID)
-			argIdx++
-		}
 		if req.FDID != "" {
 			baseSQL += fmt.Sprintf(" AND r.fd_id = $%d", argIdx)
 			args = append(args, req.FDID)
 			argIdx++
 		}
-		if req.BankID != "" {
-			baseSQL += fmt.Sprintf(" AND r.bank_id = $%d", argIdx)
-			args = append(args, req.BankID)
-			argIdx++
+		if !appendFDReceiptScopeFilters(ctx, w, &baseSQL, &args, &argIdx, "r.entity_id", "r.bank_id", req.EntityID, req.BankID) {
+			return
 		}
 
 		baseSQL += ` ORDER BY GREATEST(COALESCE(l.requested_at,'1970-01-01'::timestamptz), COALESCE(l.checker_at,'1970-01-01'::timestamptz)) DESC`
@@ -1602,20 +1701,13 @@ WHERE t.is_deleted = false AND l.processing_status = 'APPROVED'`
 
 		args := []interface{}{}
 		argIdx := 1
-		if req.EntityID != "" {
-			baseSQL += fmt.Sprintf(" AND t.entity_id = $%d", argIdx)
-			args = append(args, req.EntityID)
-			argIdx++
-		}
 		if req.FDID != "" {
 			baseSQL += fmt.Sprintf(" AND t.fd_id = $%d", argIdx)
 			args = append(args, req.FDID)
 			argIdx++
 		}
-		if req.BankID != "" {
-			baseSQL += fmt.Sprintf(" AND t.bank_id = $%d", argIdx)
-			args = append(args, req.BankID)
-			argIdx++
+		if !appendFDReceiptScopeFilters(ctx, w, &baseSQL, &args, &argIdx, "t.entity_id", "t.bank_id", req.EntityID, req.BankID) {
+			return
 		}
 
 		baseSQL += ` ORDER BY GREATEST(COALESCE(l.requested_at,'1970-01-01'::timestamptz), COALESCE(l.checker_at,'1970-01-01'::timestamptz)) DESC`
@@ -1751,20 +1843,13 @@ WHERE t.is_deleted = false`
 		args := []interface{}{}
 		argIdx := 1
 
-		if req.EntityID != "" {
-			baseSQL += fmt.Sprintf(" AND t.entity_id=$%d", argIdx)
-			args = append(args, req.EntityID)
-			argIdx++
-		}
 		if req.FDID != "" {
 			baseSQL += fmt.Sprintf(" AND t.fd_id=$%d", argIdx)
 			args = append(args, req.FDID)
 			argIdx++
 		}
-		if req.BankID != "" {
-			baseSQL += fmt.Sprintf(" AND t.bank_id=$%d", argIdx)
-			args = append(args, req.BankID)
-			argIdx++
+		if !appendFDReceiptScopeFilters(ctx, w, &baseSQL, &args, &argIdx, "t.entity_id", "t.bank_id", req.EntityID, req.BankID) {
+			return
 		}
 		if req.TDSStatus != "" {
 			baseSQL += fmt.Sprintf(" AND t.tds_status=$%d", argIdx)
@@ -1847,7 +1932,14 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		receiptList, _ := rowsToMapSlice(receiptRows)
 		var receipt interface{}
 		if len(receiptList) > 0 {
-			receipt = receiptList[0]
+			receiptRow := receiptList[0]
+			if !requireFDReceiptEntityScope(ctx, w, fmt.Sprint(receiptRow["entity_id"])) {
+				return
+			}
+			receipt = receiptRow
+		} else {
+			api.RespondWithError(w, http.StatusNotFound, "receipt not found")
+			return
 		}
 
 		// 2. TDS row
@@ -2051,11 +2143,20 @@ func GetTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, req.FdID)
 			argIdx++
 		}
-		if req.EntityID != "" {
+		if strings.TrimSpace(req.EntityID) != "" {
+			if !requireFDReceiptEntityScope(ctx, w, req.EntityID) {
+				return
+			}
 			cond := fmt.Sprintf(constants.QuerryEntityID, argIdx)
 			baseSQL += cond
 			summarySQL += cond
 			args = append(args, req.EntityID)
+			argIdx++
+		} else if scope := ctxutil.FromContext(ctx); len(scope.EntityIDs) > 0 {
+			cond := fmt.Sprintf(" AND entity_id = ANY($%d::text[])", argIdx)
+			baseSQL += cond
+			summarySQL += cond
+			args = append(args, scope.EntityIDs)
 			argIdx++
 		}
 		if req.FromDate != "" {
@@ -2151,6 +2252,21 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if hasIDs {
+			if !requireFDReceiptIDScope(ctx, pool, w, req.ReceiptIDs, req.TDSIDs) {
+				return
+			}
+		} else {
+			scope := ctxutil.FromContext(ctx)
+			if !scope.HasEntityAccess(req.EntityID) {
+				api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				return
+			}
+			if req.BankIDFilter != "" && !scope.HasApprovedBank(req.BankIDFilter) {
+				api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", req.BankIDFilter))
+				return
+			}
+		}
 
 		var preview *ReconcilePreviewSummary
 		var previewErr error
@@ -2256,6 +2372,21 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if hasIDs {
+			if !requireFDReceiptIDScope(ctx, pool, w, req.ReceiptIDs, req.TDSIDs) {
+				return
+			}
+		} else {
+			scope := ctxutil.FromContext(ctx)
+			if !scope.HasEntityAccess(req.EntityID) {
+				api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				return
+			}
+			if req.BankIDFilter != "" && !scope.HasApprovedBank(req.BankIDFilter) {
+				api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", req.BankIDFilter))
+				return
+			}
+		}
 
 		// Create a fresh RUNNING run row
 		var runID string
@@ -2416,9 +2547,16 @@ func GetReconcileRunStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, req.ReconcileRunID)
 			argIdx++
 		}
-		if req.EntityID != "" {
+		if strings.TrimSpace(req.EntityID) != "" {
+			if !requireFDReceiptEntityScope(ctx, w, req.EntityID) {
+				return
+			}
 			baseSQL += fmt.Sprintf(" AND entity_id=$%d", argIdx)
 			args = append(args, req.EntityID)
+			argIdx++
+		} else if scope := ctxutil.FromContext(ctx); len(scope.EntityIDs) > 0 {
+			baseSQL += fmt.Sprintf(" AND entity_id = ANY($%d::text[])", argIdx)
+			args = append(args, scope.EntityIDs)
 			argIdx++
 		}
 		if req.RunStatus != "" {
@@ -2527,9 +2665,16 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, req.ReconcileRunID)
 			argIdx++
 		}
-		if req.EntityID != "" {
+		if strings.TrimSpace(req.EntityID) != "" {
+			if !requireFDReceiptEntityScope(ctx, w, req.EntityID) {
+				return
+			}
 			baseSQL += fmt.Sprintf(" AND rr.entity_id=$%d", argIdx)
 			args = append(args, req.EntityID)
+			argIdx++
+		} else if scope := ctxutil.FromContext(ctx); len(scope.EntityIDs) > 0 {
+			baseSQL += fmt.Sprintf(" AND rr.entity_id = ANY($%d::text[])", argIdx)
+			args = append(args, scope.EntityIDs)
 			argIdx++
 		}
 		if req.FDID != "" {
@@ -3188,20 +3333,13 @@ WHERE r.is_deleted = false
 
 		iArgs := []interface{}{}
 		iIdx := 1
-		if req.EntityID != "" {
-			interestSQL += fmt.Sprintf(" AND r.entity_id=$%d", iIdx)
-			iArgs = append(iArgs, req.EntityID)
-			iIdx++
-		}
 		if req.FDID != "" {
 			interestSQL += fmt.Sprintf(" AND r.fd_id=$%d", iIdx)
 			iArgs = append(iArgs, req.FDID)
 			iIdx++
 		}
-		if req.BankID != "" {
-			interestSQL += fmt.Sprintf(" AND r.bank_id=$%d", iIdx)
-			iArgs = append(iArgs, req.BankID)
-			iIdx++
+		if !appendFDReceiptScopeFilters(ctx, w, &interestSQL, &iArgs, &iIdx, "r.entity_id", "r.bank_id", req.EntityID, req.BankID) {
+			return
 		}
 		if req.PeriodStart != "" {
 			interestSQL += fmt.Sprintf(" AND r.period_start>=$%d::date", iIdx)
@@ -3286,20 +3424,13 @@ WHERE t.is_deleted = false
 
 		tArgs := []interface{}{}
 		tIdx := 1
-		if req.EntityID != "" {
-			tdsSQL += fmt.Sprintf(" AND t.entity_id=$%d", tIdx)
-			tArgs = append(tArgs, req.EntityID)
-			tIdx++
-		}
 		if req.FDID != "" {
 			tdsSQL += fmt.Sprintf(" AND t.fd_id=$%d", tIdx)
 			tArgs = append(tArgs, req.FDID)
 			tIdx++
 		}
-		if req.BankID != "" {
-			tdsSQL += fmt.Sprintf(" AND t.bank_id=$%d", tIdx)
-			tArgs = append(tArgs, req.BankID)
-			tIdx++
+		if !appendFDReceiptScopeFilters(ctx, w, &tdsSQL, &tArgs, &tIdx, "t.entity_id", "t.bank_id", req.EntityID, req.BankID) {
+			return
 		}
 		if req.PeriodStart != "" {
 			tdsSQL += fmt.Sprintf(" AND t.period_start>=$%d::date", tIdx)
@@ -3360,10 +3491,13 @@ func GetExceptions(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		scope := ctxutil.FromContext(ctx)
 		out, err := loadVarianceListRows(ctx, pool, varianceListFilters{
 			ReconcileRunID:  req.ReconcileRunID,
 			FdID:            req.FdID,
 			ExceptionStatus: req.ExceptionStatus,
+			EntityIDs:       scope.EntityIDs,
+			BankIDs:         scope.BankIDs(),
 		})
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
@@ -3409,10 +3543,23 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		var exStatus string
-		err := pool.QueryRow(ctx, `SELECT exception_status FROM investment.fd_receipt_exception WHERE exception_id=$1 AND is_deleted=false`, req.ExceptionID).Scan(&exStatus)
+		var exStatus, entityID, bankID string
+		err := pool.QueryRow(ctx, `
+			SELECT e.exception_status, COALESCE(m.entity_id,''), COALESCE(m.bank_id,'')
+			FROM investment.fd_receipt_exception e
+			LEFT JOIN investment.fd_master m ON m.fd_id = e.fd_id AND COALESCE(m.is_deleted,false)=false
+			WHERE e.exception_id=$1 AND e.is_deleted=false`, req.ExceptionID).Scan(&exStatus, &entityID, &bankID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrExceptionNotFound)
+			return
+		}
+		scope := ctxutil.FromContext(ctx)
+		if !scope.HasEntityAccess(entityID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return
+		}
+		if bankID != "" && !scope.HasApprovedBank(bankID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bankID))
 			return
 		}
 		if exStatus != "OPEN" && exStatus != "IN_REVIEW" {
@@ -3909,7 +4056,18 @@ func GetTDSDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		tdsData, _ := rowsToMapSlice(tdsRows)
 		var tds interface{}
 		if len(tdsData) > 0 {
-			tds = tdsData[0]
+			tdsRow := tdsData[0]
+			if !requireFDReceiptEntityScope(ctx, w, fmt.Sprint(tdsRow["entity_id"])) {
+				return
+			}
+			if bankID := fmt.Sprint(tdsRow["bank_id"]); bankID != "" && !ctxutil.FromContext(ctx).HasApprovedBank(bankID) {
+				api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bankID))
+				return
+			}
+			tds = tdsRow
+		} else {
+			api.RespondWithError(w, http.StatusNotFound, "tds receipt not found")
+			return
 		}
 
 		// Audit trail

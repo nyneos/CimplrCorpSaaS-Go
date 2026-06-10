@@ -3,12 +3,24 @@ package investment
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/validation"
 	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func validateOnboardingLookupRows(w http.ResponseWriter, r *http.Request, rows []map[string]interface{}) bool {
+	for _, row := range rows {
+		if msg := validation.ValidateMFMasterReferences(r.Context(), row); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return false
+		}
+	}
+	return true
+}
 
 func GetAMFISchemeAMCEnriched(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -78,6 +90,13 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Clean input (trim + lower)
 		for i, a := range req.AMCs {
 			req.AMCs[i] = strings.ToLower(strings.TrimSpace(a))
+		}
+		amcRows := make([]map[string]interface{}, 0, len(req.AMCs))
+		for _, amc := range req.AMCs {
+			amcRows = append(amcRows, map[string]interface{}{"amc_name": amc, "amc_id": amc})
+		}
+		if !validateOnboardingLookupRows(w, r, amcRows) {
+			return
 		}
 
 		query := `
@@ -361,8 +380,13 @@ func GetDematWithDPInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				AND COALESCE(dp.is_deleted, false) = false
 			ORDER BY dm.entity_name, dm.demat_account_number;
 		`
+		args := []interface{}{}
+		if scope := ctxutil.FromContext(ctx); len(scope.EntityNames) > 0 {
+			q = strings.Replace(q, "ORDER BY dm.entity_name", "AND dm.entity_name = ANY($1::text[])\n\t\t\tORDER BY dm.entity_name", 1)
+			args = append(args, scope.EntityNames)
+		}
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return

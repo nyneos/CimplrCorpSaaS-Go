@@ -51,6 +51,10 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if msg := validateTransactionRecordScope(ctx, pgxPool, txType, req.TransactionID); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
 		rows, err := pgxPool.Query(ctx, `
 			SELECT
 				action_id,
@@ -159,6 +163,31 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"audit_logs": payload,
 		})
 	}
+}
+
+func validateTransactionRecordScope(ctx context.Context, pgxPool *pgxpool.Pool, transactionType, transactionID string) string {
+	var entityName, counterpartyName, currencyCode string
+	switch strings.ToUpper(strings.TrimSpace(transactionType)) {
+	case "PAYABLE":
+		if err := pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(entity_name, ''), COALESCE(counterparty_name, ''), COALESCE(currency_code, '')
+			FROM tr_payables
+			WHERE payable_id = $1 AND is_deleted != TRUE
+		`, transactionID).Scan(&entityName, &counterpartyName, &currencyCode); err != nil {
+			return "payable not found"
+		}
+	case "RECEIVABLE":
+		if err := pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(entity_name, ''), COALESCE(counterparty_name, ''), COALESCE(currency_code, '')
+			FROM tr_receivables
+			WHERE receivable_id = $1 AND is_deleted != TRUE
+		`, transactionID).Scan(&entityName, &counterpartyName, &currencyCode); err != nil {
+			return "receivable not found"
+		}
+	default:
+		return "transaction_type must be PAYABLE or RECEIVABLE"
+	}
+	return validatePayRecScope(ctx, entityName, counterpartyName, currencyCode)
 }
 
 func respondTransactionAuditError(w http.ResponseWriter, message string) {

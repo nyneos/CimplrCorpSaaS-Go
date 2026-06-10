@@ -5,7 +5,6 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/dash/ticker"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -13,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
 )
@@ -76,16 +75,25 @@ type FXOpsDashboardResponse struct {
 }
 
 // GetFXOpsDashboard returns comprehensive FX Ops dashboard data with filters
-func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
+func GetFXOpsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req FXOpsDashboardRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid request format")
 			return
 		}
 
-		// Use entities from request if provided, otherwise get all data (no entity filter)
-		entities := req.Entities
+		entities, ok := scopedEntityFilter(ctx, req.Entities)
+		if !ok {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
+			return
+		}
+		currencies, ok := scopedCurrencyFilter(ctx, req.Currencies)
+		if !ok {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
+			return
+		}
 
 		// Log for debugging
 		logger.LogInfo("Entities from request: %v", entities)
@@ -105,20 +113,20 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 		alerts := []Alert{}
 
 		// Alert 1: Maturing in 3 days
-		maturingAlert := getMaturingExposuresAlert(r.Context(), db, entities, req.Currencies)
+		maturingAlert := getMaturingExposuresAlert(ctx, db, entities, currencies)
 		alerts = append(alerts, maturingAlert)
 
 		// Alert 2: Settlement Failed
-		settlementAlert := getSettlementFailedAlert(r.Context(), db, entities)
+		settlementAlert := getSettlementFailedAlert(ctx, db, entities)
 		alerts = append(alerts, settlementAlert)
 
 		// Alert 3: High Unhedged Exposure (always show)
-		highExposureAlert := getHighUnhedgedAlert(r.Context(), db, entities, req.Currencies)
+		highExposureAlert := getHighUnhedgedAlert(ctx, db, entities, currencies)
 		alerts = append(alerts, highExposureAlert)
 
 		// 2. KPI CARDS SECTION
 		// KPI 1: Exposures Requiring Attention (Unhedged & Approaching)
-		unhedgedCount, unhedgedAmount := getUnhedgedExposures(r.Context(), db, entities, req.Currencies, days)
+		unhedgedCount, unhedgedAmount := getUnhedgedExposures(ctx, db, entities, currencies, days)
 
 		kpis := []KPICard{
 			{
@@ -129,7 +137,7 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 		}
 
 		// KPI 2: Trades Maturing Today
-		tradesCount := getTradesMaturingToday(r.Context(), db, entities, req.Currencies)
+		tradesCount := getTradesMaturingToday(ctx, db, entities, currencies)
 		kpis = append(kpis, KPICard{
 			Title:    "Trades Maturing Today",
 			Value:    tradesCount,
@@ -137,7 +145,7 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 		})
 
 		// KPI 3: Overall Unhedged (Spot exposure)
-		_, overallUnhedgedUSD := getUnhedgedExposures(r.Context(), db, entities, req.Currencies, 0) // All time
+		_, overallUnhedgedUSD := getUnhedgedExposures(ctx, db, entities, currencies, 0) // All time
 		kpis = append(kpis, KPICard{
 			Title:    "Overall Unhedged",
 			Value:    formatAmount(overallUnhedgedUSD),
@@ -145,7 +153,7 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 		})
 
 		// KPI 4: Pending Settlement Today
-		pendingCount := getPendingSettlementToday(r.Context(), db, entities)
+		pendingCount := getPendingSettlementToday(ctx, db, entities)
 		kpis = append(kpis, KPICard{
 			Title:    "Pending Settlement Today",
 			Value:    pendingCount,
@@ -153,13 +161,13 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 		})
 
 		// 3. EXPOSURE MATURITIES
-		exposures := getExposureMaturities(r.Context(), db, entities, req.Currencies)
+		exposures := getExposureMaturities(ctx, db, entities, currencies)
 
 		// 4. SETTLEMENT PERFORMANCE (Daily)
-		settlementSummary := getSettlementPerformance(r.Context(), db, entities)
+		settlementSummary := getSettlementPerformance(ctx, db, entities)
 
 		// 5. TOP 5 CURRENCY NET POSITIONS
-		netPositions := getTopCurrencyPositions(r.Context(), db, entities, 5)
+		netPositions := getTopCurrencyPositions(ctx, db, entities, 5)
 
 		// 6. BANK LIMITS USAGE (placeholder - no table yet)
 		bankLimits := []BankLimit{} // Empty array for now
@@ -181,9 +189,84 @@ func GetFXOpsDashboard(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+func scopedEntityFilter(ctx context.Context, requested []string) ([]string, bool) {
+	allowed := api.GetEntityNamesFromCtx(ctx)
+	if len(allowed) == 0 {
+		return nil, false
+	}
+	if len(requested) == 0 {
+		return allowed, true
+	}
+	out := make([]string, 0, len(requested))
+	seen := map[string]struct{}{}
+	for _, raw := range requested {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		matched := ""
+		for _, allowedName := range allowed {
+			if strings.EqualFold(strings.TrimSpace(allowedName), raw) {
+				matched = strings.TrimSpace(allowedName)
+				break
+			}
+		}
+		if matched == "" {
+			return nil, false
+		}
+		key := strings.ToUpper(matched)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, matched)
+	}
+	if len(out) == 0 {
+		return allowed, true
+	}
+	return out, true
+}
+
+func scopedCurrencyFilter(ctx context.Context, requested []string) ([]string, bool) {
+	allowed := api.GetCurrencyCodesFromCtx(ctx)
+	if len(allowed) == 0 {
+		return nil, false
+	}
+	if len(requested) == 0 {
+		return allowed, true
+	}
+	out := make([]string, 0, len(requested))
+	seen := map[string]struct{}{}
+	for _, raw := range requested {
+		raw = strings.ToUpper(strings.TrimSpace(raw))
+		if raw == "" {
+			continue
+		}
+		matched := ""
+		for _, allowedCode := range allowed {
+			if strings.EqualFold(strings.TrimSpace(allowedCode), raw) {
+				matched = strings.ToUpper(strings.TrimSpace(allowedCode))
+				break
+			}
+		}
+		if matched == "" {
+			return nil, false
+		}
+		if _, ok := seen[matched]; ok {
+			continue
+		}
+		seen[matched] = struct{}{}
+		out = append(out, matched)
+	}
+	if len(out) == 0 {
+		return allowed, true
+	}
+	return out, true
+}
+
 // Helper: Get unhedged exposures maturing in 3 days for alerts
 // Helper: Get maturing exposures alert - always returns exactly one alert
-func getMaturingExposuresAlert(ctx context.Context, db *sql.DB, entities []string, currencies []string) Alert {
+func getMaturingExposuresAlert(ctx context.Context, db *pgxpool.Pool, entities []string, currencies []string) Alert {
 	now := time.Now()
 	threeDaysLater := now.AddDate(0, 0, 3).Format(constants.DateFormat)
 
@@ -194,13 +277,13 @@ func getMaturingExposuresAlert(ctx context.Context, db *sql.DB, entities []strin
 
 	if len(entities) > 0 {
 		entityFilter = fmt.Sprintf(constants.QuerryEntity, argPos)
-		args = append(args, pq.Array(entities))
+		args = append(args, entities)
 		argPos++
 	}
 
 	if len(currencies) > 0 {
 		currencyFilter = fmt.Sprintf(constants.QuerryCurrency2, argPos)
-		args = append(args, pq.Array(currencies))
+		args = append(args, currencies)
 	}
 
 	query := fmt.Sprintf(`
@@ -219,7 +302,7 @@ func getMaturingExposuresAlert(ctx context.Context, db *sql.DB, entities []strin
 	`, entityFilter, currencyFilter)
 
 	var count int
-	err := db.QueryRowContext(ctx, query, args...).Scan(&count)
+	err := db.QueryRow(ctx, query, args...).Scan(&count)
 	if err != nil {
 		logger.LogError("Error in getMaturingExposuresAlert: %v", err)
 		count = 0
@@ -248,12 +331,12 @@ func getMaturingExposuresAlert(ctx context.Context, db *sql.DB, entities []strin
 
 // Helper: Get settlement failures alert
 // Helper: Get settlement failed alert - always returns exactly one alert
-func getSettlementFailedAlert(ctx context.Context, db *sql.DB, entities []string) Alert {
+func getSettlementFailedAlert(ctx context.Context, db *pgxpool.Pool, entities []string) Alert {
 	entityFilter := ""
 	args := []interface{}{}
 	if len(entities) > 0 {
 		entityFilter = "WHERE eh.entity = ANY($1) AND"
-		args = append(args, pq.Array(entities))
+		args = append(args, entities)
 	} else {
 		entityFilter = "WHERE"
 	}
@@ -267,7 +350,7 @@ func getSettlementFailedAlert(ctx context.Context, db *sql.DB, entities []string
 	`, entityFilter)
 
 	var count int
-	err := db.QueryRowContext(ctx, query, args...).Scan(&count)
+	err := db.QueryRow(ctx, query, args...).Scan(&count)
 	if err != nil {
 		logger.LogError("Error in getSettlementFailedAlert: %v", err)
 		count = 0
@@ -295,7 +378,7 @@ func getSettlementFailedAlert(ctx context.Context, db *sql.DB, entities []string
 }
 
 // Helper: Get unhedged exposures count and amount
-func getUnhedgedExposures(ctx context.Context, db *sql.DB, entities []string, currencies []string, days int) (int, float64) {
+func getUnhedgedExposures(ctx context.Context, db *pgxpool.Pool, entities []string, currencies []string, days int) (int, float64) {
 	entityFilter := ""
 	currencyFilter := ""
 	dateFilter := ""
@@ -305,7 +388,7 @@ func getUnhedgedExposures(ctx context.Context, db *sql.DB, entities []string, cu
 	// Add entity filter only if entities are provided
 	if len(entities) > 0 {
 		entityFilter = fmt.Sprintf(constants.QuerryEntity, argPos)
-		args = append(args, pq.Array(entities))
+		args = append(args, entities)
 		argPos++
 	}
 
@@ -318,7 +401,7 @@ func getUnhedgedExposures(ctx context.Context, db *sql.DB, entities []string, cu
 
 	if len(currencies) > 0 {
 		currencyFilter = fmt.Sprintf(constants.QuerryCurrency2, argPos)
-		args = append(args, pq.Array(currencies))
+		args = append(args, currencies)
 	}
 
 	query := fmt.Sprintf(`
@@ -339,7 +422,7 @@ func getUnhedgedExposures(ctx context.Context, db *sql.DB, entities []string, cu
 		GROUP BY eh.currency
 	`, entityFilter, dateFilter, currencyFilter)
 
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		logger.LogError("Error in getUnhedgedExposures: %v", err)
 		return 0, 0
@@ -369,7 +452,7 @@ func getUnhedgedExposures(ctx context.Context, db *sql.DB, entities []string, cu
 }
 
 // Helper: Get trades maturing today from forward bookings
-func getTradesMaturingToday(ctx context.Context, db *sql.DB, entities []string, currencies []string) int {
+func getTradesMaturingToday(ctx context.Context, db *pgxpool.Pool, entities []string, currencies []string) int {
 	today := time.Now().Format(constants.DateFormat)
 
 	entityFilter := ""
@@ -379,13 +462,13 @@ func getTradesMaturingToday(ctx context.Context, db *sql.DB, entities []string, 
 
 	if len(entities) > 0 {
 		entityFilter = fmt.Sprintf(" AND fb.entity_level_0 = ANY($%d)", argPos)
-		args = append(args, pq.Array(entities))
+		args = append(args, entities)
 		argPos++
 	}
 
 	if len(currencies) > 0 {
 		currencyFilter = fmt.Sprintf(" AND fb.base_currency = ANY($%d)", argPos)
-		args = append(args, pq.Array(currencies))
+		args = append(args, currencies)
 	}
 
 	query := fmt.Sprintf(`
@@ -398,7 +481,7 @@ func getTradesMaturingToday(ctx context.Context, db *sql.DB, entities []string, 
 	`, entityFilter, currencyFilter)
 
 	var count int
-	err := db.QueryRowContext(ctx, query, args...).Scan(&count)
+	err := db.QueryRow(ctx, query, args...).Scan(&count)
 	if err != nil {
 		logger.LogError("Error in getTradesMaturingToday: %v", err)
 		return 0
@@ -408,14 +491,14 @@ func getTradesMaturingToday(ctx context.Context, db *sql.DB, entities []string, 
 }
 
 // Helper: Get pending settlements today
-func getPendingSettlementToday(ctx context.Context, db *sql.DB, entities []string) int {
+func getPendingSettlementToday(ctx context.Context, db *pgxpool.Pool, entities []string) int {
 	today := time.Now().Format(constants.DateFormat)
 
 	entityFilter := ""
 	args := []interface{}{today}
 	if len(entities) > 0 {
 		entityFilter = constants.QuerryWhereClause
-		args = append(args, pq.Array(entities))
+		args = append(args, entities)
 	} else {
 		entityFilter = "WHERE"
 	}
@@ -429,7 +512,7 @@ func getPendingSettlementToday(ctx context.Context, db *sql.DB, entities []strin
 	`, entityFilter)
 
 	var count int
-	err := db.QueryRowContext(ctx, query, args...).Scan(&count)
+	err := db.QueryRow(ctx, query, args...).Scan(&count)
 	if err != nil {
 		logger.LogError("Error in getPendingSettlementToday: %v", err)
 		return 0
@@ -439,7 +522,7 @@ func getPendingSettlementToday(ctx context.Context, db *sql.DB, entities []strin
 }
 
 // Helper: Get exposure maturities (Next 7 days, Next 30 days, Total)
-func getExposureMaturities(ctx context.Context, db *sql.DB, entities []string, currencies []string) []ExposureBlock {
+func getExposureMaturities(ctx context.Context, db *pgxpool.Pool, entities []string, currencies []string) []ExposureBlock {
 	now := time.Now()
 
 	entityFilter := ""
@@ -449,13 +532,13 @@ func getExposureMaturities(ctx context.Context, db *sql.DB, entities []string, c
 
 	if len(entities) > 0 {
 		entityFilter = fmt.Sprintf(constants.QuerryEntity, argPos)
-		args = append(args, pq.Array(entities))
+		args = append(args, entities)
 		argPos++
 	}
 
 	if len(currencies) > 0 {
 		currencyFilter = fmt.Sprintf(constants.QuerryCurrency2, argPos)
-		args = append(args, pq.Array(currencies))
+		args = append(args, currencies)
 	}
 
 	query := fmt.Sprintf(`
@@ -471,7 +554,7 @@ func getExposureMaturities(ctx context.Context, db *sql.DB, entities []string, c
 			%s
 	`, entityFilter, currencyFilter)
 
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		logger.LogError("Error in getExposureMaturities: %v", err)
 		return []ExposureBlock{}
@@ -484,7 +567,7 @@ func getExposureMaturities(ctx context.Context, db *sql.DB, entities []string, c
 	// Check if exposure is hedged
 	hedgedMap := make(map[string]bool)
 	hedgeQuery := `SELECT DISTINCT exposure_header_id FROM exposure_hedge_links WHERE is_active = true`
-	hedgeRows, err := db.QueryContext(ctx, hedgeQuery)
+	hedgeRows, err := db.Query(ctx, hedgeQuery)
 	if err != nil {
 		logger.LogError("[WARN] failed to fetch exposure hedges: %v", err)
 	} else {
@@ -545,7 +628,7 @@ func getExposureMaturities(ctx context.Context, db *sql.DB, entities []string, c
 }
 
 // Helper: Get settlement performance summary - FIXED SQL INTERVAL SYNTAX
-func getSettlementPerformance(ctx context.Context, db *sql.DB, entities []string) SettlementSummary {
+func getSettlementPerformance(ctx context.Context, db *pgxpool.Pool, entities []string) SettlementSummary {
 	today := time.Now().Format(constants.DateFormat)
 
 	summary := SettlementSummary{
@@ -559,7 +642,7 @@ func getSettlementPerformance(ctx context.Context, db *sql.DB, entities []string
 	args := []interface{}{today}
 	if len(entities) > 0 {
 		entityFilter = constants.QuerryWhereClause
-		args = append(args, pq.Array(entities))
+		args = append(args, entities)
 	} else {
 		entityFilter = "WHERE"
 	}
@@ -576,7 +659,7 @@ func getSettlementPerformance(ctx context.Context, db *sql.DB, entities []string
 		GROUP BY LOWER(s.apprval_status)
 	`, entityFilter)
 
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		logger.LogError("Error in getSettlementPerformance: %v", err)
 		return summary
@@ -605,7 +688,7 @@ func getSettlementPerformance(ctx context.Context, db *sql.DB, entities []string
 	upcomingArgs := []interface{}{today}
 	if len(entities) > 0 {
 		upcomingEntityFilter = constants.QuerryWhereClause
-		upcomingArgs = append(upcomingArgs, pq.Array(entities))
+		upcomingArgs = append(upcomingArgs, entities)
 	} else {
 		upcomingEntityFilter = "WHERE"
 	}
@@ -616,7 +699,7 @@ func getSettlementPerformance(ctx context.Context, db *sql.DB, entities []string
 		JOIN exposure_headers eh ON s.exposure_header_id = eh.exposure_header_id
 		%s s.settlement_date > $1::date
 	`, upcomingEntityFilter)
-	db.QueryRowContext(ctx, upcomingQuery, upcomingArgs...).Scan(&summary.Upcoming)
+	db.QueryRow(ctx, upcomingQuery, upcomingArgs...).Scan(&summary.Upcoming)
 
 	// Auto-reconciled percentage (placeholder logic)
 	total := summary.Confirmed + summary.Pending
@@ -628,14 +711,14 @@ func getSettlementPerformance(ctx context.Context, db *sql.DB, entities []string
 }
 
 // Helper: Get top N currency net positions
-func getTopCurrencyPositions(ctx context.Context, db *sql.DB, entities []string, topN int) []NetPosition {
+func getTopCurrencyPositions(ctx context.Context, db *pgxpool.Pool, entities []string, topN int) []NetPosition {
 	entityFilter := ""
 	args := []interface{}{}
 	argPos := 1
 
 	if len(entities) > 0 {
 		entityFilter = fmt.Sprintf("WHERE eh.entity = ANY($%d) AND", argPos)
-		args = append(args, pq.Array(entities))
+		args = append(args, entities)
 		argPos++
 	} else {
 		entityFilter = "WHERE"
@@ -654,7 +737,7 @@ func getTopCurrencyPositions(ctx context.Context, db *sql.DB, entities []string,
 
 	args = append(args, topN)
 
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		logger.LogError("Error in getTopCurrencyPositions: %v", err)
 		return []NetPosition{}
@@ -757,7 +840,7 @@ func getTopTradeCurrencies() []NetPosition {
 }
 
 // Helper: Get high unhedged exposure alert - always returns exactly one alert
-func getHighUnhedgedAlert(ctx context.Context, db *sql.DB, entities []string, currencies []string) Alert {
+func getHighUnhedgedAlert(ctx context.Context, db *pgxpool.Pool, entities []string, currencies []string) Alert {
 	_, totalUnhedged := getUnhedgedExposures(ctx, db, entities, currencies, 0)
 
 	if totalUnhedged > 1000000 { // > $1M

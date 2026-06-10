@@ -1,12 +1,12 @@
 package exposures
 
 import (
-	"CimplrCorpSaas/api"
 	"database/sql"
 	"encoding/json"
 	"net/http"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/lib/pq"
 )
@@ -33,8 +33,9 @@ func GetHedgingProposalsAggregated(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Get business units from context (set by middleware)
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}

@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,6 +36,26 @@ func getCurrencyRate(currency string) float64 {
 	}
 	logger.LogInfo("Unknown currency encountered: %s, using default rate 1.0", currency)
 	return 1.0
+}
+
+func normalizeLower(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if s := strings.ToLower(strings.TrimSpace(value)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func normalizeUpper(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if s := strings.ToUpper(strings.TrimSpace(value)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 type PlannedIODashEntity struct {
@@ -66,6 +88,13 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+		entityNames := normalizeLower(api.GetEntityNamesFromCtx(ctx))
+		currencyCodes := normalizeUpper(api.GetCurrencyCodesFromCtx(ctx))
+		if len(entityNames) == 0 || len(currencyCodes) == 0 {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			return
+		}
 		now := time.Now()
 		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		qStart := quarterStart(today)
@@ -95,9 +124,11 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					WHERE a.proposal_id = p.proposal_id
 					ORDER BY a.requested_at DESC LIMIT 1
 				  ) = 'APPROVED'
+					AND ($3::text[] IS NULL OR array_length($3::text[], 1) IS NULL OR LOWER(TRIM(i.entity_name)) = ANY($3))
+					AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($4)
 				GROUP BY i.entity_name, p.currency_code
 			`
-			rows, err := pgxPool.Query(ctx, entityQ, dr.Start, dr.End)
+			rows, err := pgxPool.Query(ctx, entityQ, dr.Start, dr.End, entityNames, currencyCodes)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
@@ -152,9 +183,11 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					WHERE a.proposal_id = p.proposal_id
 					ORDER BY a.requested_at DESC LIMIT 1
 				  ) = 'APPROVED'
+					AND ($3::text[] IS NULL OR array_length($3::text[], 1) IS NULL OR LOWER(TRIM(i.entity_name)) = ANY($3))
+					AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($4)
 				GROUP BY i.cashflow_type, p.currency_code
 			`
-			rows2, err := pgxPool.Query(ctx, cashflowQ, dr.Start, dr.End)
+			rows2, err := pgxPool.Query(ctx, cashflowQ, dr.Start, dr.End, entityNames, currencyCodes)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})

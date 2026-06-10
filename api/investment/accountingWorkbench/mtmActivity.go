@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
+	"CimplrCorpSaas/internal/validation"
 )
 
 // ---------------------------
@@ -65,6 +66,14 @@ func CreateMTMSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.Units <= 0 || req.PrevNAV <= 0 || req.CurrNAV <= 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "units, prev_nav, and curr_nav must be greater than 0")
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{
+			"scheme_id": req.SchemeID,
+			"folio_id":  req.FolioID,
+			"demat_id":  req.DematID,
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -769,6 +778,10 @@ func UpdateMTM(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "no fields to update")
 			return
 		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), req.Fields); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			return
+		}
 
 		userEmail := api.GetUserNameFromCtx(r.Context())
 		if userEmail == "" {
@@ -872,6 +885,8 @@ func UpdateMTM(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetMTMWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		args := []interface{}{}
+		pos := 1
 		q := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.activity_id)
@@ -943,10 +958,24 @@ func GetMTMWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN investment.masterscheme sch ON sch.scheme_id = m.scheme_id
 			WHERE COALESCE(m.is_deleted, false) = false
 				AND COALESCE(act.is_deleted, false) = false
-			ORDER BY m.updated_at DESC, m.mtm_id;
 		`
+		if schemeRefs := accountingMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			q += fmt.Sprintf(" AND m.scheme_id = ANY($%d::text[])", pos)
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := accountingMFFolioRefs(ctx); len(folioRefs) > 0 {
+			q += fmt.Sprintf(" AND (COALESCE(m.folio_id::text,'') = '' OR m.folio_id::text = ANY($%d::text[]))", pos)
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := accountingMFDematRefs(ctx); len(dematRefs) > 0 {
+			q += fmt.Sprintf(" AND (COALESCE(m.demat_id::text,'') = '' OR m.demat_id::text = ANY($%d::text[]))", pos)
+			args = append(args, dematRefs)
+		}
+		q += " ORDER BY m.updated_at DESC, m.mtm_id"
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
@@ -1569,6 +1598,18 @@ func CommitMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"success":   false,
 					"scheme_id": record.SchemeID,
 					"error":     "Invalid record: units, prev_nav, and curr_nav must be greater than 0",
+				})
+				continue
+			}
+			if errMsg := validation.ValidateMFMasterReferences(ctx, map[string]interface{}{
+				"scheme_id":        record.SchemeID,
+				"folio_number":     record.FolioNumber,
+				"demat_acc_number": record.DematAccNumber,
+			}); errMsg != "" {
+				results = append(results, map[string]interface{}{
+					"success":   false,
+					"scheme_id": record.SchemeID,
+					"error":     errMsg,
 				})
 				continue
 			}

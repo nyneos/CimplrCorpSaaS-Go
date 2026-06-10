@@ -3,6 +3,7 @@ package accountingworkbench
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/validation"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -72,6 +73,13 @@ func CreateCorporateActionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if strings.TrimSpace(req.SourceSchemeID) == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "source_scheme_id is required")
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{
+			"source_scheme_id": req.SourceSchemeID,
+			"target_scheme_id": req.TargetSchemeID,
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -232,6 +240,13 @@ func CreateCorporateActionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"success": false, "error": "source_scheme_id is required"})
 				continue
 			}
+			if errMsg := validation.ValidateMFMasterReferences(ctx, map[string]interface{}{
+				"source_scheme_id": row.SourceSchemeID,
+				"target_scheme_id": row.TargetSchemeID,
+			}); errMsg != "" {
+				results = append(results, map[string]interface{}{"success": false, "error": errMsg})
+				continue
+			}
 
 			var corpActionID string
 			if err := tx.QueryRow(ctx, `
@@ -293,6 +308,10 @@ func UpdateCorporateAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(req.Fields) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "no fields to update")
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), req.Fields); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -394,6 +413,8 @@ func UpdateCorporateAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetCorporateActionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		args := []interface{}{}
+		pos := 1
 		q := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.activity_id)
@@ -452,10 +473,17 @@ func GetCorporateActionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l ON l.activity_id = ca.activity_id
 			WHERE COALESCE(ca.is_deleted, false) = false
 				AND COALESCE(act.is_deleted, false) = false
-			ORDER BY ca.updated_at DESC, ca.ca_id;
 		`
+		if schemeRefs := accountingMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			q += fmt.Sprintf(" AND ca.source_scheme_id = ANY($%d::text[])", pos)
+			args = append(args, schemeRefs)
+			pos++
+			q += fmt.Sprintf(" AND (COALESCE(ca.target_scheme_id,'') = '' OR ca.target_scheme_id = ANY($%d::text[]))", pos)
+			args = append(args, schemeRefs)
+		}
+		q += " ORDER BY ca.updated_at DESC, ca.ca_id"
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return

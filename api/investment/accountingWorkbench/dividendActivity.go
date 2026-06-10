@@ -3,6 +3,7 @@ package accountingworkbench
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/validation"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -66,6 +67,13 @@ func CreateDividendSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.DividendAmount <= 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "dividend_amount must be greater than 0")
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{
+			"scheme_id": req.SchemeID,
+			"folio_id":  req.FolioID,
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -239,6 +247,13 @@ func CreateDividendBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"success": false, "error": "dividend_amount must be > 0"})
 				continue
 			}
+			if errMsg := validation.ValidateMFMasterReferences(ctx, map[string]interface{}{
+				"scheme_id": row.SchemeID,
+				"folio_id":  row.FolioID,
+			}); errMsg != "" {
+				results = append(results, map[string]interface{}{"success": false, "error": errMsg})
+				continue
+			}
 
 			// Auto-calculate reinvest_units if not provided for REINVESTMENT transactions
 			reinvestUnits := row.ReinvestUnits
@@ -308,6 +323,10 @@ func UpdateDividend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(req.Fields) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "no fields to update")
+			return
+		}
+		if errMsg := validation.ValidateMFMasterReferences(r.Context(), req.Fields); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -432,6 +451,8 @@ func UpdateDividend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetDividendsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		args := []interface{}{}
+		pos := 1
 		q := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.activity_id)
@@ -492,10 +513,19 @@ func GetDividendsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l ON l.activity_id = d.activity_id
 			WHERE COALESCE(d.is_deleted, false) = false
 				AND COALESCE(act.is_deleted, false) = false
-			ORDER BY d.updated_at DESC, d.dividend_id;
 		`
+		if schemeRefs := accountingMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			q += fmt.Sprintf(" AND d.scheme_id = ANY($%d::text[])", pos)
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := accountingMFFolioRefs(ctx); len(folioRefs) > 0 {
+			q += fmt.Sprintf(" AND (COALESCE(d.folio_id::text,'') = '' OR d.folio_id::text = ANY($%d::text[]))", pos)
+			args = append(args, folioRefs)
+		}
+		q += " ORDER BY d.updated_at DESC, d.dividend_id"
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return

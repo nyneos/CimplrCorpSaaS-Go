@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -858,12 +859,26 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if len(toDeleteActionIDs) > 0 {
+		// Dependency check: block schemes that still have active MF transactions or folio mappings.
+		var blockedSchemes []map[string]interface{}
+		var canDeleteSchemeIDs []string
+		var canDeleteActionIDs []string
+		for i, schemeID := range deleteMasterIDs {
+			blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterscheme", schemeID)
+			if len(blockers) > 0 {
+				blockedSchemes = append(blockedSchemes, map[string]interface{}{"scheme_id": schemeID, "blocked_by": dependency.BlockersSummary(blockers)})
+			} else {
+				canDeleteSchemeIDs = append(canDeleteSchemeIDs, schemeID)
+				canDeleteActionIDs = append(canDeleteActionIDs, toDeleteActionIDs[i])
+			}
+		}
+
+		if len(canDeleteActionIDs) > 0 {
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.auditactionscheme
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
 				WHERE action_id = ANY($3)
-			`, checkerBy, req.Comment, toDeleteActionIDs); err != nil {
+			`, checkerBy, req.Comment, canDeleteActionIDs); err != nil {
 				msg, status := getUserFriendlySchemeError(err, "mark deleted failed")
 				api.RespondWithError(w, status, msg)
 				return
@@ -872,7 +887,7 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				UPDATE investment.masterscheme
 				SET is_deleted=true, status='Inactive'
 				WHERE scheme_id = ANY($1)
-			`, deleteMasterIDs); err != nil {
+			`, canDeleteSchemeIDs); err != nil {
 				msg, status := getUserFriendlySchemeError(err, "master soft-delete failed")
 				api.RespondWithError(w, status, msg)
 				return
@@ -885,9 +900,18 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// folioschememapping has no is_deleted column and PK is `id` (not scheme_id),
+		// so the registry cannot cascade it. Delete the mapping rows directly.
+		if len(canDeleteSchemeIDs) > 0 {
+			_, _ = pgxPool.Exec(ctx, `
+				DELETE FROM investment.folioschememapping
+				WHERE scheme_id = ANY($1)`, canDeleteSchemeIDs)
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"approved_action_ids": toApprove,
-			"deleted_schemes":     deleteMasterIDs,
+			"deleted_schemes":     canDeleteSchemeIDs,
+			"blocked_schemes":     blockedSchemes,
 		})
 	}
 }

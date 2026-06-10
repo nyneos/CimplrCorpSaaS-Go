@@ -17,12 +17,28 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/validation"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
 )
+
+func validatePayRecScope(ctx context.Context, entityName, counterpartyName, currencyCode string) string {
+	return validation.ValidateCashMasterReferences(ctx, map[string]interface{}{
+		"entity_name":       entityName,
+		"counterparty_name": counterpartyName,
+		"currency_code":     currencyCode,
+	})
+}
+
+func stringPtrValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
 
 func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -47,16 +63,17 @@ func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var uploadS3Key *string
+		var entityName, counterpartyName, currencyCode string
 		switch txType {
 		case "PAYABLE":
-			err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM tr_payables WHERE payable_id = $1 AND is_deleted != TRUE`, req.TransactionID).Scan(&uploadS3Key)
+			err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key, COALESCE(entity_name,''), COALESCE(counterparty_name,''), COALESCE(currency_code,'') FROM tr_payables WHERE payable_id = $1 AND is_deleted != TRUE`, req.TransactionID).Scan(&uploadS3Key, &entityName, &counterpartyName, &currencyCode)
 			if err != nil {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "payable not found"})
 				return
 			}
 		case "RECEIVABLE":
-			err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM tr_receivables WHERE receivable_id = $1 AND is_deleted != TRUE`, req.TransactionID).Scan(&uploadS3Key)
+			err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key, COALESCE(entity_name,''), COALESCE(counterparty_name,''), COALESCE(currency_code,'') FROM tr_receivables WHERE receivable_id = $1 AND is_deleted != TRUE`, req.TransactionID).Scan(&uploadS3Key, &entityName, &counterpartyName, &currencyCode)
 			if err != nil {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "receivable not found"})
@@ -65,6 +82,12 @@ func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		default:
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type must be PAYABLE or RECEIVABLE"})
+			return
+		}
+		if msg := validatePayRecScope(ctx, entityName, counterpartyName, currencyCode); msg != "" {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": msg})
 			return
 		}
 
@@ -127,15 +150,16 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			var uploadS3Key *string
+			var entityName, counterpartyName, currencyCode string
 			switch txType {
 			case "PAYABLE":
-				err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM tr_payables WHERE payable_id = $1 AND is_deleted != TRUE`, transactionID).Scan(&uploadS3Key)
+				err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key, COALESCE(entity_name,''), COALESCE(counterparty_name,''), COALESCE(currency_code,'') FROM tr_payables WHERE payable_id = $1 AND is_deleted != TRUE`, transactionID).Scan(&uploadS3Key, &entityName, &counterpartyName, &currencyCode)
 				if err != nil {
 					failedIDs = append(failedIDs, transactionID)
 					continue
 				}
 			case "RECEIVABLE":
-				err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM tr_receivables WHERE receivable_id = $1 AND is_deleted != TRUE`, transactionID).Scan(&uploadS3Key)
+				err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key, COALESCE(entity_name,''), COALESCE(counterparty_name,''), COALESCE(currency_code,'') FROM tr_receivables WHERE receivable_id = $1 AND is_deleted != TRUE`, transactionID).Scan(&uploadS3Key, &entityName, &counterpartyName, &currencyCode)
 				if err != nil {
 					failedIDs = append(failedIDs, transactionID)
 					continue
@@ -144,6 +168,10 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type must be PAYABLE or RECEIVABLE"})
 				return
+			}
+			if msg := validatePayRecScope(ctx, entityName, counterpartyName, currencyCode); msg != "" {
+				failedIDs = append(failedIDs, transactionID)
+				continue
 			}
 
 			if uploadS3Key == nil || strings.TrimSpace(*uploadS3Key) == "" {
@@ -449,6 +477,34 @@ func normalizeDate(dateStr string) string {
 	return dateStr // fallback, let DB error if invalid
 }
 
+func validateLegacyPayRecUploadScope(ctx context.Context, pgxPool *pgxpool.Pool, batchID string) error {
+	rows, err := pgxPool.Query(ctx, `
+		SELECT transaction_type,
+		       COALESCE(entity_name, entity_id, ''),
+		       COALESCE(counterparty_name, vendor_id, customer_id, ''),
+		       COALESCE(currency_code, '')
+		FROM input_transactions
+		WHERE upload_batch_id = $1
+	`, batchID)
+	if err != nil {
+		return fmt.Errorf("failed to validate upload scope: %w", err)
+	}
+	defer rows.Close()
+
+	rowNo := 0
+	for rows.Next() {
+		rowNo++
+		var txType, entityName, counterpartyName, currencyCode string
+		if err := rows.Scan(&txType, &entityName, &counterpartyName, &currencyCode); err != nil {
+			return fmt.Errorf("failed to validate upload row %d: %w", rowNo, err)
+		}
+		if msg := validatePayRecScope(ctx, entityName, counterpartyName, currencyCode); msg != "" {
+			return fmt.Errorf("%s row %d failed scope validation: %s", strings.ToLower(txType), rowNo, msg)
+		}
+	}
+	return rows.Err()
+}
+
 // Handler: UploadPayRec (for payables/receivables)
 func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -557,6 +613,10 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				)
 				if err != nil {
 					http.Error(w, "Failed to stage data: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				if err := validateLegacyPayRecUploadScope(ctx, pgxPool, batchID); err != nil {
+					http.Error(w, err.Error(), http.StatusForbidden)
 					return
 				}
 
@@ -763,6 +823,9 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if dueDate != nil {
 				p.DueDate = dueDate.Format(constants.DateFormat)
 			}
+			if msg := validatePayRecScope(ctx, p.EntityName, p.CounterpartyName, p.CurrencyCode); msg != "" {
+				continue
+			}
 			payables = append(payables, p)
 			payableIDs = append(payableIDs, p.PayableID)
 		}
@@ -837,6 +900,9 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rcv.DueDate = ""
 			if dueDate != nil {
 				rcv.DueDate = dueDate.Format(constants.DateFormat)
+			}
+			if msg := validatePayRecScope(ctx, rcv.EntityName, rcv.CounterpartyName, rcv.CurrencyCode); msg != "" {
+				continue
 			}
 			receivables = append(receivables, rcv)
 			receivableIDs = append(receivableIDs, rcv.ReceivableID)
@@ -1572,6 +1638,11 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("item %d missing required fields", idx)})
 				return
 			}
+			if msg := validatePayRecScope(ctx, entityName, counterparty, currency); msg != "" {
+				tx.Rollback(ctx)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("item %d: %s", idx, msg)})
+				return
+			}
 
 			invDate := normalizeDate(invDateStr)
 			dueDate := normalizeDate(dueDateStr)
@@ -1765,6 +1836,23 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code
 				FROM tr_payables WHERE payable_id = $1 AND is_deleted != TRUE
 			`, id).Scan(&oldEntity, &oldCounter, &oldInvoice, &oldInvDate, &oldDueDate, &oldAmount, &oldCurrency)
+			effectiveEntity := stringPtrValue(oldEntity)
+			effectiveCounterparty := stringPtrValue(oldCounter)
+			effectiveCurrency := stringPtrValue(oldCurrency)
+			if newEntity != nil {
+				effectiveEntity = *newEntity
+			}
+			if newCounter != nil {
+				effectiveCounterparty = *newCounter
+			}
+			if newCurrency != nil {
+				effectiveCurrency = *newCurrency
+			}
+			if msg := validatePayRecScope(ctx, effectiveEntity, effectiveCounterparty, effectiveCurrency); msg != "" {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusForbidden, msg)
+				return
+			}
 
 			auditQ := `
 				INSERT INTO auditactionpayable
@@ -1858,6 +1946,23 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code
 				FROM tr_receivables WHERE receivable_id = $1 AND is_deleted != TRUE
 			`, id).Scan(&oldEntity, &oldCounter, &oldInvoice, &oldInvDate, &oldDueDate, &oldAmount, &oldCurrency)
+			effectiveEntity := stringPtrValue(oldEntity)
+			effectiveCounterparty := stringPtrValue(oldCounter)
+			effectiveCurrency := stringPtrValue(oldCurrency)
+			if newEntity != nil {
+				effectiveEntity = *newEntity
+			}
+			if newCounter != nil {
+				effectiveCounterparty = *newCounter
+			}
+			if newCurrency != nil {
+				effectiveCurrency = *newCurrency
+			}
+			if msg := validatePayRecScope(ctx, effectiveEntity, effectiveCounterparty, effectiveCurrency); msg != "" {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusForbidden, msg)
+				return
+			}
 
 			auditQ := `
 				INSERT INTO auditactionreceivable

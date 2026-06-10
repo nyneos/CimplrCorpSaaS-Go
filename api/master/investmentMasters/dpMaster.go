@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	dependency "CimplrCorpSaas/internal/dependency"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -827,12 +828,26 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if len(toDeleteActionIDs) > 0 {
+		// Dependency check: block DPs that still have active demat accounts.
+		var blockedDPs []map[string]interface{}
+		var canDeleteDPIDs []string
+		var canDeleteActionIDs []string
+		for i, dpID := range deleteMasterIDs {
+			blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterdepositoryparticipant", dpID)
+			if len(blockers) > 0 {
+				blockedDPs = append(blockedDPs, map[string]interface{}{"dp_id": dpID, "blocked_by": dependency.BlockersSummary(blockers)})
+			} else {
+				canDeleteDPIDs = append(canDeleteDPIDs, dpID)
+				canDeleteActionIDs = append(canDeleteActionIDs, toDeleteActionIDs[i])
+			}
+		}
+
+		if len(canDeleteActionIDs) > 0 {
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.auditactiondp
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
 				WHERE action_id = ANY($3)
-			`, checkerBy, req.Comment, toDeleteActionIDs); err != nil {
+			`, checkerBy, req.Comment, canDeleteActionIDs); err != nil {
 				msg, status := getUserFriendlyDPError(err, "mark deleted failed")
 				api.RespondWithError(w, status, msg)
 				return
@@ -841,7 +856,7 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				UPDATE investment.masterdepositoryparticipant
 				SET is_deleted=true, status='Inactive'
 				WHERE dp_id = ANY($1)
-			`, deleteMasterIDs); err != nil {
+			`, canDeleteDPIDs); err != nil {
 				msg, status := getUserFriendlyDPError(err, "master soft-delete failed")
 				api.RespondWithError(w, status, msg)
 				return
@@ -854,9 +869,17 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Cascade-delete non-core children (demat accounts) for every deleted DP.
+		for _, dpID := range canDeleteDPIDs {
+			if err := dependency.CascadeDelete(ctx, pgxPool, "masterdepositoryparticipant", dpID, checkerBy); err != nil {
+				api.LogError("[DP] cascade failed for %s: %v", dpID, err)
+			}
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"approved_action_ids": toApprove,
-			"deleted_dps":         deleteMasterIDs,
+			"deleted_dps":         canDeleteDPIDs,
+			"blocked_dps":         blockedDPs,
 		})
 	}
 }

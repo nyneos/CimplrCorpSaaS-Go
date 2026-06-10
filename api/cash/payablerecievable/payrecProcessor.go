@@ -155,6 +155,13 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 				}
 
 				if len(payableData) > 0 {
+					if msg := validatePayRecScope(ctx,
+						transactionScopeString(payableData, "entity_name"),
+						transactionScopeString(payableData, "counterparty_name"),
+						transactionScopeString(payableData, "currency_code"),
+					); msg != "" {
+						return fmt.Errorf("payable staging row %s failed scope validation: %s", record.StagingID, msg)
+					}
 					// Build dynamic insert query for payables
 					var fields []string
 					var placeholders []string
@@ -192,6 +199,13 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 				}
 
 				if len(receivableData) > 0 {
+					if msg := validatePayRecScope(ctx,
+						transactionScopeString(receivableData, "entity_name"),
+						transactionScopeString(receivableData, "counterparty_name"),
+						transactionScopeString(receivableData, "currency_code"),
+					); msg != "" {
+						return fmt.Errorf("receivable staging row %s failed scope validation: %s", record.StagingID, msg)
+					}
 					// Build dynamic insert query for receivables
 					var fields []string
 					var placeholders []string
@@ -325,6 +339,13 @@ func getValueFromTransactionRawData(rawData map[string]interface{}, sourceCol st
 	}
 
 	return nil
+}
+
+func transactionScopeString(data map[string]interface{}, key string) string {
+	if value, ok := data[key]; ok && value != nil {
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+	return ""
 }
 
 func convertTransactionValueByDataType(value interface{}, fieldName string) interface{} {
@@ -630,6 +651,13 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 				payableData["upload_s3_key"] = nullableString(uploadS3Key)
 
 				if len(payableData) > 0 {
+					if msg := validatePayRecScope(ctx,
+						transactionScopeString(payableData, "entity_name"),
+						transactionScopeString(payableData, "counterparty_name"),
+						transactionScopeString(payableData, "currency_code"),
+					); msg != "" {
+						return fmt.Errorf("payable staging row %s failed scope validation: %s", record.StagingID, msg)
+					}
 					var fields []string
 					var placeholders []string
 					var values []interface{}
@@ -664,6 +692,13 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 				receivableData["upload_s3_key"] = nullableString(uploadS3Key)
 
 				if len(receivableData) > 0 {
+					if msg := validatePayRecScope(ctx,
+						transactionScopeString(receivableData, "entity_name"),
+						transactionScopeString(receivableData, "counterparty_name"),
+						transactionScopeString(receivableData, "currency_code"),
+					); msg != "" {
+						return fmt.Errorf("receivable staging row %s failed scope validation: %s", record.StagingID, msg)
+					}
 					var fields []string
 					var placeholders []string
 					var values []interface{}

@@ -68,7 +68,11 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			now = asOn
 		}
 		ctx := r.Context()
-		entityFilter := req.EntityID
+		entityFilter, scopeMsg := resolveFDDashboardEntity(ctx, req.EntityID)
+		if scopeMsg != "" {
+			api.RespondWithError(w, http.StatusForbidden, scopeMsg)
+			return
+		}
 		bankFilter := req.Bank
 		fdTypeFilter := req.FDType
 
@@ -104,13 +108,13 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
 				  COALESCE(b.principal_amount,0) AS principal,
 				  COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD"T"HH24:MI:SS'),'') AS requested_at,
-				  COALESCE(EXTRACT(DAY FROM ('` + endDateStr + `'::timestamp)-b.created_at)::int, 0) AS aging_days,
+				  COALESCE(EXTRACT(DAY FROM ('`+endDateStr+`'::timestamp)-b.created_at)::int, 0) AS aging_days,
 				  b.booking_status
 				FROM investment.fd_booking_request b
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE b.is_deleted=false
 				  AND b.booking_status = 'SENT_TO_BANK'
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($4::text='' OR (m.bank_id=$4 OR m.bank_name=$4 OR b.bank_id=$4 OR b.bank_name=$4))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$5)
 				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')
@@ -213,12 +217,12 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(b.principal_amount,0) AS principal,
 				  COALESCE(TO_CHAR(b.created_at,'YYYY-MM-DD'),'') AS booking_date,
 				  b.booking_status,
-				  COALESCE(EXTRACT(DAY FROM ('` + endDateStr + `'::timestamp)-b.created_at)::int, 0) AS aging_days
+				  COALESCE(EXTRACT(DAY FROM ('`+endDateStr+`'::timestamp)-b.created_at)::int, 0) AS aging_days
 				FROM investment.fd_booking_request b
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE b.is_deleted=false
 				  AND b.booking_status IN ('SENT_TO_BANK','APPROVED')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($4::text='' OR (m.bank_id=$4 OR m.bank_name=$4 OR b.bank_id=$4 OR b.bank_name=$4))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$5)
 				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')
@@ -287,7 +291,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE ir.is_deleted=false
 				  AND (ir.fd_id IS NULL OR ir.fd_id='' OR ir.reconcile_status IN ('UNMATCHED','PENDING',''))
-				  AND ($1::text='' OR ir.entity_id=$1)
+				  AND (ir.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (ir.bank_id=$2 OR ir.bank_name=$2 OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)
 				  AND ir.receipt_date >= $4::date AND ir.receipt_date <= ($5::date + INTERVAL '1 day')
@@ -340,7 +344,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE ir.is_deleted=false
 				  AND COALESCE(ir.tds_deducted,0) > 0
 				  AND (ir.tds_allocation_status IS NULL OR ir.tds_allocation_status IN ('PENDING','UNALLOCATED'))
-				  AND ($1::text='' OR ir.entity_id=$1)
+				  AND (ir.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (ir.bank_id=$2 OR ir.bank_name=$2 OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)`, entityFilter, bankFilter, fdTypeFilter).Scan(&cnt, &totalAmt)
 			if err != nil {
@@ -412,8 +416,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE COALESCE(ae.is_deleted,false)=false
 				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				  AND ae.created_at <= ('` + endDateStr + `'::date + INTERVAL '1 day')
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ae.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
+				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)
 				ORDER BY ae.created_at DESC
@@ -465,8 +469,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id OR b.booking_id = vl.record_id
 				WHERE vl.module_code LIKE 'FD_%'
 				  AND vl.status = 'OPEN'
-				  AND vl.created_at <= ('` + endDateStr + `'::date + INTERVAL '1 day')
-				  AND ($1::text='' OR vl.entity_id=$1)
+				  AND vl.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
+				  AND (vl.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)
 				ORDER BY vl.created_at DESC
@@ -507,8 +511,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				   LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				   WHERE COALESCE(ae.is_deleted,false)=false
 				     AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				     AND ae.created_at <= ('` + endDateStr + `'::date + INTERVAL '1 day')
-				     AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				     AND ae.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
+				     AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				     AND ($2::text='' OR (m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				     AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3))
 				  +
@@ -516,8 +520,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				   LEFT JOIN investment.fd_master m ON m.fd_id = vl.record_id
 				   LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id OR b.booking_id = vl.record_id
 				   WHERE vl.module_code LIKE 'FD_%' AND vl.status='OPEN'
-				     AND vl.created_at <= ('` + endDateStr + `'::date + INTERVAL '1 day')
-				     AND ($1::text='' OR vl.entity_id=$1)
+				     AND vl.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
+				     AND (vl.entity_id = ANY(string_to_array($1, ',')))
 				     AND ($2::text='' OR (m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				     AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3))`,
 				entityFilter, bankFilter, fdTypeFilter).Scan(&totalCount)
@@ -560,8 +564,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				            WHERE l.run_id = r.run_id AND COALESCE(l.is_deleted,false)=false), 0) AS ledger_count
 				FROM investment.fd_accrual_run r
 				WHERE COALESCE(r.is_deleted,false)=false
-				  AND r.created_at <= ('` + endDateStr + `'::date + INTERVAL '1 day')
-				  AND ($1::text='' OR r.entity_id=$1)
+				  AND r.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
+				  AND (r.entity_id = ANY(string_to_array($1, ',')))
 				ORDER BY r.run_at DESC NULLS LAST, r.created_at DESC
 				LIMIT 1`, entityFilter).Scan(
 				&runID, &runType, &runMode, &runStatus, &entityID, &entityName, &financialPeriod,
@@ -635,7 +639,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(TO_CHAR(posted_at,'YYYY-MM-DD"T"HH24:MI:SS'),'') AS posting_time,
 				  COALESCE(error_message,'') AS error_message
 				FROM investment.fd_journal_posting_batch
-				WHERE created_at <= ('` + endDateStr + `'::date + INTERVAL '1 day')
+				WHERE created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
 				ORDER BY created_at DESC
 				LIMIT 20`)
 			if err != nil {
@@ -677,7 +681,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND b.booking_status IN ('SENT_TO_BANK','APPROVED','APPROVAL_PENDING')
 				  AND b.created_at <= ('` + endDateStr + `'::date + INTERVAL '1 day')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)
 				GROUP BY 1`
@@ -696,7 +700,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE COALESCE(ae.is_deleted,false)=false
 				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
 				  AND ae.created_at <= ('` + endDateStr + `'::date + INTERVAL '1 day')
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)
 				GROUP BY 1`
@@ -775,7 +779,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  ORDER BY created_at DESC LIMIT 1
 				) la ON true
 				WHERE ir.is_deleted = false
-				  AND ($1::text='' OR ir.entity_id=$1)
+				  AND (ir.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (ir.bank_id=$2 OR ir.bank_name=$2 OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)
 				ORDER BY ir.created_at DESC
@@ -888,7 +892,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  ORDER BY created_at DESC LIMIT 1
 				) la ON true
 				WHERE t.is_deleted = false
-				  AND ($1::text='' OR t.entity_id=$1)
+				  AND (t.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (t.bank_id=$2 OR t.bank_name=$2 OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)
 				ORDER BY t.created_at DESC
@@ -986,8 +990,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE COALESCE(ae.is_deleted,false)=false
 				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				  AND ae.created_at <= ('` + endDateStr + `'::date + INTERVAL '1 day')
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND ae.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
+				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)
 				GROUP BY 1
@@ -1016,8 +1020,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.fd_id = vl.record_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id OR b.booking_id = vl.record_id
 				WHERE vl.module_code LIKE 'FD_%' AND vl.status='OPEN'
-				  AND vl.created_at <= ('` + endDateStr + `'::date + INTERVAL '1 day')
-				  AND ($1::text='' OR vl.entity_id=$1)
+				  AND vl.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
+				  AND (vl.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)
 				GROUP BY 1
@@ -1050,8 +1054,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE ir.is_deleted=false
 				  AND (ir.fd_id IS NULL OR ir.fd_id='' OR ir.reconcile_status IN ('UNMATCHED','PENDING',''))
-				  AND ir.receipt_date <= ('` + endDateStr + `'::date + INTERVAL '1 day')
-				  AND ($1::text='' OR ir.entity_id=$1)
+				  AND ir.receipt_date <= ('`+endDateStr+`'::date + INTERVAL '1 day')
+				  AND (ir.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (ir.bank_id=$2 OR ir.bank_name=$2 OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)
 				GROUP BY 1
@@ -1121,7 +1125,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($4::text='' OR (m.bank_id=$4 OR m.bank_name=$4 OR b.bank_id=$4 OR b.bank_name=$4))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$5)`,
 				entityFilter, startDateStr, endDateStr, bankFilter, fdTypeFilter).Scan(&bookingTotal, &bookingStuck, &bookingAmt)
@@ -1139,7 +1143,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($4::text='' OR (m.bank_id=$4 OR m.bank_name=$4 OR b.bank_id=$4 OR b.bank_name=$4))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$5)
 				ORDER BY b.created_at DESC LIMIT 50`, entityFilter, startDateStr, endDateStr, bankFilter, fdTypeFilter); err == nil {
@@ -1165,7 +1169,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND COALESCE(b.created_at, c.created_at) >= $2::date
 				  AND COALESCE(b.created_at, c.created_at) <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR COALESCE(b.entity_id,m.entity_id)=$1)
+				  AND (COALESCE(b.entity_id,m.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($4::text='' OR (m.bank_id=$4 OR m.bank_name=$4 OR b.bank_id=$4 OR b.bank_name=$4))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$5)`,
 				entityFilter, startDateStr, endDateStr, bankFilter, fdTypeFilter).Scan(&confTotal, &confAmt)
@@ -1185,7 +1189,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND COALESCE(b.created_at, c.created_at) >= $2::date
 				  AND COALESCE(b.created_at, c.created_at) <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR COALESCE(b.entity_id,m.entity_id)=$1)
+				  AND (COALESCE(b.entity_id,m.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($4::text='' OR (m.bank_id=$4 OR m.bank_name=$4 OR b.bank_id=$4 OR b.bank_name=$4))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$5)
 				ORDER BY COALESCE(b.created_at, c.created_at) DESC LIMIT 50`,
@@ -1213,7 +1217,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND m.fd_status='ACTIVE'
 				  AND `+sqlExcludeTerminalFdOnMaster+`
 				  AND m.created_at >= $2::date AND m.created_at <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR m.entity_id=$1)
+				  AND (m.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($4::text='' OR (m.bank_id=$4 OR m.bank_name=$4 OR b.bank_id=$4 OR b.bank_name=$4))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$5)`,
 				entityFilter, startDateStr, endDateStr, bankFilter, fdTypeFilter).Scan(&activeTotal, &activeStuck, &activeAmt)
@@ -1232,7 +1236,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND m.fd_status='ACTIVE'
 				  AND `+sqlExcludeTerminalFdOnMaster+`
 				  AND m.created_at >= $2::date AND m.created_at <= ($3::date + INTERVAL '1 day')
-				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
+				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($4::text='' OR (m.bank_id=$4 OR m.bank_name=$4 OR b.bank_id=$4 OR b.bank_name=$4))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$5)
 				ORDER BY m.created_at DESC LIMIT 50`,
@@ -1258,7 +1262,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE COALESCE(al.is_deleted,false)=false
 				  AND `+sqlExcludeTerminalFdOnMaster+`
 				  AND al.accrual_period_end >= $2::date
-				  AND ($1::text='' OR m.entity_id=$1)`,
+				  AND (m.entity_id = ANY(string_to_array($1, ',')))`,
 				entityFilter, startDateStr).Scan(&accrualTotal, &accrualAmt)
 
 			accrualItems := []stageItem{}
@@ -1273,7 +1277,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.fd_id = al.fd_id
 				WHERE COALESCE(al.is_deleted,false)=false
 				  AND al.accrual_period_end >= $2::date
-				  AND ($1::text='' OR m.entity_id=$1)
+				  AND (m.entity_id = ANY(string_to_array($1, ',')))
 				GROUP BY al.fd_id, m.bank_name, m.bank_id, m.entity_name, m.principal_amount, al.ledger_status
 				ORDER BY MAX(al.accrual_period_end) DESC LIMIT 50`,
 				entityFilter, startDateStr); err == nil {
@@ -1335,7 +1339,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE b.is_deleted=false
 				  AND `+sqlBookingAwaitingApproval+`
 				  AND `+sqlExcludeTerminalFdOnBooking+`
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($4::text='' OR (m.bank_id=$4 OR m.bank_name=$4 OR b.bank_id=$4 OR b.bank_name=$4))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$5)
 				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')`,
@@ -1343,14 +1347,14 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 			_ = pool.QueryRow(ctx, `
 				SELECT COUNT(*),
-				       COUNT(*) FILTER (WHERE EXTRACT(DAY FROM ('` + endDateStr + `'::timestamp)-c.created_at) >= 3)
+				       COUNT(*) FILTER (WHERE EXTRACT(DAY FROM ('`+endDateStr+`'::timestamp)-c.created_at) >= 3)
 				FROM investment.fd_confirmation c
 				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id AND b.is_deleted=false
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE COALESCE(c.is_deleted,false)=false
 				  AND `+sqlConfirmationAwaitingApproval+`
 				  AND `+sqlExcludeTerminalFdOnBooking+`
-				  AND ($1::text='' OR COALESCE(b.entity_id,m.entity_id)=$1)
+				  AND (COALESCE(b.entity_id,m.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($4::text='' OR (m.bank_id=$4 OR m.bank_name=$4 OR b.bank_id=$4 OR b.bank_name=$4))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$5)
 				  AND c.created_at >= $2::date AND c.created_at <= ($3::date + INTERVAL '1 day')`,
@@ -1362,7 +1366,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE ir.is_deleted=false
 				  AND (ir.fd_id IS NULL OR ir.fd_id='' OR ir.reconcile_status IN ('UNMATCHED','PENDING',''))
-				  AND ($1::text='' OR ir.entity_id=$1)
+				  AND (ir.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (ir.bank_id=$2 OR ir.bank_name=$2 OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
 				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)`, entityFilter, bankFilter, fdTypeFilter).Scan(&unm)
 

@@ -3,6 +3,8 @@ package accountingworkbench
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1294,7 +1296,47 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		q := `
+		args := []interface{}{}
+		pos := 1
+
+		schemeParam, folioParam, dematParam := 0, 0, 0
+		if schemeRefs := accountingMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			schemeParam = pos
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := accountingMFFolioRefs(ctx); len(folioRefs) > 0 {
+			folioParam = pos
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := accountingMFDematRefs(ctx); len(dematRefs) > 0 {
+			dematParam = pos
+			args = append(args, dematRefs)
+		}
+
+		mtmScope, dividendScope, fvoScope, corporateActionScope := "", "", "", ""
+		if schemeParam > 0 {
+			mtmScope += fmt.Sprintf(" AND mt.scheme_id = ANY($%d::text[])", schemeParam)
+			dividendScope += fmt.Sprintf(" AND dv.scheme_id = ANY($%d::text[])", schemeParam)
+			fvoScope += fmt.Sprintf(" AND fv.scheme_id = ANY($%d::text[])", schemeParam)
+			corporateActionScope += fmt.Sprintf(" AND ca.source_scheme_id = ANY($%d::text[])", schemeParam)
+			corporateActionScope += fmt.Sprintf(" AND (COALESCE(ca.target_scheme_id,'') = '' OR ca.target_scheme_id = ANY($%d::text[]))", schemeParam)
+		}
+		if folioParam > 0 {
+			mtmScope += fmt.Sprintf(" AND (COALESCE(mt.folio_id::text,'') = '' OR mt.folio_id::text = ANY($%d::text[]))", folioParam)
+			dividendScope += fmt.Sprintf(" AND (COALESCE(dv.folio_id::text,'') = '' OR dv.folio_id::text = ANY($%d::text[]))", folioParam)
+		}
+		if dematParam > 0 {
+			mtmScope += fmt.Sprintf(" AND (COALESCE(mt.demat_id::text,'') = '' OR mt.demat_id::text = ANY($%d::text[]))", dematParam)
+		}
+
+		finalScope := ""
+		if schemeParam > 0 || folioParam > 0 || dematParam > 0 {
+			finalScope = " AND (mtm.mtm_records IS NOT NULL OR dv.dividend_records IS NOT NULL OR fvo.fvo_records IS NOT NULL OR ca.corporate_action_records IS NOT NULL)"
+		}
+
+		q := fmt.Sprintf(`
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.activity_id)
 					a.activity_id,
@@ -1350,6 +1392,7 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.masterfolio fol ON fol.folio_id::text = mt.folio_id
 				LEFT JOIN investment.masterdemataccount dem ON dem.demat_id::text = mt.demat_id
 				WHERE COALESCE(mt.is_deleted, false) = false
+					%s
 				GROUP BY mt.activity_id
 			),
 			dividend_data AS (
@@ -1375,6 +1418,7 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.masterscheme sch ON sch.scheme_id = dv.scheme_id
 				LEFT JOIN investment.masterfolio fol ON fol.folio_id::text = dv.folio_id
 				WHERE COALESCE(dv.is_deleted, false) = false
+					%s
 				GROUP BY dv.activity_id
 			),
 			fvo_data AS (
@@ -1400,6 +1444,7 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.accounting_fvo fv
 				LEFT JOIN investment.masterscheme sch ON sch.scheme_id = fv.scheme_id
 				WHERE COALESCE(fv.is_deleted, false) = false
+					%s
 				GROUP BY fv.activity_id
 			),
 			corporate_action_data AS (
@@ -1424,6 +1469,7 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.masterscheme sch_src ON sch_src.scheme_id = ca.source_scheme_id
 				LEFT JOIN investment.masterscheme sch_tgt ON sch_tgt.scheme_id = ca.target_scheme_id
 				WHERE COALESCE(ca.is_deleted, false) = false
+					%s
 				GROUP BY ca.activity_id
 			)
 			SELECT
@@ -1473,10 +1519,11 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN fvo_data fvo ON fvo.activity_id = m.activity_id
 			LEFT JOIN corporate_action_data ca ON ca.activity_id = m.activity_id
 			WHERE COALESCE(m.is_deleted, false) = false
+				%s
 			ORDER BY m.updated_at DESC, m.activity_id;
-		`
+		`, mtmScope, dividendScope, fvoScope, corporateActionScope, finalScope)
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
@@ -1510,8 +1557,53 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetApprovedActivities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		args := []interface{}{}
+		pos := 1
 
-		q := `
+		schemeParam, folioParam, dematParam := 0, 0, 0
+		if schemeRefs := accountingMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			schemeParam = pos
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := accountingMFFolioRefs(ctx); len(folioRefs) > 0 {
+			folioParam = pos
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := accountingMFDematRefs(ctx); len(dematRefs) > 0 {
+			dematParam = pos
+			args = append(args, dematRefs)
+		}
+
+		mtmScope, dividendScope, fvoScope, corporateActionScope := "", "", "", ""
+		if schemeParam > 0 {
+			mtmScope += fmt.Sprintf(" AND mt.scheme_id = ANY($%d::text[])", schemeParam)
+			dividendScope += fmt.Sprintf(" AND dv.scheme_id = ANY($%d::text[])", schemeParam)
+			fvoScope += fmt.Sprintf(" AND fv.scheme_id = ANY($%d::text[])", schemeParam)
+			corporateActionScope += fmt.Sprintf(" AND ca.source_scheme_id = ANY($%d::text[])", schemeParam)
+			corporateActionScope += fmt.Sprintf(" AND (COALESCE(ca.target_scheme_id,'') = '' OR ca.target_scheme_id = ANY($%d::text[]))", schemeParam)
+		}
+		if folioParam > 0 {
+			mtmScope += fmt.Sprintf(" AND (COALESCE(mt.folio_id::text,'') = '' OR mt.folio_id::text = ANY($%d::text[]))", folioParam)
+			dividendScope += fmt.Sprintf(" AND (COALESCE(dv.folio_id::text,'') = '' OR dv.folio_id::text = ANY($%d::text[]))", folioParam)
+		}
+		if dematParam > 0 {
+			mtmScope += fmt.Sprintf(" AND (COALESCE(mt.demat_id::text,'') = '' OR mt.demat_id::text = ANY($%d::text[]))", dematParam)
+		}
+
+		activityScope := ""
+		if schemeParam > 0 || folioParam > 0 || dematParam > 0 {
+			activityScope = fmt.Sprintf(`
+				AND (
+					EXISTS (SELECT 1 FROM investment.accounting_mtm mt WHERE mt.activity_id = m.activity_id AND COALESCE(mt.is_deleted,false)=false %s)
+					OR EXISTS (SELECT 1 FROM investment.accounting_dividend dv WHERE dv.activity_id = m.activity_id AND COALESCE(dv.is_deleted,false)=false %s)
+					OR EXISTS (SELECT 1 FROM investment.accounting_fvo fv WHERE fv.activity_id = m.activity_id AND COALESCE(fv.is_deleted,false)=false %s)
+					OR EXISTS (SELECT 1 FROM investment.accounting_corporate_action ca WHERE ca.activity_id = m.activity_id AND COALESCE(ca.is_deleted,false)=false %s)
+				)`, mtmScope, dividendScope, fvoScope, corporateActionScope)
+		}
+
+		q := fmt.Sprintf(`
 			WITH latest AS (
 				SELECT DISTINCT ON (activity_id)
 					activity_id,
@@ -1533,10 +1625,11 @@ func GetApprovedActivities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE 
 				UPPER(l.processing_status) = 'APPROVED'
 				AND COALESCE(m.is_deleted,false)=false
+				%s
 			ORDER BY m.updated_at DESC;
-		`
+		`, activityScope)
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
@@ -1584,10 +1677,18 @@ func GetJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Build query with optional filter
 		whereClause := "WHERE je.is_deleted = false"
 		args := []interface{}{}
+		scope := ctxutil.FromContext(ctx)
 
 		if req.EntityName != "" {
+			if errMsg := validation.ValidateMFMasterReferences(ctx, map[string]interface{}{"entity_name": req.EntityName}); errMsg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
+			}
 			whereClause += " AND je.entity_name = $1"
 			args = append(args, req.EntityName)
+		} else if len(scope.EntityNames) > 0 {
+			whereClause += " AND je.entity_name = ANY($1::text[])"
+			args = append(args, scope.EntityNames)
 		}
 
 		query := fmt.Sprintf(`

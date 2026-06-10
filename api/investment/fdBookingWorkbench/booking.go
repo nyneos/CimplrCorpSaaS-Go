@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -77,6 +79,42 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
+
+		// ── Scope + master-data validation ───────────────────────────────────
+		scope := ctxutil.FromContext(r.Context())
+		if !scope.HasEntityAccess(req.EntityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+			return
+		}
+		// Resolve aliases before validation so the correct key is checked.
+		freqID := req.FrequencyID
+		if freqID == "" {
+			freqID = req.InterestPayoutFreq
+		}
+		dcCode := req.DayCountCode
+		if dcCode == "" {
+			dcCode = req.DayCountConvention
+		}
+		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
+			"entity_id":              req.EntityID,
+			"bank_id":                req.BankID,
+			"bank_name":              req.BankName,
+			"bank_account_id":        req.BankAccountID,
+			"source_account_number":  req.SourceAccountNumber,
+			"bank_config_id":         req.BankConfigID,
+			"interest_type":          req.InterestType,
+			"interest_type_id":       req.InterestTypeID,
+			"frequency_id":           freqID,
+			"payout_frequency_id":    req.PayoutFrequencyID,
+			"accrual_frequency_code": req.AccrualFrequencyCode,
+			"day_count_code":         dcCode,
+			"tds_plan_id":            req.TdsPlanID,
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+		// ────────────────────────────────────────────────────────────────────
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
@@ -341,6 +379,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		scope := ctxutil.FromContext(ctx)
 		results := make([]map[string]interface{}, 0, len(req.Rows))
 
 		for i, row := range req.Rows {
@@ -351,6 +390,42 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"row_index":            i,
 					constants.ValueSuccess: false,
 					constants.ValueError:   "Missing required fields: entity_id, bank_id, principal_amount, interest_rate, tenor_days, value_date, maturity_date",
+				})
+				continue
+			}
+
+			if !scope.HasEntityAccess(row.EntityID) {
+				results = append(results, map[string]interface{}{
+					"row_index": i, "entity_id": row.EntityID,
+					constants.ValueSuccess: false,
+					constants.ValueError:   fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", row.EntityID),
+				})
+				continue
+			}
+			bulkFreqID := row.FrequencyID
+			if bulkFreqID == "" {
+				bulkFreqID = row.InterestPayoutFreq
+			}
+			bulkDCCode := row.DayCountCode
+			if bulkDCCode == "" {
+				bulkDCCode = row.DayCountConvention
+			}
+			if errMsg := validation.ValidateFDMasterReferences(ctx, map[string]interface{}{
+				"entity_id":             row.EntityID,
+				"bank_id":               row.BankID,
+				"bank_name":             row.BankName,
+				"bank_account_id":       row.BankAccountID,
+				"source_account_number": row.SourceAccountNumber,
+				"bank_config_id":        row.BankConfigID,
+				"interest_type":         row.InterestType,
+				"interest_type_id":      row.InterestTypeID,
+				"frequency_id":          bulkFreqID,
+				"day_count_code":        bulkDCCode,
+				"tds_plan_id":           row.TdsPlanID,
+			}); errMsg != "" {
+				results = append(results, map[string]interface{}{
+					"row_index": i, "entity_id": row.EntityID,
+					constants.ValueSuccess: false, constants.ValueError: errMsg,
 				})
 				continue
 			}
@@ -656,6 +731,36 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, status, msg)
 			return
 		}
+
+		scope := ctxutil.FromContext(r.Context())
+		if !scope.HasEntityAccess(entityID) {
+			api.RespondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return
+		}
+		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
+			"bank_id":                   req.Fields["bank_id"],
+			"bank_name":                 req.Fields["bank_name"],
+			"bank_account_id":           req.Fields["bank_account_id"],
+			"source_account_number":     req.Fields["source_account_number"],
+			"bank_config_id":            req.Fields["bank_config_id"],
+			"interest_type":             req.Fields["interest_type"],
+			"interest_type_id":          req.Fields["interest_type_id"],
+			"frequency_id":              req.Fields["frequency_id"],
+			"interest_payout_frequency": req.Fields["interest_payout_frequency"],
+			"payout_frequency_id":       req.Fields["payout_frequency_id"],
+			"accrual_frequency_code":    req.Fields["accrual_frequency_code"],
+			"day_count_code":            req.Fields["day_count_code"],
+			"day_count_convention":      req.Fields["day_count_convention"],
+			"tds_plan_id":               req.Fields["tds_plan_id"],
+			"currency":                  req.Fields["currency"],
+			"currency_code":             req.Fields["currency_code"],
+			"penalty_structure_id":      req.Fields["penalty_structure_id"],
+		}); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+
 		if currentStatus != "DRAFT" && currentStatus != constants.StatusRejected {
 			api.RespondWithError(w, http.StatusBadRequest,
 				fmt.Sprintf("Cannot update booking in status '%s'. Only DRAFT or REJECTED bookings can be updated.", currentStatus))
@@ -873,7 +978,8 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// APPROVED bookings cannot be deleted (system depends on them).
 		// Allow: DRAFT, REJECTED, APPROVAL_PENDING (pending can be cancelled/deleted).
-		rows, err := tx.Query(ctx, `
+		deleteScope := ctxutil.FromContext(r.Context())
+		deleteBaseQ := `
 			SELECT booking_id, entity_id, principal_amount
 			FROM investment.fd_booking_request
 			WHERE booking_id = ANY($1::text[])
@@ -888,9 +994,13 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  WHERE fm.booking_id = fd_booking_request.booking_id
 				    AND COALESCE(fm.is_deleted,false) = false
 			  )
-			  AND COALESCE(is_deleted,false) = false`,
-			req.BookingIDs,
-		)
+			  AND COALESCE(is_deleted,false) = false`
+		deleteQueryArgs := []interface{}{req.BookingIDs}
+		if len(deleteScope.EntityIDs) > 0 {
+			deleteBaseQ += ` AND entity_id = ANY($2::text[])`
+			deleteQueryArgs = append(deleteQueryArgs, deleteScope.EntityIDs)
+		}
+		rows, err := tx.Query(ctx, deleteBaseQ, deleteQueryArgs...)
 		if err != nil {
 			msg, status := getUserFriendlyFDError(err, "Verify bookings failed")
 			api.RespondWithError(w, status, msg)
@@ -1492,6 +1602,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "m", 1)
 
 		q := fmt.Sprintf(`
 			WITH latest_audit AS (
@@ -1661,12 +1772,13 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ON aie.instance_id = ai.instance_id
 				AND aie.status = 'ACTIVE'
 			WHERE COALESCE(m.is_deleted,false) = false
+			%s
 			ORDER BY GREATEST(
 				COALESCE(l.requested_at,'1970-01-01'::timestamp),
 				COALESCE(l.checker_at,'1970-01-01'::timestamp)
-			) DESC`, accountExpr)
+			) DESC`, accountExpr, scopeWhere)
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, scopeArgs...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
@@ -1715,6 +1827,8 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "fd_booking_request", 2)
+		detailArgs := append([]interface{}{bookingID}, scopeArgs...)
 
 		// Main booking row — use dynamic column scan to avoid any future schema drift
 		var bk map[string]interface{}
@@ -1753,7 +1867,8 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')      AS record_created_at,
 					COALESCE(created_by,'')                                        AS record_created_by
 				FROM investment.fd_booking_request
-				WHERE booking_id = $1`, accountExpr), bookingID)
+				WHERE booking_id = $1
+				%s`, accountExpr, scopeWhere), detailArgs...)
 			if err != nil {
 				msg, httpStatus := getUserFriendlyFDError(err, constants.ErrQueryFailed)
 				api.RespondWithError(w, httpStatus, msg)
@@ -1969,14 +2084,21 @@ func GetBookingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_audit_booking_request a
 				LEFT JOIN investment.fd_booking_request m ON m.booking_id = a.booking_id`
 		if bookingID != "" {
+			scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "m", 2)
 			q = auditSelect + `
 				WHERE a.booking_id = $1
+				` + scopeWhere + `
 				ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`
 			args = append(args, bookingID)
+			args = append(args, scopeArgs...)
 		} else {
+			scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "m", 1)
 			q = auditSelect + `
+				WHERE 1=1
+				` + scopeWhere + `
 				ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
 				LIMIT 1000`
+			args = append(args, scopeArgs...)
 		}
 
 		rows, err := pgxPool.Query(ctx, q, args...)
@@ -2024,7 +2146,11 @@ func GetBookingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		entityID := r.URL.Query().Get("entity_id")
+		entityID := strings.TrimSpace(r.URL.Query().Get("entity_id"))
+		if !fdBookingEntityAllowed(ctx, entityID) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			return
+		}
 		statusFilter := r.URL.Query().Get("status") // optional single-status override
 
 		baseSelect := `
@@ -2125,6 +2251,11 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var q string
 		var args []interface{}
 		argIdx := 1
+
+		scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "m", argIdx)
+		baseSelect += scopeWhere
+		args = append(args, scopeArgs...)
+		argIdx += len(scopeArgs)
 
 		// determine which statuses to show
 		if statusFilter != "" {

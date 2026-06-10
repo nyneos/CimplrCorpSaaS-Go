@@ -1037,8 +1037,8 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		if len(args) != 2 {
 			return "", fmt.Errorf("%s expects 2 args: listVar, field", up)
 		}
-		rows, ok := getRowList(args[0], payload)
-		if !ok || len(rows) == 0 {
+		rows, _ := getRowList(args[0], payload)
+		if len(rows) == 0 {
 			return "0", nil
 		}
 		field := resolveFieldArg(args[1])
@@ -1288,7 +1288,7 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 			return constants.NoDataTable, nil
 		}
 		grouped, ok := toRowList(v)
-		if !ok || len(grouped) == 0 {
+		if len(grouped) == 0 {
 			return constants.NoDataTable, nil
 		}
 		var sb strings.Builder
@@ -1527,8 +1527,8 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 			}
 			return toString(v), nil
 		}
-		rows, ok := getRowList(args[0], payload)
-		if !ok || len(rows) == 0 {
+		rows, _ := getRowList(args[0], payload)
+		if len(rows) == 0 {
 			return "", nil
 		}
 		field := resolveFieldArg(args[1])

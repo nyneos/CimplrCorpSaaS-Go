@@ -3,6 +3,7 @@ package fdMaturityAndRollover
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -144,12 +145,21 @@ func GetClosureAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // ─── Access validator ─────────────────────────────────────────────────────────
 
 func validateClosureAuditAccess(ctx context.Context, pool *pgxpool.Pool, closureRequestID string) (int, string) {
-	var exists bool
+	var entityID, bankID string
 	if err := pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM investment.fd_closure_request WHERE closure_request_id = $1)`,
+		`SELECT COALESCE(cr.entity_id,''), COALESCE(m.bank_id,'')
+		FROM investment.fd_closure_request cr
+		LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
+		WHERE cr.closure_request_id = $1 AND COALESCE(cr.is_deleted,false)=false`,
 		closureRequestID,
-	).Scan(&exists); err != nil || !exists {
+	).Scan(&entityID, &bankID); err != nil {
 		return http.StatusNotFound, "closure request not found"
+	}
+	if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
+		return http.StatusForbidden, "closure request is outside your authorized entity scope"
+	}
+	if strings.TrimSpace(bankID) != "" && !ctxutil.FromContext(ctx).HasApprovedBank(bankID) {
+		return http.StatusForbidden, "closure request is outside your approved bank scope"
 	}
 	return 0, ""
 }

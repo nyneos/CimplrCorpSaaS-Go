@@ -20,6 +20,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	_ "CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/validation"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -120,6 +121,57 @@ func defaultIfEmpty(val, def string) string {
 		return def
 	}
 	return val
+}
+
+func validateOnboardingUploadScope(ctx context.Context, w http.ResponseWriter, amcs []AMCInput, schemes []SchemeInput, demats []DematInput, folios []FolioInput) bool {
+	rows := make([]map[string]interface{}, 0, len(amcs)+len(schemes)+len(demats)+len(folios))
+	for _, a := range amcs {
+		if a.Enriched || strings.TrimSpace(a.AmcID) != "" {
+			rows = append(rows, map[string]interface{}{
+				"amc_id":   a.AmcID,
+				"amc_name": a.AmcName,
+			})
+		}
+	}
+	for _, s := range schemes {
+		if s.Enriched || strings.TrimSpace(s.SchemeID) != "" {
+			rows = append(rows, map[string]interface{}{
+				"scheme_id":            s.SchemeID,
+				"scheme_internal_code": s.InternalSchemeCode,
+				"amc_name":             s.AmcName,
+			})
+		}
+	}
+	for _, d := range demats {
+		row := map[string]interface{}{
+			"entity_name": d.EntityName,
+		}
+		if d.Enriched || strings.TrimSpace(d.DematID) != "" {
+			row["demat_id"] = d.DematID
+			row["demat_acc_number"] = d.DematAccountNumber
+		}
+		rows = append(rows, row)
+	}
+	for _, f := range folios {
+		row := map[string]interface{}{
+			"entity_name": f.EntityName,
+		}
+		if f.Enriched || strings.TrimSpace(f.FolioID) != "" {
+			row["folio_id"] = f.FolioID
+			row["folio_number"] = f.FolioNumber
+		}
+		if len(f.SchemeRefs) > 0 {
+			row["scheme_ids"] = f.SchemeRefs
+		}
+		rows = append(rows, row)
+	}
+	for _, row := range rows {
+		if msg := validation.ValidateMFMasterReferences(ctx, row); msg != "" {
+			api.RespondWithError(w, http.StatusForbidden, msg)
+			return false
+		}
+	}
+	return true
 }
 
 // parse JSON array field from multipart form; field should be a single JSON array string
@@ -326,6 +378,9 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			logger.LogInfo("[bulk] parsed arrays (legacy form): amc=%d scheme=%d dp=%d demat=%d folio=%d",
 				len(amcs), len(schemes), len(dps), len(demats), len(folios))
+		}
+		if !validateOnboardingUploadScope(ctx, w, amcs, schemes, demats, folios) {
+			return
 		}
 
 		// maps to hold created or existing ids

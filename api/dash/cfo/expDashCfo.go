@@ -14,7 +14,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
 )
@@ -43,21 +43,21 @@ func getUserID(r *http.Request) string {
 }
 
 // 1. Total Open Amount USD Sum
-func GetTotalOpenAmountUsdSumFromHeaders(db *sql.DB) http.HandlerFunc {
+func GetTotalOpenAmountUsdSumFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
 		//     http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		//     return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
-		logger.LogInfo("%v", pq.Array(buNames))
+		logger.LogInfo("%v", buNames)
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
+		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
@@ -87,20 +87,20 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *sql.DB) http.HandlerFunc {
 }
 
 // 2. Payables By Currency
-func GetPayablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
+func GetPayablesByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
 		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		// 	return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'PO' OR exposure_type = 'creditors' OR exposure_type = 'grn') AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
+		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
@@ -134,20 +134,20 @@ func GetPayablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 }
 
 // 3. Receivables By Currency
-func GetReceivablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
+func GetReceivablesByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
 		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		// 	return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'SO' OR exposure_type = 'LC' OR exposure_type = 'debitors') AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
+		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
@@ -181,20 +181,20 @@ func GetReceivablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 }
 
 // 4. Amount By Currency
-func GetAmountByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
+func GetAmountByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
 		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		// 	return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
+		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
@@ -228,20 +228,20 @@ func GetAmountByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 }
 
 // 5. Business Unit Currency Summary
-func GetBusinessUnitCurrencySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
+func GetBusinessUnitCurrencySummaryFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
 		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		// 	return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT entity, currency, total_open_amount FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
+		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
@@ -297,20 +297,20 @@ func GetBusinessUnitCurrencySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 }
 
 // 6. Maturity Expiry Summary
-func GetMaturityExpirySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
+func GetMaturityExpirySummaryFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
 		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		// 	return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT total_open_amount, currency, value_date FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
+		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
@@ -375,20 +375,20 @@ func formatK(val float64) string {
 }
 
 // 7. Average Exposure Maturity
-func GetAvgExposureMaturity(db *sql.DB) http.HandlerFunc {
+func GetAvgExposureMaturity(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
 		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		// 	return
 		// }
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT total_original_amount AS amount, currency, value_date, ABS(CAST(value_date AS date) - CURRENT_DATE) AS days_to_maturity FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
+		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, "Error calculating Avg Exposure Maturity", http.StatusInternalServerError)
 			return
@@ -425,15 +425,15 @@ func GetAvgExposureMaturity(db *sql.DB) http.HandlerFunc {
 }
 
 // Endpoint: Maturity Expiry Count for Next 7 Days
-func GetMaturityExpiryCount7DaysFromHeaders(db *sql.DB) http.HandlerFunc {
+func GetMaturityExpiryCount7DaysFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		buNames := api.GetEntityNamesFromCtx(r.Context())
+		if len(buNames) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT value_date FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
+		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return

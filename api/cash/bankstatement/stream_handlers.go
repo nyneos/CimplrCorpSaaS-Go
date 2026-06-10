@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
@@ -164,13 +166,13 @@ func respondWithError(w http.ResponseWriter, err error, userMsg string, code int
 }
 
 // insertUploadRow inserts a metadata row and returns the generated id
-func insertUploadRow(ctx context.Context, db *sql.DB, filename, storagePath, checksum string) (string, error) {
+func insertUploadRow(ctx context.Context, pool *pgxpool.Pool, filename, storagePath, checksum string) (string, error) {
 	var id string
 	// If storage uploads are disabled we pass an empty string for storage_path
 	// The DB in this project requires a non-NULL storage_path column, so do
 	// not convert empty string to NULL here. Store $2 as-is.
 	q := `INSERT INTO cimplrcorpsaas.bank_pdf_uploads (original_filename, storage_path, checksum_sha256, status) VALUES ($1, $2, $3, 'uploaded') RETURNING id`
-	err := db.QueryRowContext(ctx, q, filename, storagePath, checksum).Scan(&id)
+	err := pool.QueryRow(ctx, q, filename, storagePath, checksum).Scan(&id)
 	if err != nil {
 		return "", err
 	}
@@ -179,21 +181,21 @@ func insertUploadRow(ctx context.Context, db *sql.DB, filename, storagePath, che
 
 // insertUploadRowTx inserts using an explicit transaction so callers can roll
 // back if downstream processing fails.
-func insertUploadRowTx(ctx context.Context, tx *sql.Tx, filename, storagePath, checksum string) (string, error) {
+func insertUploadRowTx(ctx context.Context, tx pgx.Tx, filename, storagePath, checksum string) (string, error) {
 	var id string
 	q := `INSERT INTO cimplrcorpsaas.bank_pdf_uploads (original_filename, storage_path, checksum_sha256, status) VALUES ($1, $2, $3, 'uploaded') RETURNING id`
-	if err := tx.QueryRowContext(ctx, q, filename, storagePath, checksum).Scan(&id); err != nil {
+	if err := tx.QueryRow(ctx, q, filename, storagePath, checksum).Scan(&id); err != nil {
 		return "", err
 	}
 	return id, nil
 }
 
 // checkExistingByChecksum returns true and id if checksum exists
-func checkExistingByChecksum(ctx context.Context, db *sql.DB, checksum string) (bool, string, error) {
+func checkExistingByChecksum(ctx context.Context, pool *pgxpool.Pool, checksum string) (bool, string, error) {
 	var id string
 	q := `SELECT id FROM cimplrcorpsaas.bank_pdf_uploads WHERE checksum_sha256 = $1 LIMIT 1`
-	err := db.QueryRowContext(ctx, q, checksum).Scan(&id)
-	if err == sql.ErrNoRows {
+	err := pool.QueryRow(ctx, q, checksum).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 		return false, "", nil
 	}
 	if err != nil {
@@ -301,7 +303,7 @@ func attachStreamKey(u string) string {
 	return u + "?stream_key=" + url.QueryEscape(first)
 }
 
-func uploadBankStatementV2FromBytes(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, filename string, data []byte, formValues map[string][]string, query url.Values) (map[string]interface{}, error) {
+func uploadBankStatementV2FromBytes(ctx context.Context, pool *pgxpool.Pool, filename string, data []byte, formValues map[string][]string, query url.Values) (map[string]interface{}, error) {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 
@@ -335,7 +337,7 @@ func uploadBankStatementV2FromBytes(ctx context.Context, db *sql.DB, pool *pgxpo
 	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
 
 	rr := httptest.NewRecorder()
-	UploadBankStatementV2Handler(db, pool).ServeHTTP(rr, req)
+	UploadBankStatementV2Handler(pool).ServeHTTP(rr, req)
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
@@ -377,7 +379,7 @@ func zipPreviewRowToUploadZipResult(row map[string]interface{}) map[string]inter
 	return out
 }
 
-func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.ResponseWriter, r *http.Request) {
+func handleZipBankStatementUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	file, header, err := r.FormFile("file")
@@ -567,7 +569,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 			continue
 		}
 
-		resp, err := uploadBankStatementV2FromBytes(ctx, db, pool, filename, fileBytes, perFileFormValues, r.URL.Query())
+		resp, err := uploadBankStatementV2FromBytes(ctx, pool, filename, fileBytes, perFileFormValues, r.URL.Query())
 		if err != nil {
 			results = append(results, map[string]interface{}{
 				"file":   filename,
@@ -604,7 +606,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 		if userID == "" {
 			userID = strings.TrimSpace(r.FormValue("user_id"))
 		}
-		bID, batchErr := insertStagingBatch(ctx, db, userID, header.Filename, len(pdfEntries))
+		bID, batchErr := insertStagingBatch(ctx, pool, userID, header.Filename, len(pdfEntries))
 		if batchErr != nil {
 			logger.LogError("[ZIP-PDF] failed to create staging batch: %v", batchErr)
 			for _, pe := range pdfEntries {
@@ -621,10 +623,10 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 				bgCtx := context.Background()
 				succeeded, failed := 0, 0
 				for _, f := range files {
-					stagingIDs, err := processPDFViaPDFCo(bgCtx, db, f.data, f.filename, bgBatchID, "")
+					stagingIDs, err := processPDFViaPDFCo(bgCtx, pool, f.data, f.filename, bgBatchID, "")
 					if err != nil {
 						logger.LogError("[ZIP-PDF-BG] failed %s: %v", f.filename, err)
-						_, _ = insertStagingStatement(bgCtx, db, insertStagingStatementParams{
+						_, _ = insertStagingStatement(bgCtx, pool, insertStagingStatementParams{
 							BatchID: bgBatchID, Filename: f.filename, CSVURL: "", RawStatement: nil, Status: "failed", ErrMsg: err.Error(),
 						})
 						failed++
@@ -636,7 +638,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 						}
 					}
 				}
-				_ = finaliseStagingBatch(bgCtx, db, bgBatchID, succeeded, failed)
+				_ = finaliseStagingBatch(bgCtx, pool, bgBatchID, succeeded, failed)
 				if pool != nil && uploaderID != "" {
 					notif.TriggerNotification(
 						bgCtx, pool,
@@ -721,7 +723,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 }
 
 // UploadBankStatementV3Handler returns http.Handler that accepts file upload and streams preview
-func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
+func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
@@ -750,7 +752,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		}
 		if ext == ".zip" {
 			logger.LogInfo("[BANK-PREVIEW] zip upload detected filename=%s", fh.Filename)
-			handleZipBankStatementUpload(db, pool, w, r)
+			handleZipBankStatementUpload(pool, w, r)
 			return
 		}
 
@@ -758,7 +760,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		if ext != ".pdf" && ext != ".docx" {
 			// delegate to existing V2 handler for Excel/CSV
 			logger.LogInfo("[BANK-PREVIEW] delegating to V2 handler for extension=%s", ext)
-			h := UploadBankStatementV2Handler(db, pool)
+			h := UploadBankStatementV2Handler(pool)
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -789,7 +791,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 
 		// Begin a DB transaction so we can check for existing checksum and
 		// commit the metadata only after parsing and storage upload succeed.
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			respondWithError(w, err, "Failed to start DB transaction", http.StatusInternalServerError)
 			return
@@ -797,22 +799,22 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// Ensure rollback if we return before explicit commit.
 		defer func() {
 			if tx != nil {
-				_ = tx.Rollback()
+				_ = tx.Rollback(ctx)
 			}
 		}()
 
 		// Check for existing checksum inside the transaction to avoid races.
 		var existingID sql.NullString
-		err = tx.QueryRowContext(ctx, `SELECT id FROM cimplrcorpsaas.bank_pdf_uploads WHERE checksum_sha256 = $1 LIMIT 1`, checksum).Scan(&existingID)
+		err = tx.QueryRow(ctx, `SELECT id FROM cimplrcorpsaas.bank_pdf_uploads WHERE checksum_sha256 = $1 LIMIT 1`, checksum).Scan(&existingID)
 		if err == nil && existingID.Valid {
 			// already exists — rollback the open transaction but continue parsing
 			// so the caller receives the full preview data instead of a bare {exists} stub
-			if rerr := tx.Rollback(); rerr != nil {
+			if rerr := tx.Rollback(ctx); rerr != nil {
 				logger.LogError("failed to rollback tx after existing-check: %v", rerr)
 			}
 			tx = nil
 			// fall through: parse and return full preview using the existing record ID
-		} else if err != nil && err != sql.ErrNoRows {
+		} else if err != nil && !(errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows)) {
 			respondWithError(w, err, "Failed to check existing uploads", http.StatusInternalServerError)
 			return
 		}
@@ -821,7 +823,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		usePDFCo := usePDFCoFromEnv()
 		if ext == ".pdf" && usePDFCo {
 			if tx != nil {
-				_ = tx.Rollback()
+				_ = tx.Rollback(ctx)
 				tx = nil
 			}
 			forceOverride := r.FormValue("force_override") == "true"
@@ -838,14 +840,14 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 				}
 				accountOverridePDF = accountNums[0]
 			}
-			batchID, batchErr := insertStagingBatch(ctx, db, uploadUserID, header.Filename, 1)
+			batchID, batchErr := insertStagingBatch(ctx, pool, uploadUserID, header.Filename, 1)
 			if batchErr != nil {
 				respondWithError(w, batchErr, "Failed to create staging batch", http.StatusInternalServerError)
 				return
 			}
-			stagingIDs, pdfErr := processPDFViaPDFCo(ctx, db, fileBytes, header.Filename, batchID, accountOverridePDF)
+			stagingIDs, pdfErr := processPDFViaPDFCo(ctx, pool, fileBytes, header.Filename, batchID, accountOverridePDF)
 			if pdfErr != nil {
-				_ = finaliseStagingBatch(ctx, db, batchID, 0, 1)
+				_ = finaliseStagingBatch(ctx, pool, batchID, 0, 1)
 				// Let userFriendlyUploadError classify converter vs parse vs master-data failures.
 				respondWithError(w, pdfErr, "", http.StatusInternalServerError)
 				return
@@ -854,7 +856,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			if processedCount == 0 {
 				processedCount = 1
 			}
-			_ = finaliseStagingBatch(ctx, db, batchID, processedCount, 0)
+			_ = finaliseStagingBatch(ctx, pool, batchID, processedCount, 0)
 			primaryStagingID := ""
 			if len(stagingIDs) > 0 {
 				primaryStagingID = stagingIDs[0]
@@ -876,7 +878,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		csvBytes, convErr := callConvertCSV(ctx, fileBytes, header.Filename, "")
 		if convErr != nil {
 			if tx != nil {
-				if rerr := tx.Rollback(); rerr != nil {
+				if rerr := tx.Rollback(ctx); rerr != nil {
 					log.Printf("failed to rollback tx after conversion error: %v", rerr)
 				}
 			}
@@ -935,7 +937,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			logger.LogError("AI response parsing error: %v, raw: %s", err, string(aiResponseBytes))
 			// rollback the transaction because parsing failed
 			if tx != nil {
-				if rerr := tx.Rollback(); rerr != nil {
+				if rerr := tx.Rollback(ctx); rerr != nil {
 					logger.LogError("failed to rollback tx after parse error: %v", rerr)
 				}
 				tx = nil
@@ -950,10 +952,10 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 				accountForConvert = nums[0]
 			}
 		}
-		previews, prevErr := BuildPreviewResponsesFromCSVBytes(ctx, db, csvBytes, header.Filename, accountForConvert)
+		previews, prevErr := BuildPreviewResponsesFromCSVBytes(ctx, pool, csvBytes, header.Filename, accountForConvert)
 		if prevErr != nil {
 			if tx != nil {
-				if rerr := tx.Rollback(); rerr != nil {
+				if rerr := tx.Rollback(ctx); rerr != nil {
 					log.Printf("failed to rollback tx after preview error: %v", rerr)
 				}
 				tx = nil
@@ -963,7 +965,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		}
 		if len(previews) == 0 {
 			if tx != nil {
-				_ = tx.Rollback()
+				_ = tx.Rollback(ctx)
 				tx = nil
 			}
 			respondWithError(w, fmt.Errorf("no preview data"), "No transactions found in document", http.StatusUnprocessableEntity)
@@ -980,7 +982,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			if upErr := uploadToSupabase(ctx, fileBytes, objectPath); upErr != nil {
 				// rollback transaction
 				if tx != nil {
-					if rerr := tx.Rollback(); rerr != nil {
+					if rerr := tx.Rollback(ctx); rerr != nil {
 						logger.LogError("failed to rollback tx after supabase upload failure: %v", rerr)
 					}
 					tx = nil
@@ -1024,7 +1026,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 
 		// Commit the metadata insert now that parsing succeeded.
 		if tx != nil {
-			if cerr := tx.Commit(); cerr != nil {
+			if cerr := tx.Commit(ctx); cerr != nil {
 				logger.LogError("failed to commit upload metadata: %v", cerr)
 				respondWithError(w, cerr, "Failed to persist upload metadata", http.StatusInternalServerError)
 				return
@@ -1072,7 +1074,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 }
 
 // RecalculateHandler accepts bank statement transactions and validates running balances
-func RecalculateHandler(db *sql.DB) http.Handler {
+func RecalculateHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var input RecalculateInput
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -1224,7 +1226,7 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 			}
 			if raw, merr := json.Marshal(rawStatement); merr == nil {
 				uid := apipreval.GetUserIDFromContext(r.Context())
-				if _, uerr := db.ExecContext(r.Context(), `
+				if _, uerr := pool.Exec(r.Context(), `
 					UPDATE cimplrcorpsaas.pdf_staging_statement st
 					   SET raw_statement = $1, status = 'parsed', updated_at = now()
 					  FROM cimplrcorpsaas.pdf_staging_batch b
@@ -1240,7 +1242,7 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 				"status": "preview",
 			}
 			if raw, merr := json.Marshal(rawStatement); merr == nil {
-				if _, uerr := db.ExecContext(r.Context(), `
+				if _, uerr := pool.Exec(r.Context(), `
 					UPDATE cimplrcorpsaas.pdf_staging_statement
 					   SET raw_statement = $1, status = 'parsed', updated_at = now()
 					 WHERE staging_id = $2 AND status != 'committed'
@@ -1255,7 +1257,7 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 }
 
 // CommitHandler persists clean JSON into bank_pdf_uploads.committed_json by id
-func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
+func CommitHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			ID        string               `json:"user_id"`
@@ -1276,13 +1278,13 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			var prevStatus string
 			var prevBS sql.NullString
 			var stagingOwner string
-			err := db.QueryRowContext(ctx, `
+			err := pool.QueryRow(ctx, `
 				SELECT s.status, s.committed_bs_id::text, b.user_id
 				  FROM cimplrcorpsaas.pdf_staging_statement s
 				  INNER JOIN cimplrcorpsaas.pdf_staging_batch b ON b.batch_id = s.batch_id
 				 WHERE s.staging_id = $1
 			`, stagingID).Scan(&prevStatus, &prevBS, &stagingOwner)
-			if err == sql.ErrNoRows {
+			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 				respondWithError(w, nil, "staging_id not found", http.StatusNotFound)
 				return
 			}
@@ -1367,14 +1369,14 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// 	return
 		// }
 
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			respondWithError(w, err, "Failed to start database transaction", http.StatusInternalServerError)
 			return
 		}
 		defer func() {
 			if p := recover(); p != nil {
-				tx.Rollback()
+				tx.Rollback(ctx)
 				panic(p)
 			}
 		}()
@@ -1382,32 +1384,32 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		if stagingID != "" {
 			var st string
 			var batchUserID string
-			qErr := tx.QueryRowContext(ctx, `
+			qErr := tx.QueryRow(ctx, `
 				SELECT s.status, b.user_id
 				  FROM cimplrcorpsaas.pdf_staging_statement s
 				  INNER JOIN cimplrcorpsaas.pdf_staging_batch b ON b.batch_id = s.batch_id
 				 WHERE s.staging_id = $1
 				 FOR UPDATE OF s
 			`, stagingID).Scan(&st, &batchUserID)
-			if qErr == sql.ErrNoRows {
-				tx.Rollback()
+			if errors.Is(qErr, pgx.ErrNoRows) || errors.Is(qErr, sql.ErrNoRows) {
+				tx.Rollback(ctx)
 				respondWithError(w, nil, "staging_id not found", http.StatusNotFound)
 				return
 			}
 			if qErr != nil {
-				tx.Rollback()
+				tx.Rollback(ctx)
 				respondWithError(w, qErr, "Failed to lock staging statement", http.StatusInternalServerError)
 				return
 			}
 			if sessionUser != "" && batchUserID != sessionUser {
-				tx.Rollback()
+				tx.Rollback(ctx)
 				respondWithError(w, nil, "You do not have access to this staged statement.", http.StatusForbidden)
 				return
 			}
 			if st == "committed" {
 				var prevBS sql.NullString
-				_ = tx.QueryRowContext(ctx, `SELECT committed_bs_id::text FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1`, stagingID).Scan(&prevBS)
-				tx.Rollback()
+				_ = tx.QueryRow(ctx, `SELECT committed_bs_id::text FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1`, stagingID).Scan(&prevBS)
+				tx.Rollback(ctx)
 				data := map[string]interface{}{
 					"already_committed": true,
 					"staging_id":        stagingID,
@@ -1426,8 +1428,8 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		}
 
 		// update committed_json and status
-		// if _, err := tx.ExecContext(ctx, `UPDATE cimplrcorpsaas.bank_pdf_uploads SET committed_json = $1, status='committed' WHERE user_id = $2`, cleanJSON, payload.ID); err != nil {
-		// 	tx.Rollback()
+		// if _, err := tx.Exec(ctx, `UPDATE cimplrcorpsaas.bank_pdf_uploads SET committed_json = $1, status='committed' WHERE user_id = $2`, cleanJSON, payload.ID); err != nil {
+		// 	tx.Rollback(ctx)
 		// 	respondWithError(w, err, "Failed to persist committed data", http.StatusInternalServerError)
 		// 	return
 		// }
@@ -1435,13 +1437,13 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// lookup entity id and currency from masterbankaccount (public schema)
 		var entityID sql.NullString
 		var acctCurrency sql.NullString
-		if err := tx.QueryRowContext(ctx, `SELECT entity_id, currency FROM public.masterbankaccount WHERE account_number=$1 LIMIT 1`, accountNumber).Scan(&entityID, &acctCurrency); err != nil {
-			if err == sql.ErrNoRows {
-				tx.Rollback()
+		if err := tx.QueryRow(ctx, `SELECT entity_id, currency FROM public.masterbankaccount WHERE account_number=$1 LIMIT 1`, accountNumber).Scan(&entityID, &acctCurrency); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
+				tx.Rollback(ctx)
 				respondWithError(w, nil, "Bank account not found in master data. Please add this account to the system before uploading statements.", http.StatusBadRequest)
 				return
 			} else {
-				tx.Rollback()
+				tx.Rollback(ctx)
 				respondWithError(w, err, "Failed to lookup master bank account", http.StatusInternalServerError)
 				return
 			}
@@ -1456,7 +1458,7 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		if acctCurrency.Valid {
 			currencyCode = acctCurrency.String
 		}
-		rules, _ := loadCategoryRuleComponents(ctx, db, accountNumber, entityIDStr, currencyCode)
+		rules, _ := loadCategoryRuleComponentsPgx(ctx, pool, accountNumber, entityIDStr, currencyCode)
 
 		// Parse period dates from metadata
 		var periodStart, periodEnd time.Time
@@ -1490,19 +1492,19 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 
 		// Validate we have valid period dates
 		if periodStart.IsZero() {
-			tx.Rollback()
+			tx.Rollback(ctx)
 			respondWithError(w, nil, "Statement period start date is missing or invalid. Please ensure the statement contains valid period information.", http.StatusBadRequest)
 			return
 		}
 		if periodEnd.IsZero() {
-			tx.Rollback()
+			tx.Rollback(ctx)
 			respondWithError(w, nil, "Statement period end date is missing or invalid. Please ensure the statement contains valid period information.", http.StatusBadRequest)
 			return
 		}
 
 		// Validate period dates make sense
 		if periodEnd.Before(periodStart) {
-			tx.Rollback()
+			tx.Rollback(ctx)
 			respondWithError(w, nil, "Statement period end date cannot be before start date. Please check the statement dates.", http.StatusBadRequest)
 			return
 		}
@@ -1521,7 +1523,7 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 
 		// Insert parent bank_statements row (matching V2 structure)
 		var bankStatementID string
-		err = tx.QueryRowContext(ctx, `
+		err = tx.QueryRow(ctx, `
 			INSERT INTO cimplrcorpsaas.bank_statements (
 				entity_id, account_number, statement_period_start, statement_period_end, 
 				file_hash, opening_balance, closing_balance
@@ -1529,7 +1531,7 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			RETURNING bank_statement_id
 		`, entityID, accountNumber, periodStart, periodEnd, fileHash, openingBalance, closingBalance).Scan(&bankStatementID)
 		if err != nil {
-			tx.Rollback()
+			tx.Rollback(ctx)
 			respondWithError(w, err, "Failed to insert bank statement", http.StatusInternalServerError)
 			return
 		}
@@ -1596,8 +1598,8 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 				)
 			}
 			stmt := `INSERT INTO cimplrcorpsaas.bank_statement_transactions (bank_statement_id, account_number, tran_id, value_date, transaction_date, description, withdrawal_amount, deposit_amount, balance, raw_json, category_id) VALUES ` + strings.Join(valueStrings, ",") + ` ON CONFLICT (account_number, transaction_date, description, withdrawal_amount, deposit_amount) DO NOTHING`
-			if _, err := tx.ExecContext(ctx, stmt, valueArgs...); err != nil {
-				tx.Rollback()
+			if _, err := tx.Exec(ctx, stmt, valueArgs...); err != nil {
+				tx.Rollback(ctx)
 				respondWithError(w, err, "Failed to insert transactions", http.StatusInternalServerError)
 				return
 			}
@@ -1610,29 +1612,29 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 				requestedBy = us
 			}
 		}
-		_, err = tx.ExecContext(ctx, `
+		_, err = tx.Exec(ctx, `
 			INSERT INTO cimplrcorpsaas.auditactionbankstatement (
 				bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip
 			) VALUES ($1, $2, $3, $4, $5, $6)
 		`, bankStatementID, "CREATE", constants.StatusPendingApproval, requestedBy, time.Now().UTC(), nullIfBlank(api.ClientIPFromRequest(r)))
 		if err != nil {
-			tx.Rollback()
+			tx.Rollback(ctx)
 			respondWithError(w, err, "Failed to record audit action", http.StatusInternalServerError)
 			return
 		}
 
 		if stagingID != "" {
-			if _, errSt := tx.ExecContext(ctx, `
+			if _, errSt := tx.Exec(ctx, `
 				UPDATE cimplrcorpsaas.pdf_staging_statement
 				   SET status = 'committed', committed_bs_id = $1, updated_at = now()
 				 WHERE staging_id = $2
 			`, bankStatementID, stagingID); errSt != nil {
-				tx.Rollback()
+				tx.Rollback(ctx)
 				respondWithError(w, errSt, "Failed to update staging statement status", http.StatusInternalServerError)
 				return
 			}
 			// When every statement in the batch has committed_bs_id set, promote the batch so /cash/staging/list shows committed.
-			if _, errBatch := tx.ExecContext(ctx, `
+			if _, errBatch := tx.Exec(ctx, `
 				UPDATE cimplrcorpsaas.pdf_staging_batch b
 				   SET status = 'committed', updated_at = now()
 				 WHERE b.batch_id = (SELECT batch_id FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1)
@@ -1645,7 +1647,7 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			}
 		}
 
-		if err := tx.Commit(); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			respondWithError(w, err, "Failed to commit transaction", http.StatusInternalServerError)
 			return
 		}
@@ -1943,7 +1945,7 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 }
 
 // GetPDFMetadataHandler fetches metadata by id
-func GetPDFMetadataHandler(db *sql.DB) http.Handler {
+func GetPDFMetadataHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var id string
 		// support GET ?id=... or POST {"id":"...","user_id":"..."}
@@ -1977,8 +1979,8 @@ func GetPDFMetadataHandler(db *sql.DB) http.Handler {
 			CreatedAt        time.Time
 		}
 		q := `SELECT id, original_filename, storage_path, checksum_sha256, status, created_at FROM cimplrcorpsaas.bank_pdf_uploads WHERE id=$1`
-		if err := db.QueryRowContext(r.Context(), q, id).Scan(&row.ID, &row.OriginalFilename, &row.StoragePath, &row.ChecksumSHA256, &row.Status, &row.CreatedAt); err != nil {
-			if err == sql.ErrNoRows {
+		if err := pool.QueryRow(r.Context(), q, id).Scan(&row.ID, &row.OriginalFilename, &row.StoragePath, &row.ChecksumSHA256, &row.Status, &row.CreatedAt); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 				respondWithError(w, nil, "Not found", http.StatusNotFound)
 				return
 			}
@@ -1991,7 +1993,7 @@ func GetPDFMetadataHandler(db *sql.DB) http.Handler {
 }
 
 // DownloadPDFHandler downloads file from supabase and streams to client
-func DownloadPDFHandler(db *sql.DB) http.Handler {
+func DownloadPDFHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var id string
 		var providedUserID string
@@ -2020,8 +2022,8 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 		}
 		var storagePath, filename, entityName sql.NullString
 		q := `SELECT storage_path, original_filename, entity_name FROM cimplrcorpsaas.bank_pdf_uploads WHERE id=$1`
-		if err := db.QueryRowContext(r.Context(), q, id).Scan(&storagePath, &filename, &entityName); err != nil {
-			if err == sql.ErrNoRows {
+		if err := pool.QueryRow(r.Context(), q, id).Scan(&storagePath, &filename, &entityName); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 				respondWithError(w, nil, "Not found", http.StatusNotFound)
 				return
 			}
@@ -2031,7 +2033,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 
 		var bankStatementID sql.NullString
 		if storagePath.Valid && strings.TrimSpace(storagePath.String) != "" {
-			_ = db.QueryRowContext(r.Context(), `
+			_ = pool.QueryRow(r.Context(), `
 				SELECT bank_statement_id
 				FROM cimplrcorpsaas.bank_statements
 				WHERE upload_s3_key = $1
@@ -2121,7 +2123,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 		ip := api.ClientIPFromRequest(r)
 		go func() {
 			// best-effort; log on error
-			if err := insertDownloadAudit(r.Context(), db, sql.NullString{String: strings.TrimSpace(id), Valid: strings.TrimSpace(id) != ""}, sql.NullString{}, userID, ip, entityName); err != nil {
+			if err := insertDownloadAuditPgx(r.Context(), pool, sql.NullString{String: strings.TrimSpace(id), Valid: strings.TrimSpace(id) != ""}, sql.NullString{}, userID, ip, entityName); err != nil {
 				logger.LogError("failed to insert download audit: %v", err)
 			}
 		}()
@@ -2138,7 +2140,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 // the CSV into a preview response, and stages the result in pdf_staging_statement.
 // accountOverride is the optional forced master account (same semantics as force_override + account_numbers on CSV upload).
 // Returns (stagingID, error).
-func processPDFViaPDFCo(ctx context.Context, db *sql.DB, pdfBytes []byte, filename, batchID string, accountOverride string) (stagingIDs []string, err error) {
+func processPDFViaPDFCo(ctx context.Context, pool *pgxpool.Pool, pdfBytes []byte, filename, batchID string, accountOverride string) (stagingIDs []string, err error) {
 	csvBytes, err := callConvertCSV(ctx, pdfBytes, filename, "")
 	if err != nil {
 		return nil, fmt.Errorf("convert: %w", err)
@@ -2147,7 +2149,7 @@ func processPDFViaPDFCo(ctx context.Context, db *sql.DB, pdfBytes []byte, filena
 		return nil, fmt.Errorf("received empty output from conversion service")
 	}
 
-	previews, perr := BuildPreviewResponsesFromCSVBytes(ctx, db, csvBytes, filename, accountOverride)
+	previews, perr := BuildPreviewResponsesFromCSVBytes(ctx, pool, csvBytes, filename, accountOverride)
 	if perr != nil {
 		return nil, fmt.Errorf("build preview: %w", perr)
 	}
@@ -2155,7 +2157,7 @@ func processPDFViaPDFCo(ctx context.Context, db *sql.DB, pdfBytes []byte, filena
 		return nil, fmt.Errorf("build preview: no parsed statements")
 	}
 	for _, preview := range previews {
-		sid, serr := insertStagingStatement(ctx, db, insertStagingStatementParams{
+		sid, serr := insertStagingStatement(ctx, pool, insertStagingStatementParams{
 			BatchID: batchID, Filename: filename, CSVURL: "", RawStatement: preview, Status: "parsed",
 		})
 		if serr != nil {
@@ -2169,12 +2171,12 @@ func processPDFViaPDFCo(ctx context.Context, db *sql.DB, pdfBytes []byte, filena
 // insertDownloadAudit records who downloaded a file.
 // Some bank statements are stored directly in bank_statements without a linked
 // bank_pdf_uploads row, so file_id falls back to a generated UUID when absent.
-func insertDownloadAudit(ctx context.Context, db *sql.DB, fileID sql.NullString, bankStatementID sql.NullString, userID, ip string, entityName sql.NullString) error {
+func insertDownloadAuditPgx(ctx context.Context, pool *pgxpool.Pool, fileID sql.NullString, bankStatementID sql.NullString, userID, ip string, entityName sql.NullString) error {
 	q := `
 		INSERT INTO cimplrcorpsaas.bank_pdf_download_audits (file_id, bankstatementid, user_id, ip, entity_name)
 		VALUES (COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5)
 	`
-	_, err := db.ExecContext(ctx, q, fileID, bankStatementID, userID, ip, entityName)
+	_, err := pool.Exec(ctx, q, fileID, bankStatementID, userID, ip, entityName)
 	return err
 }
 func z4() string {

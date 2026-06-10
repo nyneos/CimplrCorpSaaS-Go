@@ -222,6 +222,9 @@ func (bp *TransactionBatchProcessor) BatchInsertPayables(ctx context.Context, pa
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING payable_id`
 
 	for _, payable := range payables {
+		if msg := validatePayRecScope(ctx, payable.EntityName, payable.CounterpartyName, payable.CurrencyCode); msg != "" {
+			return fmt.Errorf("payable invoice %s failed scope validation: %s", payable.InvoiceNumber, msg)
+		}
 		batch.Queue(query, payable.EntityName, payable.CounterpartyName, payable.InvoiceNumber,
 			payable.InvoiceDate, payable.DueDate, payable.Amount, payable.CurrencyCode,
 			payable.OldEntityName, payable.OldCounterparty, payable.OldInvoiceNumber,
@@ -290,6 +293,9 @@ func (bp *TransactionBatchProcessor) BatchInsertReceivables(ctx context.Context,
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING receivable_id`
 
 	for _, receivable := range receivables {
+		if msg := validatePayRecScope(ctx, receivable.EntityName, receivable.CounterpartyName, receivable.CurrencyCode); msg != "" {
+			return fmt.Errorf("receivable invoice %s failed scope validation: %s", receivable.InvoiceNumber, msg)
+		}
 		batch.Queue(query, receivable.EntityName, receivable.CounterpartyName, receivable.InvoiceNumber,
 			receivable.InvoiceDate, receivable.DueDate, receivable.InvoiceAmount, receivable.CurrencyCode,
 			receivable.OldEntityName, receivable.OldCounterparty, receivable.OldInvoiceNumber,

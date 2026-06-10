@@ -10,6 +10,7 @@ import (
 	"io"
 
 	// "log"
+	"CimplrCorpSaas/internal/dependency"
 	"net/http"
 	"strings"
 	"time"
@@ -193,7 +194,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Get context-based approved data for validations
-			approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+			approvedEntities := api.GetEntityNamesFromCtx(ctx)
 			approvedAMCs, _ := ctx.Value("ApprovedAMCs").([]map[string]string)
 			approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 			approvedSchemes, _ := ctx.Value("ApprovedSchemes").([]map[string]string)
@@ -511,7 +512,7 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Get user's accessible entities from context
-		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		approvedEntities := api.GetEntityNamesFromCtx(ctx)
 		if len(approvedEntities) == 0 {
 			api.RespondWithError(w, http.StatusForbidden, "No accessible entities found")
 			return
@@ -735,7 +736,7 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Get user's accessible entities from context
-		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		approvedEntities := api.GetEntityNamesFromCtx(ctx)
 		if len(approvedEntities) == 0 {
 			api.RespondWithError(w, http.StatusForbidden, "No accessible entities found")
 			return
@@ -861,7 +862,7 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Validate entity access
-		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		approvedEntities := api.GetEntityNamesFromCtx(ctx)
 		if len(approvedEntities) == 0 {
 			api.RespondWithError(w, http.StatusForbidden, "No accessible entities found in context")
 			return
@@ -1438,6 +1439,23 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
+		// [AUTO] Partial Success Filter for DELETE approvals only
+		pendingDel := dependency.GetPendingDeleteIDs(r.Context(), pgxPool, "investment.auditactionfolio", "folio_id", req.FolioIDs)
+		blocked := dependency.CheckBulkBlockers(r.Context(), pgxPool, "masterfolio", pendingDel)
+		if len(blocked) > 0 {
+			blockedSet := make(map[string]bool)
+			for _, b := range blocked {
+				blockedSet[b["id"].(string)] = true
+			}
+			var unblocked []string
+			for _, id := range req.FolioIDs {
+				if !blockedSet[id] {
+					unblocked = append(unblocked, id)
+				}
+			}
+			req.FolioIDs = unblocked
+		}
+		w = dependency.NewBulkResponseInterceptor(w, blocked)
 		checkerBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -1476,6 +1494,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var toApprove []string
 		var toDeleteActionIDs []string
 		var deleteMasterIDs []string
+		var blockedFolios []map[string]interface{}
 
 		for rows.Next() {
 			var aid, fid, atype, pstatus string
@@ -1487,6 +1506,15 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if ps == constants.StatusPendingDeleteApproval {
+				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterfolio", fid)
+				if len(blockers) > 0 {
+					blockedFolios = append(blockedFolios, map[string]interface{}{
+						"folio_id":   fid,
+						"blocked_by": dependency.BlockersSummary(blockers),
+					})
+					continue
+				}
+
 				toDeleteActionIDs = append(toDeleteActionIDs, aid)
 				deleteMasterIDs = append(deleteMasterIDs, fid)
 				continue
@@ -1546,6 +1574,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"approved_action_ids": toApprove,
 			"deleted_folios":      deleteMasterIDs,
+			"blocked":             blockedFolios,
 		})
 	}
 }

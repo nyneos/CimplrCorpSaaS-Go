@@ -10,6 +10,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -411,7 +412,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate sweep scope against prevalidation context
 		if strings.TrimSpace(entityName) != "" {
-			if !api.IsEntityAllowed(ctx, entityName) {
+			if !ctxutil.FromContext(ctx).HasEntityAccess(entityName) {
 				api.RespondWithResult(w, false, "unauthorized entity")
 				return
 			}

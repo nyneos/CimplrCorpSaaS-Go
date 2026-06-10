@@ -1,9 +1,9 @@
 package forwards
 
 import (
-	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/fx/auditutil"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/ctxutil"
 	"bytes"
 	"context"
 	"database/sql"
@@ -154,8 +154,9 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Get business units from middleware context
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -809,8 +810,9 @@ func GetMTMData(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Get business units from middleware context
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -875,8 +877,9 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
@@ -995,8 +998,9 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.MTMIDsRequired)
 			return
 		}
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
+		scope := ctxutil.FromContext(r.Context())
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}

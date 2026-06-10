@@ -2,9 +2,9 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/dependency"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
+	"CimplrCorpSaas/internal/validation"
 )
 
 // getUserFriendlyCostProfitCenterError converts database errors to user-friendly messages
@@ -211,17 +212,12 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Find createdBy from active sessions
-		createdBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				createdBy = s.Name
-				break
-			}
-		}
-		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil || session.UserID != req.UserID {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
+		createdBy := session.Name
 
 		ctx := r.Context()
 		entities := api.GetEntityNamesFromCtx(ctx)
@@ -240,7 +236,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Validate entity
-			if rrow.EntityCode != "" && !api.IsEntityAllowed(ctx, rrow.EntityCode) {
+			if rrow.EntityCode != "" && validation.ValidateCashMasterReferences(ctx, map[string]interface{}{"entity_name": rrow.EntityCode}) != "" {
 				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized entity_name: " + rrow.EntityCode, "centre_code": rrow.CentreCode})
 				continue
 			}
@@ -419,17 +415,12 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		updatedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				updatedBy = s.Name
-				break
-			}
-		}
-		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil || session.UserID != req.UserID {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
+		updatedBy := session.Name
 
 		ctx := r.Context()
 		results := []map[string]interface{}{}
@@ -486,7 +477,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				// Validate entity if being updated
 				if val, ok := row.Fields["entity_name"]; ok {
-					if valStr := fmt.Sprint(val); valStr != "" && !api.IsEntityAllowed(ctx, valStr) {
+					if valStr := fmt.Sprint(val); valStr != "" && validation.ValidateCashMasterReferences(ctx, map[string]interface{}{"entity_name": valStr}) != "" {
 						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized entity_name: " + valStr, "centre_id": row.CentreID})
 						return
 					}
@@ -813,17 +804,12 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		userEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userEmail = s.Name
-				break
-			}
-		}
-		if userEmail == "" {
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil || session.UserID != userID {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		userEmail := session.Name
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
@@ -1198,15 +1184,9 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		valid := false
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil || session.UserID != req.UserID {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -1313,7 +1293,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				args = append(args, strings.ToLower(entity))
 				argPos++
 			}
-			whereClauses = append(whereClauses, fmt.Sprintf("LOWER(m.entity_name) IN (%s)", strings.Join(placeholders, ",")))
+			whereClauses = append(whereClauses, fmt.Sprintf("(m.entity_name IS NULL OR TRIM(m.entity_name) = ''OR LOWER(m.entity_name) IN (%s))", strings.Join(placeholders, ",")))
 		}
 
 		// Currency filter
@@ -1727,7 +1707,7 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, strings.ToLower(entity))
 			argPos++
 		}
-		entityFilter := fmt.Sprintf("LOWER(m.entity_name) IN (%s)", strings.Join(placeholders, ","))
+		entityFilter := fmt.Sprintf("(m.entity_name IS NULL OR TRIM(m.entity_name) = ''OR LOWER(m.entity_name) IN (%s))", strings.Join(placeholders, ","))
 
 		q := fmt.Sprintf(`
 			SELECT m.centre_name, m.centre_id, m.centre_code, m.entity_name
@@ -1785,17 +1765,12 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		requestedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
-		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil || session.UserID != req.UserID {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
+		requestedBy := session.Name
 		if len(req.CentreIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "centre_ids required")
 			return
@@ -1888,17 +1863,12 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil || session.UserID != req.UserID {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
+		checkerBy := session.Name
 		// Fetch relationships and compute descendants, then update audit rows by centre_id
 		ctx := context.Background()
 
@@ -2035,17 +2005,12 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil || session.UserID != req.UserID {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
+		checkerBy := session.Name
 		ctx := context.Background()
 
 		// Fetch relationships
@@ -2108,9 +2073,31 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return res
 		}
 
+		// Dependency validation for deletes
 		allToApprove := getAllDescendants(req.CentreIDs)
-		if len(allToApprove) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No centres found to approve")
+		var safeToApprove []string
+		var blockedRecords []map[string]interface{}
+
+		for _, cid := range allToApprove {
+			var actionType, procStatus string
+			err := pgxPool.QueryRow(ctx, "SELECT actiontype, processing_status FROM auditactioncostprofitcenter WHERE centre_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC LIMIT 1", cid).Scan(&actionType, &procStatus)
+			if err == nil && strings.ToUpper(actionType) == "DELETE" && strings.ToUpper(procStatus) == "PENDING_DELETE_APPROVAL" {
+				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "mastercostprofitcenter", cid)
+				if len(blockers) > 0 {
+					blockedRecords = append(blockedRecords, map[string]interface{}{
+						"centre_id":  cid,
+						"blocked_by": dependency.BlockersSummary(blockers),
+					})
+					continue
+				}
+			}
+			safeToApprove = append(safeToApprove, cid)
+		}
+
+		if len(safeToApprove) == 0 {
+			api.RespondWithPayload(w, false, "All selected centres are blocked from deletion", map[string]interface{}{
+				"blocked": blockedRecords,
+			})
 			return
 		}
 
@@ -2129,7 +2116,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		// Update audit rows to APPROVED and return affected rows including action type
 		query := `UPDATE auditactioncostprofitcenter SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE centre_id = ANY($3) RETURNING action_id, centre_id, actiontype`
-		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToApprove)
+		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, safeToApprove)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to approve centre actions")
 			if statusCode == http.StatusOK {
@@ -2156,6 +2143,9 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		// Set is_deleted=true for approved DELETE actions
 		if len(deleteIDs) > 0 {
+			for _, cid := range deleteIDs {
+				_ = dependency.CascadeDelete(ctx, pgxPool, "mastercostprofitcenter", cid, checkerBy)
+			}
 			updQ := `UPDATE mastercostprofitcenter SET is_deleted=true WHERE centre_id = ANY($1)`
 			if _, err := tx.Exec(ctx, updQ, deleteIDs); err != nil {
 				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to mark centres as deleted")
@@ -2171,7 +2161,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
-		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
+		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated, "blocked": blockedRecords}
 		if !success {
 			resp["message"] = constants.ErrNoRowsUpdated
 		}
@@ -2209,17 +2199,12 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
-		if userName == "" {
+		session := api.GetSessionFromCtx(r.Context())
+		if session == nil || session.UserID != userID {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		userName := session.Name
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())

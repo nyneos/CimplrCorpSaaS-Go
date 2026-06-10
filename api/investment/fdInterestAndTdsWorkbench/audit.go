@@ -49,6 +49,16 @@ func GetTDSReceiptAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, code, msg)
 				return
 			}
+			if msg := validateTDSRecordAccess(ctx, pgxPool, req.TDSID); msg != "" {
+				api.RespondWithError(w, http.StatusForbidden, msg)
+				return
+			}
+		}
+		if req.FDID != "" {
+			if msg := validateFDRecordAccess(ctx, pgxPool, req.FDID); msg != "" {
+				api.RespondWithError(w, http.StatusForbidden, msg)
+				return
+			}
 		}
 
 		baseQuery := `
