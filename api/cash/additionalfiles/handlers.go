@@ -1017,9 +1017,9 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 	}
 
 	var createQuery string
-var createArgs []interface{}
-if cfg.AuditByFileIDOnly {
-	createQuery = `
+	var createArgs []interface{}
+	if cfg.AuditByFileIDOnly {
+		createQuery = `
 		SELECT DISTINCT ON (file_id)
 			file_id,
 			requested_ip
@@ -1028,9 +1028,9 @@ if cfg.AuditByFileIDOnly {
 		  AND action_type = $2
 		ORDER BY file_id, requested_at DESC, audit_id DESC
 	`
-	createArgs = []interface{}{fileIDs, fileAuditCreateAction}
-} else {
-	createQuery = `
+		createArgs = []interface{}{fileIDs, fileAuditCreateAction}
+	} else {
+		createQuery = `
 		SELECT DISTINCT ON (file_id)
 			file_id,
 			requested_ip
@@ -1041,34 +1041,34 @@ if cfg.AuditByFileIDOnly {
 		  AND action_type = $4
 		ORDER BY file_id, requested_at DESC, audit_id DESC
 	`
-	createArgs = []interface{}{cfg.Module, parentID, fileIDs, fileAuditCreateAction}
-}
+		createArgs = []interface{}{cfg.Module, parentID, fileIDs, fileAuditCreateAction}
+	}
 
-createRows, err := pool.Query(ctx, createQuery, createArgs...)
-if err != nil {
-	return nil, err
-}
-uploadIPs := make(map[string]string, len(files))
-for createRows.Next() {
-	var fileID string
-	var requestedIP sql.NullString
-	if err := createRows.Scan(&fileID, &requestedIP); err != nil {
+	createRows, err := pool.Query(ctx, createQuery, createArgs...)
+	if err != nil {
+		return nil, err
+	}
+	uploadIPs := make(map[string]string, len(files))
+	for createRows.Next() {
+		var fileID string
+		var requestedIP sql.NullString
+		if err := createRows.Scan(&fileID, &requestedIP); err != nil {
+			createRows.Close()
+			return nil, err
+		}
+		uploadIPs[strings.TrimSpace(fileID)] = strings.TrimSpace(requestedIP.String)
+	}
+	if err := createRows.Err(); err != nil {
 		createRows.Close()
 		return nil, err
 	}
-	uploadIPs[strings.TrimSpace(fileID)] = strings.TrimSpace(requestedIP.String)
-}
-if err := createRows.Err(); err != nil {
 	createRows.Close()
-	return nil, err
-}
-createRows.Close()
 
-pendingStatuses := []string{fileAuditPendingDeleteApproval, fileAuditRejectedStatus}
-var query string
-var args []interface{}
-if cfg.AuditByFileIDOnly {
-	query = `
+	pendingStatuses := []string{fileAuditPendingDeleteApproval, fileAuditRejectedStatus}
+	var query string
+	var args []interface{}
+	if cfg.AuditByFileIDOnly {
+		query = `
 		SELECT DISTINCT ON (file_id)
 			file_id, requested_by, requested_at, requested_ip,
 			checker_by, checker_at, checker_ip, checker_comment, processing_status
@@ -1078,9 +1078,9 @@ if cfg.AuditByFileIDOnly {
 		  AND processing_status = ANY($3)
 		ORDER BY file_id, requested_at DESC, audit_id DESC
 	`
-	args = []interface{}{fileIDs, fileAuditDeleteAction, pendingStatuses}
-} else {
-	query = `
+		args = []interface{}{fileIDs, fileAuditDeleteAction, pendingStatuses}
+	} else {
+		query = `
 		SELECT DISTINCT ON (file_id)
 			file_id, requested_by, requested_at, requested_ip,
 			checker_by, checker_at, checker_ip, checker_comment, processing_status
@@ -1092,10 +1092,10 @@ if cfg.AuditByFileIDOnly {
 		  AND processing_status = ANY($5)
 		ORDER BY file_id, requested_at DESC, audit_id DESC
 	`
-	args = []interface{}{cfg.Module, parentID, fileIDs, fileAuditDeleteAction, pendingStatuses}
-}
+		args = []interface{}{cfg.Module, parentID, fileIDs, fileAuditDeleteAction, pendingStatuses}
+	}
 
-rows, err := pool.Query(ctx, query, args...)
+	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1313,7 +1313,8 @@ func InsertMainUploadAudit(ctx context.Context, tx pgx.Tx, tableName, parentColu
 
 func listAuditEvents(ctx context.Context, pool *pgxpool.Pool, cfg Config, parentID, fileID string) ([]fileAuditEvent, error) {
 	cols := `audit_id, module_key, parent_record_id, file_id, action_type, processing_status,
-	         requested_by, requested_at, checker_by,requested_ip, checker_at,checker_ip, checker_comment, reason`
+	         requested_by, requested_at, requested_ip,
+	         checker_by, checker_at, checker_ip, checker_comment, reason`
 	var query string
 	var args []interface{}
 	if cfg.AuditByFileIDOnly {
