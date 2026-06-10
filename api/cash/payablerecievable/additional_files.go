@@ -2,6 +2,7 @@ package payablerecievable
 
 import (
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"errors"
 	"net/http"
@@ -183,7 +184,7 @@ func getPayableAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool
 	if err := validatePayableParentScope(ctx, pool, parentID); err != nil {
 		return nil, err
 	}
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}
@@ -320,7 +321,7 @@ func getReceivableAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.P
 	if err := validateReceivableParentScope(ctx, pool, parentID); err != nil {
 		return nil, err
 	}
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}

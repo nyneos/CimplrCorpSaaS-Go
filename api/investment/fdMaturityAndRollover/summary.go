@@ -103,7 +103,7 @@ func GetFDMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 			placeholders := make([]string, len(req.EntityIDs))
 			for i, eid := range req.EntityIDs {
 				if !scope.HasEntityAccess(eid) {
-					api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", eid))
+					api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrEntityIDNotAuthorized, eid))
 					return
 				}
 				placeholders[i] = fmt.Sprintf("$%d", idx)
@@ -121,7 +121,7 @@ func GetFDMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 			placeholders := make([]string, len(req.BankIDs))
 			for i, bid := range req.BankIDs {
 				if !scope.HasApprovedBank(bid) {
-					api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bid))
+					api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrBankNotApproved1, bid))
 					return
 				}
 				placeholders[i] = fmt.Sprintf("$%d", idx)

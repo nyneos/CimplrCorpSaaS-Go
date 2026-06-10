@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"strings"
@@ -12,7 +13,7 @@ func ValidateFDMasterReferences(ctx context.Context, fields map[string]interface
 	// 1. Validate Entity Scope
 	if entityID := fieldString(fields, "entity_id"); entityID != "" {
 		if allowedEntities, ok := ctx.Value("entity_ids").([]string); ok && !stringInSlice(entityID, allowedEntities) {
-			return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID)
+			return fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID)
 		}
 	}
 

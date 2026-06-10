@@ -64,7 +64,7 @@ func appendFDEntityScope(ctx context.Context, query *string, args *[]interface{}
 	requestedEntityID = strings.TrimSpace(requestedEntityID)
 	if requestedEntityID != "" {
 		if !fdEntityAllowed(ctx, requestedEntityID) {
-			return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", requestedEntityID)
+			return fmt.Sprintf(constants.ErrEntityIDNotAuthorized, requestedEntityID)
 		}
 		*query += fmt.Sprintf(" AND %s=$%d", column, *idx)
 		*args = append(*args, requestedEntityID)
@@ -96,7 +96,7 @@ func validateFDRecordAccess(ctx context.Context, pool *pgxpool.Pool, fdID string
 		return constants.ErrFDNotFound
 	}
 	if !fdEntityAllowed(ctx, entityID) {
-		return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID)
+		return fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID)
 	}
 	return validation.ValidateFDMasterReferences(ctx, map[string]interface{}{
 		"entity_id": entityID,
@@ -121,7 +121,7 @@ func validateTDSRecordAccess(ctx context.Context, pool *pgxpool.Pool, tdsID stri
 		return "TDS receipt not found"
 	}
 	if !fdEntityAllowed(ctx, entityID) {
-		return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID)
+		return fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID)
 	}
 	return validation.ValidateFDMasterReferences(ctx, map[string]interface{}{
 		"entity_id": entityID,
@@ -146,7 +146,7 @@ func validateFDInterestReceiptAccess(ctx context.Context, pool *pgxpool.Pool, re
 		return "FD interest receipt not found"
 	}
 	if !fdEntityAllowed(ctx, entityID) {
-		return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID)
+		return fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID)
 	}
 	return validation.ValidateFDMasterReferences(ctx, map[string]interface{}{
 		"entity_id": entityID,
@@ -190,12 +190,12 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.FromDate != "" {
-			statusSQL += fmt.Sprintf(" AND receipt_date>=$%d", idx)
+			statusSQL += fmt.Sprintf(constants.ErrReceiptDateFilter, idx)
 			args = append(args, req.FromDate)
 			idx++
 		}
 		if req.ToDate != "" {
-			statusSQL += fmt.Sprintf(" AND receipt_date<=$%d", idx)
+			statusSQL += fmt.Sprintf(constants.ErrReceiptDateFilterEnd, idx)
 			args = append(args, req.ToDate)
 			idx++
 		}
@@ -222,12 +222,12 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.FromDate != "" {
-			recentSQL += fmt.Sprintf(" AND receipt_date>=$%d", ridx)
+			recentSQL += fmt.Sprintf(constants.ErrReceiptDateFilter, ridx)
 			recentArgs = append(recentArgs, req.FromDate)
 			ridx++
 		}
 		if req.ToDate != "" {
-			recentSQL += fmt.Sprintf(" AND receipt_date<=$%d", ridx)
+			recentSQL += fmt.Sprintf(constants.ErrReceiptDateFilterEnd, ridx)
 			recentArgs = append(recentArgs, req.ToDate)
 			ridx++
 		}
@@ -253,12 +253,12 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.FromDate != "" {
-			totalSQL += fmt.Sprintf(" AND receipt_date>=$%d", tidx)
+			totalSQL += fmt.Sprintf(constants.ErrReceiptDateFilter, tidx)
 			totalArgs = append(totalArgs, req.FromDate)
 			tidx++
 		}
 		if req.ToDate != "" {
-			totalSQL += fmt.Sprintf(" AND receipt_date<=$%d", tidx)
+			totalSQL += fmt.Sprintf(constants.ErrReceiptDateFilterEnd, tidx)
 			totalArgs = append(totalArgs, req.ToDate)
 			tidx++
 		}
@@ -505,7 +505,7 @@ func GetInterestVsAccrualAnalysis(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE COALESCE(r.is_deleted,false)=false`
 		args := []interface{}{}
 		idx := 1
-		if msg := appendFDEntityScope(ctx, &analysisSQL, &args, &idx, "r.entity_id", req.EntityID); msg != "" {
+		if msg := appendFDEntityScope(ctx, &analysisSQL, &args, &idx, constants.ErrEntityIDFilterAlt, req.EntityID); msg != "" {
 			api.RespondWithError(w, http.StatusForbidden, msg)
 			return
 		}

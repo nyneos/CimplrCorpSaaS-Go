@@ -109,7 +109,7 @@ func cashCrossStageUnion(ctx context.Context, module, parentID string, extraArgs
 	}
 
 	args := append([]interface{}{parentID}, extraArgs...)
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}

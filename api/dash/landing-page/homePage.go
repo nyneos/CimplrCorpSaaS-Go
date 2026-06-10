@@ -698,7 +698,7 @@ func buildDailyMaps(ctx context.Context, db *pgxpool.Pool, entities []string, st
 	projArgs := []interface{}{baseMonth.Year()*12 + int(baseMonth.Month()), endMonthKey}
 	projWhere := ""
 	if len(entities) > 0 {
-		projWhere = fmt.Sprintf(" AND cpi.entity_name = ANY($%d)", len(projArgs)+1)
+		projWhere = fmt.Sprintf(constants.ErrEntityNameFilter, len(projArgs)+1)
 		projArgs = append(projArgs, pqStringArray(entities))
 	}
 

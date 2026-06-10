@@ -113,7 +113,7 @@ func getForwardAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool
 	if err != nil {
 		return nil, err
 	}
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}

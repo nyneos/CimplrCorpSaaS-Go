@@ -113,7 +113,7 @@ func getExposureAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Poo
 	if err != nil {
 		return nil, err
 	}
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}

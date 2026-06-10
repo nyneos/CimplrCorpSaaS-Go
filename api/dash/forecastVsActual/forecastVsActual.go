@@ -254,8 +254,8 @@ func GetForecastVsActualRows(pgxPool *pgxpool.Pool, horizon int, scope requestSc
           AND (UPPER(fpl.source_ref) LIKE 'TR-PAY-%' OR UPPER(fpl.source_ref) LIKE 'TR-REC-%')
     `
 	aargs := []interface{}{scope.Currencies, scope.Entities}
-	actualQ += " AND UPPER(TRIM(fpl.currency)) = ANY($1)"
-	actualQ += " AND fg.primary_key = 'entity_name' AND fg.primary_value = ANY($2)"
+	actualQ += constants.ErrCurrencyFilter
+	actualQ += constants.ErrEntityNameFilterAlt
 
 	arows, err := pgxPool.Query(context.Background(), actualQ, aargs...)
 	if err != nil {
@@ -402,8 +402,8 @@ func GetForecastVsActualByDateRows(pgxPool *pgxpool.Pool, horizon int, scope req
           AND (UPPER(fpl.source_ref) LIKE 'TR-PAY-%' OR UPPER(fpl.source_ref) LIKE 'TR-REC-%')
     `
 	aargs := []interface{}{scope.Currencies, scope.Entities}
-	actualQ += " AND UPPER(TRIM(fpl.currency)) = ANY($1)"
-	actualQ += " AND fg.primary_key = 'entity_name' AND fg.primary_value = ANY($2)"
+	actualQ += constants.ErrCurrencyFilter
+	actualQ += constants.ErrEntityNameFilterAlt
 
 	arows, err := pgxPool.Query(context.Background(), actualQ, aargs...)
 	if err != nil {
@@ -629,8 +629,8 @@ func GetForecastVsActualByMonthRows(
             OR UPPER(fpl.source_ref) LIKE 'PROP-%')
     `
 	args := []interface{}{scope.Currencies, scope.Entities}
-	q += " AND UPPER(TRIM(fpl.currency)) = ANY($1)"
-	q += " AND fg.primary_key = 'entity_name' AND fg.primary_value = ANY($2)"
+	q += constants.ErrCurrencyFilter
+	q += constants.ErrEntityNameFilterAlt
 	if accountID != "" {
 		q += fmt.Sprintf(" AND COALESCE(fpl.allocated_account_id::text,'') = $%d", len(args)+1)
 		args = append(args, accountID)

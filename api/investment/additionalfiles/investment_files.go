@@ -1758,7 +1758,7 @@ func createInvestmentAdditionalFileReturningID(ctx context.Context, tx pgx.Tx, d
 }
 
 func getInvestmentAdditionalFile(ctx context.Context, pool *pgxpool.Pool, def investmentFileDefinition, parentID, fileID string, includeDeleted bool) (*cashfiles.FileRecord, error) {
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}

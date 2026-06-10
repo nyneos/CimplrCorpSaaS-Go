@@ -134,7 +134,7 @@ func getProjectionAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.P
 		return nil, err
 	}
 
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}

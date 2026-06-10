@@ -3,6 +3,7 @@ package sweepconfig
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"net/http"
@@ -189,7 +190,7 @@ func getAnySweepPlanningAdditionalFile(ctx context.Context, pool *pgxpool.Pool, 
 }
 
 func getSweepPlanningAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}
@@ -286,7 +287,7 @@ func getAnySweepInitiationAdditionalFile(ctx context.Context, pool *pgxpool.Pool
 }
 
 func getSweepInitiationAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}

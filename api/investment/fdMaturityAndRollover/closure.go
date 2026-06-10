@@ -65,36 +65,41 @@ func nullStrOrNil(s string) interface{} {
 	return s
 }
 
-func appendClosureScopeConditions(ctx context.Context, w http.ResponseWriter, conditions *[]string, args *[]interface{}, argIdx *int, entityCol, bankCol, entityID, bankID string) bool {
+type closureScopeFilter struct {
+	EntityCol, BankCol string
+	EntityID, BankID   string
+}
+
+func appendClosureScopeConditions(ctx context.Context, w http.ResponseWriter, conditions *[]string, args *[]interface{}, argIdx *int, f closureScopeFilter) bool {
 	scope := ctxutil.FromContext(ctx)
-	entityID = strings.TrimSpace(entityID)
-	bankID = strings.TrimSpace(bankID)
+	entityID := strings.TrimSpace(f.EntityID)
+	bankID := strings.TrimSpace(f.BankID)
 
 	if entityID != "" {
 		if !scope.HasEntityAccess(entityID) {
-			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 			return false
 		}
 		*args = append(*args, entityID)
-		*conditions = append(*conditions, fmt.Sprintf("%s = $%d", entityCol, *argIdx))
+		*conditions = append(*conditions, fmt.Sprintf("%s = $%d", f.EntityCol, *argIdx))
 		*argIdx++
 	} else if len(scope.EntityIDs) > 0 {
 		*args = append(*args, scope.EntityIDs)
-		*conditions = append(*conditions, fmt.Sprintf("%s = ANY($%d::text[])", entityCol, *argIdx))
+		*conditions = append(*conditions, fmt.Sprintf("%s = ANY($%d::text[])", f.EntityCol, *argIdx))
 		*argIdx++
 	}
 
 	if bankID != "" {
 		if !scope.HasApprovedBank(bankID) {
-			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bankID))
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrBankNotApproved1, bankID))
 			return false
 		}
 		*args = append(*args, bankID)
-		*conditions = append(*conditions, fmt.Sprintf("%s = $%d", bankCol, *argIdx))
+		*conditions = append(*conditions, fmt.Sprintf("%s = $%d", f.BankCol, *argIdx))
 		*argIdx++
 	} else if bankIDs := scope.BankIDs(); len(bankIDs) > 0 {
 		*args = append(*args, bankIDs)
-		*conditions = append(*conditions, fmt.Sprintf("(%s = '' OR %s = ANY($%d::text[]))", bankCol, bankCol, *argIdx))
+		*conditions = append(*conditions, fmt.Sprintf("(%s = '' OR %s = ANY($%d::text[]))", f.BankCol, f.BankCol, *argIdx))
 		*argIdx++
 	}
 
@@ -104,11 +109,11 @@ func appendClosureScopeConditions(ctx context.Context, w http.ResponseWriter, co
 func requireClosureScope(ctx context.Context, w http.ResponseWriter, entityID, bankID string) bool {
 	scope := ctxutil.FromContext(ctx)
 	if !scope.HasEntityAccess(entityID) {
-		api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+		api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 		return false
 	}
 	if strings.TrimSpace(bankID) != "" && !scope.HasApprovedBank(bankID) {
-		api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bankID))
+		api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrBankNotApproved1, bankID))
 		return false
 	}
 	return true
@@ -209,7 +214,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			conditions = append(conditions, fmt.Sprintf(
 				"m.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '%d days'", req.DaysAhead))
 		}
-		if !appendClosureScopeConditions(ctx, w, &conditions, &args, &argIdx, "b.entity_id", "m.bank_id", req.EntityID, req.BankID) {
+		if !appendClosureScopeConditions(ctx, w, &conditions, &args, &argIdx, closureScopeFilter{EntityCol: "b.entity_id", BankCol: "m.bank_id", EntityID: req.EntityID, BankID: req.BankID}) {
 			return
 		}
 		where := strings.Join(conditions, " AND ")
@@ -327,7 +332,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			  )`}
 			allArgs := []interface{}{}
 			allArgIdx := 1
-			if !appendClosureScopeConditions(ctx, w, &allConditions, &allArgs, &allArgIdx, "b.entity_id", "m.bank_id", "", "") {
+			if !appendClosureScopeConditions(ctx, w, &allConditions, &allArgs, &allArgIdx, closureScopeFilter{EntityCol: "b.entity_id", BankCol: "m.bank_id"}) {
 				return
 			}
 			allWhere := strings.Join(allConditions, " AND ")
@@ -1107,7 +1112,7 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(req.BankID) != "" && !ctxutil.FromContext(ctx).HasApprovedBank(req.BankID) {
-			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Bank '%s' is not within your approved bank scope.", req.BankID))
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrBankNotApproved1, req.BankID))
 			return
 		}
 		if oldStatus != constants.StatusPendingApproval {
@@ -1506,7 +1511,7 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if req.EntityID != "" {
 			if !ctxutil.FromContext(ctx).HasEntityAccess(req.EntityID) {
-				api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityID))
 				return
 			}
 			args = append(args, req.EntityID)
@@ -3532,7 +3537,7 @@ func GetClosureApprovalList(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if req.EntityID != "" {
 			if !ctxutil.FromContext(ctx).HasEntityAccess(req.EntityID) {
-				api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityID))
 				return
 			}
 			args = append(args, req.EntityID)

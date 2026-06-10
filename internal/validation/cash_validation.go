@@ -2,6 +2,7 @@ package validation
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"reflect"
@@ -42,7 +43,7 @@ func ValidateCashMasterReferences(ctx context.Context, fields map[string]interfa
 func validateEntityRefs(ctx context.Context, fields map[string]interface{}) string {
 	for _, entityID := range fieldValues(fields, []string{"entity_id", "entity_ids"}) {
 		if allowedEntities, ok := ctx.Value("entity_ids").([]string); ok && len(allowedEntities) > 0 && !containsFold(allowedEntities, entityID) {
-			return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID)
+			return fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID)
 		}
 	}
 	for _, entityName := range fieldValues(fields, []string{"entity_name", "entity_names"}) {

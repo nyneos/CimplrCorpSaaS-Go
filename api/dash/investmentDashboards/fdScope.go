@@ -21,7 +21,7 @@ func resolveFDDashboardEntity(ctx context.Context, requestedEntityID string) (st
 				return requestedEntityID, ""
 			}
 		}
-		return "", fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", requestedEntityID)
+		return "", fmt.Sprintf(constants.ErrEntityIDNotAuthorized, requestedEntityID)
 	}
 	scoped := make([]string, 0, len(allowed))
 	for _, entityID := range allowed {
@@ -47,7 +47,7 @@ func resolveFDDashboardSingleEntity(ctx context.Context, requestedEntityID strin
 				return requestedEntityID, ""
 			}
 		}
-		return "", fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", requestedEntityID)
+		return "", fmt.Sprintf(constants.ErrEntityIDNotAuthorized, requestedEntityID)
 	}
 	if len(allowed) == 1 {
 		return strings.TrimSpace(allowed[0]), ""

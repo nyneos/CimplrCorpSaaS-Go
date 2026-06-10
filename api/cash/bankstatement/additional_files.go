@@ -147,7 +147,7 @@ func getBankStatementAdditionalFileWithDeleted(ctx context.Context, pool *pgxpoo
 		return nil, errors.New(constants.ErrNoAccessibleBusinessUnit)
 	}
 
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}

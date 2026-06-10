@@ -800,7 +800,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		scope := ctxutil.FromContext(r.Context())
 		if !scope.HasEntityAccess(rec.EntityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", rec.EntityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, rec.EntityID))
 			return
 		}
 		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
@@ -1316,13 +1316,13 @@ func GetFDMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		fdMaps, err := rowsToMaps(fdRows)
 		fdRows.Close()
 		if err != nil || len(fdMaps) == 0 {
-			api.RespondWithError(w, http.StatusNotFound, "FD master record not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound1)
 			return
 		}
 		fdMaster := fdMaps[0]
 		if entityID := strings.TrimSpace(fmt.Sprint(fdMaster["entity_id"])); entityID != "" && !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 			return
 		}
 
@@ -1524,7 +1524,7 @@ func GetFDMasterWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if entityID := strings.TrimSpace(r.URL.Query().Get("entity_id")); entityID != "" {
 			if !scope.HasEntityAccess(entityID) {
 				api.RespondWithError(w, http.StatusForbidden,
-					fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+					fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 				return
 			}
 			if masterCols["entity_id"] {
@@ -1659,7 +1659,7 @@ func GetActiveFDsInRange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.EntityID != "" {
 			if !scope.HasEntityAccess(req.EntityID) {
 				api.RespondWithError(w, http.StatusForbidden,
-					fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+					fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityID))
 				return
 			}
 			if masterCols["entity_id"] {
@@ -1675,7 +1675,7 @@ func GetActiveFDsInRange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.BankID != "" && masterCols["bank_id"] {
 			if !scope.HasApprovedBank(req.BankID) {
 				api.RespondWithError(w, http.StatusForbidden,
-					fmt.Sprintf("Bank '%s' is not within your approved bank scope.", req.BankID))
+					fmt.Sprintf(constants.ErrBankNotApproved1, req.BankID))
 				return
 			}
 			query += fmt.Sprintf(" AND bank_id = $%d", pos)
@@ -1755,7 +1755,7 @@ func GetCashflowSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "FD scope lookup failed: "+scopeErr.Error())
 			return
 		} else if !ok {
-			api.RespondWithError(w, http.StatusNotFound, "FD master record not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound1)
 			if entityID != "" {
 				api.LogError("[FDMaster] GetCashflowSchedule denied fd_id=%s entity_id=%s", fdID, entityID)
 			}
@@ -1896,7 +1896,7 @@ func GetFDJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "FD scope lookup failed: "+scopeErr.Error())
 			return
 		} else if !ok {
-			api.RespondWithError(w, http.StatusNotFound, "FD master record not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound1)
 			if entityID != "" {
 				api.LogError("[FDMaster] GetFDJournalEntries denied fd_id=%s entity_id=%s", fdID, entityID)
 			}
@@ -2022,7 +2022,7 @@ func GetCashflowGroupView(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if entityID != "" {
 			if !scope.HasEntityAccess(entityID) {
 				api.RespondWithError(w, http.StatusForbidden,
-					fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+					fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 				return
 			}
 			groupSQL += fmt.Sprintf(" AND m.entity_id = $%d", pos)

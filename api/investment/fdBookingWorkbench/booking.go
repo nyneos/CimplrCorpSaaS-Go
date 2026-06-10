@@ -84,7 +84,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		scope := ctxutil.FromContext(r.Context())
 		if !scope.HasEntityAccess(req.EntityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityID))
 			return
 		}
 		// Resolve aliases before validation so the correct key is checked.
@@ -398,7 +398,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{
 					"row_index": i, "entity_id": row.EntityID,
 					constants.ValueSuccess: false,
-					constants.ValueError:   fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", row.EntityID),
+					constants.ValueError:   fmt.Sprintf(constants.ErrEntityIDNotAuthorized, row.EntityID),
 				})
 				continue
 			}
@@ -735,7 +735,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		scope := ctxutil.FromContext(r.Context())
 		if !scope.HasEntityAccess(entityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 			return
 		}
 		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
@@ -2148,7 +2148,7 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		entityID := strings.TrimSpace(r.URL.Query().Get("entity_id"))
 		if !fdBookingEntityAllowed(ctx, entityID) {
-			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 			return
 		}
 		statusFilter := r.URL.Query().Get("status") // optional single-status override

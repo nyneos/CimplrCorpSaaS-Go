@@ -2,6 +2,7 @@ package exposures
 
 import (
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"net/http"
 	"time"
@@ -108,7 +109,7 @@ func getPendingExposureBucketingAdditionalFileWithDeleted(ctx context.Context, p
 	if err != nil {
 		return nil, err
 	}
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}

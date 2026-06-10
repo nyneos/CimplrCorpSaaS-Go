@@ -215,9 +215,9 @@ func GetForecastKPIs(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, sc
 	// append GROUP BY after optional filters to ensure WHERE clause is complete
 	aggGroup := ` GROUP BY cpi.cashflow_type, cp.currency_code`
 	args := []interface{}{startKey, endKey}
-	aggQ += fmt.Sprintf(" AND cpi.entity_name = ANY($%d)", len(args)+1)
+	aggQ += fmt.Sprintf(constants.ErrEntityNameFilter, len(args)+1)
 	args = append(args, scope.Entities)
-	aggQ += fmt.Sprintf(" AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($%d)", len(args)+1)
+	aggQ += fmt.Sprintf(constants.ErrCurrencyCodeFilter, len(args)+1)
 	args = append(args, scope.Currencies)
 
 	// finalize query
@@ -272,9 +272,9 @@ func GetForecastRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, sc
           AND aa.processing_status = 'APPROVED'
     `
 	args := []interface{}{startKey, endKey}
-	fetchQ += fmt.Sprintf(" AND cpi.entity_name = ANY($%d)", len(args)+1)
+	fetchQ += fmt.Sprintf(constants.ErrEntityNameFilter, len(args)+1)
 	args = append(args, scope.Entities)
-	fetchQ += fmt.Sprintf(" AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($%d)", len(args)+1)
+	fetchQ += fmt.Sprintf(constants.ErrCurrencyCodeFilter, len(args)+1)
 	args = append(args, scope.Currencies)
 	fetchGroup := ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cpi.category_id, cpi.description, cp.currency_code ORDER BY cpm.year, cpm.month;`
 
@@ -371,9 +371,9 @@ func GetForecastDailyRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon in
           AND (cpm.year * 12 + cpm.month) BETWEEN $1 AND $2
     `
 	margs := []interface{}{startKey, endKey}
-	monthlyQ += fmt.Sprintf(" AND cpi.entity_name = ANY($%d)", len(margs)+1)
+	monthlyQ += fmt.Sprintf(constants.ErrEntityNameFilter, len(margs)+1)
 	margs = append(margs, scope.Entities)
-	monthlyQ += fmt.Sprintf(" AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($%d)", len(margs)+1)
+	monthlyQ += fmt.Sprintf(constants.ErrCurrencyCodeFilter, len(margs)+1)
 	margs = append(margs, scope.Currencies)
 	monthlyGroup := ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cp.currency_code, cpi.start_date ORDER BY cpm.year, cpm.month;`
 
@@ -632,9 +632,9 @@ func GetForecastCategorySums(ctx context.Context, pgxPool *pgxpool.Pool, horizon
 	whereClauses := ""
 	args := []interface{}{}
 	args = append(args, scope.Entities)
-	whereClauses += fmt.Sprintf(" AND cpi.entity_name = ANY($%d)", len(args))
+	whereClauses += fmt.Sprintf(constants.ErrEntityNameFilter, len(args))
 	args = append(args, scope.Currencies)
-	whereClauses += fmt.Sprintf(" AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($%d)", len(args))
+	whereClauses += fmt.Sprintf(constants.ErrCurrencyCodeFilter, len(args))
 
 	q := baseQ + whereClauses + " GROUP BY cpi.category_id, cpi.cashflow_type, cp.currency_code"
 

@@ -237,7 +237,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		scope := ctxutil.FromContext(r.Context())
 		if !scope.HasEntityAccess(entityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 			return
 		}
 		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
@@ -851,7 +851,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		varResolveScope := ctxutil.FromContext(r.Context())
 		if !varResolveScope.HasEntityAccess(entityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 			return
 		}
 		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
@@ -1318,7 +1318,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		editScope := ctxutil.FromContext(r.Context())
 		if !editScope.HasEntityAccess(entityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 			return
 		}
 		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
@@ -2638,7 +2638,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		entityID := strings.TrimSpace(r.URL.Query().Get("entity_id"))
 		if !fdBookingEntityAllowed(ctx, entityID) {
-			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 			return
 		}
 		bookingAccountExpr, err := resolveFDBookingAccountExpression(ctx, pgxPool, "b")
@@ -3343,7 +3343,7 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		bookingID := r.URL.Query().Get("booking_id")
 		entityID := strings.TrimSpace(r.URL.Query().Get("entity_id"))
 		if !fdBookingEntityAllowed(ctx, entityID) {
-			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID))
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 			return
 		}
 

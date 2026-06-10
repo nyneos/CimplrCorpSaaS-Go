@@ -3,6 +3,7 @@ package limit
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"net/http"
@@ -140,7 +141,7 @@ func getAnyLimitAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID
 }
 
 func getLimitAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}
@@ -239,7 +240,7 @@ func getAnyUtilizationAdditionalFile(ctx context.Context, pool *pgxpool.Pool, pa
 }
 
 func getUtilizationAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.Pool, parentID, fileID string, includeDeleted bool) (*additionalfiles.FileRecord, error) {
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}
