@@ -1010,7 +1010,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					})
 					continue
 				}
-				_, err = tx.Exec(ctx,`
+				_, err = tx.Exec(ctx, `
 					UPDATE public.bank_balances_manual
 					SET is_deleted = TRUE,
 						deleted_at = now(),
@@ -1032,7 +1032,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					})
 					continue
 				}
-				if err := tx.Commit(); err != nil {
+				if err := tx.Commit(ctx); err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
 						"success":           false,
@@ -1061,7 +1061,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				var statementPeriodEnd time.Time
 				var openingBalance, closingBalance float64
 				var uploadS3Key sql.NullString
-				err = tx.QueryRowContext(ctx, `
+				err = tx.QueryRow(ctx, `
 				       SELECT account_number, statement_period_end, opening_balance, closing_balance, upload_s3_key
 				       FROM cimplrcorpsaas.bank_statements
 				       WHERE bank_statement_id = $1
