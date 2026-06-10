@@ -375,7 +375,9 @@ func queryCashProjectionList(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 			COALESCE(a.processing_status, 'N/A') AS processing_status,
 			COUNT(DISTINCT i.item_id) AS item_count
 		FROM cimplrcorpsaas.cashflow_proposal p
-		LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i ON p.proposal_id = i.proposal_id
+		LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i
+			ON p.proposal_id = i.proposal_id
+		   AND COALESCE(i.is_deleted, false) = false
 		LEFT JOIN latest_audit a ON a.proposal_id = p.proposal_id::text
 		WHERE COALESCE(p.is_deleted, false) = false
 		GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, p.upload_s3_key, a.processing_status, a.requested_at, a.checker_at
@@ -417,7 +419,7 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(i.bank_name, '')             AS bank_name,
 			COALESCE(i.bank_account_number, '')   AS bank_account_number
 		FROM cimplrcorpsaas.cashflow_proposal_item i
-		WHERE 1=1 %s %s
+		WHERE COALESCE(i.is_deleted, false) = false %s %s
 		ORDER BY i.created_at DESC NULLS LAST
 		LIMIT $1
 	`, ef, proposalFilter)

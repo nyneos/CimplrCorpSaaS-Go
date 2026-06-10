@@ -215,11 +215,13 @@ func projectionParentEntityAllowed(proposalExpr, namesExpr string) string {
 				SELECT 1
 				FROM cimplrcorpsaas.cashflow_proposal_item scope_i
 				WHERE scope_i.proposal_id = ` + proposalExpr + `
+				  AND COALESCE(scope_i.is_deleted, FALSE) = FALSE
 			)
 			OR EXISTS (
 				SELECT 1
 				FROM cimplrcorpsaas.cashflow_proposal_item scope_i
 				WHERE scope_i.proposal_id = ` + proposalExpr + `
+				  AND COALESCE(scope_i.is_deleted, FALSE) = FALSE
 				  AND (
 					NULLIF(TRIM(scope_i.entity_name), '') IS NULL
 					OR LOWER(TRIM(scope_i.entity_name)) = ANY(` + namesExpr + `)

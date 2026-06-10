@@ -151,6 +151,7 @@ func BuildProjectionNotifPayload(ctx context.Context, pool *pgxpool.Pool, propos
 			old_bank_name, old_bank_account_number
 		FROM cimplrcorpsaas.cashflow_proposal_item
 		WHERE proposal_id = ANY($1)
+		  AND COALESCE(is_deleted, false) = false
 		ORDER BY proposal_id, created_at`
 
 	itemRows, err := pool.Query(ctx, itemQuery, proposalIDs)

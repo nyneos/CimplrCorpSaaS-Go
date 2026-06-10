@@ -237,7 +237,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(NULLIF(cpi.department_id, ''), 'Generic') as costprofit_center,
 					cp.proposal_id::text as source_ref
 				FROM cashflow_proposal cp
-				JOIN cashflow_proposal_item cpi ON cpi.proposal_id = cp.proposal_id
+				JOIN cashflow_proposal_item cpi ON cpi.proposal_id = cp.proposal_id AND COALESCE(cpi.is_deleted, false) = false
 
 `
 			if joinCounterparty {
@@ -581,7 +581,7 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(NULLIF(cpi.department_id, ''), 'Generic') as costprofit_center,
 					cp.proposal_id::text as source_ref
 				FROM cashflow_proposal cp
-				JOIN cashflow_proposal_item cpi ON cpi.proposal_id = cp.proposal_id
+				JOIN cashflow_proposal_item cpi ON cpi.proposal_id = cp.proposal_id AND COALESCE(cpi.is_deleted, false) = false
 
 `
 			if joinCounterparty {

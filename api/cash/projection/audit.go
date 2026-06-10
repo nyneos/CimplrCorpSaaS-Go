@@ -276,10 +276,9 @@ func projectionExtractAuditFileName(uploadS3Key string) interface{} {
 
 func buildProjectionChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, proposalID string) []map[string]interface{} {
 	var (
-		proposalName, oldProposalName     string
-		effectiveDate, oldEffectiveDate   string
-		currencyCode, oldCurrencyCode     string
-		recurrenceType, oldRecurrenceType string
+		proposalName, oldProposalName   string
+		effectiveDate, oldEffectiveDate string
+		currencyCode, oldCurrencyCode   string
 	)
 
 	// Only changed fields will be included in the summary (not all fields)
@@ -289,17 +288,14 @@ func buildProjectionChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, pr
 			COALESCE(old_proposal_name, ''),
 			COALESCE(TO_CHAR(effective_date, 'YYYY-MM-DD'), ''),
 			COALESCE(TO_CHAR(old_effective_date, 'YYYY-MM-DD'), ''),
-			COALESCE(currency_code, ''),
-			COALESCE(old_currency_code, ''),
-			COALESCE(recurrence_type, ''),
-			COALESCE(old_recurrence_type, '')
+			COALESCE(base_currency_code, ''),
+			COALESCE(old_base_currency_code, '')
 		FROM cimplrcorpsaas.cashflow_proposal
 		WHERE proposal_id = $1
 	`, proposalID).Scan(
 		&proposalName, &oldProposalName,
 		&effectiveDate, &oldEffectiveDate,
 		&currencyCode, &oldCurrencyCode,
-		&recurrenceType, &oldRecurrenceType,
 	)
 	if err != nil {
 		return nil
@@ -310,7 +306,6 @@ func buildProjectionChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, pr
 	appendProjectionChange(&changes, "Proposal Name", oldProposalName, proposalName)
 	appendProjectionChange(&changes, "Effective Date", oldEffectiveDate, effectiveDate)
 	appendProjectionChange(&changes, "Currency Code", oldCurrencyCode, currencyCode)
-	appendProjectionChange(&changes, "Recurrence Type", oldRecurrenceType, recurrenceType)
 	return changes
 }
 

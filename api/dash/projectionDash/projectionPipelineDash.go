@@ -85,7 +85,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := pgxPool.QueryRow(ctx, `
 			SELECT COUNT(DISTINCT p.proposal_id)
 			FROM cashflow_proposal p
-			JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id
+			JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id AND COALESCE(i.is_deleted, false) = false
 			WHERE COALESCE(i.entity_name, '') = ANY($1)
 			  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($2)
 		`, allowedEntities, allowedCurrencies).Scan(&resp.TotalProposals); err != nil {
@@ -99,7 +99,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT DISTINCT p.proposal_id,
 					   (SELECT a.processing_status FROM audit_action_cashflow_proposal a WHERE a.proposal_id = p.proposal_id ORDER BY requested_at DESC LIMIT 1) AS processing_status
 				FROM cashflow_proposal p
-				JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id
+				JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id AND COALESCE(i.is_deleted, false) = false
 				WHERE COALESCE(i.entity_name, '') = ANY($1)
 				  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($2)
 			) t
@@ -114,7 +114,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sumQ := `
 			SELECT p.currency_code, i.expected_amount
 			FROM cashflow_proposal p
-			JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id
+			JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id AND COALESCE(i.is_deleted, false) = false
 			WHERE (SELECT a.processing_status FROM audit_action_cashflow_proposal a WHERE a.proposal_id = p.proposal_id ORDER BY requested_at DESC LIMIT 1) = 'PENDING_APPROVAL'
 			  AND COALESCE(i.entity_name, '') = ANY($1)
 			  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($2)
@@ -153,7 +153,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND EXISTS (
 			  	SELECT 1
 			  	FROM cashflow_proposal p
-			  	JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id
+			  	JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id AND COALESCE(i.is_deleted, false) = false
 			  	WHERE p.proposal_id = audit_action_cashflow_proposal.proposal_id
 			  	  AND COALESCE(i.entity_name, '') = ANY($3)
 			  	  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($4)
@@ -224,7 +224,7 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   i.expected_amount, p.currency_code,
 				   a.requested_by, a.requested_at, a.processing_status
 			FROM cashflow_proposal p
-			JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id
+			JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id AND COALESCE(i.is_deleted, false) = false
 			LEFT JOIN LATERAL (
 				SELECT requested_by, requested_at, processing_status
 				FROM audit_action_cashflow_proposal a
@@ -350,7 +350,7 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   p.currency_code,
 				   (SELECT a.processing_status FROM audit_action_cashflow_proposal a WHERE a.proposal_id = p.proposal_id ORDER BY a.requested_at DESC LIMIT 1) AS processing_status
 			FROM cashflow_proposal p
-			JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id
+			JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id AND COALESCE(i.is_deleted, false) = false
 			WHERE COALESCE(i.entity_name, '') = ANY($1)
 			  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($2)
 		`

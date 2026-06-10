@@ -43,6 +43,7 @@ func validateProjectionProposalScope(ctx context.Context, pgxPool *pgxpool.Pool,
 			COALESCE(bank_account_number, '')
 		FROM cimplrcorpsaas.cashflow_proposal_item
 		WHERE proposal_id = $1
+		  AND COALESCE(is_deleted, false) = false
 	`, proposalID)
 	if err != nil {
 		return err
@@ -862,6 +863,7 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				old_bank_name, old_bank_account_number
 			FROM cimplrcorpsaas.cashflow_proposal_item
 			WHERE proposal_id = $1
+			  AND COALESCE(is_deleted, false) = false
 			ORDER BY created_at
 		`
 
@@ -1048,7 +1050,9 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.processing_status, 'N/A') AS processing_status,
 				COUNT(DISTINCT i.item_id) AS item_count
 			FROM cimplrcorpsaas.cashflow_proposal p
-			LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i ON p.proposal_id = i.proposal_id
+			LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i
+				ON p.proposal_id = i.proposal_id
+			   AND COALESCE(i.is_deleted, false) = false
 			LEFT JOIN LATERAL (
 				SELECT processing_status
 				FROM cimplrcorpsaas.audit_action_cashflow_proposal a2
@@ -1361,9 +1365,16 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Delete old items and projections (will recreate from request)
-		if _, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id=$1`, req.ProposalID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to delete old items: "+err.Error())
+		// Soft-delete old items; edited items are inserted as the new active version.
+		if _, err := tx.Exec(ctx, `
+			UPDATE cimplrcorpsaas.cashflow_proposal_item
+			SET is_deleted = TRUE,
+				deleted_at = now(),
+				deleted_by = $2
+			WHERE proposal_id = $1
+			  AND COALESCE(is_deleted, FALSE) = FALSE
+		`, req.ProposalID, requestedBy); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to soft delete old items: "+err.Error())
 			return
 		}
 
