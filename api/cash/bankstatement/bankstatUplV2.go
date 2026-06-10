@@ -3341,7 +3341,7 @@ func UploadMultiAccountBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 			fileHash := fmt.Sprintf("%x", h.Sum(nil))
 
 			// Call structured ingestion
-			res, upErr := ProcessBankStatementFromStructuredInput(ctx, stm, fileHash,pool,"")
+			res, upErr := ProcessBankStatementFromStructuredInput(ctx, pool, stm, fileHash, "")
 			if upErr != nil {
 				results[resultKey] = map[string]interface{}{"success": false, "message": userFriendlyUploadError(upErr)}
 				continue

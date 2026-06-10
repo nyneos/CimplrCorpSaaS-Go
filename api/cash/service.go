@@ -37,7 +37,7 @@ func (s *CashService) Start() error {
 			}
 		}
 	}
-	go StartCashService(port)
+	go StartCashService(s.db, port)
 	return nil
 }
 
