@@ -107,12 +107,12 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		scope := ctxutil.FromContext(ctx)
 		if !scope.HasEntityAccess(req.EntityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityID))
 			return
 		}
 		if strings.TrimSpace(req.DefaultBankIDFilter) != "" && !scope.HasApprovedBank(req.DefaultBankIDFilter) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Bank '%s' is not within your approved bank scope.", req.DefaultBankIDFilter))
+				fmt.Sprintf(constants.ErrBankNotApproved1, req.DefaultBankIDFilter))
 			return
 		}
 
@@ -240,7 +240,7 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		entityID, ok, scopeErr := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID)
 		if scopeErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Schedule config lookup failed: "+scopeErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+scopeErr.Error())
 			return
 		}
 		if !ok {
@@ -250,7 +250,7 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if bankFilter, has := req.Fields["default_bank_id_filter"]; has {
 			if bank := strings.TrimSpace(fmt.Sprint(bankFilter)); bank != "" && !ctxutil.FromContext(ctx).HasApprovedBank(bank) {
 				api.RespondWithError(w, http.StatusForbidden,
-					fmt.Sprintf("Bank '%s' is not within your approved bank scope.", bank))
+					fmt.Sprintf(constants.ErrBankNotApproved1, bank))
 				return
 			}
 		}
@@ -414,7 +414,7 @@ func GetScheduleConfigs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.EntityID != "" {
 			if !scope.HasEntityAccess(req.EntityID) {
 				api.RespondWithError(w, http.StatusForbidden,
-					fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+					fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityID))
 				return
 			}
 			query += " AND entity_id = $1"
@@ -483,7 +483,7 @@ func DisableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		if _, ok, scopeErr := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID); scopeErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Schedule config lookup failed: "+scopeErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+scopeErr.Error())
 			return
 		} else if !ok {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
@@ -541,7 +541,7 @@ func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		if _, ok, scopeErr := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID); scopeErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Schedule config lookup failed: "+scopeErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+scopeErr.Error())
 			return
 		} else if !ok {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
@@ -970,7 +970,7 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		entityID, ok, scopeErr := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID)
 		if scopeErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Schedule config lookup failed: "+scopeErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+scopeErr.Error())
 			return
 		}
 		if !ok {
@@ -2280,7 +2280,7 @@ func GetScheduleExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		argIdx := 1
 		if req.ConfigID != "" {
 			if _, ok, err := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Schedule config lookup failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+err.Error())
 				return
 			} else if !ok {
 				api.RespondWithError(w, http.StatusForbidden, "Schedule config is not within your authorized entity scope.")

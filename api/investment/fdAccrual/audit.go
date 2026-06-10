@@ -312,7 +312,7 @@ func GetScheduleConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		if _, ok, err := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Schedule config lookup failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+err.Error())
 			return
 		} else if !ok {
 			api.RespondWithError(w, http.StatusForbidden, "Schedule config is not within your authorized entity scope.")

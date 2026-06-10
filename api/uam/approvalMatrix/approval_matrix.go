@@ -362,7 +362,7 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		scope := ctxutil.FromContext(r.Context())
 		if !scope.HasEntityAccess(req.EntityCode) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityCode))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityCode))
 			return
 		}
 		// Master SLA column is used by list/grid views; if omitted, mirror the highest per-eye SLA (when any).

@@ -53,7 +53,7 @@ func validateAccrualEntityParam(ctx context.Context, entityID string) (int, stri
 		return 0, ""
 	}
 	if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
-		return http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID)
+		return http.StatusForbidden, fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID)
 	}
 	return 0, ""
 }
@@ -150,7 +150,7 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		scope := ctxutil.FromContext(r.Context())
 		if !scope.HasEntityAccess(req.EntityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityID))
 			return
 		}
 
@@ -502,17 +502,17 @@ func GetAccrualLedger(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if !scope.HasEntityAccess(runEntityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", runEntityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, runEntityID))
 			return
 		}
 		if req.EntityID != "" && !scope.HasEntityAccess(req.EntityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityID))
 			return
 		}
 		if req.BankID != "" && !scope.HasApprovedBank(req.BankID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Bank '%s' is not within your approved bank scope.", req.BankID))
+				fmt.Sprintf(constants.ErrBankNotApproved1, req.BankID))
 			return
 		}
 
@@ -4000,12 +4000,12 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		scope := ctxutil.FromContext(r.Context())
 		if !scope.HasEntityAccess(req.EntityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityID))
 			return
 		}
 		if strings.TrimSpace(req.BankIDFilter) != "" && !scope.HasApprovedBank(req.BankIDFilter) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Bank '%s' is not within your approved bank scope.", req.BankIDFilter))
+				fmt.Sprintf(constants.ErrBankNotApproved1, req.BankIDFilter))
 			return
 		}
 		// SkipExisting defaults to true unless caller explicitly sets false

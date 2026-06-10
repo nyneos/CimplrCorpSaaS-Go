@@ -1,6 +1,7 @@
 package dependency
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"net/http"
 
@@ -123,37 +124,37 @@ var DependencyGraph = map[string][]ChildCheck{
 	// ── Investment FD: Bank Config ──────────────────────────────────────────
 	"fd_bank_config_master": {
 		{Schema: "investment", Table: "fd_booking_request", FKCol: "bank_config_id",
-			Label: "FD Bookings", IsCore: true},
+			Label: constants.ErrFDBookingsFilter, IsCore: true},
 	},
 
 	// ── Investment FD: Interest Type ────────────────────────────────────────
 	"fd_interest_type_master": {
 		{Schema: "investment", Table: "fd_booking_request", FKCol: "interest_type_id",
-			Label: "FD Bookings", IsCore: true},
+			Label: constants.ErrFDBookingsFilter, IsCore: true},
 	},
 
 	// ── Investment FD: Compounding Frequency ────────────────────────────────
 	"fd_compounding_frequency_master": {
 		{Schema: "investment", Table: "fd_booking_request", FKCol: "frequency_id",
-			Label: "FD Bookings", IsCore: true},
+			Label: constants.ErrFDBookingsFilter, IsCore: true},
 	},
 
 	// ── Investment FD: Day Count Convention ─────────────────────────────────
 	"fd_day_count_convention_master": {
 		{Schema: "investment", Table: "fd_booking_request", FKCol: "day_count_code",
-			Label: "FD Bookings", IsCore: true},
+			Label: constants.ErrFDBookingsFilter, IsCore: true},
 	},
 
 	// ── Investment FD: TDS Plan ─────────────────────────────────────────────
 	"fd_tds_plan_master": {
 		{Schema: "investment", Table: "fd_booking_request", FKCol: "tds_plan_id",
-			Label: "FD Bookings", IsCore: true},
+			Label: constants.ErrFDBookingsFilter, IsCore: true},
 	},
 
 	// ── Investment FD: Penalty Structure ────────────────────────────────────
 	"fd_penalty_structure_master": {
 		{Schema: "investment", Table: "fd_booking_request", FKCol: "penalty_structure_id",
-			Label: "FD Bookings", IsCore: true},
+			Label: constants.ErrFDBookingsFilter, IsCore: true},
 	},
 
 	// ── Investment FD: Rate Card ─────────────────────────────────────────────
@@ -161,22 +162,22 @@ var DependencyGraph = map[string][]ChildCheck{
 
 	// ── Cash: CashFlow Category ─────────────────────────────────────────────
 	"mastercashflowcategory": {
-		{Schema: "cimplrcorpsaas", Table: "cash_transactions", FKCol: "category_id", Label: "Cash Transactions", IsCore: true},
+		{Schema: "cimplrcorpsaas", Table: "cash_transactions", FKCol: "category_id", Label: constants.ErrCashTransactionsFilter, IsCore: true},
 	},
 
 	// ── Cash: Counterparty ──────────────────────────────────────────────────
 	"mastercounterparty": {
-		{Schema: "cimplrcorpsaas", Table: "cash_transactions", FKCol: "counterparty_id", Label: "Cash Transactions", IsCore: true},
+		{Schema: "cimplrcorpsaas", Table: "cash_transactions", FKCol: "counterparty_id", Label: constants.ErrCashTransactionsFilter, IsCore: true},
 	},
 
 	// ── Cash: Payable/Receivable Type ───────────────────────────────────────
 	"masterpayablereceivabletype": {
-		{Schema: "cimplrcorpsaas", Table: "cash_transactions", FKCol: "type_id", Label: "Cash Transactions", IsCore: true},
+		{Schema: "cimplrcorpsaas", Table: "cash_transactions", FKCol: "type_id", Label: constants.ErrCashTransactionsFilter, IsCore: true},
 	},
 
 	// ── Cash: Cost/Profit Center ────────────────────────────────────────────
 	"mastercostprofitcenter": {
-		{Schema: "cimplrcorpsaas", Table: "cash_transactions", FKCol: "centre_id", Label: "Cash Transactions", IsCore: true},
+		{Schema: "cimplrcorpsaas", Table: "cash_transactions", FKCol: "centre_id", Label: constants.ErrCashTransactionsFilter, IsCore: true},
 	},
 
 	// ── Investment: Holiday Calendar ────────────────────────────────────────
@@ -184,7 +185,7 @@ var DependencyGraph = map[string][]ChildCheck{
 	// FD bookings are CORE.
 	"mastercalendar": {
 		{Schema: "investment", Table: "fd_booking_request", FKCol: "calendar_id",
-			Label: "FD Bookings", IsCore: true},
+			Label: constants.ErrFDBookingsFilter, IsCore: true},
 	},
 }
 

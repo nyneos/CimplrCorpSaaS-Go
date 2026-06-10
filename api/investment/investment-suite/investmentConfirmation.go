@@ -1234,22 +1234,22 @@ func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []str
 		pos := 1
 		where := " WHERE COALESCE(m.is_deleted, false) = false"
 		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
-			where += fmt.Sprintf(" AND (COALESCE(i.entity_name,'') = '' OR i.entity_name = ANY($%d::text[]))", pos)
+			where += fmt.Sprintf(constants.ErrEntityNameFilterAlt2, pos)
 			args = append(args, entityNames)
 			pos++
 		}
 		if schemeRefs := suiteMFSchemeRefs(ctx); len(schemeRefs) > 0 {
-			where += fmt.Sprintf(" AND i.scheme_id = ANY($%d::text[])", pos)
+			where += fmt.Sprintf(constants.ErrSchemeIDFilterAlt, pos)
 			args = append(args, schemeRefs)
 			pos++
 		}
 		if folioRefs := suiteMFFolioRefs(ctx); len(folioRefs) > 0 {
-			where += fmt.Sprintf(" AND (COALESCE(i.folio_id,'') = '' OR i.folio_id = ANY($%d::text[]))", pos)
+			where += fmt.Sprintf(constants.ErrFolioIDFilterAlt, pos)
 			args = append(args, folioRefs)
 			pos++
 		}
 		if dematRefs := suiteMFDematRefs(ctx); len(dematRefs) > 0 {
-			where += fmt.Sprintf(" AND (COALESCE(i.demat_id,'') = '' OR i.demat_id = ANY($%d::text[]))", pos)
+			where += fmt.Sprintf(constants.ErrDematIDFilterAlt, pos)
 			args = append(args, dematRefs)
 		}
 		q = baseSQL + where + " ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
@@ -1431,22 +1431,22 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		pos := 1
 		where := " WHERE 1=1"
 		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
-			where += fmt.Sprintf(" AND (COALESCE(i.entity_name,'') = '' OR i.entity_name = ANY($%d::text[]))", pos)
+			where += fmt.Sprintf(constants.ErrEntityNameFilterAlt2, pos)
 			args = append(args, entityNames)
 			pos++
 		}
 		if schemeRefs := suiteMFSchemeRefs(ctx); len(schemeRefs) > 0 {
-			where += fmt.Sprintf(" AND i.scheme_id = ANY($%d::text[])", pos)
+			where += fmt.Sprintf(constants.ErrSchemeIDFilterAlt, pos)
 			args = append(args, schemeRefs)
 			pos++
 		}
 		if folioRefs := suiteMFFolioRefs(ctx); len(folioRefs) > 0 {
-			where += fmt.Sprintf(" AND (COALESCE(i.folio_id,'') = '' OR i.folio_id = ANY($%d::text[]))", pos)
+			where += fmt.Sprintf(constants.ErrFolioIDFilterAlt, pos)
 			args = append(args, folioRefs)
 			pos++
 		}
 		if dematRefs := suiteMFDematRefs(ctx); len(dematRefs) > 0 {
-			where += fmt.Sprintf(" AND (COALESCE(i.demat_id,'') = '' OR i.demat_id = ANY($%d::text[]))", pos)
+			where += fmt.Sprintf(constants.ErrDematIDFilterAlt, pos)
 			args = append(args, dematRefs)
 		}
 		q += where + " ORDER BY m.nav_date DESC, m.initiation_id"
@@ -1584,22 +1584,22 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args := []interface{}{}
 		pos := 1
 		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
-			q += fmt.Sprintf(" AND (COALESCE(i.entity_name,'') = '' OR i.entity_name = ANY($%d::text[]))", pos)
+			q += fmt.Sprintf(constants.ErrEntityNameFilterAlt2, pos)
 			args = append(args, entityNames)
 			pos++
 		}
 		if schemeRefs := suiteMFSchemeRefs(ctx); len(schemeRefs) > 0 {
-			q += fmt.Sprintf(" AND i.scheme_id = ANY($%d::text[])", pos)
+			q += fmt.Sprintf(constants.ErrSchemeIDFilterAlt, pos)
 			args = append(args, schemeRefs)
 			pos++
 		}
 		if folioRefs := suiteMFFolioRefs(ctx); len(folioRefs) > 0 {
-			q += fmt.Sprintf(" AND (COALESCE(i.folio_id,'') = '' OR i.folio_id = ANY($%d::text[]))", pos)
+			q += fmt.Sprintf(constants.ErrFolioIDFilterAlt, pos)
 			args = append(args, folioRefs)
 			pos++
 		}
 		if dematRefs := suiteMFDematRefs(ctx); len(dematRefs) > 0 {
-			q += fmt.Sprintf(" AND (COALESCE(i.demat_id,'') = '' OR i.demat_id = ANY($%d::text[]))", pos)
+			q += fmt.Sprintf(constants.ErrDematIDFilterAlt, pos)
 			args = append(args, dematRefs)
 		}
 		q += " ORDER BY m.nav_date DESC"

@@ -2,6 +2,7 @@ package additionalfiles
 
 import (
 	cashfiles "CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"strings"
@@ -145,22 +146,22 @@ func isMFCrossStageModule(module string) bool {
 }
 
 func listMFCrossStageFiles(ctx context.Context, pool *pgxpool.Pool, module, parentID string) ([]cashfiles.FileRecord, error) {
-	union, ok := mfCrossStageUnion(module, "AND COALESCE(f.is_deleted, FALSE) = FALSE")
+	union, ok := mfCrossStageUnion(module, constants.ErrFDReceiptDeletedFilter)
 	if !ok {
-		return nil, fmt.Errorf("module %q is not a cross-stage MF module", module)
+		return nil, fmt.Errorf(constants.ErrInvalidMFModule, module)
 	}
 	query := union + "\nORDER BY uploaded_at DESC"
 	return cashfiles.QueryFiles(ctx, pool, query, strings.TrimSpace(parentID))
 }
 
 func getMFCrossStageFile(ctx context.Context, pool *pgxpool.Pool, module, parentID, fileID string, includeDeleted bool) (*cashfiles.FileRecord, error) {
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}
 	union, ok := mfCrossStageUnion(module, deletedClause)
 	if !ok {
-		return nil, fmt.Errorf("module %q is not a cross-stage MF module", module)
+		return nil, fmt.Errorf(constants.ErrInvalidMFModule, module)
 	}
 	query := fmt.Sprintf("SELECT %s FROM (%s) u WHERE u.file_id::text = $2 LIMIT 1", mfCrossStageOuterCols, union)
 	return cashfiles.FirstFile(ctx, pool, query, strings.TrimSpace(parentID), strings.TrimSpace(fileID))
@@ -168,9 +169,9 @@ func getMFCrossStageFile(ctx context.Context, pool *pgxpool.Pool, module, parent
 
 func getMFCrossStageFiles(ctx context.Context, pool *pgxpool.Pool, module, parentID string, fileIDs []string) ([]cashfiles.FileRecord, []string, error) {
 	trimmedIDs := trimInvestmentAdditionalFileIDs(fileIDs)
-	union, ok := mfCrossStageUnion(module, "AND COALESCE(f.is_deleted, FALSE) = FALSE")
+	union, ok := mfCrossStageUnion(module, constants.ErrFDReceiptDeletedFilter)
 	if !ok {
-		return nil, nil, fmt.Errorf("module %q is not a cross-stage MF module", module)
+		return nil, nil, fmt.Errorf(constants.ErrInvalidMFModule, module)
 	}
 	query := fmt.Sprintf("SELECT %s FROM (%s) u WHERE u.file_id::text = ANY($2)", mfCrossStageOuterCols, union)
 	files, err := cashfiles.QueryFiles(ctx, pool, query, strings.TrimSpace(parentID), trimmedIDs)

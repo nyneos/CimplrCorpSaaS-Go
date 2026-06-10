@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"strings"
@@ -20,7 +21,7 @@ func ValidateMFMasterReferences(ctx context.Context, fields map[string]interface
 	if allowedEntityIDs, ok := ctx.Value("entity_ids").([]string); ok {
 		for _, entityID := range mfFieldStrings(fields, "entity_id", "entity_ids") {
 			if !stringInSlice(entityID, allowedEntityIDs) {
-				return fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", entityID)
+				return fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID)
 			}
 		}
 	}

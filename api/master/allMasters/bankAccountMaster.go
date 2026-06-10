@@ -118,7 +118,7 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		scope := ctxutil.FromContext(ctx)
 		if !scope.HasEntityAccess(req.EntityID) {
 			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityID))
 			return
 		}
 

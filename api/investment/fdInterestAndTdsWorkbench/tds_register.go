@@ -485,7 +485,7 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		if strings.TrimSpace(req.EntityID) != "" && !fdEntityAllowed(ctx, req.EntityID) {
-			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Entity ID '%s' is not within your authorized access scope.", req.EntityID))
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityID))
 			return
 		}
 		for _, item := range req.ReconciliationItems {

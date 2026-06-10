@@ -2,6 +2,7 @@ package bankstatement
 
 import (
 	"CimplrCorpSaas/api/cash/additionalfiles"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"database/sql"
 	"errors"
@@ -110,7 +111,7 @@ func getRuleMasterAdditionalFileWithDeleted(ctx context.Context, pool *pgxpool.P
 		return nil, err
 	}
 
-	deletedClause := "AND COALESCE(f.is_deleted, FALSE) = FALSE"
+	deletedClause := constants.ErrFDReceiptDeletedFilter
 	if includeDeleted {
 		deletedClause = ""
 	}
