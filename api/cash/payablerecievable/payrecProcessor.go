@@ -1,6 +1,7 @@
 package payablerecievable
 
 import (
+	"CimplrCorpSaas/api"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -267,12 +268,10 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 
 	// Insert audit actions for payables
 	if len(payableIDs) > 0 {
-		var auditValues []string
-		for _, pid := range payableIDs {
-			auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, pid, userName))
-		}
-		auditSQL := "INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
-		_, auditErr := pool.Exec(ctx, auditSQL)
+		_, auditErr := pool.Exec(ctx, `
+			INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+			SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
+		`, payableIDs, userName, transactionNullIfEmpty(api.ClientIPFromContext(ctx)))
 		if auditErr != nil {
 			logger.LogError("Error inserting audit actions for payables: %v", auditErr)
 		}
@@ -280,12 +279,10 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 
 	// Insert audit actions for receivables
 	if len(receivableIDs) > 0 {
-		var auditValues []string
-		for _, rid := range receivableIDs {
-			auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, rid, userName))
-		}
-		auditSQL := "INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
-		_, auditErr := pool.Exec(ctx, auditSQL)
+		_, auditErr := pool.Exec(ctx, `
+			INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+			SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
+		`, receivableIDs, userName, transactionNullIfEmpty(api.ClientIPFromContext(ctx)))
 		if auditErr != nil {
 			logger.LogError("Error inserting audit actions for receivables: %v", auditErr)
 		}
@@ -766,12 +763,10 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 
 	// Insert audit actions for payables
 	if len(payableIDs) > 0 {
-		var auditValues []string
-		for _, pid := range payableIDs {
-			auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, pid, userName))
-		}
-		auditSQL := "INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
-		_, auditErr := tx.Exec(ctx, auditSQL)
+		_, auditErr := tx.Exec(ctx, `
+			INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+			SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
+		`, payableIDs, userName, transactionNullIfEmpty(api.ClientIPFromContext(ctx)))
 		if auditErr != nil {
 			return fmt.Errorf("failed to insert audit actions for payables: %w", auditErr)
 		}
@@ -779,12 +774,10 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 
 	// Insert audit actions for receivables
 	if len(receivableIDs) > 0 {
-		var auditValues []string
-		for _, rid := range receivableIDs {
-			auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, rid, userName))
-		}
-		auditSQL := "INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
-		_, auditErr := tx.Exec(ctx, auditSQL)
+		_, auditErr := tx.Exec(ctx, `
+			INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+			SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
+		`, receivableIDs, userName, transactionNullIfEmpty(api.ClientIPFromContext(ctx)))
 		if auditErr != nil {
 			return fmt.Errorf("failed to insert audit actions for receivables: %w", auditErr)
 		}

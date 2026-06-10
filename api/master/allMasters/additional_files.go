@@ -72,9 +72,10 @@ func newMasterFilesHandlers(pool *pgxpool.Pool, args MasterFilesConfigArgs) mast
 
 func buildMasterFilesConfig(moduleKey, parentField, parentTable, parentCol, filesTable, auditTable, actionCol string) additionalfiles.Config {
 	return additionalfiles.Config{
-		AuditSource:   strings.ToUpper(strings.ReplaceAll(moduleKey, "-", "_")),
-		Module:        moduleKey,
-		ParentIDField: parentField,
+		AuditSource:    strings.ToUpper(strings.ReplaceAll(moduleKey, "-", "_")),
+		AuditTableName: "cimplrcorpsaas.cash_additional_file_audit",
+		Module:         moduleKey,
+		ParentIDField:  parentField,
 		List: func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
 			q := `SELECT file_id, stored_file_name, content_type, file_size, upload_s3_key, uploaded_by, uploaded_at
 			      FROM ` + filesTable + `

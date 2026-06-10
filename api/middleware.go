@@ -514,9 +514,10 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				})
 				return
 			}
-			// Attach entity scope, session, and user identity to context
+			// Attach entity scope, session, request metadata, and user identity to context
 			ctx := context.WithValue(r.Context(), BusinessUnitsKey, buNames)
 			ctx = context.WithValue(ctx, EntityIDsKey, buEntityIDs)
+			ctx = context.WithValue(ctx, ClientIPContextKey, ClientIPFromRequest(r))
 			ctx = context.WithValue(ctx, "session", matchedSession)
 			ctx = context.WithValue(ctx, "user_id", userID)
 			next.ServeHTTP(w, r.WithContext(ctx))

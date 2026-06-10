@@ -860,11 +860,11 @@ func isValidPeriodCoverage(p string) bool {
 // (excludes DRAFT, VALIDATED, COMPUTED, IN_PROGRESS, VALIDATION_FAILED, FAILED, etc.).
 var accrualRunApprovalListStatuses = map[string]bool{
 	constants.StatusPendingApproval: true,
-	constants.StatusApproved:         true,
-	constants.StatusRejected:         true,
-	"POSTED":           true,
-	"POSTED_TO_GL":     true,
-	"LOCKED":           true,
+	constants.StatusApproved:        true,
+	constants.StatusRejected:        true,
+	"POSTED":                        true,
+	"POSTED_TO_GL":                  true,
+	"LOCKED":                        true,
 }
 
 func isAccrualRunApprovalListStatus(status string) bool {

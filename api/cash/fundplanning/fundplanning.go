@@ -1183,10 +1183,11 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		results := make([]map[string]interface{}, 0)
+		requestedIP := api.ClientIPFromRequest(r)
 
 		// Process each group
 		for _, group := range req.Groups {
-			groupResult := processGroupCreation(ctx, tx, req.PlanID, req.EntityName, req.Horizon, group, userEmail)
+			groupResult := processGroupCreation(ctx, tx, req.PlanID, req.EntityName, req.Horizon, group, userEmail, requestedIP)
 			results = append(results, groupResult)
 		}
 
@@ -1213,7 +1214,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // processGroupCreation handles creation of a single fund plan group with all its components
-func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityName string, horizon int, group FundPlanGroupRequest, userEmail string) map[string]interface{} {
+func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityName string, horizon int, group FundPlanGroupRequest, userEmail, requestedIP string) map[string]interface{} {
 	result := map[string]interface{}{
 		"group_id":             group.GroupID,
 		constants.ValueSuccess: false,
@@ -1309,12 +1310,12 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityN
 
 	// Create audit action entry
 	insertAuditQuery := `
-		INSERT INTO auditaction_fund_plan_groups (group_id, actiontype, processing_status, requested_by, requested_at)
-		VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
+		INSERT INTO auditaction_fund_plan_groups (group_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+		VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
 		RETURNING action_id`
 
 	var actionID string
-	err = tx.QueryRow(ctx, insertAuditQuery, group.GroupID, userEmail).Scan(&actionID)
+	err = tx.QueryRow(ctx, insertAuditQuery, group.GroupID, userEmail, nullIfEmpty(requestedIP)).Scan(&actionID)
 	if err != nil {
 		result[constants.ValueError] = fmt.Sprintf("failed to create audit action: %s", err.Error())
 		return result
@@ -1402,14 +1403,16 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				aa.processing_status,
 				aa.requested_by,
 				aa.requested_at,
+				aa.requested_ip,
 				aa.checker_by,
 				aa.checker_at,
+				aa.checker_ip,
 				aa.checker_comment,
 				aa.reason
 			FROM fund_plan_groups fpg
 			LEFT JOIN LATERAL (
-				SELECT actiontype, processing_status, requested_by, requested_at, 
-					   checker_by, checker_at, checker_comment, reason
+				SELECT actiontype, processing_status, requested_by, requested_at, requested_ip,
+					   checker_by, checker_at, checker_ip, checker_comment, reason
 				FROM auditaction_fund_plan_groups aafpg
 				WHERE aafpg.group_id IN (
 					SELECT group_id FROM fund_plan_groups fpg2 WHERE fpg2.plan_id = fpg.plan_id LIMIT 1
@@ -1419,7 +1422,7 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) aa ON TRUE
 			GROUP BY fpg.plan_id, fpg.entity_name, fpg.horizon, 
 					 aa.actiontype, aa.processing_status, aa.requested_by, aa.requested_at,
-					 aa.checker_by, aa.checker_at, aa.checker_comment, aa.reason
+					 aa.requested_ip, aa.checker_by, aa.checker_at, aa.checker_ip, aa.checker_comment, aa.reason
 			ORDER BY fpg.plan_id`
 
 		rows, err := pgxPool.Query(ctx, query)
@@ -1436,12 +1439,12 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var horizon, totalGroups int
 			var totalAmount float64
 			var actionType, processingStatus sql.NullString
-			var requestedBy, checkerBy, checkerComment, reason sql.NullString
+			var requestedBy, requestedIP, checkerBy, checkerIP, checkerComment, reason sql.NullString
 			var requestedAt, checkerAt sql.NullTime
 
 			err := rows.Scan(&planID, &entityName, &horizon, &totalGroups, &totalAmount,
 				&primaryTypes, &primaryValues, &actionType, &processingStatus,
-				&requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason)
+				&requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason)
 
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailed+err.Error())
@@ -1462,16 +1465,18 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":       nullableToString(actionType),
 				"processing_status": nullableToString(processingStatus),
 				"requested_by":      nullableToString(requestedBy),
+				"requested_ip":      nullableToString(requestedIP),
 				"checker_by":        nullableToString(checkerBy),
+				"checker_ip":        nullableToString(checkerIP),
 				"checker_comment":   nullableToString(checkerComment),
 				"reason":            nullableToString(reason),
 			}
 
 			if requestedAt.Valid {
-				plan["requested_at"] = requestedAt.Time.Format(constants.DateTimeFormat)
+				plan["requested_at"] = api.FormatAuditTimestampIST(requestedAt.Time)
 			}
 			if checkerAt.Valid {
-				plan["checker_at"] = checkerAt.Time.Format(constants.DateTimeFormat)
+				plan["checker_at"] = api.FormatAuditTimestampIST(checkerAt.Time)
 			}
 
 			results = append(results, plan)
@@ -1540,14 +1545,16 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				aa.processing_status,
 				aa.requested_by,
 				aa.requested_at,
+				aa.requested_ip,
 				aa.checker_by,
 				aa.checker_at,
+				aa.checker_ip,
 				aa.checker_comment,
 				aa.reason
 			FROM fund_plan_groups fpg
 			LEFT JOIN LATERAL (
-				SELECT actiontype, processing_status, requested_by, requested_at, 
-					   checker_by, checker_at, checker_comment, reason
+				SELECT actiontype, processing_status, requested_by, requested_at, requested_ip,
+					   checker_by, checker_at, checker_ip, checker_comment, reason
 				FROM auditaction_fund_plan_groups aafpg
 				WHERE aafpg.group_id = fpg.group_id
 				ORDER BY requested_at DESC, action_id DESC
@@ -1571,12 +1578,12 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var totalAmount float64
 			var horizon int
 			var actionType, processingStatus sql.NullString
-			var requestedBy, checkerBy, checkerComment, reason sql.NullString
+			var requestedBy, requestedIP, checkerBy, checkerIP, checkerComment, reason sql.NullString
 			var requestedAt, checkerAt sql.NullTime
 
 			err := rows.Scan(&groupID, &planID, &direction, &currency, &primaryKey, &primaryValue,
 				&totalAmount, &entityName, &horizon, &actionType, &processingStatus,
-				&requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason)
+				&requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason)
 
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailed+err.Error())
@@ -1613,16 +1620,18 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":       nullableToString(actionType),
 				"processing_status": nullableToString(processingStatus),
 				"requested_by":      nullableToString(requestedBy),
+				"requested_ip":      nullableToString(requestedIP),
 				"checker_by":        nullableToString(checkerBy),
+				"checker_ip":        nullableToString(checkerIP),
 				"checker_comment":   nullableToString(checkerComment),
 				"reason":            nullableToString(reason),
 			}
 
 			if requestedAt.Valid {
-				group["requested_at"] = requestedAt.Time.Format(constants.DateTimeFormat)
+				group["requested_at"] = api.FormatAuditTimestampIST(requestedAt.Time)
 			}
 			if checkerAt.Valid {
-				group["checker_at"] = checkerAt.Time.Format(constants.DateTimeFormat)
+				group["checker_at"] = api.FormatAuditTimestampIST(checkerAt.Time)
 			}
 
 			groups = append(groups, group)
@@ -1731,12 +1740,13 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SET processing_status = 'APPROVED',
 				checker_by = $1,
 				checker_at = now(),
-				checker_comment = $2
-			WHERE group_id = ANY($3) 
+				checker_comment = $2,
+				checker_ip = $3
+			WHERE group_id = ANY($4) 
 			AND processing_status = 'PENDING_APPROVAL'
 			AND actiontype = 'CREATE'`
 
-		cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, groupIDs)
+		cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, nullIfEmpty(api.ClientIPFromRequest(r)), groupIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to approve groups: "+err.Error())
 			return
@@ -1843,12 +1853,13 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SET processing_status = 'REJECTED',
 				checker_by = $1,
 				checker_at = now(),
-				checker_comment = $2
-			WHERE group_id = ANY($3) 
+				checker_comment = $2,
+				checker_ip = $3
+			WHERE group_id = ANY($4) 
 			AND processing_status = 'PENDING_APPROVAL'
 			AND actiontype = 'CREATE'`
 
-		cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, groupIDs)
+		cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, nullIfEmpty(api.ClientIPFromRequest(r)), groupIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to reject groups: "+err.Error())
 			return
@@ -1959,12 +1970,12 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var actionIDs []string
 		for _, groupID := range groupIDs {
 			insertQuery := `
-				INSERT INTO auditaction_fund_plan_groups (group_id, actiontype, processing_status, reason, requested_by, requested_at)
-				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())
+				INSERT INTO auditaction_fund_plan_groups (group_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now(), $4)
 				RETURNING action_id`
 
 			var actionID string
-			err = tx.QueryRow(ctx, insertQuery, groupID, req.Reason, userEmail).Scan(&actionID)
+			err = tx.QueryRow(ctx, insertQuery, groupID, req.Reason, userEmail, nullIfEmpty(api.ClientIPFromRequest(r))).Scan(&actionID)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create delete request for group %s: %s", groupID, err.Error()))
 				return

@@ -63,9 +63,11 @@ func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.processing_status, '') AS processing_status,
 				COALESCE(a.reason, '') AS reason,
 				COALESCE(a.requested_by, '') AS requested_by,
-				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS requested_at,
+				COALESCE(TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+				COALESCE(a.requested_ip, '') AS requested_ip,
 				COALESCE(a.checker_by, '') AS checker_by,
-				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS checker_at,
+				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+				COALESCE(a.checker_ip, '') AS checker_ip,
 				COALESCE(a.checker_comment, '') AS checker_comment
 			FROM investment.additional_file_audit a
 			JOIN investment.fd_master_files f ON f.file_id = a.file_id AND f.fd_id::text = a.parent_record_id
@@ -161,9 +163,11 @@ func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(a.processing_status, '') AS audit_status,
 					COALESCE(a.reason, '') AS reason,
 					COALESCE(a.requested_by, '') AS requested_by,
-					COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS requested_at,
+					COALESCE(TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+					COALESCE(a.requested_ip, '') AS requested_ip,
 					COALESCE(a.checker_by, '') AS checker_by,
-					COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS checker_at,
+					COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+					COALESCE(a.checker_ip, '') AS checker_ip,
 					COALESCE(a.checker_comment, '') AS checker_comment
 				FROM investment.additional_file_audit a
 				JOIN investment.fd_cashflow_files f ON f.file_id = a.file_id AND f.fd_id::text = a.parent_record_id

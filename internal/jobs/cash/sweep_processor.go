@@ -472,8 +472,8 @@ func ExecuteSweep(ctx context.Context, db *pgxpool.Pool, p ExecuteSweepParams) e
 	// Create audit action for source account balance change
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
-		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system', NOW())
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
+		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system', NOW(), NULL::text)
 	`, balanceID, fmt.Sprintf("Auto sweep execution: %s", p.SweepID))
 
 	if err != nil {
@@ -522,8 +522,8 @@ func ExecuteSweep(ctx context.Context, db *pgxpool.Pool, p ExecuteSweepParams) e
 	// Create audit action for parent account balance change
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
-		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system', NOW())
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
+		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system', NOW(), NULL::text)
 	`, parentBalanceID, fmt.Sprintf("Auto sweep receipt: %s", p.SweepID))
 
 	if err != nil {
@@ -618,8 +618,8 @@ func executeReverseSweep(ctx context.Context, db *pgxpool.Pool, p ReverseSweepPa
 	// Create audit action for parent
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
-		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system', NOW())
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
+		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system', NOW(), NULL::text)
 	`, parentBalanceID, fmt.Sprintf("Reverse sweep (concentration funding): %s", p.SweepID))
 	if err != nil {
 		logger.LogError("Error creating audit record for parent account %s in reverse sweep: %v", p.ParentAccount, err)
@@ -650,8 +650,8 @@ func executeReverseSweep(ctx context.Context, db *pgxpool.Pool, p ReverseSweepPa
 	// Create audit action for child
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
-		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system', NOW())
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
+		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system', NOW(), NULL::text)
 	`, p.ChildBalanceID, fmt.Sprintf("Reverse sweep receipt (concentration funding): %s", p.SweepID))
 	if err != nil {
 		logger.LogError("Error creating audit record for child account %s in reverse sweep: %v", p.ChildAccount, err)
@@ -791,9 +791,9 @@ func ExecuteSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep SweepDat
 	// Create audit action for source account
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
 		)
-		SELECT balance_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, 'sweep_system', NOW()
+		SELECT balance_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, 'sweep_system', NOW(), NULL::text
 		FROM bank_balances_manual
 		WHERE account_no = $2
 		LIMIT 1
@@ -829,9 +829,9 @@ func ExecuteSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep SweepDat
 	// Create audit action for parent account
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
 		)
-		SELECT balance_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, 'sweep_system', NOW()
+		SELECT balance_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, 'sweep_system', NOW(), NULL::text
 		FROM bank_balances_manual
 		WHERE account_no = $2
 		LIMIT 1
@@ -924,9 +924,9 @@ func executeReverseSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep S
 	// Create audit action for parent
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
 		)
-		SELECT balance_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, 'sweep_system', NOW()
+		SELECT balance_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, 'sweep_system', NOW(), NULL::text
 		FROM bank_balances_manual
 		WHERE account_no = $2
 		LIMIT 1
@@ -962,9 +962,9 @@ func executeReverseSweepOptimized(ctx context.Context, db *pgxpool.Pool, sweep S
 	// Create audit action for child
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
 		)
-		SELECT balance_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, 'sweep_system', NOW()
+		SELECT balance_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, 'sweep_system', NOW(), NULL::text
 		FROM bank_balances_manual
 		WHERE account_no = $2
 		LIMIT 1

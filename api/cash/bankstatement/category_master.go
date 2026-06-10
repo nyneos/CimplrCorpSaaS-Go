@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -383,7 +384,7 @@ func MapTransactionsToCategoryHandler(pool *pgxpool.Pool) http.Handler {
 
 		// Insert pending edit approval for each affected statement
 		for _, bsID := range bsIDs {
-			_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
+			_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, $4)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now(), nullIfBlank(apictx.ClientIPFromRequest(r)))
 			if err != nil {
 
 				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
@@ -544,7 +545,7 @@ WHERE t.category_id IS NULL
 		}
 
 		for bsID := range bsSet {
-			_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
+			_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, $4)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now(), nullIfBlank(apictx.ClientIPFromRequest(r)))
 			if err != nil {
 
 				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
@@ -684,7 +685,7 @@ WHERE t.category_id IS NULL
 		}
 
 		for bsID := range bsSet {
-			_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
+			_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, $4)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now(), nullIfBlank(apictx.ClientIPFromRequest(r)))
 			if err != nil {
 				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return

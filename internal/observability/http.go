@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -103,7 +104,8 @@ func WrapHTTP(service string, next http.Handler) http.Handler {
 			duration.Milliseconds(),
 			rw.bytes,
 			requestID,
-			r.RemoteAddr,
+			traceID,
+			clientIPFromRequest(r),
 		)
 	})
 }
@@ -209,4 +211,34 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func clientIPFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+
+	if forwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwardedFor != "" {
+		parts := strings.Split(forwardedFor, ",")
+		if first := strings.TrimSpace(parts[0]); first != "" {
+			return normalizeClientIP(first)
+		}
+	}
+
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		return normalizeClientIP(realIP)
+	}
+
+	return normalizeClientIP(r.RemoteAddr)
+}
+
+func normalizeClientIP(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(trimmed); err == nil {
+		return strings.TrimSpace(host)
+	}
+	return trimmed
 }

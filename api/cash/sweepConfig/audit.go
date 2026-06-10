@@ -61,8 +61,10 @@ func GetSweepConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				processing_status,
 				requested_by,
 				requested_at,
+				requested_ip,
 				checker_by,
 				checker_at,
+				checker_ip,
 				checker_comment,
 				reason
 			FROM cimplrcorpsaas.auditactionsweepconfiguration
@@ -126,8 +128,10 @@ func GetSweepInitiationAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				processing_status,
 				requested_by,
 				requested_at,
+				requested_ip,
 				checker_by,
 				checker_at,
+				checker_ip,
 				checker_comment,
 				reason
 			FROM cimplrcorpsaas.auditactionsweepinitiation
@@ -215,10 +219,10 @@ type sweepAuditScanner interface {
 func scanSweepAuditRow(row sweepAuditScanner) (map[string]interface{}, error) {
 	var auditID interface{}
 	var entityID string
-	var action, status, requestedBy, checkerBy, checkerComment, reason sql.NullString
+	var action, status, requestedBy, requestedIP, checkerBy, checkerIP, checkerComment, reason sql.NullString
 	var requestedAt, checkerAt sql.NullTime
 
-	if err := row.Scan(&auditID, &entityID, &action, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+	if err := row.Scan(&auditID, &entityID, &action, &status, &requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason); err != nil {
 		return nil, err
 	}
 
@@ -229,8 +233,10 @@ func scanSweepAuditRow(row sweepAuditScanner) (map[string]interface{}, error) {
 		"processing_status": sweepAuditString(status),
 		"requested_by":      sweepAuditString(requestedBy),
 		"requested_at":      sweepAuditTime(requestedAt),
+		"requested_ip":      sweepAuditString(requestedIP),
 		"checker_by":        sweepAuditString(checkerBy),
 		"checker_at":        sweepAuditTime(checkerAt),
+		"checker_ip":        sweepAuditString(checkerIP),
 		"checker_comment":   sweepAuditString(checkerComment),
 		"reason":            sweepAuditString(reason),
 		"source":            sweepAuditSourceWorkflow,
@@ -247,8 +253,10 @@ func appendSweepAdditionalFileAudit(ctx context.Context, pgxPool *pgxpool.Pool, 
 			processing_status,
 			requested_by,
 			requested_at,
+			requested_ip,
 			checker_by,
 			checker_at,
+			checker_ip,
 			checker_comment,
 			reason
 		FROM `+sweepAdditionalFileAuditTable+`
@@ -287,10 +295,10 @@ func appendSweepAdditionalFileAudit(ctx context.Context, pgxPool *pgxpool.Pool, 
 
 func scanSweepAdditionalFileAuditRow(row sweepAuditScanner, moduleKey string) (map[string]interface{}, error) {
 	var auditID int64
-	var parentRecordID, fileID, action, status, requestedBy, checkerBy, checkerComment, reason sql.NullString
+	var parentRecordID, fileID, action, status, requestedBy, requestedIP, checkerBy, checkerIP, checkerComment, reason sql.NullString
 	var requestedAt, checkerAt sql.NullTime
 
-	if err := row.Scan(&auditID, &parentRecordID, &fileID, &action, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+	if err := row.Scan(&auditID, &parentRecordID, &fileID, &action, &status, &requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason); err != nil {
 		return nil, err
 	}
 
@@ -309,8 +317,10 @@ func scanSweepAdditionalFileAuditRow(row sweepAuditScanner, moduleKey string) (m
 		"processing_status": sweepAuditString(status),
 		"requested_by":      sweepAuditString(requestedBy),
 		"requested_at":      sweepAuditTime(requestedAt),
+		"requested_ip":      sweepAuditString(requestedIP),
 		"checker_by":        sweepAuditString(checkerBy),
 		"checker_at":        sweepAuditTime(checkerAt),
+		"checker_ip":        sweepAuditString(checkerIP),
 		"checker_comment":   sweepAuditString(checkerComment),
 		"reason":            sweepAuditString(reason),
 		"source":            sweepAuditSourceAdditionalFile,
@@ -365,10 +375,7 @@ func sweepAuditString(value sql.NullString) string {
 }
 
 func sweepAuditTime(value sql.NullTime) interface{} {
-	if !value.Valid {
-		return nil
-	}
-	return value.Time
+	return api.FormatAuditTimestampNullIST(value)
 }
 
 func sweepAuditID(value interface{}) string {

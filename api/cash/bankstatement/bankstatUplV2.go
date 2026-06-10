@@ -2663,9 +2663,9 @@ RETURNING bank_statement_id
 	}
 	_, err = tx.Exec(ctx, `
 			       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
-				       bankstatementid, actiontype, processing_status, requested_by, requested_at
-			       ) VALUES ($1, $2, $3, $4, $5)
-		       `, bankStatementID, "CREATE", constants.StatusPendingApproval, requestedBy, time.Now())
+				       bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip
+			       ) VALUES ($1, $2, $3, $4, $5, $6)
+		       `, bankStatementID, "CREATE", constants.StatusPendingApproval, requestedBy, time.Now().UTC(), nullIfBlank(opts.RequestedIP))
 	if err != nil {
 		tx.Rollback(ctx)
 		return nil, fmt.Errorf(constants.ErrFailedToInsertAuditAction, err)
@@ -3341,7 +3341,7 @@ func UploadMultiAccountBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 			fileHash := fmt.Sprintf("%x", h.Sum(nil))
 
 			// Call structured ingestion
-			res, upErr := ProcessBankStatementFromStructuredInput(ctx, pool, stm, fileHash)
+			res, upErr := ProcessBankStatementFromStructuredInput(ctx, pool, stm, fileHash, "")
 			if upErr != nil {
 				results[resultKey] = map[string]interface{}{"success": false, "message": userFriendlyUploadError(upErr)}
 				continue

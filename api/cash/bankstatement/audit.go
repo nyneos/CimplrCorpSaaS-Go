@@ -34,8 +34,8 @@ func GetBankStatementAuditHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		var body bankStatementAuditRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingUserIDOrBankStatementID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "bank_statement_id is required")
 			return
 		}
 
@@ -53,8 +53,10 @@ func GetBankStatementAuditHandler(pool *pgxpool.Pool) http.Handler {
 				processing_status,
 				requested_by,
 				requested_at,
+				requested_ip,
 				checker_by,
 				checker_at,
+				checker_ip,
 				checker_comment,
 				reason
 			FROM cimplrcorpsaas.auditactionbankstatement
@@ -70,9 +72,9 @@ func GetBankStatementAuditHandler(pool *pgxpool.Pool) http.Handler {
 		payload := make([]map[string]interface{}, 0)
 		for rows.Next() {
 			var auditID, entityID string
-			var action, status, performedBy, checkerBy, comment, reason sql.NullString
+			var action, status, performedBy, requestedIP, checkerBy, checkerIP, comment, reason sql.NullString
 			var performedAt, checkerAt sql.NullTime
-			if err := rows.Scan(&auditID, &entityID, &action, &status, &performedBy, &performedAt, &checkerBy, &checkerAt, &comment, &reason); err != nil {
+			if err := rows.Scan(&auditID, &entityID, &action, &status, &performedBy, &performedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &comment, &reason); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read audit history")
 				return
 			}
@@ -84,8 +86,10 @@ func GetBankStatementAuditHandler(pool *pgxpool.Pool) http.Handler {
 				"processing_status": status.String,
 				"requested_by":      performedBy.String,
 				"requested_at":      nullableTime(performedAt),
+				"requested_ip":      requestedIP.String,
 				"checker_by":        checkerBy.String,
 				"checker_at":        nullableTime(checkerAt),
+				"checker_ip":        checkerIP.String,
 				"checker_comment":   comment.String,
 				"reason":            reason.String,
 			}
@@ -119,8 +123,8 @@ func GetBankStatementDownloadAuditHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		var body bankStatementDownloadAuditRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingUserIDOrBankStatementID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "bank_statement_id is required")
 			return
 		}
 
@@ -161,9 +165,11 @@ func GetBankStatementDownloadAuditHandler(pool *pgxpool.Pool) http.Handler {
 				"action_type":       "DOWNLOAD",
 				"processing_status": "COMPLETED",
 				"requested_by":      performedBy.String,
-				"requested_at":      performedAt,
+				"requested_at":      api.FormatAuditTimestampIST(performedAt),
+				"requested_ip":      ip.String,
 				"checker_by":        "",
 				"checker_at":        nil,
+				"checker_ip":        "",
 				"checker_comment":   "",
 				"reason":            "",
 				"file_id":           fileID.String,
@@ -194,8 +200,8 @@ func GetBankStatementBalanceImpactAuditHandler(pool *pgxpool.Pool) http.Handler 
 		}
 
 		var body bankStatementAuditRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingUserIDOrBankStatementID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "bank_statement_id is required")
 			return
 		}
 
@@ -211,7 +217,12 @@ func GetBankStatementBalanceImpactAuditHandler(pool *pgxpool.Pool) http.Handler 
 				actiontype,
 				processing_status,
 				requested_by,
-				requested_at
+				requested_at,
+				requested_ip,
+				checker_by,
+				checker_at,
+				checker_ip,
+				checker_comment
 			FROM public.auditactionbankbalances
 			WHERE balance_id = $1
 			ORDER BY requested_at ASC, action_id ASC
@@ -225,9 +236,9 @@ func GetBankStatementBalanceImpactAuditHandler(pool *pgxpool.Pool) http.Handler 
 		payload := make([]map[string]interface{}, 0)
 		for rows.Next() {
 			var balanceID string
-			var action, status, performedBy sql.NullString
-			var performedAt sql.NullTime
-			if err := rows.Scan(&balanceID, &action, &status, &performedBy, &performedAt); err != nil {
+			var action, status, performedBy, requestedIP, checkerBy, checkerIP, checkerComment sql.NullString
+			var performedAt, checkerAt sql.NullTime
+			if err := rows.Scan(&balanceID, &action, &status, &performedBy, &performedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read balance impact audit")
 				return
 			}
@@ -239,9 +250,11 @@ func GetBankStatementBalanceImpactAuditHandler(pool *pgxpool.Pool) http.Handler 
 				"processing_status": status.String,
 				"requested_by":      performedBy.String,
 				"requested_at":      nullableTime(performedAt),
-				"checker_by":        "",
-				"checker_at":        nil,
-				"checker_comment":   "",
+				"requested_ip":      requestedIP.String,
+				"checker_by":        checkerBy.String,
+				"checker_at":        nullableTime(checkerAt),
+				"checker_ip":        checkerIP.String,
+				"checker_comment":   checkerComment.String,
 				"reason":            "",
 				"bank_statement_id": body.BankStatementID,
 			})
@@ -268,8 +281,8 @@ func GetBankStatementTransactionAuditHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		var body bankStatementAuditRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.BankStatementID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingUserIDOrBankStatementID)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "bank_statement_id is required")
 			return
 		}
 
@@ -286,7 +299,9 @@ func GetBankStatementTransactionAuditHandler(pool *pgxpool.Pool) http.Handler {
 				old_value,
 				new_value,
 				performed_by,
-				performed_at
+				performed_at,
+				requested_ip,
+				checker_ip
 			FROM cimplrcorpsaas.auditactionbankstatementtxn
 			WHERE bankstatementid = $1
 			ORDER BY performed_at DESC, transaction_id ASC
@@ -299,9 +314,9 @@ func GetBankStatementTransactionAuditHandler(pool *pgxpool.Pool) http.Handler {
 
 		payload := make([]map[string]interface{}, 0)
 		for rows.Next() {
-			var transactionID, fieldName, oldValue, newValue, performedBy sql.NullString
+			var transactionID, fieldName, oldValue, newValue, performedBy, requestedIP, checkerIP sql.NullString
 			var performedAt sql.NullTime
-			if err := rows.Scan(&transactionID, &fieldName, &oldValue, &newValue, &performedBy, &performedAt); err != nil {
+			if err := rows.Scan(&transactionID, &fieldName, &oldValue, &newValue, &performedBy, &performedAt, &requestedIP, &checkerIP); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read transaction audit history")
 				return
 			}
@@ -312,8 +327,10 @@ func GetBankStatementTransactionAuditHandler(pool *pgxpool.Pool) http.Handler {
 				"processing_status": "COMPLETED",
 				"requested_by":      performedBy.String,
 				"requested_at":      nullableTime(performedAt),
+				"requested_ip":      requestedIP.String,
 				"checker_by":        "",
 				"checker_at":        nil,
+				"checker_ip":        checkerIP.String,
 				"checker_comment":   "",
 				"reason":            "",
 				"transaction_id":    transactionID.String,
@@ -377,10 +394,14 @@ func validateEntityAuditAccess(ctx context.Context, pool *pgxpool.Pool, entityNa
 }
 
 func nullableTime(value sql.NullTime) interface{} {
-	if value.Valid {
-		return value.Time
+	return api.FormatAuditTimestampNullIST(value)
+}
+
+func nullIfBlank(value string) interface{} {
+	if strings.TrimSpace(value) == "" {
+		return nil
 	}
-	return nil
+	return strings.TrimSpace(value)
 }
 
 func respondAuditPayload(w http.ResponseWriter, payload interface{}) {

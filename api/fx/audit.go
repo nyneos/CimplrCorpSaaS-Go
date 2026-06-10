@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
 )
@@ -106,8 +107,10 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 				       processing_status,
 				       requested_by,
 				       requested_at,
+				       requested_ip,
 				       checker_by,
 				       checker_at,
+				       checker_ip,
 				       checker_comment,
 				       reason,
 				       old_values,
@@ -129,8 +132,10 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 				       processing_status,
 				       requested_by,
 				       requested_at,
+				       requested_ip,
 				       checker_by,
 				       checker_at,
+				       checker_ip,
 				       checker_comment,
 				       reason,
 				       old_values,
@@ -152,8 +157,10 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 				       processing_status,
 				       requested_by,
 				       requested_at,
+				       requested_ip,
 				       checker_by,
 				       checker_at,
+				       checker_ip,
 				       checker_comment,
 				       reason
 				FROM %s
@@ -172,8 +179,10 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 				       processing_status,
 				       requested_by,
 				       requested_at,
+				       requested_ip,
 				       checker_by,
 				       checker_at,
+				       checker_ip,
 				       checker_comment,
 				       reason
 				FROM %s
@@ -192,8 +201,10 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 				       processing_status,
 				       requested_by,
 				       requested_at,
+				       requested_ip,
 				       checker_by,
 				       checker_at,
+				       checker_ip,
 				       checker_comment,
 				       reason,
 				       old_values,
@@ -215,8 +226,10 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 				       processing_status,
 				       requested_by,
 				       requested_at,
+				       requested_ip,
 				       checker_by,
 				       checker_at,
+				       checker_ip,
 				       checker_comment,
 				       reason,
 				       old_values,
@@ -238,8 +251,10 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 				       processing_status,
 				       requested_by,
 				       requested_at,
+				       requested_ip,
 				       checker_by,
 				       checker_at,
+				       checker_ip,
 				       checker_comment,
 				       reason
 				FROM %s
@@ -258,8 +273,10 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 				       processing_status,
 				       requested_by,
 				       requested_at,
+				       requested_ip,
 				       checker_by,
 				       checker_at,
+				       checker_ip,
 				       checker_comment,
 				       reason
 				FROM %s
@@ -374,8 +391,10 @@ func synthesizeMTMAuditRow(r *http.Request, db *sql.DB, parentID string) map[str
 		"processing_status": status,
 		"requested_by":      requestedBy,
 		"requested_at":      requestedAt,
+		"requested_ip":      "",
 		"checker_by":        "",
 		"checker_at":        nil,
+		"checker_ip":        "",
 		"checker_comment":   "",
 		"reason":            "Synthesized from forward_mtm because no MTM audit action row was found.",
 		"source":            "FX_FORWARD_MTM",
@@ -439,7 +458,7 @@ func firstNonZeroTime(values ...interface{}) interface{} {
 		switch v := value.(type) {
 		case time.Time:
 			if !v.IsZero() {
-				return v
+				return api.FormatAuditTimestampIST(v)
 			}
 		case string:
 			text := strings.TrimSpace(v)
@@ -477,8 +496,10 @@ func queryFXAdditionalFileAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, 
 		       processing_status,
 		       requested_by,
 		       requested_at,
+		       requested_ip,
 		       checker_by,
 		       checker_at,
+		       checker_ip,
 		       checker_comment,
 		       reason
 		FROM cimplrcorpsaas.fx_additional_file_audit
@@ -496,9 +517,9 @@ func queryFXAdditionalFileAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, 
 	payload := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var parentRecordID, fileID, moduleKey string
-		var actionType, status, requestedBy, checkerBy, checkerComment, reason sql.NullString
+		var actionType, status, requestedBy, requestedIP, checkerBy, checkerIP, checkerComment, reason sql.NullString
 		var requestedAt, checkerAt sql.NullTime
-		if err := rows.Scan(&parentRecordID, &fileID, &moduleKey, &actionType, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+		if err := rows.Scan(&parentRecordID, &fileID, &moduleKey, &actionType, &status, &requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason); err != nil {
 			return nil, err
 		}
 		payload = append(payload, map[string]interface{}{
@@ -509,8 +530,10 @@ func queryFXAdditionalFileAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, 
 			"processing_status": nullString(status),
 			"requested_by":      nullString(requestedBy),
 			"requested_at":      nullTime(requestedAt),
+			"requested_ip":      nullString(requestedIP),
 			"checker_by":        nullString(checkerBy),
 			"checker_at":        nullTime(checkerAt),
+			"checker_ip":        nullString(checkerIP),
 			"checker_comment":   nullString(checkerComment),
 			"reason":            nullString(reason),
 			"source":            cfg.Source,
@@ -542,8 +565,10 @@ func scanFXAuditRow(rows *sql.Rows, hasJSON bool) (map[string]interface{}, error
 		status         sql.NullString
 		requestedBy    sql.NullString
 		requestedAt    sql.NullTime
+		requestedIP    sql.NullString
 		checkerBy      sql.NullString
 		checkerAt      sql.NullTime
+		checkerIP      sql.NullString
 		checkerComment sql.NullString
 		reason         sql.NullString
 		oldValues      sql.NullString
@@ -551,10 +576,10 @@ func scanFXAuditRow(rows *sql.Rows, hasJSON bool) (map[string]interface{}, error
 		changeSummary  sql.NullString
 	)
 	if hasJSON {
-		if err := rows.Scan(&actionID, &entityID, &action, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &oldValues, &newValues, &changeSummary); err != nil {
+		if err := rows.Scan(&actionID, &entityID, &action, &status, &requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason, &oldValues, &newValues, &changeSummary); err != nil {
 			return nil, err
 		}
-	} else if err := rows.Scan(&actionID, &entityID, &action, &status, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+	} else if err := rows.Scan(&actionID, &entityID, &action, &status, &requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason); err != nil {
 		return nil, err
 	}
 	auditID := normalizeFXAuditID(actionID)
@@ -566,8 +591,10 @@ func scanFXAuditRow(rows *sql.Rows, hasJSON bool) (map[string]interface{}, error
 		"processing_status": nullString(status),
 		"requested_by":      nullString(requestedBy),
 		"requested_at":      nullTime(requestedAt),
+		"requested_ip":      nullString(requestedIP),
 		"checker_by":        nullString(checkerBy),
 		"checker_at":        nullTime(checkerAt),
+		"checker_ip":        nullString(checkerIP),
 		"checker_comment":   nullString(checkerComment),
 		"reason":            nullString(reason),
 	}
@@ -604,7 +631,7 @@ func normalizeFXAuditID(value interface{}) interface{} {
 
 func queryFXDownloadAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentID string) ([]map[string]interface{}, error) {
 	query := fmt.Sprintf(`
-		SELECT %s, requested_by, requested_at, file_name, upload_s3_key
+		SELECT %s, requested_by, requested_at, requested_ip, file_name, upload_s3_key
 		FROM %s
 		WHERE %s = $1
 		ORDER BY requested_at ASC, download_audit_id ASC
@@ -619,8 +646,8 @@ func queryFXDownloadAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parent
 	for rows.Next() {
 		var entityID, requestedBy string
 		var requestedAt sql.NullTime
-		var fileName, uploadKey sql.NullString
-		if err := rows.Scan(&entityID, &requestedBy, &requestedAt, &fileName, &uploadKey); err != nil {
+		var requestedIP, fileName, uploadKey sql.NullString
+		if err := rows.Scan(&entityID, &requestedBy, &requestedAt, &requestedIP, &fileName, &uploadKey); err != nil {
 			return nil, err
 		}
 		entry := map[string]interface{}{
@@ -628,8 +655,10 @@ func queryFXDownloadAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parent
 			"action_type":     "DOWNLOAD",
 			"requested_by":    strings.TrimSpace(requestedBy),
 			"requested_at":    nullTime(requestedAt),
+			"requested_ip":    nullString(requestedIP),
 			"checker_by":      "",
 			"checker_at":      nil,
+			"checker_ip":      "",
 			"checker_comment": "",
 			"reason":          "",
 			"file_name":       nullString(fileName),
@@ -659,10 +688,7 @@ func nullString(value sql.NullString) string {
 }
 
 func nullTime(value sql.NullTime) interface{} {
-	if !value.Valid {
-		return nil
-	}
-	return value.Time
+	return api.FormatAuditTimestampNullIST(value)
 }
 
 func parseJSONColumn(value sql.NullString) interface{} {

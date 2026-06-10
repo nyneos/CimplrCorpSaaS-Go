@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
@@ -212,6 +213,7 @@ type ActionParams struct {
 	Status         string
 	Reason         string
 	RequestedBy    string
+	RequestedIP  string
 	CheckerBy      string
 	CheckerComment string
 	OldValues      interface{}
@@ -225,6 +227,7 @@ type DecisionParams struct {
 	ParentID     string
 	Status       string
 	CheckerBy    string
+	CheckerIP    string
 	Comment      string
 }
 
@@ -234,6 +237,7 @@ type DownloadParams struct {
 	ParentColumn string
 	ParentID     string
 	RequestedBy  string
+	RequestedIP  string
 	UploadS3Key  string
 	ExtraColumns map[string]string
 }
@@ -243,6 +247,9 @@ func recordAction(ctx context.Context, exec ExecContext, p ActionParams) error {
 	p.RequestedBy = strings.TrimSpace(p.RequestedBy)
 	if p.ParentID == "" || p.RequestedBy == "" || exec == nil {
 		return fmt.Errorf("parent id, requested by, and executor are required")
+	}
+	if strings.TrimSpace(p.RequestedIP) == "" {
+		p.RequestedIP = api.ClientIPFromContext(ctx)
 	}
 	attempts := buildActionInsertAttempts(p)
 	return execFirstSuccess(ctx, exec, attempts)
@@ -260,9 +267,9 @@ func buildActionInsertAttempts(p ActionParams) []execAttempt {
 	for _, includeJSON := range []bool{true, false} {
 		for _, idExpression := range idExpressions {
 			for _, actionColumn := range actionColumns {
-				columns := []string{p.ParentColumn, actionColumn, "processing_status", "reason", "requested_by", "requested_at"}
-				values := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
-				args := []interface{}{p.ParentID, p.ActionType, p.Status, NullIfBlank(p.Reason), p.RequestedBy}
+				columns := []string{p.ParentColumn, actionColumn, "processing_status", "reason", "requested_by", "requested_at", "requested_ip"}
+				values := []string{"$1", "$2", "$3", "$4", "$5", "now()", "$6"}
+				args := []interface{}{p.ParentID, p.ActionType, p.Status, NullIfBlank(p.Reason), p.RequestedBy, NullIfBlank(p.RequestedIP)}
 				if idExpression != "" {
 					columns = append([]string{"action_id"}, columns...)
 					values = append([]string{idExpression}, values...)
@@ -306,6 +313,9 @@ func RecordActionTx(ctx context.Context, tx *sql.Tx, p ActionParams) error {
 	if p.ParentID == "" || p.RequestedBy == "" {
 		return fmt.Errorf("parent id and requested by are required")
 	}
+	if strings.TrimSpace(p.RequestedIP) == "" {
+		p.RequestedIP = api.ClientIPFromContext(ctx)
+	}
 	return execFirstSuccessTx(ctx, tx, buildActionInsertAttempts(p))
 }
 
@@ -324,7 +334,11 @@ func recordDecision(ctx context.Context, exec ExecContext, p DecisionParams) err
 	parentID := p.ParentID
 	status := p.Status
 	checkerBy := p.CheckerBy
+	checkerIP := p.CheckerIP
 	comment := p.Comment
+	if strings.TrimSpace(checkerIP) == "" {
+		checkerIP = api.ClientIPFromContext(ctx)
+	}
 	attempts := []execAttempt{
 		{
 			query: fmt.Sprintf(`
@@ -332,7 +346,8 @@ func recordDecision(ctx context.Context, exec ExecContext, p DecisionParams) err
 			SET processing_status = $1,
 			    checker_by = $2,
 			    checker_at = now(),
-			    checker_comment = $3
+			    checker_comment = $3,
+			    checker_ip = $5
 			WHERE action_id = (
 				SELECT action_id
 				FROM %s
@@ -342,7 +357,7 @@ func recordDecision(ctx context.Context, exec ExecContext, p DecisionParams) err
 				LIMIT 1
 			)
 		`, tableName, tableName, parentColumn),
-			args: []interface{}{status, checkerBy, NullIfBlank(comment), parentID},
+			args: []interface{}{status, checkerBy, NullIfBlank(comment), parentID, NullIfBlank(checkerIP)},
 		},
 		{
 			query: fmt.Sprintf(`
@@ -350,7 +365,8 @@ func recordDecision(ctx context.Context, exec ExecContext, p DecisionParams) err
 			SET processing_status = $1,
 			    checker_by = $2,
 			    checker_at = now(),
-			    checker_comment = $3
+			    checker_comment = $3,
+			    checker_ip = $5
 			WHERE audit_id = (
 				SELECT audit_id
 				FROM %s
@@ -360,7 +376,7 @@ func recordDecision(ctx context.Context, exec ExecContext, p DecisionParams) err
 				LIMIT 1
 			)
 		`, tableName, tableName, parentColumn),
-			args: []interface{}{status, checkerBy, NullIfBlank(comment), parentID},
+			args: []interface{}{status, checkerBy, NullIfBlank(comment), parentID, NullIfBlank(checkerIP)},
 		},
 		{
 			query: fmt.Sprintf(`
@@ -368,11 +384,12 @@ func recordDecision(ctx context.Context, exec ExecContext, p DecisionParams) err
 			SET processing_status = $1,
 			    checker_by = $2,
 			    checker_at = now(),
-			    checker_comment = $3
+			    checker_comment = $3,
+			    checker_ip = $5
 			WHERE %s = $4
 			  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL', 'pending')
 		`, tableName, parentColumn),
-			args: []interface{}{status, checkerBy, NullIfBlank(comment), parentID},
+			args: []interface{}{status, checkerBy, NullIfBlank(comment), parentID, NullIfBlank(checkerIP)},
 		},
 	}
 	return execFirstSuccess(ctx, exec, attempts)
@@ -406,10 +423,13 @@ func RecordDownload(ctx context.Context, db *sql.DB, p DownloadParams) {
 	if p.ParentID == "" || p.RequestedBy == "" || db == nil {
 		return
 	}
-	columns := []string{p.ParentColumn, "requested_by", "requested_at", "file_name", "upload_s3_key"}
-	values := []string{"$1", "$2", "now()", "$3", "$4"}
-	args := []interface{}{p.ParentID, p.RequestedBy, FileName(p.UploadS3Key), NullIfBlank(p.UploadS3Key)}
-	next := 5
+	if strings.TrimSpace(p.RequestedIP) == "" {
+		p.RequestedIP = api.ClientIPFromContext(ctx)
+	}
+	columns := []string{p.ParentColumn, "requested_by", "requested_at", "requested_ip", "file_name", "upload_s3_key"}
+	values := []string{"$1", "$2", "now()", "$3", "$4", "$5"}
+	args := []interface{}{p.ParentID, p.RequestedBy, NullIfBlank(p.RequestedIP), FileName(p.UploadS3Key), NullIfBlank(p.UploadS3Key)}
+	next := 6
 	for col, val := range p.ExtraColumns {
 		if strings.TrimSpace(col) == "" {
 			continue
@@ -431,10 +451,13 @@ func RecordDownloadPGX(ctx context.Context, pool *pgxpool.Pool, p DownloadParams
 	if p.ParentID == "" || p.RequestedBy == "" || pool == nil {
 		return
 	}
-	columns := []string{p.ParentColumn, "requested_by", "requested_at", "file_name", "upload_s3_key"}
-	values := []string{"$1", "$2", "now()", "$3", "$4"}
-	args := []interface{}{p.ParentID, p.RequestedBy, FileName(p.UploadS3Key), NullIfBlank(p.UploadS3Key)}
-	next := 5
+	if strings.TrimSpace(p.RequestedIP) == "" {
+		p.RequestedIP = api.ClientIPFromContext(ctx)
+	}
+	columns := []string{p.ParentColumn, "requested_by", "requested_at", "requested_ip", "file_name", "upload_s3_key"}
+	values := []string{"$1", "$2", "now()", "$3", "$4", "$5"}
+	args := []interface{}{p.ParentID, p.RequestedBy, NullIfBlank(p.RequestedIP), FileName(p.UploadS3Key), NullIfBlank(p.UploadS3Key)}
+	next := 6
 	for col, val := range p.ExtraColumns {
 		if strings.TrimSpace(col) == "" {
 			continue

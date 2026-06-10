@@ -106,7 +106,7 @@ func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		insertTransactionDownloadAudit(ctx, pgxPool, txType, req.TransactionID, requestedBy, strings.TrimSpace(*uploadS3Key))
+		insertTransactionDownloadAudit(ctx, pgxPool, txType, req.TransactionID, requestedBy, strings.TrimSpace(*uploadS3Key), api.ClientIPFromRequest(r))
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -189,7 +189,7 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"transaction_id": transactionID,
 				"download_url":   downloadURL,
 			})
-			insertTransactionDownloadAudit(ctx, pgxPool, txType, transactionID, requestedBy, strings.TrimSpace(*uploadS3Key))
+			insertTransactionDownloadAudit(ctx, pgxPool, txType, transactionID, requestedBy, strings.TrimSpace(*uploadS3Key), api.ClientIPFromRequest(r))
 		}
 
 		if len(files) == 0 {
@@ -382,7 +382,7 @@ func getAuditInfoPayable(ctx context.Context, pgxPool *pgxpool.Pool, payableID s
 					by = *rbyPtr
 				}
 				if ratPtr != nil {
-					at = ratPtr.Format(constants.DateTimeFormat)
+					at = api.FormatAuditTimestampIST(*ratPtr)
 				}
 				if atype == "CREATE" && createdBy == "" {
 					createdBy = by
@@ -419,7 +419,7 @@ func getAuditInfoReceivable(ctx context.Context, pgxPool *pgxpool.Pool, receivab
 					by = *rbyPtr
 				}
 				if ratPtr != nil {
-					at = ratPtr.Format(constants.DateTimeFormat)
+					at = api.FormatAuditTimestampIST(*ratPtr)
 				}
 				if atype == "CREATE" && createdBy == "" {
 					createdBy = by
@@ -642,13 +642,10 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					rows.Close()
 					if len(payableIDs) > 0 {
-						// Bulk insert audit logs
-						var auditValues []string
-						for _, pid := range payableIDs {
-							auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, pid, userName))
-						}
-						auditSQL := "INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
-						_, auditErr := pgxPool.Exec(ctx, auditSQL)
+						_, auditErr := pgxPool.Exec(ctx, `
+							INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+							SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
+						`, payableIDs, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r)))
 						if auditErr != nil {
 							http.Error(w, "Audit log error (payables): "+auditErr.Error(), http.StatusInternalServerError)
 							return
@@ -675,13 +672,10 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					rows.Close()
 					if len(receivableIDs) > 0 {
-						// Bulk insert audit logs
-						var auditValues []string
-						for _, rid := range receivableIDs {
-							auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, rid, userName))
-						}
-						auditSQL := "INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
-						_, auditErr := pgxPool.Exec(ctx, auditSQL)
+						_, auditErr := pgxPool.Exec(ctx, `
+							INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+							SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
+						`, receivableIDs, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r)))
 						if auditErr != nil {
 							http.Error(w, "Audit log error (receivables): "+auditErr.Error(), http.StatusInternalServerError)
 							return
@@ -935,19 +929,19 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if atype == "CREATE" {
 						auditPayableMap[pid]["created_by"] = requestedBy
 						if requestedAt != nil {
-							auditPayableMap[pid]["created_at"] = requestedAt.Format(constants.DateTimeFormat)
+							auditPayableMap[pid]["created_at"] = api.FormatAuditTimestampIST(*requestedAt)
 						}
 						auditPayableMap[pid]["created_status"] = status
 					} else if atype == constants.AuditActionEdit {
 						auditPayableMap[pid]["edited_by"] = requestedBy
 						if requestedAt != nil {
-							auditPayableMap[pid]["edited_at"] = requestedAt.Format(constants.DateTimeFormat)
+							auditPayableMap[pid]["edited_at"] = api.FormatAuditTimestampIST(*requestedAt)
 						}
 						auditPayableMap[pid]["edited_status"] = status
 					} else if atype == constants.AuditActionDelete {
 						auditPayableMap[pid]["deleted_by"] = requestedBy
 						if requestedAt != nil {
-							auditPayableMap[pid]["deleted_at"] = requestedAt.Format(constants.DateTimeFormat)
+							auditPayableMap[pid]["deleted_at"] = api.FormatAuditTimestampIST(*requestedAt)
 						}
 						auditPayableMap[pid]["deleted_status"] = status
 					}
@@ -990,19 +984,19 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if atype == "CREATE" {
 						auditReceivableMap[rid]["created_by"] = requestedBy
 						if requestedAt != nil {
-							auditReceivableMap[rid]["created_at"] = requestedAt.Format(constants.DateTimeFormat)
+							auditReceivableMap[rid]["created_at"] = api.FormatAuditTimestampIST(*requestedAt)
 						}
 						auditReceivableMap[rid]["created_status"] = status
 					} else if atype == constants.AuditActionEdit {
 						auditReceivableMap[rid]["edited_by"] = requestedBy
 						if requestedAt != nil {
-							auditReceivableMap[rid]["edited_at"] = requestedAt.Format(constants.DateTimeFormat)
+							auditReceivableMap[rid]["edited_at"] = api.FormatAuditTimestampIST(*requestedAt)
 						}
 						auditReceivableMap[rid]["edited_status"] = status
 					} else if atype == constants.AuditActionDelete {
 						auditReceivableMap[rid]["deleted_by"] = requestedBy
 						if requestedAt != nil {
-							auditReceivableMap[rid]["deleted_at"] = requestedAt.Format(constants.DateTimeFormat)
+							auditReceivableMap[rid]["deleted_at"] = api.FormatAuditTimestampIST(*requestedAt)
 						}
 						auditReceivableMap[rid]["deleted_status"] = status
 					}
@@ -1061,6 +1055,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidSession})
 			return
 		}
+		requestedIP := api.ClientIPFromRequest(r)
 
 		txIDsPay := []string{}
 		txIDsRec := []string{}
@@ -1085,7 +1080,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		insPay := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now()) RETURNING action_id`
+		insPay := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4) RETURNING action_id`
 		reasonArg := interface{}(nil)
 		if strings.TrimSpace(req.Reason) != "" {
 			reasonArg = req.Reason
@@ -1104,12 +1099,12 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			var actionID string
-			if err := tx.QueryRow(ctx, insPay, id, reasonArg, requestedBy).Scan(&actionID); err == nil {
+			if err := tx.QueryRow(ctx, insPay, id, reasonArg, requestedBy, requestedIP).Scan(&actionID); err == nil {
 				// nop: collected if needed
 			}
 		}
 
-		insRec := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now()) RETURNING action_id`
+		insRec := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4) RETURNING action_id`
 		for _, id := range txIDsRec {
 			var latestActionType, latestStatus string
 			latestErr := tx.QueryRow(ctx, `
@@ -1124,7 +1119,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			var actionID string
-			if err := tx.QueryRow(ctx, insRec, id, reasonArg, requestedBy).Scan(&actionID); err == nil {
+			if err := tx.QueryRow(ctx, insRec, id, reasonArg, requestedBy, requestedIP).Scan(&actionID); err == nil {
 				// nop
 			}
 		}
@@ -1163,6 +1158,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidSession})
 			return
 		}
+		checkerIP := api.ClientIPFromRequest(r)
 
 		// separate ids
 		payIDs := []string{}
@@ -1284,13 +1280,13 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(payActionIDs) > 0 {
-			if _, err := tx.Exec(ctx, `UPDATE auditactionpayable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, payActionIDs); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE auditactionpayable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`, checkerBy, commentArg, checkerIP, payActionIDs); err != nil {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to reject payable actions"})
 				return
 			}
 		}
 		if len(recActionIDs) > 0 {
-			if _, err := tx.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, recActionIDs); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`, checkerBy, commentArg, checkerIP, recActionIDs); err != nil {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to reject receivable actions"})
 				return
 			}
@@ -1330,6 +1326,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidSession})
 			return
 		}
+		checkerIP := api.ClientIPFromRequest(r)
 
 		// separate ids
 		payIDs := []string{}
@@ -1426,13 +1423,13 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			commentArg = req.Comment
 		}
 		if len(payActionIDs) > 0 {
-			if _, err := tx.Exec(ctx, `UPDATE auditactionpayable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, payActionIDs); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE auditactionpayable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`, checkerBy, commentArg, checkerIP, payActionIDs); err != nil {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to approve payable audits"})
 				return
 			}
 		}
 		if len(recActionIDs) > 0 {
-			if _, err := tx.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, recActionIDs); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`, checkerBy, commentArg, checkerIP, recActionIDs); err != nil {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to approve receivable audits"})
 				return
 			}
@@ -1671,8 +1668,8 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				createdPayables = append(createdPayables, pid)
 				var actionID string
-				auditQ := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now()) RETURNING action_id`
-				if err := tx.QueryRow(ctx, auditQ, pid, userName).Scan(&actionID); err != nil {
+				auditQ := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now(),$3) RETURNING action_id`
+				if err := tx.QueryRow(ctx, auditQ, pid, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r))).Scan(&actionID); err != nil {
 					tx.Rollback(ctx)
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("failed to create audit for payable %s: %v", pid, err)})
 					return
@@ -1689,8 +1686,8 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				createdReceivables = append(createdReceivables, rid)
 				var actionID string
-				auditQ := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now()) RETURNING action_id`
-				if err := tx.QueryRow(ctx, auditQ, rid, userName).Scan(&actionID); err != nil {
+				auditQ := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now(),$3) RETURNING action_id`
+				if err := tx.QueryRow(ctx, auditQ, rid, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r))).Scan(&actionID); err != nil {
 					tx.Rollback(ctx)
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("failed to create audit for receivable %s: %v", rid, err)})
 					return
@@ -1860,15 +1857,18 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			auditQ := `
 				INSERT INTO auditactionpayable
 				  (payable_id, actiontype, processing_status, reason, requested_by, requested_at,
+				   requested_ip,
 				   old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date,
 				   old_due_date, old_amount, old_currency_code,
 				   new_entity_name, new_counterparty_name, new_invoice_number, new_invoice_date,
 				   new_due_date, new_amount, new_currency_code)
 				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),
-					$4,$5,$6,$7,$8,$9,$10,
-					$11,$12,$13,$14,$15,$16,$17)
+					$4,
+					$5,$6,$7,$8,$9,$10,$11,
+					$12,$13,$14,$15,$16,$17,$18)
 				RETURNING action_id`
 			if err := tx.QueryRow(ctx, auditQ, id, reasonArg, userName,
+				transactionNullIfEmpty(api.ClientIPFromRequest(r)),
 				oldEntity, oldCounter, oldInvoice, oldInvDate, oldDueDate, oldAmount, oldCurrency,
 				newEntity, newCounter, newInvoice, newInvDate, newDueDate, newAmount, newCurrency).Scan(&actionID); err != nil {
 				tx.Rollback(ctx)
@@ -1967,15 +1967,18 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			auditQ := `
 				INSERT INTO auditactionreceivable
 				  (receivable_id, actiontype, processing_status, reason, requested_by, requested_at,
+				   requested_ip,
 				   old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date,
 				   old_due_date, old_amount, old_currency_code,
 				   new_entity_name, new_counterparty_name, new_invoice_number, new_invoice_date,
 				   new_due_date, new_amount, new_currency_code)
 				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),
-					$4,$5,$6,$7,$8,$9,$10,
-					$11,$12,$13,$14,$15,$16,$17)
+					$4,
+					$5,$6,$7,$8,$9,$10,$11,
+					$12,$13,$14,$15,$16,$17,$18)
 				RETURNING action_id`
 			if err := tx.QueryRow(ctx, auditQ, id, reasonArg, userName,
+				transactionNullIfEmpty(api.ClientIPFromRequest(r)),
 				oldEntity, oldCounter, oldInvoice, oldInvDate, oldDueDate, oldAmount, oldCurrency,
 				newEntity, newCounter, newInvoice, newInvDate, newDueDate, newAmount, newCurrency).Scan(&actionID); err != nil {
 				tx.Rollback(ctx)

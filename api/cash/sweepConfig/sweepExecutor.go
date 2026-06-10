@@ -392,6 +392,7 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
+		requestedIP := api.ClientIPFromRequest(r)
 
 		// Fetch sweep configuration (no cutoff_time or frequency check needed for manual)
 		var entityName, bankName, bankAccount, sweepType, parentAccount string
@@ -555,9 +556,9 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Create audit for source
 		_, err = tx.Exec(ctx, `
 			INSERT INTO auditactionbankbalances (
-				balance_id, actiontype, processing_status, reason, requested_by, requested_at
-			) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, NOW())
-		`, balanceID, fmt.Sprintf("Manual sweep execution: %s", req.SweepID), requestedBy)
+				balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
+			) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, NOW(), $4)
+		`, balanceID, fmt.Sprintf("Manual sweep execution: %s", req.SweepID), requestedBy, nullifyEmpty(requestedIP))
 
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to create audit for source: "+err.Error())
@@ -605,9 +606,9 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Create audit for parent
 		_, err = tx.Exec(ctx, `
 			INSERT INTO auditactionbankbalances (
-				balance_id, actiontype, processing_status, reason, requested_by, requested_at
-			) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, NOW())
-		`, parentBalanceID, fmt.Sprintf("Manual sweep receipt: %s", req.SweepID), requestedBy)
+				balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
+			) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, NOW(), $4)
+		`, parentBalanceID, fmt.Sprintf("Manual sweep receipt: %s", req.SweepID), requestedBy, nullifyEmpty(requestedIP))
 
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to create audit for parent: "+err.Error())

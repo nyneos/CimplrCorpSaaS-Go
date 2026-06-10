@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
@@ -458,7 +459,7 @@ func GetBankStatementDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 				auditFileID,
 				sql.NullString{String: strings.TrimSpace(body.BankStatementID), Valid: strings.TrimSpace(body.BankStatementID) != ""},
 				requestedBy,
-				r.RemoteAddr,
+				apictx.ClientIPFromRequest(r),
 				entityName,
 			); err != nil {
 				logger.LogError("failed to insert bank statement download audit for %s: %v", body.BankStatementID, err)
@@ -552,7 +553,7 @@ func GetBankStatementBulkDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 					auditFileID,
 					sql.NullString{String: strings.TrimSpace(bankStatementID), Valid: strings.TrimSpace(bankStatementID) != ""},
 					requestedBy,
-					r.RemoteAddr,
+					apictx.ClientIPFromRequest(r),
 					entityName,
 				); err != nil {
 					logger.LogError("failed to insert bank statement bulk download audit for %s: %v", bankStatementID, err)
@@ -969,7 +970,8 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					SET processing_status = 'APPROVED',
 						checker_by = $2,
 						checker_at = now(),
-						checker_comment = $3
+						checker_comment = $3,
+						checker_ip = $4
 					WHERE action_id = (
 						SELECT action_id
 						FROM cimplrcorpsaas.auditactionbankstatement
@@ -979,7 +981,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 						ORDER BY requested_at DESC, action_id DESC
 						LIMIT 1
 					)
-				`, bsid, actorName, body.Comment)
+				`, bsid, actorName, body.Comment, nullIfBlank(apictx.ClientIPFromRequest(r)))
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1190,11 +1192,11 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				actionTime := time.Now()
 				_, err = tx.Exec(ctx, `
 				       INSERT INTO auditactionbankbalances (
-					       balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
+					       balance_id, actiontype, processing_status, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip, checker_comment
 				       )
-				       SELECT $1, $2, $3, $4, $5, $6, $7, $8
+				       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 				       WHERE NOT EXISTS (
-				           SELECT 1 FROM auditactionbankbalances WHERE balance_id = $9
+				           SELECT 1 FROM auditactionbankbalances WHERE balance_id = $11
 				       )
 				       `,
 					bsid,
@@ -1202,8 +1204,10 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					constants.StatusApproved,
 					actorName,
 					actionTime,
+					nullIfBlank(apictx.ClientIPFromRequest(r)),
 					actorName,
 					actionTime,
+					nullIfBlank(apictx.ClientIPFromRequest(r)),
 					body.Comment,
 					bsid,
 				)
@@ -1227,7 +1231,8 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					SET processing_status = 'APPROVED',
 						checker_by = $2,
 						checker_at = now(),
-						checker_comment = $3
+						checker_comment = $3,
+						checker_ip = $4
 					WHERE action_id = (
 						SELECT action_id
 						FROM cimplrcorpsaas.auditactionbankstatement
@@ -1243,7 +1248,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 							action_id DESC
 						LIMIT 1
 					)
-				`, bsid, actorName, body.Comment)
+				`, bsid, actorName, body.Comment, nullIfBlank(apictx.ClientIPFromRequest(r)))
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1376,17 +1381,24 @@ func RejectBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				SET processing_status = 'REJECTED',
 					checker_by = $2,
 					checker_at = now(),
-					checker_comment = $3
+					checker_comment = $3,
+					checker_ip = $4
 				WHERE action_id = (
 					SELECT action_id
 					FROM cimplrcorpsaas.auditactionbankstatement
 					WHERE bankstatementid = $1
-					  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+					  AND actiontype IN ('CREATE', 'EDIT', 'DELETE', 'RECAT')
 					  AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
-					ORDER BY requested_at DESC, action_id DESC
+					ORDER BY
+						CASE
+							WHEN actiontype = 'RECAT' AND processing_status = 'PENDING_EDIT_APPROVAL' THEN 0
+							ELSE 1
+						END,
+						requested_at DESC,
+						action_id DESC
 					LIMIT 1
 				)
-			`, bsid, actorName, body.Comment)
+			`, bsid, actorName, body.Comment, nullIfBlank(apictx.ClientIPFromRequest(r)))
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
@@ -1494,9 +1506,9 @@ func DeleteBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 			requestedBy := auditActorDisplayName(ctx, body.UserID)
 			_, err := pool.Exec(ctx, `
 				       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
-					       bankstatementid, actiontype, processing_status, requested_by, requested_at, reason
-				       ) VALUES ($1, $2, $3, $4, $5, $6)
-			       `, bsid, constants.AuditActionDelete, constants.StatusPendingDeleteApproval, requestedBy, time.Now(), deleteComment)
+					       bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip, reason
+				       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			       `, bsid, constants.AuditActionDelete, constants.StatusPendingDeleteApproval, requestedBy, time.Now().UTC(), nullIfBlank(apictx.ClientIPFromRequest(r)), deleteComment)
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
@@ -1563,7 +1575,7 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 
 		if isPDF {
 			logger.LogInfo("[BANK_STATEMENT] PDF flag detected, processing from bank.json")
-			result, err := ProcessBankStatementFromJSON(r.Context(), pgxPool)
+			result, err := ProcessBankStatementFromJSON(r.Context(), pgxPool, apictx.ClientIPFromRequest(r))
 			if err != nil {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"success": false,
@@ -1775,6 +1787,7 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 				AccountNumberOverride: accountOverride,
 				UploadFileName:        uploadFileName,
 				UploadedBy:            requestedByFromCtx(r.Context(), r.FormValue("user_id")),
+				RequestedIP:           apictx.ClientIPFromRequest(r),
 				Password:              r.FormValue("password"),
 				PgxPool:               pgxPool,
 			},
@@ -2217,6 +2230,7 @@ func UploadZippedBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 					AccountNumberOverride: accountOverride,
 					UploadFileName:        ze.name,
 					UploadedBy:            requestedByFromCtx(ctx, r.FormValue("user_id")),
+					RequestedIP:           apictx.ClientIPFromRequest(r),
 					PgxPool:               pool,
 				},
 			)

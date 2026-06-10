@@ -102,10 +102,15 @@ func SetAuthService(svc *auth.AuthService) {
 }
 
 func extractClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return xff
+	return ClientIPFromRequest(r)
+}
+
+func SystemIfBlank(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "system"
 	}
-	return r.RemoteAddr
+	return value
 }
 
 func withCORS(h http.HandlerFunc) http.HandlerFunc {
@@ -832,7 +837,7 @@ func StartGateway(port string, pathPrefix string) {
 
 	mux.HandleFunc("/", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		logr := logger.GlobalLogger
-		msg := "[Gateway] [Error] " + r.URL.Path + " from " + r.RemoteAddr + " (route not found)"
+		msg := "[Gateway] [Error] " + r.URL.Path + " from " + ClientIPFromRequest(r) + " (route not found)"
 		if logr != nil {
 			logr.LogAudit(msg)
 		} else {

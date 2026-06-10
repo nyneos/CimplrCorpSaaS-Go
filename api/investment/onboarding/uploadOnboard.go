@@ -465,7 +465,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			// audit
-			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionamc (amc_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, amcID, userEmail); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionamc (amc_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, amcID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				logger.LogError("[bulk] audit amc[%d] insert failed: %v", i, err)
 				api.RespondWithError(w, 500, "audit amc failed: "+err.Error())
 				return
@@ -510,7 +510,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 500, "dp mapping failed: "+err.Error())
 				return
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, dpID, userEmail); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, dpID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				logger.LogError("[bulk] audit dp failed: %v", err)
 				api.RespondWithError(w, 500, "audit dp failed: "+err.Error())
 				return
@@ -552,7 +552,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 500, "demat mapping failed: "+err.Error())
 				return
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, dematID, userEmail); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, dematID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				logger.LogError("[bulk] audit demat failed: %v", err)
 				api.RespondWithError(w, 500, "audit demat failed: "+err.Error())
 				return
@@ -623,7 +623,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 500, constants.ErrBulkFolioMappingFailed+err.Error())
 				return
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, folioID, userEmail); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, folioID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				logger.LogError("[bulk] audit folio failed: %v", err)
 				api.RespondWithError(w, 500, "audit folio failed: "+err.Error())
 				return
@@ -723,7 +723,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 500, constants.ErrBulkSchemeMappingFailed+err.Error())
 				return
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, schemeID, userEmail); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, schemeID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				logger.LogError("[bulk] audit scheme failed: %v", err)
 				api.RespondWithError(w, 500, "audit scheme failed: "+err.Error())
 				return

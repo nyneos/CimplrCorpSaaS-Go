@@ -302,11 +302,12 @@ func insertFDAuditRecord(ctx context.Context, exec queryExecutor, p InsertFDAudi
 		refCol:              p.RefID,
 		"action_type":       p.ActionType,
 		"processing_status": p.ProcessingStatus,
-		"requested_by":      p.UserEmail,
+		"requested_by":      api.SystemIfBlank(p.UserEmail),
 		"requested_at":      time.Now(),
+		"requested_ip":      api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 		"reason":            p.Reason,
 	}
-	preferred := []string{refCol, "action_type", "processing_status", "reason", "requested_by", "requested_at"}
+	preferred := []string{refCol, "action_type", "processing_status", "reason", "requested_by", "requested_at", "requested_ip"}
 	insertSQL, args, _, ok := buildDynamicInsert(p.AuditTable, cols, preferred, valueMap, nil)
 	if !ok {
 		return nil
@@ -330,11 +331,18 @@ func updateFDAuditStatus(ctx context.Context, exec queryExecutor, auditTable str
 		return nil
 	}
 
+	setParts := []string{"processing_status = $1", "checker_by = $2", "checker_at = now()", "checker_comment = $3"}
+	args := []interface{}{status, api.SystemIfBlank(userEmail), comment}
+	if cols["checker_ip"] {
+		args = append(args, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
+		setParts = append(setParts, fmt.Sprintf("checker_ip = $%d", len(args)))
+	}
+	args = append(args, fdIDs)
 	query := fmt.Sprintf(
-		"UPDATE %s SET processing_status = $1, checker_by = $2, checker_at = now(), checker_comment = $3 WHERE %s = ANY($4::text[]) AND processing_status LIKE '%%PENDING%%'",
-		auditTable, refCol,
+		"UPDATE %s SET %s WHERE %s = ANY($%d::text[]) AND processing_status LIKE '%%PENDING%%'",
+		auditTable, strings.Join(setParts, ", "), refCol, len(args),
 	)
-	_, err = exec.Exec(ctx, query, status, userEmail, comment, fdIDs)
+	_, err = exec.Exec(ctx, query, args...)
 	return err
 }
 
@@ -677,14 +685,14 @@ func insertCashflowAuditRowsPending(ctx context.Context, exec queryExecutor, fdI
 				cashflow_id, fd_id,
 				action_type, processing_status,
 				reason,
-				requested_by, requested_at
+				requested_by, requested_at, requested_ip
 			) VALUES (
 				$1::text, $2::text,
 				'CREATE', $5::text,
 				$3::text,
-				$4::text, now()
+				$4::text, now(), $6::text
 			)`,
-			cf.id, fdID, reason, createdBy, cashflowAuditStatusPending,
+			cf.id, fdID, reason, api.SystemIfBlank(createdBy), cashflowAuditStatusPending, api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 		)
 		if insErr != nil {
 			return fmt.Errorf("cashflow audit insert for %s: %w", cf.id, insErr)
@@ -702,11 +710,12 @@ func markCashflowAuditApproved(ctx context.Context, exec queryExecutor, fdID, ch
 		SET processing_status = 'APPROVED',
 		    checker_by = $2,
 		    checker_at = now(),
-		    checker_comment = 'Auto-approved on FD activation approval'
+		    checker_comment = 'Auto-approved on FD activation approval',
+		    checker_ip = $4
 		WHERE fd_id = $1
 		  AND action_type = 'CREATE'
 		  AND processing_status = $3`,
-		fdID, checkerEmail, cashflowAuditStatusPending,
+		fdID, api.SystemIfBlank(checkerEmail), cashflowAuditStatusPending, api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 	)
 }
 
@@ -748,11 +757,11 @@ func softDeleteFDCashflowForRejection(ctx context.Context, exec queryExecutor, f
 	// Mark activation-seeded cashflow audit rows as REJECTED.
 	_, _ = exec.Exec(ctx, `
 		UPDATE investment.fd_audit_cashflow_schedule
-		SET processing_status = 'REJECTED', checker_by = $2, checker_at = now(), checker_comment = $3
+		SET processing_status = 'REJECTED', checker_by = $2, checker_at = now(), checker_comment = $3, checker_ip = $5
 		WHERE fd_id = $1
 		  AND action_type = 'CREATE'
 		  AND processing_status = $4`,
-		fdID, userEmail, comment, cashflowAuditStatusPending,
+		fdID, api.SystemIfBlank(userEmail), comment, cashflowAuditStatusPending, api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 	)
 	// Clear cashflow_generated flag on fd_master.
 	_, _ = exec.Exec(ctx, `
@@ -2381,8 +2390,8 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Stamp audit row as REJECTED
 			_, _ = pgxPool.Exec(ctx,
 				`UPDATE investment.fd_audit_cashflow_schedule
-				 SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-				 WHERE audit_id=$3`, userEmail, req.Comment, auditID)
+				 SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				 WHERE audit_id=$4`, api.SystemIfBlank(userEmail), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), auditID)
 
 			// Revert cashflow row to old_* snapshot (if snapshots exist)
 			if table != "" && fdID != "" &&
@@ -2566,8 +2575,8 @@ func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if _, execErr := pgxPool.Exec(ctx,
 				`UPDATE investment.fd_audit_cashflow_schedule
-				 SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
-				 WHERE audit_id=$3`, userEmail, req.Comment, auditID,
+				 SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				 WHERE audit_id=$4`, api.SystemIfBlank(userEmail), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), auditID,
 			); execErr != nil {
 				api.LogError("[BulkDeleteCashflow] audit stamp failed audit=%s: %v", auditID, execErr)
 			}
@@ -2793,7 +2802,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cashflow_id, fd_id,
 				action_type, processing_status,
 				reason,
-				requested_by, requested_at,
+				requested_by, requested_at, requested_ip,
 				old_sequence_number, old_event_type, old_event_date,
 				old_period_start_date, old_period_end_date, old_period_days,
 				old_opening_principal, old_interest_accrued, old_capitalized_amount,
@@ -2807,14 +2816,15 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				old_receipt_id, old_receipt_cleared
 			) VALUES (
 				$1,$2,'EDIT','PENDING_EDIT_APPROVAL',$3,
-				$4,now(),
-				$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-				$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-				$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37
+				$4,now(),$5,
+				$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+				$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,
+				$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38
 			) RETURNING audit_id`,
 			req.CashflowID, req.FDID,
 			reasonWithFields,
-			userEmail,
+			api.SystemIfBlank(userEmail),
+			api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			snap.seqNumber, snap.eventType, snap.eventDate,
 			snap.periodStart, snap.periodEnd, snap.periodDays,
 			snap.openingP, snap.interestAcc, snap.capAmt,
@@ -2934,8 +2944,8 @@ func applyApprovedCashflowEdit(ctx context.Context, pool *pgxpool.Pool, auditID 
 		// Nothing to apply — still mark approved
 		_, _ = pool.Exec(ctx,
 			`UPDATE investment.fd_audit_cashflow_schedule
-			 SET processing_status='APPROVED', checker_by=$1, checker_at=now()
-			 WHERE audit_id=$2`, checkerEmail, auditID)
+			 SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_ip=$2
+			 WHERE audit_id=$3`, api.SystemIfBlank(checkerEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), auditID)
 		return nil
 	}
 
@@ -2989,8 +2999,8 @@ func applyApprovedCashflowEdit(ctx context.Context, pool *pgxpool.Pool, auditID 
 	if len(sets) == 0 {
 		_, _ = pool.Exec(ctx,
 			`UPDATE investment.fd_audit_cashflow_schedule
-			 SET processing_status='APPROVED', checker_by=$1, checker_at=now()
-			 WHERE audit_id=$2`, checkerEmail, auditID)
+			 SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_ip=$2
+			 WHERE audit_id=$3`, api.SystemIfBlank(checkerEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), auditID)
 		return nil
 	}
 	// Always mark is_edited = true + set edit audit columns on approval
@@ -3040,8 +3050,8 @@ func applyApprovedCashflowEdit(ctx context.Context, pool *pgxpool.Pool, auditID 
 	// 5. Mark audit row as APPROVED
 	_, _ = pool.Exec(ctx,
 		`UPDATE investment.fd_audit_cashflow_schedule
-		 SET processing_status='APPROVED', checker_by=$1, checker_at=now()
-		 WHERE audit_id=$2`, checkerEmail, auditID)
+		 SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_ip=$2
+		 WHERE audit_id=$3`, api.SystemIfBlank(checkerEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), auditID)
 
 	// 6. Propagate downstream principal changes
 	propagateCashflowDownstream(ctx, pool, PropagateCashflowParams{
@@ -3343,8 +3353,8 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Engine finalizer stamps audit row; also ensure our status is REJECTED
 			if _, execErr := pgxPool.Exec(ctx,
 				`UPDATE investment.fd_audit_cashflow_schedule
-				 SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-				 WHERE audit_id=$3`, userEmail, req.Comment, req.AuditID,
+				 SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				 WHERE audit_id=$4`, api.SystemIfBlank(userEmail), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.AuditID,
 			); execErr != nil {
 				api.LogError("[CashflowReject] audit stamp failed audit=%s: %v", req.AuditID, execErr)
 			}
@@ -3358,8 +3368,8 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// No engine — direct stamp
 			if _, execErr := pgxPool.Exec(ctx,
 				`UPDATE investment.fd_audit_cashflow_schedule
-				 SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-				 WHERE audit_id=$3`, userEmail, req.Comment, req.AuditID,
+				 SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				 WHERE audit_id=$4`, api.SystemIfBlank(userEmail), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.AuditID,
 			); execErr != nil {
 				api.LogError("[CashflowReject] audit stamp failed audit=%s: %v", req.AuditID, execErr)
 			}
@@ -3514,7 +3524,7 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cashflow_id, fd_id,
 				action_type, processing_status,
 				reason,
-				requested_by, requested_at,
+				requested_by, requested_at, requested_ip,
 				old_sequence_number, old_event_type, old_event_date,
 				old_period_start_date, old_period_end_date, old_period_days,
 				old_opening_principal, old_interest_accrued, old_capitalized_amount,
@@ -3528,13 +3538,13 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				old_receipt_id, old_receipt_cleared
 			) VALUES (
 				$1,$2,'DELETE','PENDING_DELETE_APPROVAL',$3,
-				$4,now(),
-				$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-				$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-				$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37
+				$4,now(),$5,
+				$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+				$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,
+				$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38
 			) RETURNING audit_id`,
 			req.CashflowID, req.FDID,
-			req.Reason, userEmail,
+			req.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			snap.seqNumber, snap.eventType, snap.eventDate,
 			snap.periodStart, snap.periodEnd, snap.periodDays,
 			snap.openingP, snap.interestAcc, snap.capAmt,
@@ -3690,8 +3700,8 @@ func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if _, execErr := pgxPool.Exec(ctx,
 					`UPDATE investment.fd_audit_cashflow_schedule
-					 SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
-					 WHERE audit_id=$3`, userEmail, req.Comment, req.AuditID,
+					 SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+					 WHERE audit_id=$4`, api.SystemIfBlank(userEmail), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.AuditID,
 				); execErr != nil {
 					api.LogError("[CashflowApproveDelete] audit stamp (engine) failed audit=%s: %v", req.AuditID, execErr)
 				}
@@ -3713,8 +3723,8 @@ func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if _, execErr := pgxPool.Exec(ctx,
 				`UPDATE investment.fd_audit_cashflow_schedule
-				 SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
-				 WHERE audit_id=$3`, userEmail, req.Comment, req.AuditID,
+				 SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				 WHERE audit_id=$4`, api.SystemIfBlank(userEmail), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.AuditID,
 			); execErr != nil {
 				api.LogError("[CashflowApproveDelete] audit stamp failed audit=%s: %v", req.AuditID, execErr)
 			}

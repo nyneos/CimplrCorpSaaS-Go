@@ -115,9 +115,9 @@ func GetClosureAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.requested_by, '') AS performed_by,
 				COALESCE(a.requested_by, '') AS performed_by_email,
 				COALESCE(a.reason, '') AS action_reason,
-				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS created_at,
+				COALESCE(TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS created_at,
 				COALESCE(a.checker_by, '') AS checker_by,
-				COALESCE(TO_CHAR(a.checker_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS checker_at,
+				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
 				COALESCE(a.checker_comment, '') AS checker_comment
 			FROM investment.additional_file_audit a
 			LEFT JOIN investment.fd_closure_request_files cf ON cf.file_id = a.file_id AND cf.closure_request_id::text = a.parent_record_id

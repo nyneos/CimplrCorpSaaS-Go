@@ -1,6 +1,7 @@
 package payablerecievable
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"context"
 	"crypto/sha256"
@@ -266,12 +267,10 @@ func (bp *TransactionBatchProcessor) BatchInsertPayables(ctx context.Context, pa
 
 	// Insert audit actions for successful inserts
 	if len(payableIDs) > 0 {
-		var auditValues []string
-		for _, pid := range payableIDs {
-			auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, pid, userName))
-		}
-		auditSQL := "INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
-		_, auditErr := bp.pool.Exec(ctx, auditSQL)
+		_, auditErr := bp.pool.Exec(ctx, `
+			INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+			SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
+		`, payableIDs, userName, transactionNullIfEmpty(api.ClientIPFromContext(ctx)))
 		if auditErr != nil {
 			return fmt.Errorf("audit log insert failed for payables: %w", auditErr)
 		}
@@ -339,12 +338,10 @@ func (bp *TransactionBatchProcessor) BatchInsertReceivables(ctx context.Context,
 
 	// Insert audit actions for successful inserts
 	if len(receivableIDs) > 0 {
-		var auditValues []string
-		for _, rid := range receivableIDs {
-			auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, rid, userName))
-		}
-		auditSQL := "INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
-		_, auditErr := bp.pool.Exec(ctx, auditSQL)
+		_, auditErr := bp.pool.Exec(ctx, `
+			INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+			SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
+		`, receivableIDs, userName, transactionNullIfEmpty(api.ClientIPFromContext(ctx)))
 		if auditErr != nil {
 			return fmt.Errorf("audit log insert failed for receivables: %w", auditErr)
 		}

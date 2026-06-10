@@ -224,14 +224,16 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Auto-approve sweep (requested_by = checker_by = user)
 			insAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (
 				sweep_id, actiontype, processing_status, reason,
-				requested_by, requested_at, checker_by, checker_at
-			) VALUES ($1, 'CREATE', 'APPROVED', $2, $3, now(), $4, now())`
+				requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip
+			) VALUES ($1, 'CREATE', 'APPROVED', $2, $3, now(), $4, $5, now(), $6)`
 
 			_, err = tx.Exec(ctx, insAudit,
 				sweepID,
 				"Auto-created from unplanned initiation",
 				initiatedBy,
-				initiatedBy)
+				nullifyEmpty(api.ClientIPFromRequest(r)),
+				initiatedBy,
+				nullifyEmpty(api.ClientIPFromRequest(r)))
 
 			if err != nil {
 				api.RespondWithResult(w, false, "failed to auto-approve sweep: "+err.Error())
@@ -295,10 +297,10 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Create PENDING_APPROVAL audit entry for initiation
 			auditIns := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
-				initiation_id, sweep_id, actiontype, processing_status, requested_by, requested_at
-			) VALUES ($1, $2, 'CREATE', 'PENDING_APPROVAL', $3, now())`
+				initiation_id, sweep_id, actiontype, processing_status, requested_by, requested_at, requested_ip
+			) VALUES ($1, $2, 'CREATE', 'PENDING_APPROVAL', $3, now(), $4)`
 
-			_, err = tx.Exec(ctx, auditIns, initiationID, sweepID, initiatedBy)
+			_, err = tx.Exec(ctx, auditIns, initiationID, sweepID, initiatedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
 			if err != nil {
 				api.RespondWithResult(w, false, "failed to create audit entry: "+err.Error())
 				return
@@ -447,10 +449,10 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Create PENDING_APPROVAL audit entry
 		auditIns := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
-			initiation_id, sweep_id, actiontype, processing_status, requested_by, requested_at
-		) VALUES ($1, $2, 'CREATE', 'PENDING_APPROVAL', $3, now())`
+			initiation_id, sweep_id, actiontype, processing_status, requested_by, requested_at, requested_ip
+		) VALUES ($1, $2, 'CREATE', 'PENDING_APPROVAL', $3, now(), $4)`
 
-		_, err = pgxPool.Exec(ctx, auditIns, initiationID, req.SweepID, initiatedBy)
+		_, err = pgxPool.Exec(ctx, auditIns, initiationID, req.SweepID, initiatedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to create audit entry: "+err.Error())
 			return
@@ -1105,9 +1107,10 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SET processing_status = 'APPROVED', 
 					checker_by = $1, 
 					checker_at = now(), 
-					checker_comment = $2
-				WHERE action_id = ANY($3)`
-		if _, err := tx.Exec(ctx, upd, checkerName, nullifyEmpty(comment), actionIDs); err != nil {
+					checker_comment = $2,
+					checker_ip = $3
+				WHERE action_id = ANY($4)`
+		if _, err := tx.Exec(ctx, upd, checkerName, nullifyEmpty(comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
 			api.RespondWithResult(w, false, "failed to approve initiations: "+err.Error())
 			return
 		}
@@ -1236,9 +1239,10 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SET processing_status = 'REJECTED',
 					checker_by = $1,
 					checker_at = now(),
-					checker_comment = $2
-				WHERE action_id = ANY($3)`
-		if _, err := tx.Exec(ctx, upd, checkerName, nullifyEmpty(comment), actionIDs); err != nil {
+					checker_comment = $2,
+					checker_ip = $3
+				WHERE action_id = ANY($4)`
+		if _, err := tx.Exec(ctx, upd, checkerName, nullifyEmpty(comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
 			api.RespondWithResult(w, false, "failed to reject initiations: "+err.Error())
 			return
 		}
@@ -1336,9 +1340,9 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO cimplrcorpsaas.auditactionsweepinitiation
-					(initiation_id, sweep_id, actiontype, processing_status, reason, requested_by, requested_at)
-				VALUES ($1, $2, 'DELETE', 'PENDING_DELETE_APPROVAL', $3, $4, now())
-			`, id, sweepID, nullifyEmpty(req.Reason), requestedBy); err != nil {
+					(initiation_id, sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+				VALUES ($1, $2, 'DELETE', 'PENDING_DELETE_APPROVAL', $3, $4, now(), $5)
+			`, id, sweepID, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
 				api.RespondWithResult(w, false, "failed to create delete request: "+err.Error())
 				return
 			}
@@ -1512,14 +1516,16 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Auto-approve sweep (requested_by = checker_by = user, approved immediately)
 				insAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (
 					sweep_id, actiontype, processing_status, reason,
-					requested_by, requested_at, checker_by, checker_at
-				) VALUES ($1, 'CREATE', 'APPROVED', $2, $3, now(), $4, now())`
+					requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip
+				) VALUES ($1, 'CREATE', 'APPROVED', $2, $3, now(), $4, $5, now(), $6)`
 
 				_, err = tx.Exec(ctx, insAudit,
 					sweepID,
 					"Auto-created from unplanned initiation",
 					initiatedBy,
-					initiatedBy)
+					nullifyEmpty(api.ClientIPFromRequest(r)),
+					initiatedBy,
+					nullifyEmpty(api.ClientIPFromRequest(r)))
 
 				if err != nil {
 					tx.Rollback(ctx)
@@ -1694,10 +1700,10 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Create PENDING_APPROVAL audit entry for initiation
 			insInitAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
-				initiation_id, sweep_id, actiontype, processing_status, requested_by, requested_at
-			) VALUES ($1, $2, 'CREATE', 'PENDING_APPROVAL', $3, now())`
+				initiation_id, sweep_id, actiontype, processing_status, requested_by, requested_at, requested_ip
+			) VALUES ($1, $2, 'CREATE', 'PENDING_APPROVAL', $3, now(), $4)`
 
-			_, err = tx.Exec(ctx, insInitAudit, initiationID, sweepID, initiatedBy)
+			_, err = tx.Exec(ctx, insInitAudit, initiationID, sweepID, initiatedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
 			if err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithResult(w, false, "failed to create initiation audit: "+err.Error())
@@ -2430,10 +2436,10 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				// Create PENDING_EDIT_APPROVAL audit for initiation update
 				insInitAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
-				initiation_id, sweep_id, actiontype, processing_status, requested_by, requested_at
-			) VALUES ($1, $2, 'EDIT', 'PENDING_EDIT_APPROVAL', $3, now())`
+				initiation_id, sweep_id, actiontype, processing_status, requested_by, requested_at, requested_ip
+			) VALUES ($1, $2, 'EDIT', 'PENDING_EDIT_APPROVAL', $3, now(), $4)`
 
-				_, err = tx.Exec(ctx, insInitAudit, req.InitiationID, sweepID, requestedBy)
+				_, err = tx.Exec(ctx, insInitAudit, req.InitiationID, sweepID, requestedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
 				if err != nil {
 					api.RespondWithResult(w, false, "failed to create initiation audit: "+err.Error())
 					return
@@ -2518,10 +2524,10 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				insConfigAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (
-					sweep_id, actiontype, processing_status, reason, requested_by, requested_at
-				) VALUES ($1, 'EDIT', $2, $3, $4, now())`
+					sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
+				) VALUES ($1, 'EDIT', $2, $3, $4, now(), $5)`
 
-				_, err = tx.Exec(ctx, insConfigAudit, sweepID, currentStatus, reason, requestedBy)
+				_, err = tx.Exec(ctx, insConfigAudit, sweepID, currentStatus, reason, requestedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
 				if err != nil {
 					api.RespondWithResult(w, false, "failed to create config audit: "+err.Error())
 					return

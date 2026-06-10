@@ -246,9 +246,9 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 				// For delete approval, mark as DELETED and soft-delete the master record
 				_, err = tx.Exec(ctx, `
 					UPDATE investment.auditactionamc 
-					SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
-					WHERE action_id=$3
-				`, userEmail, comment, actionID)
+					SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+					WHERE action_id=$4
+				`, api.SystemIfBlank(userEmail), comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionID)
 				if err != nil {
 					return nil, err
 				}
@@ -281,9 +281,9 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 			if !amcsWithAudit[amcID] {
 				// Create an approval audit record for enriched entities
 				_, err = tx.Exec(ctx, `
-					INSERT INTO investment.auditactionamc (amc_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
-					VALUES ($1, $4, $5, $2, now(), $2, now(), $3)
-				`, amcID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved)
+					INSERT INTO investment.auditactionamc (amc_id, actiontype, processing_status, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_comment, checker_ip)
+					VALUES ($1, $4, $5, $2, now(), $6, $2, now(), $3, $6)
+				`, amcID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 				if err != nil {
 					return nil, err
 				}
@@ -301,9 +301,9 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.auditactionamc 
-			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3
-			WHERE action_id = ANY($4)
-		`, status, userEmail, comment, actionIDs)
+			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3, checker_ip=$4
+			WHERE action_id = ANY($5)
+		`, status, api.SystemIfBlank(userEmail), comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionIDs)
 		// Ignore errors for enriched entities without audit
 	}
 
@@ -364,9 +364,9 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 		if action == constants.AuditActionApprove && status == constants.StatusPendingDeleteApproval {
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.auditactionscheme 
-				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id=$3
-			`, userEmail, comment, actionID)
+				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				WHERE action_id=$4
+			`, api.SystemIfBlank(userEmail), comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionID)
 			if err != nil {
 				return nil, err
 			}
@@ -391,9 +391,9 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 		for _, schemeID := range schemeIDs {
 			if !schemesWithAudit[schemeID] {
 				_, err = tx.Exec(ctx, `
-					INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
-					VALUES ($1, $4, $5, $2, now(), $2, now(), $3)
-				`, schemeID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved)
+					INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_comment, checker_ip)
+					VALUES ($1, $4, $5, $2, now(), $6, $2, now(), $3, $6)
+				`, schemeID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 				if err != nil {
 					return nil, err
 				}
@@ -410,9 +410,9 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.auditactionscheme 
-			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3
-			WHERE action_id = ANY($4)
-		`, status, userEmail, comment, actionIDs)
+			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3, checker_ip=$4
+			WHERE action_id = ANY($5)
+		`, status, api.SystemIfBlank(userEmail), comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionIDs)
 		// Ignore errors for enriched entities
 	}
 
@@ -469,9 +469,9 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 		if action == constants.AuditActionApprove && status == constants.StatusPendingDeleteApproval {
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.auditactiondp 
-				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id=$3
-			`, userEmail, comment, actionID)
+				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				WHERE action_id=$4
+			`, api.SystemIfBlank(userEmail), comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionID)
 			if err != nil {
 				return nil, err
 			}
@@ -495,9 +495,9 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 		for _, dpID := range dpIDs {
 			if !dpsWithAudit[dpID] {
 				_, err = tx.Exec(ctx, `
-					INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
-					VALUES ($1, $4, $5, $2, now(), $2, now(), $3)
-				`, dpID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved)
+					INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_comment, checker_ip)
+					VALUES ($1, $4, $5, $2, now(), $6, $2, now(), $3, $6)
+				`, dpID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 				if err != nil {
 					return nil, err
 				}
@@ -514,9 +514,9 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.auditactiondp 
-			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3
-			WHERE action_id = ANY($4)
-		`, status, userEmail, comment, actionIDs)
+			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3, checker_ip=$4
+			WHERE action_id = ANY($5)
+		`, status, api.SystemIfBlank(userEmail), comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionIDs)
 	}
 
 	return map[string]interface{}{
@@ -575,9 +575,9 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 		if action == constants.AuditActionApprove && status == constants.StatusPendingDeleteApproval {
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.auditactiondemat 
-				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id=$3
-			`, userEmail, comment, actionID)
+				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				WHERE action_id=$4
+			`, api.SystemIfBlank(userEmail), comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionID)
 			if err != nil {
 				return nil, err
 			}
@@ -601,9 +601,9 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 		for _, dematID := range dematIDs {
 			if !dematsWithAudit[dematID] {
 				_, err = tx.Exec(ctx, `
-					INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
-					VALUES ($1, $4, $5, $2, now(), $2, now(), $3)
-				`, dematID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved)
+					INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_comment, checker_ip)
+					VALUES ($1, $4, $5, $2, now(), $6, $2, now(), $3, $6)
+				`, dematID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 				if err != nil {
 					return nil, err
 				}
@@ -620,9 +620,9 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 
 		_, _ = tx.Exec(ctx, `
 			UPDATE investment.auditactiondemat 
-			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3
-			WHERE action_id = ANY($4)
-		`, status, userEmail, comment, actionIDs)
+			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3, checker_ip=$4
+			WHERE action_id = ANY($5)
+		`, status, api.SystemIfBlank(userEmail), comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionIDs)
 	}
 
 	return map[string]interface{}{
@@ -681,9 +681,9 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 		if action == constants.AuditActionApprove && status == constants.StatusPendingDeleteApproval {
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.auditactionfolio 
-				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id=$3
-			`, userEmail, comment, actionID)
+				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				WHERE action_id=$4
+			`, api.SystemIfBlank(userEmail), comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionID)
 			if err != nil {
 				return nil, err
 			}
@@ -707,9 +707,9 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 		for _, folioID := range folioIDs {
 			if !foliosWithAudit[folioID] {
 				_, err = tx.Exec(ctx, `
-					INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
-					VALUES ($1, $4, $5, $2, now(), $2, now(), $3)
-				`, folioID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved)
+					INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_comment, checker_ip)
+					VALUES ($1, $4, $5, $2, now(), $6, $2, now(), $3, $6)
+				`, folioID, userEmail, constants.ErrAutoApprovedEnrichedEntity, constants.AuditActionCreate, constants.StatusApproved, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 				if err != nil {
 					return nil, err
 				}
@@ -726,9 +726,9 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 
 		_, _ = tx.Exec(ctx, `
 			UPDATE investment.auditactionfolio 
-			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3
-			WHERE action_id = ANY($4)
-		`, status, userEmail, comment, actionIDs)
+			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3, checker_ip=$4
+			WHERE action_id = ANY($5)
+		`, status, api.SystemIfBlank(userEmail), comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionIDs)
 	}
 
 	return map[string]interface{}{

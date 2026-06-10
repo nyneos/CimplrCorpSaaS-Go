@@ -169,9 +169,9 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Audit trail (processing_status must match DB check constraint)
 		if _, auditErr := pgxPool.Exec(ctx, `
 			INSERT INTO investment.fd_accrual_schedule_config_audit
-				(config_id, action_type, processing_status, requested_by, requested_at)
-			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`,
-			configID, userEmail); auditErr != nil {
+				(config_id, action_type, processing_status, requested_by, requested_at, requested_ip)
+			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`,
+			configID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); auditErr != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Schedule audit insert failed: "+auditErr.Error())
 			return
 		}
@@ -344,13 +344,13 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Audit trail with full old-value snapshot
 		_, _ = pgxPool.Exec(ctx, `
 			INSERT INTO investment.fd_accrual_schedule_config_audit (
-				config_id, action_type, processing_status, requested_by, requested_at,
+				config_id, action_type, processing_status, requested_by, requested_at, requested_ip,
 				old_schedule_frequency, old_run_day_of_month, old_run_time,
 				old_default_run_mode, old_default_bank_id_filter, old_default_fd_status_filter,
 				old_auto_submit_for_approval, old_notification_recipients, old_is_active,
 				old_period_coverage
-			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10::jsonb,true,$11)`,
-			req.ConfigID, userEmail,
+			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,true,$12)`,
+			req.ConfigID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			oldFreq, oldRunDay, oldRunTime, oldRunMode, oldBankFilter, oldFDFilter,
 			oldAutoSubmit, string(oldNotifRecipients), oldPeriodCoverage)
 
@@ -868,9 +868,9 @@ func finalizeScheduleConfigAudits(
 
 		ct, uErr := tx.Exec(ctx, `
 			UPDATE investment.fd_accrual_schedule_config_audit
-			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3
-			WHERE config_id=$4 AND processing_status=$5`,
-			finalAuditStatus, checkerEmail, comment, p.configID, p.status)
+			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3, checker_ip=$4
+			WHERE config_id=$5 AND processing_status=$6`,
+			finalAuditStatus, api.SystemIfBlank(checkerEmail), comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), p.configID, p.status)
 		if uErr != nil {
 			return nil, nil, uErr
 		}
@@ -1009,13 +1009,13 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Audit trail — deactivate only after delete is approved
 		if _, err := pgxPool.Exec(ctx, `
 			INSERT INTO investment.fd_accrual_schedule_config_audit (
-				config_id, action_type, processing_status, requested_by, requested_at,
+				config_id, action_type, processing_status, requested_by, requested_at, requested_ip,
 				old_schedule_frequency, old_run_day_of_month, old_run_time,
 				old_default_run_mode, old_default_bank_id_filter, old_default_fd_status_filter,
 				old_auto_submit_for_approval, old_notification_recipients, old_is_active,
 				old_period_coverage
-			) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10::jsonb,true,$11)`,
-			req.ConfigID, userEmail,
+			) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,true,$12)`,
+			req.ConfigID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			dOldFreq, dOldRunDay, dOldRunTime, dOldRunMode, dOldBankFilter, dOldFDFilter,
 			dOldAutoSubmit, string(dOldNotif), dOldPeriodCoverage); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Delete audit insert failed: "+err.Error())
@@ -1705,11 +1705,11 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT
 				config_id,
 				MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by,
-				MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
+				MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
 				MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-				MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
+				MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
 				MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-				MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
+				MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
 			FROM investment.fd_accrual_schedule_config_audit
 			GROUP BY config_id
 		)
@@ -1741,9 +1741,9 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			COALESCE(l.processing_status,'')            AS processing_status,
 			COALESCE(l.processing_status,'')            AS approval_status,
 			COALESCE(l.requested_by,'')                 AS requested_by,
-			COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS requested_at,
+			COALESCE(TO_CHAR((l.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
 			COALESCE(l.checker_by,'')                   AS checker_by,
-			COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
+			COALESCE(TO_CHAR((l.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
 			COALESCE(l.checker_comment,'')              AS checker_comment,
 			COALESCE(l.reason,'')                       AS reason,
 			COALESCE(h.created_by,'')                   AS created_by,
@@ -1874,11 +1874,11 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					config_id,
 					MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at_audit,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
 					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
 					MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
 				FROM investment.fd_accrual_schedule_config_audit
 				WHERE config_id = $1
 				GROUP BY config_id

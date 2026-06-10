@@ -75,6 +75,7 @@ func UploadBankBalancesProcess(
 	fileHeader *multipart.FileHeader,
 	userName string,
 	entityIDs []string,
+	requestedIP string,
 ) (string, error) {
 
 	// 1. Open file
@@ -429,7 +430,7 @@ func UploadBankBalancesProcess(
 
 	// 13. Audit insert (identical to original)
 	for _, bid := range insertedIDs {
-		if _, err := tx.Exec(ctx, `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, bid, userName); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, bid, userName, nullableString(requestedIP)); err != nil {
 			return "", fmt.Errorf("failed to create audit action: %w", err)
 		}
 	}

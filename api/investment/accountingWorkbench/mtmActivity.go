@@ -130,9 +130,9 @@ func CreateMTMSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Create audit trail
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
-			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
-		`, activityID, userEmail); err != nil {
+			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+		`, activityID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
@@ -736,9 +736,9 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Create single audit trail for batch
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
-			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
-		`, activityID, userEmail); err != nil {
+			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+		`, activityID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 			logger.LogError("CreateMTMBulk: failed to insert audit row for activity_id=%s: %v", activityID, err)
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
@@ -858,9 +858,9 @@ func UpdateMTM(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Audit
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at)
-			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
-		`, activityID, req.Reason, userEmail); err != nil {
+			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now(), $4)
+		`, activityID, req.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
@@ -946,9 +946,9 @@ func GetMTMWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
 				COALESCE(l.requested_by,'') AS audit_requested_by,
-				TO_CHAR(NULLIF(l.requested_at::text, '')::timestamp,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
+				TO_CHAR((NULLIF(l.requested_at::text, '')::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(NULLIF(l.checker_at::text, '')::timestamp,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
+				TO_CHAR((NULLIF(l.checker_at::text, '')::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason
 			FROM investment.accounting_mtm m
@@ -1660,9 +1660,9 @@ func CommitMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Create single audit trail for batch
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
-			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
-		`, activityID, userEmail); err != nil {
+			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+		`, activityID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}

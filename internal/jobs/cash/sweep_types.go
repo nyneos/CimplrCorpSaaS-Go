@@ -15,6 +15,7 @@ type SweepExecParams struct {
 	SweepAmount      *float64
 	OverriddenAmount *float64
 	RequestedBy      string
+	RequestedIP      string
 }
 
 // SweepFailureInfo groups fields used when logging a sweep failure.

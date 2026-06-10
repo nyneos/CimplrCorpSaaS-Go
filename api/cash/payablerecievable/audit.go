@@ -63,8 +63,10 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				processing_status,
 				requested_by,
 				requested_at,
+				requested_ip,
 				checker_by,
 				checker_at,
+				checker_ip,
 				checker_comment,
 				reason
 			FROM `+tableName+`
@@ -81,9 +83,10 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var actionID, entityID, action, status, performedBy string
 			var performedAt time.Time
+			var requestedIP, checkerIP *string
 			var checkerBy, checkerComment, reason *string
 			var checkerAt *time.Time
-			if err := rows.Scan(&actionID, &entityID, &action, &status, &performedBy, &performedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+			if err := rows.Scan(&actionID, &entityID, &action, &status, &performedBy, &performedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason); err != nil {
 				respondTransactionAuditError(w, "failed to read transaction audit history")
 				return
 			}
@@ -94,9 +97,11 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":       action,
 				"processing_status": status,
 				"requested_by":      performedBy,
-				"requested_at":      performedAt,
+				"requested_at":      api.FormatAuditTimestampIST(performedAt),
+				"requested_ip":      stringPointerValue(requestedIP),
 				"checker_by":        stringPointerValue(checkerBy),
 				"checker_at":        timePointerValue(checkerAt),
+				"checker_ip":        stringPointerValue(checkerIP),
 				"checker_comment":   stringPointerValue(checkerComment),
 				"reason":            stringPointerValue(reason),
 				"change_summary":    buildTransactionChangeSummary(ctx, pgxPool, txType, req.TransactionID, action, actionID),
@@ -108,7 +113,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		downloadRows, err := pgxPool.Query(ctx, `
-			SELECT transaction_id, requested_by, requested_at, file_name, upload_s3_key
+			SELECT transaction_id, requested_by, requested_at, requested_ip, file_name, upload_s3_key
 			FROM auditactiontransactiondownloads
 			WHERE transaction_type = $1 AND transaction_id = $2
 			ORDER BY requested_at ASC, download_audit_id ASC
@@ -122,8 +127,9 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for downloadRows.Next() {
 			var entityID, requestedBy string
 			var requestedAt sql.NullTime
+			var requestedIP sql.NullString
 			var fileName, uploadKey sql.NullString
-			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &fileName, &uploadKey); err != nil {
+			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &requestedIP, &fileName, &uploadKey); err != nil {
 				respondTransactionAuditError(w, constants.ErrFailedToReadTransactionDownloadAuditHistory)
 				return
 			}
@@ -133,9 +139,11 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":       "DOWNLOAD",
 				"processing_status": "COMPLETED",
 				"requested_by":      strings.TrimSpace(requestedBy),
-				"requested_at":      timePointerValue(&requestedAt.Time),
+				"requested_at":      api.FormatAuditTimestampNullIST(requestedAt),
+				"requested_ip":      strings.TrimSpace(requestedIP.String),
 				"checker_by":        "",
 				"checker_at":        nil,
+				"checker_ip":        "",
 				"checker_comment":   "",
 				"reason":            "",
 				"file_name":         fileName.String,
@@ -336,10 +344,7 @@ func stringPointerValue(value *string) string {
 }
 
 func timePointerValue(value *time.Time) interface{} {
-	if value == nil {
-		return nil
-	}
-	return *value
+	return api.FormatAuditTimestampPtrIST(value)
 }
 
 func transactionRequestedBy(userID string) string {
@@ -354,7 +359,7 @@ func transactionRequestedBy(userID string) string {
 	return strings.TrimSpace(userID)
 }
 
-func insertTransactionDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, transactionType, transactionID, requestedBy, uploadS3Key string) {
+func insertTransactionDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, transactionType, transactionID, requestedBy, uploadS3Key, requestedIP string) {
 	transactionID = strings.TrimSpace(transactionID)
 	requestedBy = strings.TrimSpace(requestedBy)
 	transactionType = strings.ToUpper(strings.TrimSpace(transactionType))
@@ -379,9 +384,9 @@ func insertTransactionDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, 
 	}
 
 	if _, err := pgxPool.Exec(ctx, `
-		INSERT INTO auditactiontransactiondownloads (transaction_type, transaction_id, requested_by, requested_at, file_name, upload_s3_key)
-		VALUES ($1, $2, $3, now(), $4, $5)
-	`, transactionType, transactionID, requestedBy, transactionExtractAuditFileName(uploadS3Key), transactionNullIfEmpty(uploadS3Key)); err != nil {
+		INSERT INTO auditactiontransactiondownloads (transaction_type, transaction_id, requested_by, requested_at, requested_ip, file_name, upload_s3_key)
+		VALUES ($1, $2, $3, now(), $4, $5, $6)
+	`, transactionType, transactionID, requestedBy, transactionNullIfEmpty(requestedIP), transactionExtractAuditFileName(uploadS3Key), transactionNullIfEmpty(uploadS3Key)); err != nil {
 		logger.LogError("failed to insert %s download audit for %s: %v", strings.ToLower(transactionType), transactionID, err)
 	}
 }

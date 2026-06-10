@@ -693,9 +693,9 @@ func CreateActivitySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Create audit trail
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
-			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
-		`, activityID, userEmail); err != nil {
+			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+		`, activityID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
@@ -789,9 +789,9 @@ func CreateActivityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
-				VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
-			`, activityID, userEmail); err != nil {
+				INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+				VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+			`, activityID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				results = append(results, map[string]interface{}{"success": false, "error": constants.ErrAuditInsertFailed + err.Error()})
 				continue
 			}
@@ -899,9 +899,9 @@ func UpdateActivity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Audit
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at)
-			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
-		`, req.ActivityID, req.Reason, userEmail); err != nil {
+			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now(), $4)
+		`, req.ActivityID, req.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
@@ -954,9 +954,9 @@ func DeleteActivity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, id := range req.ActivityIDs {
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at)
-				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())
-			`, id, req.Reason, requestedBy); err != nil {
+				INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now(), $4)
+			`, id, req.Reason, api.SystemIfBlank(requestedBy), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 				return
 			}
@@ -1049,9 +1049,9 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(toApprove) > 0 {
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.auditactionaccountingactivity
-				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id = ANY($3)
-			`, checkerBy, req.Comment, toApprove); err != nil {
+				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				WHERE action_id = ANY($4)
+			`, api.SystemIfBlank(checkerBy), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), toApprove); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "approve failed: "+err.Error())
 				return
 			}
@@ -1166,9 +1166,9 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(toDeleteActionIDs) > 0 {
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.auditactionaccountingactivity
-				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id = ANY($3)
-			`, checkerBy, req.Comment, toDeleteActionIDs); err != nil {
+				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				WHERE action_id = ANY($4)
+			`, api.SystemIfBlank(checkerBy), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), toDeleteActionIDs); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "delete action update failed: "+err.Error())
 				return
 			}
@@ -1273,9 +1273,9 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if _, err := tx.Exec(ctx, `
 			UPDATE investment.auditactionaccountingactivity
-			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE action_id = ANY($3)
-		`, checkerBy, req.Comment, actionIDs); err != nil {
+			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+			WHERE action_id = ANY($4)
+		`, api.SystemIfBlank(checkerBy), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionIDs); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
@@ -1357,11 +1357,11 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT 
 					activity_id,
 					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS created_at,
+					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
 					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS edited_at,
+					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
 					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
+					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
 				FROM investment.auditactionaccountingactivity
 				GROUP BY activity_id
 			),
@@ -1493,9 +1493,9 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
 				COALESCE(l.requested_by,'') AS audit_requested_by,
-				TO_CHAR(NULLIF(l.requested_at::text, '')::timestamp,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
+				TO_CHAR(NULLIF(l.requested_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(NULLIF(l.checker_at::text, '')::timestamp,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS checker_at,
+				TO_CHAR(NULLIF(l.checker_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 				

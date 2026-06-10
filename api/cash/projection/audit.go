@@ -47,8 +47,10 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				processing_status,
 				requested_by,
 				requested_at,
+				requested_ip,
 				checker_by,
 				checker_at,
+				checker_ip,
 				checker_comment,
 				reason
 			FROM cimplrcorpsaas.audit_action_cashflow_proposal
@@ -65,9 +67,9 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var entityID, action, status, performedBy string
 			var performedAt time.Time
-			var checkerBy, checkerComment, reason interface{}
+			var requestedIP, checkerBy, checkerIP, checkerComment, reason interface{}
 			var checkerAt interface{}
-			if err := rows.Scan(&entityID, &action, &status, &performedBy, &performedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+			if err := rows.Scan(&entityID, &action, &status, &performedBy, &performedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read projection audit history")
 				return
 			}
@@ -77,9 +79,11 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":       action,
 				"processing_status": status,
 				"requested_by":      performedBy,
-				"requested_at":      performedAt,
+				"requested_at":      api.FormatAuditTimestampIST(performedAt),
+				"requested_ip":      ifaceToString(requestedIP),
 				"checker_by":        ifaceToString(checkerBy),
-				"checker_at":        ifaceToTimeString(checkerAt),
+				"checker_at":        projectionAuditTime(checkerAt),
+				"checker_ip":        ifaceToString(checkerIP),
 				"checker_comment":   ifaceToString(checkerComment),
 				"reason":            ifaceToString(reason),
 			}
@@ -97,9 +101,11 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"action_type":       decisionAction,
 					"processing_status": status,
 					"requested_by":      projectionFirstNonEmpty(ifaceToString(checkerBy), performedBy),
-					"requested_at":      ifaceToTimeString(checkerAt),
+					"requested_at":      projectionAuditTime(checkerAt),
+					"requested_ip":      ifaceToString(checkerIP),
 					"checker_by":        ifaceToString(checkerBy),
-					"checker_at":        ifaceToTimeString(checkerAt),
+					"checker_at":        projectionAuditTime(checkerAt),
+					"checker_ip":        ifaceToString(checkerIP),
 					"checker_comment":   ifaceToString(checkerComment),
 					"reason":            ifaceToString(reason),
 				})
@@ -111,7 +117,7 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		downloadRows, err := pgxPool.Query(ctx, `
-			SELECT proposal_id, requested_by, requested_at, file_name, upload_s3_key
+			SELECT proposal_id, requested_by, requested_at, requested_ip, file_name, upload_s3_key
 			FROM cimplrcorpsaas.audit_cashflow_proposal_downloads
 			WHERE proposal_id = $1
 			ORDER BY requested_at ASC, download_audit_id ASC
@@ -125,8 +131,8 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for downloadRows.Next() {
 			var entityID, requestedBy string
 			var requestedAt sql.NullTime
-			var fileName, uploadKey sql.NullString
-			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &fileName, &uploadKey); err != nil {
+			var requestedIP, fileName, uploadKey sql.NullString
+			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &requestedIP, &fileName, &uploadKey); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadProjectionAuditHistory)
 				return
 			}
@@ -136,9 +142,11 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"action_type":       "DOWNLOAD",
 				"processing_status": "COMPLETED",
 				"requested_by":      strings.TrimSpace(requestedBy),
-				"requested_at":      requestedAt.Time,
+				"requested_at":      api.FormatAuditTimestampNullIST(requestedAt),
+				"requested_ip":      strings.TrimSpace(requestedIP.String),
 				"checker_by":        "",
 				"checker_at":        nil,
+				"checker_ip":        "",
 				"checker_comment":   "",
 				"reason":            "",
 				"file_name":         fileName.String,
@@ -161,7 +169,7 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func projectionDecisionAction(action, status string, checkerAt interface{}) string {
-	if ifaceToTimeString(checkerAt) == "" {
+	if projectionAuditTime(checkerAt) == nil {
 		return ""
 	}
 
@@ -177,6 +185,21 @@ func projectionDecisionAction(action, status string, checkerAt interface{}) stri
 		return "REJECT"
 	default:
 		return ""
+	}
+}
+
+func projectionAuditTime(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case time.Time:
+		return api.FormatAuditTimestampIST(typed)
+	case *time.Time:
+		return api.FormatAuditTimestampPtrIST(typed)
+	case sql.NullTime:
+		return api.FormatAuditTimestampNullIST(typed)
+	default:
+		return nil
 	}
 }
 
@@ -204,10 +227,11 @@ func projectionRequestedBy(userID string) string {
 	return strings.TrimSpace(userID)
 }
 
-func insertProjectionDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, proposalID, requestedBy, uploadS3Key string) {
+func insertProjectionDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, proposalID, requestedBy, uploadS3Key, requestedIP string) {
 	proposalID = strings.TrimSpace(proposalID)
 	requestedBy = strings.TrimSpace(requestedBy)
 	uploadS3Key = strings.TrimSpace(uploadS3Key)
+	requestedIP = strings.TrimSpace(requestedIP)
 	if proposalID == "" {
 		return
 	}
@@ -221,9 +245,9 @@ func insertProjectionDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, p
 	}
 
 	_, err := pgxPool.Exec(ctx, `
-		INSERT INTO cimplrcorpsaas.audit_cashflow_proposal_downloads (proposal_id, requested_by, requested_at, file_name, upload_s3_key)
-		VALUES ($1, $2, now(), $3, $4)
-	`, proposalID, requestedBy, projectionExtractAuditFileName(uploadS3Key), projectionNullIfEmpty(uploadS3Key))
+		INSERT INTO cimplrcorpsaas.audit_cashflow_proposal_downloads (proposal_id, requested_by, requested_at, requested_ip, file_name, upload_s3_key)
+		VALUES ($1, $2, now(), $3, $4, $5)
+	`, proposalID, requestedBy, projectionNullIfEmpty(requestedIP), projectionExtractAuditFileName(uploadS3Key), projectionNullIfEmpty(uploadS3Key))
 	if err != nil {
 		logger.LogError("failed to insert projection download audit for %s: %v", proposalID, err)
 	}

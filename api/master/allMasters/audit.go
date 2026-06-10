@@ -78,8 +78,10 @@ func runAuditHistory(
 		COALESCE(a.reason, '') AS reason,
 		COALESCE(a.requested_by, '') AS requested_by,
 		a.requested_at,
+		COALESCE(a.requested_ip, '') AS requested_ip,
 		COALESCE(a.checker_by, '') AS checker_by,
 		a.checker_at,
+		COALESCE(a.checker_ip, '') AS checker_ip,
 		COALESCE(a.checker_comment, '') AS checker_comment,
 		COALESCE(m.` + nameCol + `, '') AS display_name
 	FROM ` + auditTable + ` a

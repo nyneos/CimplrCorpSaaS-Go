@@ -1,6 +1,7 @@
 package exposures
 
 import (
+	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -502,9 +503,9 @@ func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 		_, _ = db.Exec(ledgerQuery, req.BookingID, req.ExposureHeaderID, req.HedgedAmount, newOpenAmount, req.UserID)
 		if _, auditErr := db.ExecContext(r.Context(), `
 			INSERT INTO public.auditactionhedgelink
-				(exposure_header_id, booking_id, actiontype, processing_status, requested_by, requested_at, new_values, change_summary)
-			VALUES ($1, $2, 'LINK', 'COMPLETED', $3, now(), $4, $4)
-		`, req.ExposureHeaderID, req.BookingID, auditutil.Actor(req.UserID), auditutil.JSONValue(linkMap)); auditErr != nil {
+				(exposure_header_id, booking_id, actiontype, processing_status, requested_by, requested_at, requested_ip, new_values, change_summary)
+			VALUES ($1, $2, 'LINK', 'COMPLETED', $3, now(), $4, $5, $5)
+		`, req.ExposureHeaderID, req.BookingID, auditutil.Actor(req.UserID), auditutil.NullIfBlank(api.ClientIPFromRequest(r)), auditutil.JSONValue(linkMap)); auditErr != nil {
 			logger.LogError("fx hedge link audit failed exposure=%s booking=%s: %v", req.ExposureHeaderID, req.BookingID, auditErr)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

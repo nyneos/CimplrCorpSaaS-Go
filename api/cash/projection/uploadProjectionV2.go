@@ -410,9 +410,9 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Insert audit record
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal
-			(proposal_id, action_type, processing_status, reason, requested_by, requested_at)
-			VALUES ($1,'CREATE','PENDING_APPROVAL','Imported via V2 uploader',$2,now())
-		`, proposalID, requestedBy); err != nil {
+			(proposal_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip)
+			VALUES ($1,'CREATE','PENDING_APPROVAL','Imported via V2 uploader',$2,now(),$3)
+		`, proposalID, requestedBy, projectionNullIfEmpty(api.ClientIPFromRequest(r))); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, parseConstraintError(err))
 			return
 		}

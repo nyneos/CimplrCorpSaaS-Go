@@ -360,8 +360,8 @@ func createScheduledInitiation(ctx context.Context, db *pgxpool.Pool, sweepID st
 	// Auto-approve the scheduled initiation
 	insAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
 		initiation_id, sweep_id, actiontype, processing_status, 
-		requested_by, requested_at, checker_by, checker_at
-	) VALUES ($1, $2, 'CREATE', 'APPROVED', 'sweep_system', now(), 'sweep_system', now())`
+		requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip
+	) VALUES ($1, $2, 'CREATE', 'APPROVED', 'sweep_system', now(), NULL::text, 'sweep_system', now(), NULL::text)`
 
 	_, err = db.Exec(ctx, insAudit, initiationID, sweepID)
 	return err
@@ -634,9 +634,9 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 	// Create audit for source
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
 		)
-		SELECT balance_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, 'sweep_system_v2', NOW()
+		SELECT balance_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, 'sweep_system_v2', NOW(), NULL::text
 		FROM bank_balances_manual
 		WHERE account_no = $2
 		LIMIT 1
@@ -676,9 +676,9 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 	// Create audit for target
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
 		)
-		SELECT balance_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, 'sweep_system_v2', NOW()
+		SELECT balance_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, 'sweep_system_v2', NOW(), NULL::text
 		FROM bank_balances_manual
 		WHERE account_no = $2
 		LIMIT 1
@@ -966,8 +966,8 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params Sw
 	// Create audit for source
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
-		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system_v2', NOW())
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
+		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system_v2', NOW(), NULL::text)
 	`, balanceID, fmt.Sprintf("Sweep V2 execution (initiation: %s): %s", initiationID, sweepID))
 
 	if err != nil {
@@ -1034,8 +1034,8 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params Sw
 	// Create audit for target
 	_, err = tx.Exec(ctx, `
 		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at
-		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system_v2', NOW())
+			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
+		) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, 'sweep_system_v2', NOW(), NULL::text)
 	`, targetBalanceID, fmt.Sprintf("Sweep V2 receipt (initiation: %s): %s", initiationID, sweepID))
 
 	if err != nil {

@@ -487,7 +487,7 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		fmt.Println("FILES RECEIVED:", len(r.MultipartForm.File))
 		for _, files := range r.MultipartForm.File {
 			for _, fileHeader := range files {
-				batchID, err := UploadBankBalancesProcess(ctx, pgxPool, fileHeader, userName, entityIDs)
+				batchID, err := UploadBankBalancesProcess(ctx, pgxPool, fileHeader, userName, entityIDs, api.ClientIPFromRequest(r))
 				if err != nil {
 					statusCode := http.StatusInternalServerError
 					message := err.Error()

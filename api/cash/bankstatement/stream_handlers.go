@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	apipreval "CimplrCorpSaas/api/middlewares"
 	notif "CimplrCorpSaas/api/notification/catalog"
@@ -726,7 +727,7 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		logger.LogInfo("[BANK-PREVIEW] /cash/preview start: remote=%s method=%s", r.RemoteAddr, r.Method)
+		logger.LogInfo("[BANK-PREVIEW] /cash/preview start: remote=%s method=%s", api.ClientIPFromRequest(r), r.Method)
 
 		// parse multipart form (support file field named "file")
 		if err := r.ParseMultipartForm(50 << 20); err != nil {
@@ -1613,9 +1614,9 @@ func CommitHandler(pool *pgxpool.Pool) http.Handler {
 		}
 		_, err = tx.Exec(ctx, `
 			INSERT INTO cimplrcorpsaas.auditactionbankstatement (
-				bankstatementid, actiontype, processing_status, requested_by, requested_at
-			) VALUES ($1, $2, $3, $4, $5)
-		`, bankStatementID, "CREATE", constants.StatusPendingApproval, requestedBy, time.Now())
+				bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip
+			) VALUES ($1, $2, $3, $4, $5, $6)
+		`, bankStatementID, "CREATE", constants.StatusPendingApproval, requestedBy, time.Now().UTC(), nullIfBlank(api.ClientIPFromRequest(r)))
 		if err != nil {
 			tx.Rollback(ctx)
 			respondWithError(w, err, "Failed to record audit action", http.StatusInternalServerError)
@@ -2119,8 +2120,7 @@ func DownloadPDFHandler(pool *pgxpool.Pool) http.Handler {
 				}
 			}
 		}
-		// client IP
-		ip := r.RemoteAddr
+		ip := api.ClientIPFromRequest(r)
 		go func() {
 			// best-effort; log on error
 			if err := insertDownloadAuditPgx(r.Context(), pool, sql.NullString{String: strings.TrimSpace(id), Valid: strings.TrimSpace(id) != ""}, sql.NullString{}, userID, ip, entityName); err != nil {
