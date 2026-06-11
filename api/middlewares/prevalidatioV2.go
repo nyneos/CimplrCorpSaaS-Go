@@ -287,13 +287,19 @@ func loadApprovedGLAccounts(ctx context.Context, db *pgxpool.Pool) ([]map[string
 		WITH latest_approved AS (
 			SELECT DISTINCT ON (gl_account_id) gl_account_id, processing_status
 			FROM auditactionglaccount
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY gl_account_id, requested_at DESC
 		)
-		SELECT m.gl_account_id, m.gl_account_code, m.gl_account_name, m.gl_account_type
+		SELECT COALESCE(m.gl_account_id::text,''), COALESCE(m.gl_account_code,''), COALESCE(m.gl_account_name,''), COALESCE(m.gl_account_type,'')
 		FROM masterglaccount m
 		JOIN latest_approved l ON l.gl_account_id = m.gl_account_id
 		WHERE UPPER(m.status) = 'ACTIVE' AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM auditactionglaccount d
+		  	WHERE d.gl_account_id = m.gl_account_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -321,13 +327,19 @@ func loadApprovedCounterparties(ctx context.Context, db *pgxpool.Pool) ([]map[st
 		WITH latest_approved AS (
 			SELECT DISTINCT ON (counterparty_id) counterparty_id, processing_status
 			FROM auditactioncounterparty
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY counterparty_id, requested_at DESC
 		)
-		SELECT m.counterparty_id, m.counterparty_code, m.counterparty_name, m.counterparty_type
+		SELECT COALESCE(m.counterparty_id::text,''), COALESCE(m.counterparty_code,''), COALESCE(m.counterparty_name,''), COALESCE(m.counterparty_type,'')
 		FROM mastercounterparty m
 		JOIN latest_approved l ON l.counterparty_id = m.counterparty_id
 		WHERE UPPER(m.status) = 'ACTIVE' AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM auditactioncounterparty d
+		  	WHERE d.counterparty_id = m.counterparty_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -355,13 +367,19 @@ func loadApprovedPayableReceivables(ctx context.Context, db *pgxpool.Pool) ([]ma
 		WITH latest_approved AS (
 			SELECT DISTINCT ON (type_id) type_id, processing_status
 			FROM auditactionpayablereceivable
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY type_id, requested_at DESC
 		)
-		SELECT m.type_id, m.type_code, m.type_name
+		SELECT COALESCE(m.type_id::text,''), COALESCE(m.type_code,''), COALESCE(m.type_name,'')
 		FROM masterpayablereceivabletype m
 		JOIN latest_approved l ON l.type_id = m.type_id
 		WHERE UPPER(m.status) = 'ACTIVE' AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM auditactionpayablereceivable d
+		  	WHERE d.type_id = m.type_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -388,13 +406,19 @@ func loadApprovedCostProfitCenters(ctx context.Context, db *pgxpool.Pool) ([]map
 		WITH latest_approved AS (
 			SELECT DISTINCT ON (centre_id) centre_id, processing_status
 			FROM auditactioncostprofitcenter
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY centre_id, requested_at DESC
 		)
-		SELECT m.centre_id, m.centre_code, m.centre_name, m.centre_type
+		SELECT COALESCE(m.centre_id::text,''), COALESCE(m.centre_code,''), COALESCE(m.centre_name,''), COALESCE(m.centre_type,'')
 		FROM mastercostprofitcenter m
 		JOIN latest_approved l ON l.centre_id = m.centre_id
 		WHERE UPPER(m.status) = 'ACTIVE' AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM auditactioncostprofitcenter d
+		  	WHERE d.centre_id = m.centre_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -424,14 +448,20 @@ func loadApprovedTDSPlans(ctx context.Context, db *pgxpool.Pool) ([]map[string]s
 				tds_plan_id, 
 				processing_status
 			FROM investment.fd_audit_tds_plan
-			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT')
 			ORDER BY tds_plan_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
 		)
 		SELECT 
-			m.tds_plan_id, m.tds_plan_code, m.tds_plan_name, m.tds_rate::text, m.threshold_amount::text
+			COALESCE(m.tds_plan_id,''), COALESCE(m.tds_plan_code,''), COALESCE(m.tds_plan_name,''), COALESCE(m.tds_rate::text,''), COALESCE(m.threshold_amount::text,'')
 		FROM investment.fd_tds_plan_master m
 		JOIN latest_approved l ON l.tds_plan_id = m.tds_plan_id
 		WHERE m.is_active = true AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM investment.fd_audit_tds_plan d
+		  	WHERE d.tds_plan_id = m.tds_plan_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.action_type = 'DELETE'
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -450,16 +480,25 @@ func loadApprovedTDSPlans(ctx context.Context, db *pgxpool.Pool) ([]map[string]s
 
 func loadApprovedBankConfigs(ctx context.Context, db *pgxpool.Pool) ([]map[string]string, error) {
 	query := `
-		WITH latest_approved AS (
-			SELECT DISTINCT ON (config_id) config_id, processing_status
+		WITH latest_approved_delete AS (
+			SELECT DISTINCT ON (config_id) config_id, action_type
 			FROM investment.fd_audit_bank_config
-			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND action_type = 'DELETE'
 			ORDER BY config_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
 		)
-		SELECT m.config_id, m.bank_code, m.product_type
+		SELECT COALESCE(m.config_id,''), COALESCE(m.bank_code,''), COALESCE(m.product_type,'')
 		FROM investment.fd_bank_config_master m
-		JOIN latest_approved l ON l.config_id = m.config_id
-		WHERE m.is_active = true AND COALESCE(m.is_deleted, false) = false
+		LEFT JOIN latest_approved_delete d ON d.config_id = m.config_id
+		WHERE m.is_active = true
+		  AND COALESCE(m.is_deleted, false) = false
+		  AND d.config_id IS NULL
+		  AND EXISTS (
+		  	SELECT 1
+		  	FROM investment.fd_audit_bank_config a
+		  	WHERE a.config_id = m.config_id
+		  	  AND a.processing_status = 'APPROVED'
+		  	  AND a.action_type IN ('CREATE','EDIT')
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -470,7 +509,12 @@ func loadApprovedBankConfigs(ctx context.Context, db *pgxpool.Pool) ([]map[strin
 	for rows.Next() {
 		var id, code, pt string
 		if err := rows.Scan(&id, &code, &pt); err == nil {
-			res = append(res, map[string]string{"config_id": id, "bank_code": code, "product_type": pt})
+			res = append(res, map[string]string{
+				"config_id":      id,
+				"bank_config_id": id,
+				"bank_code":      code,
+				"product_type":   pt,
+			})
 		}
 	}
 	return res, nil
@@ -481,13 +525,19 @@ func loadApprovedCompoundingFrequencies(ctx context.Context, db *pgxpool.Pool) (
 		WITH latest_approved AS (
 			SELECT DISTINCT ON (frequency_id) frequency_id, processing_status
 			FROM investment.fd_audit_compounding_frequency
-			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT')
 			ORDER BY frequency_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
 		)
-		SELECT m.frequency_id, m.frequency_code, m.frequency_name
+		SELECT COALESCE(m.frequency_id,''), COALESCE(m.frequency_code,''), COALESCE(m.frequency_name,'')
 		FROM investment.fd_compounding_frequency_master m
 		JOIN latest_approved l ON l.frequency_id = m.frequency_id
 		WHERE m.is_active = true AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM investment.fd_audit_compounding_frequency d
+		  	WHERE d.frequency_id = m.frequency_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.action_type = 'DELETE'
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -509,13 +559,19 @@ func loadApprovedDayCounts(ctx context.Context, db *pgxpool.Pool) ([]map[string]
 		WITH latest_approved AS (
 			SELECT DISTINCT ON (day_count_code) day_count_code, processing_status
 			FROM investment.fd_audit_day_count_convention
-			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT')
 			ORDER BY day_count_code, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
 		)
-		SELECT m.day_count_code, m.day_count_name, m.convention_type
+		SELECT COALESCE(m.day_count_code,''), COALESCE(m.day_count_name,''), COALESCE(m.convention_type,'')
 		FROM investment.fd_day_count_convention_master m
 		JOIN latest_approved l ON l.day_count_code = m.day_count_code
 		WHERE m.is_active = true AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM investment.fd_audit_day_count_convention d
+		  	WHERE d.day_count_code = m.day_count_code
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.action_type = 'DELETE'
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -537,13 +593,19 @@ func loadApprovedBankRateCards(ctx context.Context, db *pgxpool.Pool) ([]map[str
 		WITH latest_approved AS (
 			SELECT DISTINCT ON (rate_card_id) rate_card_id, processing_status
 			FROM investment.fd_audit_bank_rate_card
-			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT')
 			ORDER BY rate_card_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
 		)
-		SELECT m.rate_card_id, m.bank_code, m.interest_rate::text, m.min_tenor_days::text, m.max_tenor_days::text
+		SELECT COALESCE(m.rate_card_id,''), COALESCE(m.bank_code,''), COALESCE(m.interest_rate::text,''), COALESCE(m.min_tenor_days::text,''), COALESCE(m.max_tenor_days::text,'')
 		FROM investment.fd_bank_rate_card_master m
 		JOIN latest_approved l ON l.rate_card_id = m.rate_card_id
 		WHERE m.is_active = true AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM investment.fd_audit_bank_rate_card d
+		  	WHERE d.rate_card_id = m.rate_card_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.action_type = 'DELETE'
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -565,13 +627,19 @@ func loadApprovedPenaltyStructures(ctx context.Context, db *pgxpool.Pool) ([]map
 		WITH latest_approved AS (
 			SELECT DISTINCT ON (penalty_id) penalty_id, processing_status
 			FROM investment.fd_audit_penalty_structure
-			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT')
 			ORDER BY penalty_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
 		)
-		SELECT m.penalty_id, m.bank_code, m.penalty_type, m.penalty_value::text
+		SELECT COALESCE(m.penalty_id,''), COALESCE(m.bank_code,''), COALESCE(m.penalty_type,''), COALESCE(m.penalty_value::text,'')
 		FROM investment.fd_penalty_structure_master m
 		JOIN latest_approved l ON l.penalty_id = m.penalty_id
 		WHERE m.is_active = true AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM investment.fd_audit_penalty_structure d
+		  	WHERE d.penalty_id = m.penalty_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.action_type = 'DELETE'
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -593,13 +661,19 @@ func loadApprovedInterestTypes(ctx context.Context, db *pgxpool.Pool) ([]map[str
 		WITH latest_approved AS (
 			SELECT DISTINCT ON (interest_id) interest_id, processing_status
 			FROM investment.fd_audit_interest_type
-			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT')
 			ORDER BY interest_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
 		)
-		SELECT m.interest_id, m.interest_type_code, m.interest_type_name
+		SELECT COALESCE(m.interest_id,''), COALESCE(m.interest_type_code,''), COALESCE(m.interest_type_name,'')
 		FROM investment.fd_interest_type_master m
 		JOIN latest_approved l ON l.interest_id = m.interest_id
 		WHERE m.is_active = true AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM investment.fd_audit_interest_type d
+		  	WHERE d.interest_id = m.interest_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.action_type = 'DELETE'
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -621,13 +695,20 @@ func loadApprovedHolidayCalendars(ctx context.Context, db *pgxpool.Pool) ([]map[
 		WITH latest_approved AS (
 			SELECT DISTINCT ON (calendar_id) calendar_id, processing_status
 			FROM investment.auditactioncalendar
-			WHERE UPPER(processing_status) = 'APPROVED' AND UPPER(actiontype) IN ('CREATE','EDIT','DELETE')
+			WHERE UPPER(processing_status) = 'APPROVED' AND UPPER(actiontype) IN ('CREATE','EDIT')
 			ORDER BY calendar_id, requested_at DESC
 		)
-		SELECT m.calendar_id, m.calendar_code, m.calendar_name, m.weekend_pattern
+		SELECT COALESCE(m.calendar_id::text,''), COALESCE(m.calendar_code,''), COALESCE(m.calendar_name,''), COALESCE(m.weekend_pattern,'')
 		FROM investment.mastercalendar m
 		JOIN latest_approved l ON l.calendar_id = m.calendar_id
 		WHERE UPPER(m.status) = 'ACTIVE'
+		  AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM investment.auditactioncalendar d
+		  	WHERE d.calendar_id = m.calendar_id
+		  	  AND UPPER(d.processing_status) = 'APPROVED'
+		  	  AND UPPER(d.actiontype) = 'DELETE'
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {

@@ -462,17 +462,23 @@ func loadApprovedBanks(ctx context.Context, db *pgxpool.Pool) ([]map[string]stri
 				bank_id, 
 				processing_status
 			FROM auditactionbank
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY bank_id, requested_at DESC
 		)
 		SELECT 
-			m.bank_id,
-			m.bank_name,
+			COALESCE(m.bank_id::text, ''),
+			COALESCE(m.bank_name, ''),
 			COALESCE(m.bank_short_name, '') as bank_short_name
 		FROM masterbank m
 		JOIN latest_approved l ON l.bank_id = m.bank_id
 		WHERE LOWER(m.active_status) = 'active'
 		  AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM auditactionbank d
+		  	WHERE d.bank_id = m.bank_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 		ORDER BY m.bank_name
 	`
 
@@ -504,16 +510,22 @@ func loadApprovedCurrencies(ctx context.Context, db *pgxpool.Pool) ([]map[string
 				currency_id, 
 				processing_status
 			FROM auditactioncurrency
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY currency_id, requested_at DESC
 		)
 		SELECT 
-			m.currency_id,
-			m.currency_code,
-			m.currency_name
+			COALESCE(m.currency_id::text, ''),
+			COALESCE(m.currency_code, ''),
+			COALESCE(m.currency_name, '')
 		FROM mastercurrency m
 		JOIN latest_approved l ON l.currency_id = m.currency_id
 		WHERE LOWER(m.status) = 'active'
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM auditactioncurrency d
+		  	WHERE d.currency_id = m.currency_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 		ORDER BY m.currency_code
 	`
 
@@ -545,17 +557,23 @@ func loadApprovedCashFlowCategories(ctx context.Context, db *pgxpool.Pool) ([]ma
 				category_id, 
 				processing_status
 			FROM auditactioncashflowcategory
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY category_id, requested_at DESC
 		)
 		SELECT 
-			m.category_id,
-			m.category_name,
-			m.category_type
+			COALESCE(m.category_id::text, ''),
+			COALESCE(m.category_name, ''),
+			COALESCE(m.category_type, '')
 		FROM mastercashflowcategory m
 		JOIN latest_approved l ON l.category_id = m.category_id
 		WHERE UPPER(m.status) = 'ACTIVE'
 		  AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM auditactioncashflowcategory d
+		  	WHERE d.category_id = m.category_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 		ORDER BY m.category_name
 	`
 
@@ -587,17 +605,23 @@ func loadApprovedAMCs(ctx context.Context, db *pgxpool.Pool) ([]map[string]strin
 				amc_id, 
 				processing_status
 			FROM investment.auditactionamc
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY amc_id, requested_at DESC
 		)
 		SELECT 
-			m.amc_id,
-			m.amc_name,
-			m.internal_amc_code
+			COALESCE(m.amc_id::text, ''),
+			COALESCE(m.amc_name, ''),
+			COALESCE(m.internal_amc_code, '')
 		FROM investment.masteramc m
 		JOIN latest_approved l ON l.amc_id = m.amc_id
 		WHERE UPPER(m.status) = 'ACTIVE'
 		  AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM investment.auditactionamc d
+		  	WHERE d.amc_id = m.amc_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 		ORDER BY m.amc_name
 	`
 
@@ -629,19 +653,25 @@ func loadApprovedSchemes(ctx context.Context, db *pgxpool.Pool) ([]map[string]st
 				scheme_id, 
 				processing_status
 			FROM investment.auditactionscheme
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY scheme_id, requested_at DESC
 		)
 		SELECT 
-			m.scheme_id,
-			m.scheme_name,
-			m.isin,
-			m.internal_scheme_code,
-			m.amc_name
+			COALESCE(m.scheme_id::text, ''),
+			COALESCE(m.scheme_name, ''),
+			COALESCE(m.isin, ''),
+			COALESCE(m.internal_scheme_code, ''),
+			COALESCE(m.amc_name, '')
 		FROM investment.masterscheme m
 		JOIN latest_approved l ON l.scheme_id = m.scheme_id
 		WHERE UPPER(m.status) = 'ACTIVE'
 		  AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM investment.auditactionscheme d
+		  	WHERE d.scheme_id = m.scheme_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 		ORDER BY m.scheme_name
 	`
 
@@ -675,18 +705,24 @@ func loadApprovedDPs(ctx context.Context, db *pgxpool.Pool) ([]map[string]string
 				dp_id, 
 				processing_status
 			FROM investment.auditactiondp
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY dp_id, requested_at DESC
 		)
 		SELECT 
-			m.dp_id,
-			m.dp_name,
-			m.dp_code,
-			m.depository
+			COALESCE(m.dp_id::text, ''),
+			COALESCE(m.dp_name, ''),
+			COALESCE(m.dp_code, ''),
+			COALESCE(m.depository, '')
 		FROM investment.masterdepositoryparticipant m
 		JOIN latest_approved l ON l.dp_id = m.dp_id
 		WHERE UPPER(m.status) = 'ACTIVE'
 		  AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM investment.auditactiondp d
+		  	WHERE d.dp_id = m.dp_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 		ORDER BY m.dp_name
 	`
 
@@ -719,12 +755,12 @@ func loadApprovedBankAccounts(ctx context.Context, db *pgxpool.Pool) ([]map[stri
 				account_id, 
 				processing_status
 			FROM public.auditactionbankaccount
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY account_id, requested_at DESC
 		)
 		SELECT 
-			m.account_id,
-			m.account_number,
+			COALESCE(m.account_id::text, ''),
+			COALESCE(m.account_number, ''),
 			COALESCE(m.account_nickname, '') AS account_name,
 			COALESCE(b.bank_name, '') AS bank_name,
 			COALESCE(e.entity_name, ec.entity_name, '') AS entity_name
@@ -735,6 +771,12 @@ func loadApprovedBankAccounts(ctx context.Context, db *pgxpool.Pool) ([]map[stri
 		LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = m.entity_id
 		WHERE UPPER(m.status) = 'ACTIVE'
 		  AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM public.auditactionbankaccount d
+		  	WHERE d.account_id = m.account_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 		ORDER BY m.account_number
 	`
 
@@ -768,12 +810,12 @@ func loadApprovedFolios(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 				folio_id,
 				processing_status
 			FROM investment.auditactionfolio
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY folio_id, requested_at DESC
 		)
 		SELECT
-			m.folio_id,
-			m.folio_number,
+			COALESCE(m.folio_id::text, ''),
+			COALESCE(m.folio_number, ''),
 			COALESCE(m.amc_name,'') AS amc_name,
 			COALESCE(fsm.scheme_ids,'') AS scheme_id,
 			COALESCE(m.entity_name,'') AS entity_name
@@ -786,6 +828,12 @@ func loadApprovedFolios(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 		) fsm ON true
 		WHERE UPPER(m.status) = 'ACTIVE'
 		  AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM investment.auditactionfolio d
+		  	WHERE d.folio_id = m.folio_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 		ORDER BY m.folio_number
 	`
 
@@ -819,11 +867,11 @@ func loadApprovedDemats(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 				demat_id,
 				processing_status
 			FROM investment.auditactiondemat
-			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY demat_id, requested_at DESC
 		)
 		SELECT
-			m.demat_id,
+			COALESCE(m.demat_id::text, ''),
 			COALESCE(m.dp_id,'') AS dp_id,
 			COALESCE(m.depository_participant,'') AS depository_participant,
 			COALESCE(m.demat_account_number,'') AS demat_account_number,
@@ -833,6 +881,12 @@ func loadApprovedDemats(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 		JOIN latest_approved l ON l.demat_id = m.demat_id
 		WHERE UPPER(m.status) = 'ACTIVE'
 		  AND COALESCE(m.is_deleted, false) = false
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM investment.auditactiondemat d
+		  	WHERE d.demat_id = m.demat_id
+		  	  AND d.processing_status = 'APPROVED'
+		  	  AND d.actiontype = 'DELETE'
+		  )
 		ORDER BY m.demat_account_number
 	`
 
