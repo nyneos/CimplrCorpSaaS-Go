@@ -51,7 +51,7 @@ func RejectPendingExposureBucketingAdditionalFileDeleteHandler(pool *pgxpool.Poo
 }
 
 func pendingExposureBucketingAdditionalFilesConfig() additionalfiles.Config {
-	return additionalfiles.Config{
+	return withExposureCrossStage(additionalfiles.Config{
 		Module:                "fx-pending-exposure-bucketing",
 		AuditSource:           "FX_EXPOSURE_BUCKETING",
 		AuditTableName:        fxAdditionalFileAuditTable,
@@ -64,7 +64,7 @@ func pendingExposureBucketingAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deletePendingExposureBucketingAdditionalFile,
 		SoftDeleteTx:          deletePendingExposureBucketingAdditionalFileTx,
 		RecordMainUploadAudit: recordExposureBucketingMainUploadAudit,
-	}
+	})
 }
 
 func listPendingExposureBucketingAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

@@ -62,7 +62,7 @@ func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func forwardAdditionalFilesConfig() additionalfiles.Config {
-	return additionalfiles.Config{
+	return withForwardCrossStage(additionalfiles.Config{
 		Module:                "fx-forward",
 		AuditSource:           "FX_FORWARD",
 		AuditTableName:        fxAdditionalFileAuditTable,
@@ -75,7 +75,7 @@ func forwardAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteForwardAdditionalFile,
 		SoftDeleteTx:          deleteForwardAdditionalFileTx,
 		RecordMainUploadAudit: recordForwardMainUploadAudit,
-	}
+	})
 }
 
 func recordForwardMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {

@@ -51,7 +51,7 @@ func RejectExposureBucketingAdditionalFileDeleteHandler(pool *pgxpool.Pool) http
 }
 
 func exposureBucketingAdditionalFilesConfig() additionalfiles.Config {
-	return additionalfiles.Config{
+	return withExposureCrossStage(additionalfiles.Config{
 		Module:                "fx-exposure-bucketing",
 		AuditSource:           "FX_EXPOSURE_BUCKETING",
 		AuditTableName:        fxAdditionalFileAuditTable,
@@ -64,7 +64,7 @@ func exposureBucketingAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteExposureBucketingAdditionalFile,
 		SoftDeleteTx:          deleteExposureBucketingAdditionalFileTx,
 		RecordMainUploadAudit: recordExposureBucketingMainUploadAudit,
-	}
+	})
 }
 
 func recordExposureBucketingMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
