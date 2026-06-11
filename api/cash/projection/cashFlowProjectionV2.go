@@ -198,6 +198,7 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT action_type, processing_status
 				FROM cimplrcorpsaas.audit_action_cashflow_proposal
 				WHERE proposal_id = $1
+				  AND action_type IN ('CREATE', 'EDIT', 'DELETE')
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, proposalID).Scan(&latestActionType, &latestStatus)
@@ -283,7 +284,8 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 			SELECT DISTINCT ON (proposal_id) 
 				action_id, proposal_id, processing_status 
 			FROM cimplrcorpsaas.audit_action_cashflow_proposal 
-			WHERE proposal_id = ANY($1) 
+			WHERE proposal_id = ANY($1)
+			  AND action_type IN ('CREATE', 'EDIT', 'DELETE')
 			ORDER BY proposal_id, requested_at DESC, action_id DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
@@ -429,7 +431,8 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 			SELECT DISTINCT ON (proposal_id) 
 				action_id, proposal_id, action_type, processing_status 
 			FROM cimplrcorpsaas.audit_action_cashflow_proposal 
-			WHERE proposal_id = ANY($1) 
+			WHERE proposal_id = ANY($1)
+			  AND action_type IN ('CREATE', 'EDIT', 'DELETE')
 			ORDER BY proposal_id, requested_at DESC, action_id DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
@@ -799,7 +802,8 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM cimplrcorpsaas.audit_action_cashflow_proposal a2
 				WHERE a2.proposal_id = p.proposal_id
-				ORDER BY requested_at DESC
+				  AND a2.action_type IN ('CREATE', 'EDIT', 'DELETE')
+				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) a ON TRUE
 			WHERE p.proposal_id = $1
@@ -1057,12 +1061,13 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM cimplrcorpsaas.audit_action_cashflow_proposal a2
 				WHERE a2.proposal_id = p.proposal_id
+				  AND a2.action_type IN ('CREATE', 'EDIT', 'DELETE')
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) a ON TRUE
 			WHERE COALESCE(p.is_deleted, false) = false
 			GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, p.upload_s3_key, a.processing_status
-			ORDER BY COALESCE((SELECT GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = p.proposal_id ORDER BY requested_at DESC, action_id DESC LIMIT 1), '1970-01-01'::timestamp) DESC
+			ORDER BY COALESCE((SELECT GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = p.proposal_id AND action_type IN ('CREATE', 'EDIT', 'DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1), '1970-01-01'::timestamp) DESC
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
