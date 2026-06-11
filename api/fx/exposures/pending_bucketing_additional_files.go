@@ -27,6 +27,13 @@ func DownloadSelectedPendingExposureBucketingAdditionalFilesHandler(pool *pgxpoo
 	return additionalfiles.NewDownloadSelectedHandler(pool, pendingExposureBucketingAdditionalFilesConfig())
 }
 
+func DownloadPendingExposureBucketingPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, pendingExposureBucketingAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "FX Pending Exposure Bucketing",
+		IDField:     "exposure_header_id",
+	})
+}
+
 func DeletePendingExposureBucketingAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, pendingExposureBucketingAdditionalFilesConfig())
 }

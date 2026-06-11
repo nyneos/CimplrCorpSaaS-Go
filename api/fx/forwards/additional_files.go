@@ -37,6 +37,14 @@ func DownloadSelectedAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc
 	return additionalfiles.NewDownloadSelectedHandler(pool, forwardAdditionalFilesConfig())
 }
 
+func DownloadForwardPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, forwardAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "FX Forwards",
+		IDField:     "system_transaction_id",
+		LoadMain:    loadForwardMainPackageFile,
+	})
+}
+
 func DeleteAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, forwardAdditionalFilesConfig())
 }
@@ -72,6 +80,24 @@ func forwardAdditionalFilesConfig() additionalfiles.Config {
 
 func recordForwardMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionforwardbooking", "system_transaction_id", "actiontype", parentID, payload)
+}
+
+func loadForwardMainPackageFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+	names, err := forwardEntityNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var uploadS3Key string
+	err = pool.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(confirmation_upload_s3_key, ''), NULLIF(upload_s3_key, ''), '')
+		FROM public.forward_bookings
+		WHERE system_transaction_id = $1
+		  AND LOWER(TRIM(entity_level_0)) = ANY($2)
+	`, rowID, names).Scan(&uploadS3Key)
+	if err != nil || strings.TrimSpace(uploadS3Key) == "" {
+		return nil, err
+	}
+	return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
 }
 
 func listForwardAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {
