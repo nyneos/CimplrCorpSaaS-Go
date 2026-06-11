@@ -450,16 +450,25 @@ func loadApprovedTDSPlans(ctx context.Context, db *pgxpool.Pool) ([]map[string]s
 
 func loadApprovedBankConfigs(ctx context.Context, db *pgxpool.Pool) ([]map[string]string, error) {
 	query := `
-		WITH latest_approved AS (
-			SELECT DISTINCT ON (config_id) config_id, processing_status
+		WITH latest_approved_delete AS (
+			SELECT DISTINCT ON (config_id) config_id, action_type
 			FROM investment.fd_audit_bank_config
-			WHERE processing_status = 'APPROVED' AND action_type IN ('CREATE','EDIT','DELETE')
+			WHERE processing_status = 'APPROVED' AND action_type = 'DELETE'
 			ORDER BY config_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
 		)
-		SELECT m.config_id, m.bank_code, m.product_type
+		SELECT COALESCE(m.config_id,''), COALESCE(m.bank_code,''), COALESCE(m.product_type,'')
 		FROM investment.fd_bank_config_master m
-		JOIN latest_approved l ON l.config_id = m.config_id
-		WHERE m.is_active = true AND COALESCE(m.is_deleted, false) = false
+		LEFT JOIN latest_approved_delete d ON d.config_id = m.config_id
+		WHERE m.is_active = true
+		  AND COALESCE(m.is_deleted, false) = false
+		  AND d.config_id IS NULL
+		  AND EXISTS (
+		  	SELECT 1
+		  	FROM investment.fd_audit_bank_config a
+		  	WHERE a.config_id = m.config_id
+		  	  AND a.processing_status = 'APPROVED'
+		  	  AND a.action_type IN ('CREATE','EDIT')
+		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -470,7 +479,12 @@ func loadApprovedBankConfigs(ctx context.Context, db *pgxpool.Pool) ([]map[strin
 	for rows.Next() {
 		var id, code, pt string
 		if err := rows.Scan(&id, &code, &pt); err == nil {
-			res = append(res, map[string]string{"config_id": id, "bank_code": code, "product_type": pt})
+			res = append(res, map[string]string{
+				"config_id":      id,
+				"bank_config_id": id,
+				"bank_code":      code,
+				"product_type":   pt,
+			})
 		}
 	}
 	return res, nil
