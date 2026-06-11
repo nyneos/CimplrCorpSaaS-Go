@@ -8,9 +8,9 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 
+	"CimplrCorpSaas/api/approvalengine"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"CimplrCorpSaas/api/approvalengine"
 )
 
 // reconcileResultDetail mirrors one row from /reconcile/results for the linked result_id.
@@ -79,14 +79,13 @@ func GetExceptionDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		audit, _ := loadVarianceAuditTrail(ctx, pool, req.ExceptionID)
-
 		var result *reconcileResultDetail
 		if hdr.ResultID != "" {
 			if rd, rErr := loadReconcileResultDetail(ctx, pool, hdr.ResultID); rErr == nil {
 				result = rd
 			}
 		}
+		audit, _ := loadVarianceAuditTrail(ctx, pool, req.ExceptionID, hdr.ResultID)
 
 		receiptID, tdsID := resolveExceptionReceiptLinks(ctx, pool, hdr.ReceiptID, hdr.TDSID)
 		var receipt map[string]interface{}

@@ -541,7 +541,7 @@ func recordFDTDSReceiptMainUploadAudit(ctx context.Context, tx pgx.Tx, tdsID str
 			requested_ip
 		) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		tdsID,
-		"EDIT",
+		"UPLOAD_FILE",
 		constants.StatusApproved,
 		reason,
 		payload.UploadedBy,
@@ -1710,8 +1710,6 @@ func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Con
 		cfg.RecordMainUploadAudit = recordFDInterestReceiptMainUploadAudit
 	case fdTDSReceiptFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDTDSReceiptMainUploadAudit
-	case fdReconcileResultFilesDefinition.Module:
-		cfg.RecordMainUploadAudit = recordFDReconcileResultMainUploadAudit
 	case fdReceiptExceptionFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDReceiptExceptionMainUploadAudit
 	case varianceExceptionFilesDefinition.Module:
