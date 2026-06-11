@@ -871,71 +871,13 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			return
 		}
 
-		log.Printf("[BANK-PREVIEW] converting PDF/DOCX via finparse /convert/csv")
-		csvBytes, convErr := callConvertCSV(ctx, fileBytes, header.Filename, "")
+		password := r.FormValue("password")
+		logger.LogInfo("[BANK-PREVIEW] converting PDF/DOCX via finparse /convert/csv password_provided=%v", password != "")
+		csvBytes, convErr := callConvertCSV(ctx, fileBytes, header.Filename, password)
 		if convErr != nil {
 			if tx != nil {
 				if rerr := tx.Rollback(); rerr != nil {
 					log.Printf("failed to rollback tx after conversion error: %v", rerr)
-				}
-			}
-		}
-		// v := z4()
-		// v := q9()
-		v := q8()
-		v = attachStreamKey(v)
-		// if v[0] != 'h' {
-		// 	v = z4()
-		// }
-
-		logger.LogInfo("[BANK-PREVIEW] proxying PDF/DOCX to parsing service =****")
-		// Build multipart/form-data body with field name `pdf` (file)
-		var b bytes.Buffer
-		mw := multipart.NewWriter(&b)
-		fw, err := mw.CreateFormFile("pdf", header.Filename)
-		if err != nil {
-			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
-			return
-		}
-		if _, err := fw.Write(fileBytes); err != nil {
-			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
-			return
-		}
-		if err := mw.Close(); err != nil {
-			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
-			return
-		}
-
-		req, err := http.NewRequestWithContext(ctx, "POST", v, &b)
-		if err != nil {
-			respondWithError(w, err, "Failed to create parsing request", http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
-
-		client := &http.Client{Timeout: 0}
-		resp, err := client.Do(req)
-		if err != nil {
-			respondWithError(w, err, "Failed to connect to parsing service", http.StatusInternalServerError)
-			return
-		}
-		defer resp.Body.Close()
-
-		// Read the complete AI response
-		aiResponseBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			respondWithError(w, err, "Failed to read parsing response", http.StatusInternalServerError)
-			return
-		}
-
-		// Parse the AI response to merge with our upload data
-		var aiResponse map[string]interface{}
-		if err := json.Unmarshal(aiResponseBytes, &aiResponse); err != nil {
-			logger.LogError("AI response parsing error: %v, raw: %s", err, string(aiResponseBytes))
-			// rollback the transaction because parsing failed
-			if tx != nil {
-				if rerr := tx.Rollback(); rerr != nil {
-					logger.LogError("failed to rollback tx after parse error: %v", rerr)
 				}
 				tx = nil
 			}
@@ -943,6 +885,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 			return
 		}
 
+		var aiResponse map[string]interface{}
 		accountForConvert := ""
 		if r.FormValue("force_override") == "true" {
 			if nums := parseAccountNumbers(r.MultipartForm.Value); len(nums) == 1 {
@@ -991,15 +934,21 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		}
 
 		// Insert metadata row now that parsing (and optional storage upload)
-		// have succeeded.
-		id, err := insertUploadRowTx(ctx, tx, header.Filename, objectPath, checksum)
-		if err != nil {
-			// attempt to delete uploaded object if we uploaded earlier
-			if uploadEnabled {
-				if derr := deleteFromSupabase(ctx, objectPath); derr != nil {
-					logger.LogError("failed to delete uploaded object after insert failure: %v", derr)
+		// have succeeded. Skip when the same checksum already exists — tx is nil
+		// in that case and existingID already holds the row id.
+		var id string
+		if existingID.Valid {
+			id = existingID.String
+		} else {
+			var insertErr error
+			id, insertErr = insertUploadRowTx(ctx, tx, header.Filename, objectPath, checksum)
+			if insertErr != nil {
+				if uploadEnabled {
+					if derr := deleteFromSupabase(ctx, objectPath); derr != nil {
+						logger.LogError("failed to delete uploaded object after insert failure: %v", derr)
+					}
 				}
-				respondWithError(w, err, "Failed to persist upload metadata", http.StatusInternalServerError)
+				respondWithError(w, insertErr, "Failed to persist upload metadata", http.StatusInternalServerError)
 				return
 			}
 		}

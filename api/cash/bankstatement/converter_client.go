@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -94,7 +93,7 @@ func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, passwor
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
-	log.Printf("[svc] raw response status=%d body=%s", resp.StatusCode, string(raw))
+	logger.LogInfo("[svc] raw response status=%d body=%s", resp.StatusCode, string(raw))
 
 	var result convertSvcResponse
 	if err := json.Unmarshal(raw, &result); err != nil {
@@ -140,6 +139,7 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes 
 // When accountOverride is set (forced single account from the upload form), the multi-account
 // split path is skipped so preview and staging resolve the same master row as CSV/XLS uploads.
 func BuildPreviewResponsesFromCSVBytes(ctx context.Context, db *sql.DB, csvBytes []byte, filename string, accountOverride string) ([]map[string]interface{}, error) {
+	logger.LogInfo("[CSV-RAW] filename=%s size=%d content=\n%s", filename, len(csvBytes), string(csvBytes))
 	csvFilename := filename
 	if !strings.HasSuffix(strings.ToLower(csvFilename), ".csv") {
 		noExt := strings.TrimSuffix(csvFilename, ".pdf")
@@ -232,7 +232,7 @@ func buildPreviewResponseFromTxnMaps(txns []map[string]interface{}, csvBytes []b
 
 	return map[string]interface{}{
 		"clean":  clean,
-		"status": "preview",
+		"status": "complete",
 	}
 }
 
@@ -322,7 +322,7 @@ func extractLabelledBalance(data []byte, labels []string) *float64 {
 			for _, lbl := range labels {
 				if strings.Contains(norm, lbl) {
 					for j := i + 1; j < len(row); j++ {
-						if val, err := parseAmount(row[j]); err == nil && val > 0 {
+						if val, err := parseAmount(cleanAmount(row[j])); err == nil {
 							v := val
 							return &v
 						}

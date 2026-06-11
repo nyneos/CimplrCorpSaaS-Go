@@ -2,6 +2,7 @@ package bankstatement
 
 import (
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/logger"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -620,6 +621,19 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		colIdx[strings.TrimSpace(col)] = idx
 	}
 
+	// LLM column layout detection — overwrite base mapping with semantically identified columns
+	if layout, llmErr := extractColumnLayoutWithLLM(ctx, rows); llmErr == nil {
+		if layout.HeaderRowIndex != txnHeaderIdx {
+			logger.LogInfo("[PREVIEW-DEBUG] manual txnHeaderIdx=%d but LLM says header_row=%d — using LLM row for dataRows", txnHeaderIdx, layout.HeaderRowIndex)
+			txnHeaderIdx = layout.HeaderRowIndex
+			headerRow = rows[txnHeaderIdx]
+		}
+		for k, v := range layout.toColIdx() {
+			colIdx[k] = v
+		}
+	}
+	logger.LogInfo("[PREVIEW-DEBUG] txnHeaderIdx=%d total_rows=%d data_rows_to_parse=%d", txnHeaderIdx, len(rows), len(rows)-txnHeaderIdx-1)
+
 	// Apply custom mappings if provided
 	if mappings != nil {
 		if mappings.TranID != "" {
@@ -736,6 +750,18 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			colIdx[constants.TranID] = idx
 		}
 	}
+	// CrDr indicator column — used when statement has a single Amount column
+	if _, ok := colIdx["CrDr"]; !ok {
+		for idx, colName := range headerRow {
+			lc := strings.ToLower(strings.TrimSpace(colName))
+			if strings.Contains(lc, "cr/dr") || strings.Contains(lc, "crdr") ||
+				strings.Contains(lc, "dr/cr") || lc == "cr" || lc == "dr" ||
+				strings.Contains(lc, "credit/debit") || strings.Contains(lc, "debit/credit") {
+				colIdx["CrDr"] = idx
+				break
+			}
+		}
+	}
 	// Parse transactions
 	transactions := []map[string]interface{}{}
 	previewRowNum := txnHeaderIdx
@@ -761,6 +787,34 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 
 	dataRows := rows[txnHeaderIdx+1:]
 	dataRows = MergeMultiLineDescriptions(dataRows, mergeDateIdx, mergeDescIdx)
+
+	// Detect newest-first ordering (e.g. PNB) and reverse so processing is always oldest-first.
+	if mergeDateIdx >= 0 {
+		var first, last time.Time
+		for _, r := range dataRows {
+			if mergeDateIdx < len(r) {
+				if t, err := parseDate(strings.TrimSpace(r[mergeDateIdx])); err == nil && !t.IsZero() {
+					first = t
+					break
+				}
+			}
+		}
+		for i := len(dataRows) - 1; i >= 0; i-- {
+			r := dataRows[i]
+			if mergeDateIdx < len(r) {
+				if t, err := parseDate(strings.TrimSpace(r[mergeDateIdx])); err == nil && !t.IsZero() {
+					last = t
+					break
+				}
+			}
+		}
+		if !first.IsZero() && !last.IsZero() && first.After(last) {
+			logger.LogInfo("[PREVIEW] detected reverse row order (first=%s last=%s) — reversing", first.Format("2006-01-02"), last.Format("2006-01-02"))
+			for i, j := 0, len(dataRows)-1; i < j; i, j = i+1, j-1 {
+				dataRows[i], dataRows[j] = dataRows[j], dataRows[i]
+			}
+		}
+	}
 
 	var prevStmtBalance float64
 	var prevStmtBalanceOK bool
@@ -906,38 +960,121 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		}
 		txn["tran_id"] = tranIDStr
 
-		// Amounts
+		// Amounts — handle both separate Withdrawal/Deposit columns and single Amount+CrDr format
 		var withdrawal, deposit sql.NullFloat64
+		txn["withdrawal_amount"] = 0
+		txn["deposit_amount"] = 0
 
-		if idx, ok := colIdx[constants.WithdrawalAmountINR]; ok && idx < len(row) {
-			if val, err := parseAmount(row[idx]); err == nil && val > 0 {
-				withdrawal = sql.NullFloat64{Float64: val, Valid: true}
-				txn["withdrawal_amount"] = val
-			} else {
-				txn["withdrawal_amount"] = 0
-			}
-		} else {
-			txn["withdrawal_amount"] = 0
+		idxW, okW := colIdx[constants.WithdrawalAmountINR]
+		idxD, okD := colIdx[constants.DepositAmountINR]
+		idxCrDr, okCrDr := colIdx["CrDr"]
+
+		// Resolve single-amount column index: same col for both, or only one side detected.
+		singleAmtIdx := -1
+		if okW && okD && idxW == idxD {
+			singleAmtIdx = idxW
+		} else if okW && !okD {
+			singleAmtIdx = idxW
+		} else if okD && !okW {
+			singleAmtIdx = idxD
 		}
 
-		if idx, ok := colIdx[constants.DepositAmountINR]; ok && idx < len(row) {
-			if val, err := parseAmount(row[idx]); err == nil && val > 0 {
-				deposit = sql.NullFloat64{Float64: val, Valid: true}
-				txn["deposit_amount"] = val
-			} else {
-				txn["deposit_amount"] = 0
+		// Per-row column shift: some PDF converters insert an extra empty column at page
+		// boundaries (e.g. Canara Bank page 3 gets 9 cols vs 8 on other pages).
+		// Use the parsed header row length as the canonical column count; if this data row
+		// is wider AND the column after the mapped balance position holds a non-zero number,
+		// shift all financial reads by +1 for this row.
+		colShift := 0
+		if len(row) > len(headerRow) {
+			if idxBal, ok := colIdx[constants.BalanceINR]; ok && idxBal+1 < len(row) {
+				// Check non-empty string first: parseAmount("") returns (0,nil) so a
+				// bare empty-string check would always trigger. "-0.00" == 0.0 in
+				// floating point, so val!=0 would miss a genuine zero balance.
+				balNext := strings.TrimSpace(cleanAmount(row[idxBal+1]))
+				if balNext != "" {
+					if _, err := parseAmount(balNext); err == nil {
+						colShift = 1
+						logger.LogInfo("[col-shift] row=%d len=%d headerLen=%d shift=+1", previewRowNum, len(row), len(headerRow))
+					}
+				}
+			}
+		}
+		// rowAt reads a logical column index with the per-row shift applied.
+		rowAt := func(idx int) string {
+			i := idx + colShift
+			if i >= 0 && i < len(row) {
+				return row[i]
+			}
+			return ""
+		}
+
+		if singleAmtIdx >= 0 && okCrDr && idxCrDr >= 0 && idxCrDr+colShift < len(row) {
+			// Single amount column with Dr/Cr indicator
+			crdr := strings.ToLower(strings.TrimSpace(rowAt(idxCrDr)))
+			if val, err := parseAmount(cleanAmount(rowAt(singleAmtIdx))); err == nil && val > 0 {
+				if strings.HasPrefix(crdr, "cr") || strings.Contains(crdr, "credit") {
+					deposit = sql.NullFloat64{Float64: val, Valid: true}
+					txn["deposit_amount"] = val
+				} else if strings.HasPrefix(crdr, "dr") || strings.Contains(crdr, "debit") {
+					withdrawal = sql.NullFloat64{Float64: val, Valid: true}
+					txn["withdrawal_amount"] = val
+				}
+			}
+		} else if singleAmtIdx >= 0 {
+			// Single amount column, no CrDr indicator — store amount temporarily as withdrawal;
+			// direction will be corrected below once the balance column is parsed.
+			if val, err := parseAmount(cleanAmount(rowAt(singleAmtIdx))); err == nil && val > 0 {
+				withdrawal = sql.NullFloat64{Float64: val, Valid: true}
+				txn["withdrawal_amount"] = val
 			}
 		} else {
-			txn["deposit_amount"] = 0
+			// Truly separate withdrawal / deposit columns
+			if okW {
+				if val, err := parseAmount(cleanAmount(rowAt(idxW))); err == nil && val > 0 {
+					withdrawal = sql.NullFloat64{Float64: val, Valid: true}
+					txn["withdrawal_amount"] = val
+				}
+			}
+			if okD {
+				if val, err := parseAmount(cleanAmount(rowAt(idxD))); err == nil && val > 0 {
+					deposit = sql.NullFloat64{Float64: val, Valid: true}
+					txn["deposit_amount"] = val
+				}
+			}
 		}
 
 		var curBal float64
 		var curBalOK bool
-		if idx, ok := colIdx[constants.BalanceINR]; ok && idx < len(row) {
-			if val, err := parseAmount(row[idx]); err == nil {
+		if idxBal, ok := colIdx[constants.BalanceINR]; ok {
+			if val, err := parseAmount(cleanAmount(rowAt(idxBal))); err == nil {
 				txn["balance"] = val
 				curBal = val
 				curBalOK = true
+			}
+		}
+
+		// Temporary per-row debug log — remove once Canara Bank parsing is confirmed correct
+		logger.LogInfo("[ROW-DBG] row=%d len=%d shift=%d rawW=%q rawD=%q rawBal=%q w=%.2f d=%.2f bal=%.2f",
+			previewRowNum, len(row), colShift,
+			func() string { if idxW, ok := colIdx[constants.WithdrawalAmountINR]; ok && idxW < len(row) { return row[idxW] }; return "" }(),
+			func() string { if idxD, ok := colIdx[constants.DepositAmountINR]; ok && idxD < len(row) { return row[idxD] }; return "" }(),
+			func() string { if idxB, ok := colIdx[constants.BalanceINR]; ok && idxB < len(row) { return row[idxB] }; return "" }(),
+			func() float64 { v, _ := txn["withdrawal_amount"].(float64); return v }(),
+			func() float64 { v, _ := txn["deposit_amount"].(float64); return v }(),
+			curBal,
+		)
+
+		// Balance-direction flip: for single-amount columns without a CrDr indicator,
+		// use the running balance change to determine whether the transaction is a debit or credit.
+		// prevStmtBalance is 0 when not yet set, which is correct for statements starting at 0.
+		if singleAmtIdx >= 0 && !okCrDr && curBalOK {
+			w, _ := txn["withdrawal_amount"].(float64)
+			if w > 0 && curBal > prevStmtBalance+0.005 {
+				// Balance went UP — flip to deposit
+				txn["deposit_amount"] = w
+				txn["withdrawal_amount"] = 0
+				deposit = sql.NullFloat64{Float64: w, Valid: true}
+				withdrawal = sql.NullFloat64{}
 			}
 		}
 
@@ -1305,7 +1442,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 		var withdrawal, deposit sql.NullFloat64
 
 		if debitIdx >= 0 && debitIdx < len(row) {
-			if val, err := parseAmount(row[debitIdx]); err == nil && val > 0 {
+			if val, err := parseAmount(cleanAmount(row[debitIdx])); err == nil && val > 0 {
 				withdrawal = sql.NullFloat64{Float64: val, Valid: true}
 				txn["withdrawal_amount"] = val
 			} else {
@@ -1316,7 +1453,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 		}
 
 		if creditIdx >= 0 && creditIdx < len(row) {
-			if val, err := parseAmount(row[creditIdx]); err == nil && val > 0 {
+			if val, err := parseAmount(cleanAmount(row[creditIdx])); err == nil && val > 0 {
 				deposit = sql.NullFloat64{Float64: val, Valid: true}
 				txn["deposit_amount"] = val
 			} else {
@@ -1327,7 +1464,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 		}
 
 		if balanceIdx >= 0 && balanceIdx < len(row) {
-			if val, err := parseAmount(row[balanceIdx]); err == nil {
+			if val, err := parseAmount(cleanAmount(row[balanceIdx])); err == nil {
 				txn["balance"] = val
 			}
 		}

@@ -52,6 +52,9 @@ func StartCashService(db *sql.DB, port string) {
 	if err := pgxPool.Ping(pingCtx); err != nil {
 		logger.LogError("failed to verify pgxpool DB connectivity at startup: %v", err)
 	}
+	// LLM extraction test — no DB, no auth required on data, safe to call manually
+	mux.Handle("/cash/bank-statement/llm-extract", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.LLMExtractTestHandler()))
+
 	mux.Handle("/cash/upload-bank-statement", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV2Handler(db, pgxPool)))
 	mux.Handle("/cash/upload-bank-statement-zip", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadZippedBankStatementsHandler(db, pgxPool)))
 

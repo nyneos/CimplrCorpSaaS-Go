@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -223,6 +224,20 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					}
 				}
 			}
+		}
+	}
+
+	// Strategy 3: LLM extraction — try before falling through to manual label/regex scan.
+	// Fails silently (logs and moves on) if the inference service is not configured or unavailable.
+	if accountNumber == "" {
+		if info, llmErr := extractAccountInfoWithLLM(ctx, rows); llmErr == nil && info.AccountNumber != "" {
+			accountNumber = info.AccountNumber
+			if accountName == "" {
+				accountName = info.AccountName
+			}
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM extracted accountNumber=%q accountName=%q", accountNumber, accountName)
+		} else if llmErr != nil {
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM account extraction skipped or failed: %v", llmErr)
 		}
 	}
 
@@ -677,22 +692,41 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	var sampleNumericColumn func(int) bool
 	var findAmountLikeCSV func() int
 	var findDebitCreditCols func() (int, int)
+
+	// LLM column layout detection — seeds txnHeaderIdx and semantic colIdx keys.
+	// Manual detection below runs only when LLM fails or is not configured.
+	llmHeaderIdx := -1
+	llmColMap := map[string]int{}
+	if layout, llmErr := extractColumnLayoutWithLLM(ctx, rows); llmErr == nil {
+		llmHeaderIdx = layout.HeaderRowIndex
+		llmColMap = layout.toColIdx()
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM column layout: header_row=%d cols=%v", llmHeaderIdx, llmColMap)
+	} else {
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM column layout skipped or failed: %v", llmErr)
+	}
+
 	if isCSV {
+		// Seed from LLM result if available; manual scan only runs when LLM failed.
+		if llmHeaderIdx >= 0 {
+			txnHeaderIdx = llmHeaderIdx
+		}
 		// For CSV, header often contains Date + Description (or Detail Description)
 		// and Debit/Credit (or Withdrawal/Deposit) columns. Try to find a row
 		// that looks like the transaction header instead of relying solely on
 		// a "Sl. No." column which many banks omit.
-		for i, row := range rows {
-			foundSl := false
-			for _, cell := range row {
-				if strings.EqualFold(strings.TrimSpace(cell), slNoHeader) {
-					txnHeaderIdx = i
-					foundSl = true
+		if txnHeaderIdx == -1 {
+			for i, row := range rows {
+				foundSl := false
+				for _, cell := range row {
+					if strings.EqualFold(strings.TrimSpace(cell), slNoHeader) {
+						txnHeaderIdx = i
+						foundSl = true
+						break
+					}
+				}
+				if foundSl {
 					break
 				}
-			}
-			if foundSl {
-				break
 			}
 		}
 		// If not found, look for a row that has Date and either Description or Debit/Credit columns
@@ -792,6 +826,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		for idx, col := range headerRow {
 			colIdx[strings.TrimSpace(col)] = idx
 		}
+
+		// LLM-detected semantic columns take priority — overwrite base mapping unconditionally.
+		// Alias expansion below only fills keys LLM left unset (returned as -1).
+		maps.Copy(colIdx, llmColMap)
 
 		// If custom mapping provided, apply mapping fields as overrides (partial mappings allowed)
 		if mappings != nil {
@@ -949,30 +987,31 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 			return best
 		}
-		// Force remap Description column: remove any auto-mapped description columns
-		// and explicitly set to Debit/Credit Ref if present
-		delete(colIdx, "Description")
-		delete(colIdx, "Detail Description")
+		// Force remap Description column only when LLM did not already identify it.
+		if _, hasLLMDesc := llmColMap["Description"]; !hasLLMDesc {
+			delete(colIdx, "Description")
+			delete(colIdx, "Detail Description")
 
-		// Special finder that INCLUDES ref columns (override the default findColContaining)
-		findDescriptionCol := func(keywords ...string) int {
-			for colName, idx := range colIdx {
-				lcName := strings.ToLower(colName)
-				for _, kw := range keywords {
-					if strings.Contains(lcName, strings.ToLower(kw)) {
-						return idx
+			// Special finder that INCLUDES ref columns (override the default findColContaining)
+			findDescriptionCol := func(keywords ...string) int {
+				for colName, idx := range colIdx {
+					lcName := strings.ToLower(colName)
+					for _, kw := range keywords {
+						if strings.Contains(lcName, strings.ToLower(kw)) {
+							return idx
+						}
 					}
 				}
+				return -1
 			}
-			return -1
-		}
 
-		if idx := findDescriptionCol(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
-			colIdx["Description"] = idx
-			logger.LogInfo("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Description", idx)
-		} else if idx := findColContaining("description", "remarks", "narration", "narrative", "particulars"); idx >= 0 {
-			colIdx["Description"] = idx
-			logger.LogInfo("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Description", idx)
+			if idx := findDescriptionCol(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
+				colIdx["Description"] = idx
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Description", idx)
+			} else if idx := findColContaining("description", "remarks", "narration", "narrative", "particulars"); idx >= 0 {
+				colIdx["Description"] = idx
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Description", idx)
+			}
 		}
 		if _, exists := colIdx["Date"]; !exists {
 			if idx := findColContaining("date"); idx >= 0 && !strings.Contains(strings.ToLower(headerRow[idx]), "value") {
@@ -1081,15 +1120,20 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		wIdx, dIdx := findDebitCreditCols()
 		logger.LogInfo("[BANK-UPLOAD-DEBUG] findDebitCreditCols returned: Withdrawal=%d, Deposit=%d", wIdx, dIdx)
 		logger.LogInfo("[BANK-UPLOAD-DEBUG] Headers: %v", headerRow)
+		// Only apply findDebitCreditCols result for columns LLM did not already identify.
 		if wIdx >= 0 {
-			logger.LogInfo("[BANK-UPLOAD-DEBUG] Setting Withdrawal to column %d (header: %s)", wIdx, headerRow[wIdx])
-			colIdx["Withdrawal"] = wIdx
-			colIdx[withdrawalAmtHeader] = wIdx
+			if _, ok := llmColMap["Withdrawal"]; !ok {
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Setting Withdrawal to column %d (header: %s)", wIdx, headerRow[wIdx])
+				colIdx["Withdrawal"] = wIdx
+				colIdx[withdrawalAmtHeader] = wIdx
+			}
 		}
 		if dIdx >= 0 {
-			logger.LogInfo("[BANK-UPLOAD-DEBUG] Setting Deposit to column %d (header: %s)", dIdx, headerRow[dIdx])
-			colIdx["Deposit"] = dIdx
-			colIdx[depositAmtHeader] = dIdx
+			if _, ok := llmColMap["Deposit"]; !ok {
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Setting Deposit to column %d (header: %s)", dIdx, headerRow[dIdx])
+				colIdx["Deposit"] = dIdx
+				colIdx[depositAmtHeader] = dIdx
+			}
 		}
 		logger.LogInfo("[BANK-UPLOAD-DEBUG] CSV Column mapping: Date=%d, Description=%d, Withdrawal=%d, Deposit=%d, Balance=%d",
 			colIdx["Date"], colIdx["Description"], colIdx["Withdrawal"], colIdx["Deposit"], colIdx["Balance"])
@@ -1114,19 +1158,25 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			return nil, errors.New("transaction header row not found in CSV file")
 		}
 	} else {
+		// Seed from LLM result if available; manual scan only runs when LLM failed.
+		if llmHeaderIdx >= 0 {
+			txnHeaderIdx = llmHeaderIdx
+		}
 		// For Excel/XLS, some statements don't include a constants.TranID column.
 		// Try the original Tran Id detection first, then fall back to a
 		// flexible detection similar to CSV: find a row that has Date and
 		// (Description-like column OR amount columns).
-		for i, row := range rows {
-			for _, cell := range row {
-				if cell == tranIDHeader || strings.EqualFold(strings.TrimSpace(cell), "Tran Id") {
-					txnHeaderIdx = i
+		if txnHeaderIdx == -1 {
+			for i, row := range rows {
+				for _, cell := range row {
+					if cell == tranIDHeader || strings.EqualFold(strings.TrimSpace(cell), "Tran Id") {
+						txnHeaderIdx = i
+						break
+					}
+				}
+				if txnHeaderIdx != -1 {
 					break
 				}
-			}
-			if txnHeaderIdx != -1 {
-				break
 			}
 		}
 		if txnHeaderIdx == -1 {
@@ -1167,6 +1217,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		for idx, col := range headerRow {
 			colIdx[strings.TrimSpace(col)] = idx
 		}
+
+		// LLM-detected semantic columns take priority — overwrite base mapping unconditionally.
+		// Alias expansion below only fills keys LLM left unset (returned as -1).
+		maps.Copy(colIdx, llmColMap)
 
 		// If custom mapping provided, apply mapping fields as overrides (partial mappings allowed)
 		if mappings != nil {
@@ -1359,9 +1413,11 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		// Prefer explicit amount-like column, but only if we don't have separate debit/credit columns
 		amountIdx = findAmountLike()
 
-		// Detect Cr/Dr indicator column (if present)
+		// Detect Cr/Dr indicator column only when LLM did not already identify it.
 		if crDrIdx = findCrDrLike(); crDrIdx >= 0 {
-			colIdx["CrDr"] = crDrIdx
+			if _, ok := llmColMap["CrDr"]; !ok {
+				colIdx["CrDr"] = crDrIdx
+			}
 		}
 
 		// First try to find separate withdrawal/deposit columns.
