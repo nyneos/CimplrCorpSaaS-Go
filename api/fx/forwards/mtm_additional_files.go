@@ -67,11 +67,16 @@ func mtmAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteMTMAdditionalFile,
 		SoftDeleteTx:          deleteMTMAdditionalFileTx,
 		RecordMainUploadAudit: recordMTMMainUploadAudit,
+		RecordMainDownloadAudit: recordMTMMainDownloadAudit,
 	})
 }
 
 func recordMTMMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionforwardmtm", "mtm_id", "actiontype", parentID, payload)
+}
+
+func recordMTMMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadRecord(ctx, exec, "public.auditactionforwardmtmdownloads", "mtm_id", parentID, payload, nil)
 }
 
 func loadMTMMainPackageFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {

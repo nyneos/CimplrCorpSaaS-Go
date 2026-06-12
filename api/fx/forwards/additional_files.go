@@ -75,11 +75,16 @@ func forwardAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteForwardAdditionalFile,
 		SoftDeleteTx:          deleteForwardAdditionalFileTx,
 		RecordMainUploadAudit: recordForwardMainUploadAudit,
+		RecordMainDownloadAudit: recordForwardMainDownloadAudit,
 	})
 }
 
 func recordForwardMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionforwardbooking", "system_transaction_id", "actiontype", parentID, payload)
+}
+
+func recordForwardMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadRecord(ctx, exec, "public.auditactionforwardbookingdownloads", "system_transaction_id", parentID, payload, map[string]string{"download_type": "BOOKING"})
 }
 
 func loadForwardMainPackageFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {

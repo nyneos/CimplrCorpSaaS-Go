@@ -68,6 +68,7 @@ type CreateInput struct {
 type MainUploadAuditPayload struct {
 	FileID      string    `json:"file_id,omitempty"`
 	FileName    string    `json:"file_name"`
+	UploadS3Key string    `json:"upload_s3_key,omitempty"`
 	UploadedBy  string    `json:"uploaded_by"`
 	UploadedAt  time.Time `json:"uploaded_at"`
 	RequestedIP string    `json:"requested_ip,omitempty"`
@@ -89,7 +90,7 @@ type Config struct {
 	SoftDelete              func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error)
 	SoftDeleteTx            func(ctx context.Context, tx pgx.Tx, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error)
 	RecordMainUploadAudit   func(ctx context.Context, tx pgx.Tx, parentID string, payload MainUploadAuditPayload) error
-	RecordMainDownloadAudit func(ctx context.Context, exec auditExecutor, parentID string, payload MainUploadAuditPayload) error
+	RecordMainDownloadAudit func(ctx context.Context, exec AuditExecutor, parentID string, payload MainUploadAuditPayload) error
 	RequireMainUploadAudit  bool
 	// AuditByFileIDOnly keys the file lifecycle (delete-approval state, audit trail,
 	// status enrichment) by file_id alone, ignoring module_key/parent_record_id. Use
@@ -150,7 +151,7 @@ type pendingDeleteState struct {
 	ProcessingStatus string
 }
 
-type auditExecutor interface {
+type AuditExecutor interface {
 	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
 }
 
@@ -311,6 +312,7 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			if err := recordMainDownloadAuditSafely(r.Context(), pool, cfg, parentID, MainUploadAuditPayload{
 				FileID:      strings.TrimSpace(record.FileID),
 				FileName:    strings.TrimSpace(record.StoredFileName),
+				UploadS3Key: strings.TrimSpace(record.UploadS3Key),
 				UploadedBy:  performedBy,
 				UploadedAt:  time.Now().UTC(),
 				RequestedIP: requestedIP,
@@ -391,6 +393,7 @@ func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc
 				if auditErr := recordMainDownloadAuditSafely(r.Context(), pool, cfg, parentID, MainUploadAuditPayload{
 					FileID:      strings.TrimSpace(record.FileID),
 					FileName:    strings.TrimSpace(record.StoredFileName),
+					UploadS3Key: strings.TrimSpace(record.UploadS3Key),
 					UploadedBy:  performedBy,
 					UploadedAt:  time.Now().UTC(),
 					RequestedIP: requestedIP,
@@ -981,7 +984,7 @@ func recordMainUploadAuditSafely(ctx context.Context, tx pgx.Tx, cfg Config, par
 	return savepoint.Commit(ctx)
 }
 
-func recordMainDownloadAuditSafely(ctx context.Context, exec auditExecutor, cfg Config, parentID string, payload MainUploadAuditPayload) error {
+func recordMainDownloadAuditSafely(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, payload MainUploadAuditPayload) error {
 	if cfg.RecordMainDownloadAudit == nil {
 		return nil
 	}
@@ -1164,7 +1167,7 @@ func enrichFilesWithAudit(ctx context.Context, pool *pgxpool.Pool, cfg Config, p
 	return files, nil
 }
 
-func recordCreateAuditTx(ctx context.Context, exec auditExecutor, cfg Config, parentID, fileID string, input CreateInput, requestedIP string) error {
+func recordCreateAuditTx(ctx context.Context, exec AuditExecutor, cfg Config, parentID, fileID string, input CreateInput, requestedIP string) error {
 	return insertAuditEvent(ctx, exec, cfg, fileAuditEvent{
 		EntityID:         fileID,
 		ModuleKey:        cfg.Module,
@@ -1178,7 +1181,7 @@ func recordCreateAuditTx(ctx context.Context, exec auditExecutor, cfg Config, pa
 	})
 }
 
-func recordDownloadAudit(ctx context.Context, exec auditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, requestedIP string) error {
+func recordDownloadAudit(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, requestedIP string) error {
 	requestedAt := time.Now().UTC()
 	reason, err := MainDownloadAuditReasonJSON(MainUploadAuditPayload{
 		FileID:     file.FileID,
@@ -1203,7 +1206,7 @@ func recordDownloadAudit(ctx context.Context, exec auditExecutor, cfg Config, pa
 	})
 }
 
-func recordDeleteRequestAudit(ctx context.Context, exec auditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, requestedIP, reason string) error {
+func recordDeleteRequestAudit(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, requestedIP, reason string) error {
 	requestedAt := time.Now().UTC()
 	return insertAuditEvent(ctx, exec, cfg, fileAuditEvent{
 		EntityID:         file.FileID,
@@ -1219,7 +1222,7 @@ func recordDeleteRequestAudit(ctx context.Context, exec auditExecutor, cfg Confi
 	})
 }
 
-func insertAuditEvent(ctx context.Context, exec auditExecutor, cfg Config, event fileAuditEvent) error {
+func insertAuditEvent(ctx context.Context, exec AuditExecutor, cfg Config, event fileAuditEvent) error {
 	query := `
 		INSERT INTO ` + auditTableName(cfg) + ` (
 			module_key,
@@ -1308,6 +1311,51 @@ func InsertMainUploadAudit(ctx context.Context, tx pgx.Tx, tableName, parentColu
 		actionColumn,
 	)
 	_, err = tx.Exec(ctx, query, parentID, "UPLOAD_FILE", fileAuditApprovedStatus, reason, payload.UploadedBy, payload.UploadedAt, nullIfBlank(payload.RequestedIP))
+	return err
+}
+
+func InsertMainDownloadAudit(ctx context.Context, exec AuditExecutor, tableName, parentColumn, actionColumn, parentID string, payload MainUploadAuditPayload) error {
+	reason, err := MainDownloadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	query := fmt.Sprintf(
+		`INSERT INTO %s (%s, %s, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		tableName,
+		parentColumn,
+		actionColumn,
+	)
+	_, err = exec.Exec(ctx, query, parentID, fileAuditDownloadAction, fileAuditApprovedStatus, reason, payload.UploadedBy, payload.UploadedAt, nullIfBlank(payload.RequestedIP))
+	return err
+}
+
+func InsertMainDownloadRecord(ctx context.Context, exec AuditExecutor, tableName, parentColumn, parentID string, payload MainUploadAuditPayload, extraColumns map[string]string) error {
+	columns := []string{parentColumn, "requested_by", "requested_at", "requested_ip", "file_name", "upload_s3_key"}
+	values := []string{"$1", "$2", "$3", "$4", "$5", "$6"}
+	args := []interface{}{
+		parentID,
+		strings.TrimSpace(payload.UploadedBy),
+		payload.UploadedAt,
+		nullIfBlank(payload.RequestedIP),
+		nullIfBlank(defaultString(payload.FileName, objectBaseName(payload.UploadS3Key))),
+		nullIfBlank(payload.UploadS3Key),
+	}
+
+	next := 7
+	for column, value := range extraColumns {
+		column = strings.TrimSpace(column)
+		if column == "" {
+			continue
+		}
+		columns = append(columns, column)
+		values = append(values, fmt.Sprintf("$%d", next))
+		args = append(args, strings.TrimSpace(value))
+		next++
+	}
+
+	query := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s)`, tableName, strings.Join(columns, ", "), strings.Join(values, ", "))
+	_, err := exec.Exec(ctx, query, args...)
 	return err
 }
 
@@ -1493,7 +1541,7 @@ type deleteAuditDecisionParams struct {
 	CheckerComment string
 }
 
-func updateDeleteAuditDecision(ctx context.Context, exec auditExecutor, cfg Config, p deleteAuditDecisionParams) error {
+func updateDeleteAuditDecision(ctx context.Context, exec AuditExecutor, cfg Config, p deleteAuditDecisionParams) error {
 	auditID := p.AuditID
 	nextStatus := p.NextStatus
 	checkerBy := p.CheckerBy

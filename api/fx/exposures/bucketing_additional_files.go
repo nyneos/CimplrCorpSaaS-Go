@@ -64,11 +64,16 @@ func exposureBucketingAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteExposureBucketingAdditionalFile,
 		SoftDeleteTx:          deleteExposureBucketingAdditionalFileTx,
 		RecordMainUploadAudit: recordExposureBucketingMainUploadAudit,
+		RecordMainDownloadAudit: recordExposureBucketingMainDownloadAudit,
 	})
 }
 
 func recordExposureBucketingMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionexposurebucketing", "exposure_header_id", "actiontype", parentID, payload)
+}
+
+func recordExposureBucketingMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadAudit(ctx, exec, "public.auditactionexposurebucketing", "exposure_header_id", "actiontype", parentID, payload)
 }
 
 func listExposureBucketingAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

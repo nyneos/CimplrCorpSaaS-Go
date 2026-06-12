@@ -64,6 +64,7 @@ func pendingExposureBucketingAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deletePendingExposureBucketingAdditionalFile,
 		SoftDeleteTx:          deletePendingExposureBucketingAdditionalFileTx,
 		RecordMainUploadAudit: recordExposureBucketingMainUploadAudit,
+		RecordMainDownloadAudit: recordExposureBucketingMainDownloadAudit,
 	})
 }
 

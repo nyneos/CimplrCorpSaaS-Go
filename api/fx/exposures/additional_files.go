@@ -75,11 +75,16 @@ func exposureAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteExposureAdditionalFile,
 		SoftDeleteTx:          deleteExposureAdditionalFileTx,
 		RecordMainUploadAudit: recordExposureMainUploadAudit,
+		RecordMainDownloadAudit: recordExposureMainDownloadAudit,
 	})
 }
 
 func recordExposureMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionexposure", "exposure_header_id", "actiontype", parentID, payload)
+}
+
+func recordExposureMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadRecord(ctx, exec, "public.auditactionexposuredownloads", "exposure_header_id", parentID, payload, nil)
 }
 
 func loadExposureMainPackageFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
