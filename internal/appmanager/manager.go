@@ -153,6 +153,15 @@ func (am *AppManager) StartAll() error {
 	am.mu.Lock()
 	defer am.mu.Unlock()
 
+	started := make([]serviceiface.Service, 0, len(am.services))
+	stopStarted := func() {
+		for i := len(started) - 1; i >= 0; i-- {
+			if err := started[i].Stop(); err != nil {
+				logger.LogError("failed to rollback started service %s: %v", started[i].Name(), err)
+			}
+		}
+	}
+
 	// First pass: start all except Resourcemanager
 	for _, service := range am.services {
 		if service.Name() == "resourcemanager" {
@@ -160,8 +169,10 @@ func (am *AppManager) StartAll() error {
 		}
 		fmt.Println("Starting service:", service.Name())
 		if err := service.Start(); err != nil {
+			stopStarted()
 			return fmt.Errorf("failed to start service %s: %w", service.Name(), err)
 		}
+		started = append(started, service)
 	}
 
 	// Now start resourcemanager (after heartbeat is wired)
@@ -169,8 +180,10 @@ func (am *AppManager) StartAll() error {
 		if service.Name() == "resourcemanager" {
 			fmt.Println("Starting service:", service.Name())
 			if err := service.Start(); err != nil {
+				stopStarted()
 				return fmt.Errorf("failed to start service %s: %w", service.Name(), err)
 			}
+			started = append(started, service)
 		}
 	}
 	return nil

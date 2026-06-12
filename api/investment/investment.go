@@ -26,7 +26,7 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
-func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
+func NewInvestmentServer(pool *pgxpool.Pool, db *sql.DB, port string) *http.Server {
 	const serviceName = "investment"
 	mux := http.NewServeMux()
 
@@ -426,9 +426,17 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	// mux.HandleFunc("/investment/portfolio", portfolioHandler)
 	// mux.HandleFunc("/investment/schemes", schemesHandler)
 
+	return &http.Server{
+		Addr:    ":" + port,
+		Handler: observability.WrapHTTP(serviceName, mux),
+	}
+}
+
+func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
+	server := NewInvestmentServer(pool, db, port)
+
 	logger.LogInfo("Investment Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
-	if err != nil {
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.LogError("Investment service failed: %v", err)
 	}
 }

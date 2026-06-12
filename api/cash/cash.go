@@ -26,7 +26,7 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
-func StartCashService(db *sql.DB, port string) {
+func NewCashServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, error) {
 	const serviceName = "cash"
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
@@ -42,10 +42,8 @@ func StartCashService(db *sql.DB, port string) {
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 
-		logger.LogError("failed to connect to pgxpool DB: %v", err)
-		return
+		return nil, nil, fmt.Errorf("failed to connect to pgxpool DB: %w", err)
 	}
-	defer pgxPool.Close()
 
 	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -353,9 +351,24 @@ func StartCashService(db *sql.DB, port string) {
 		w.Write([]byte("Cash Service is active"))
 	})
 	mux.Handle("/cash/metrics", observability.MetricsHandler(serviceName))
-	logger.LogInfo("Cash Service started on :%s", port)
-	err = http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, cashJSONActionResponses(mux)))
+
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: observability.WrapHTTP(serviceName, cashJSONActionResponses(mux)),
+	}
+	return server, pgxPool, nil
+}
+
+func StartCashService(db *sql.DB, port string) {
+	server, pool, err := NewCashServer(db, port)
 	if err != nil {
+		logger.LogError("Cash Service failed: %v", err)
+		return
+	}
+	defer pool.Close()
+
+	logger.LogInfo("Cash Service started on :%s", port)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.LogError("Cash Service failed: %v", err)
 	}
 }

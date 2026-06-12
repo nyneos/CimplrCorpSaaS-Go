@@ -11,7 +11,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"time"
@@ -21,7 +20,7 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
-func StartUAMService(db *sql.DB, port string) {
+func NewUAMServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, error) {
 	const serviceName = "uam"
 	mux := http.NewServeMux()
 
@@ -36,20 +35,19 @@ func StartUAMService(db *sql.DB, port string) {
 		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
 		pool, err := pgxpool.New(context.Background(), dsn)
 		if err != nil {
-			logger.LogError("UAM: failed to connect to pgxpool DB: %v", err)
 			return nil
 		}
 		pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := pool.Ping(pingCtx); err != nil {
-			log.Fatalf("UAM: failed to verify pgxpool DB connectivity at startup: %v", err)
+			pool.Close()
+			return nil
 		}
 		return pool
 	}()
 	if pgxPool == nil {
-		return
+		return nil, nil, fmt.Errorf("UAM: failed to initialize pgxpool DB")
 	}
-	defer pgxPool.Close()
 	mux.HandleFunc("/uam/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("UAM Service is active"))
 	})
@@ -112,9 +110,23 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.Handle("/uam/permissions/requests/all", midUAM(http.HandlerFunc(permissions.GetAllPermissionRequests(db))))
 	mux.Handle("/uam/permissions/requests/role-summary", midUAM(http.HandlerFunc(permissions.GetRolePermissionAuditTable(db))))
 
-	logger.LogInfo("UAM Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: observability.WrapHTTP(serviceName, mux),
+	}
+	return server, pgxPool, nil
+}
+
+func StartUAMService(db *sql.DB, port string) {
+	server, pool, err := NewUAMServer(db, port)
 	if err != nil {
+		logger.LogError("UAM Service failed: %v", err)
+		return
+	}
+	defer pool.Close()
+
+	logger.LogInfo("UAM Service started on :%s", port)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.LogError("UAM Service failed: %v", err)
 	}
 }

@@ -19,9 +19,10 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
-func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
+func NewNotificationServer(pool *pgxpool.Pool, db *sql.DB, port string) (*http.Server, *pgxpool.Pool, bool, error) {
 	const serviceName = "notification"
 	mux := http.NewServeMux()
+	ownsPool := false
 
 	if pool == nil {
 		user := os.Getenv("DB_USER")
@@ -35,16 +36,18 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 			var err error
 			pool, err = pgxpool.New(context.Background(), dsn)
 			if err != nil {
-				logger.LogError("failed to connect to pgxpool DB: %v", err)
-				return
+				return nil, nil, false, fmt.Errorf("failed to connect to pgxpool DB: %w", err)
 			}
-			defer pool.Close()
+			ownsPool = true
 			pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := pool.Ping(pingCtx); err != nil {
 				logger.LogError("Notification: failed to verify pgxpool DB connectivity at startup: %v", err)
 			}
 		}
+	}
+	if pool == nil {
+		return nil, nil, false, fmt.Errorf("notification pgxpool is not configured")
 	}
 
 	mux.HandleFunc("/notification/health", func(w http.ResponseWriter, r *http.Request) {
@@ -105,8 +108,25 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	push.RegisterSubscriptionRoutes(mux, pool)
 	mux.Handle("/notification/metrics", observability.MetricsHandler(serviceName))
 
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: observability.WrapHTTP(serviceName, mux),
+	}
+	return server, pool, ownsPool, nil
+}
+
+func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
+	server, ownedPool, ownsPool, err := NewNotificationServer(pool, db, port)
+	if err != nil {
+		logger.LogError("Notification Service failed: %v", err)
+		return
+	}
+	if ownsPool {
+		defer ownedPool.Close()
+	}
+
 	logger.LogInfo("Notification Service started on :%s", port)
-	if err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux)); err != nil {
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.LogError("Notification Service failed: %v", err)
 	}
 }
