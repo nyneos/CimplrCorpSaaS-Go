@@ -92,7 +92,11 @@ func DownloadFDCashflowPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func DownloadFDInterestReceiptPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
-	return investmentAdditionalOnlyPackageHandler(pool, fdInterestReceiptFilesDefinition, "FD Interest Receipt", "receipt_id")
+	return cashfiles.NewPackageZipHandler(pool, investmentAdditionalFilesConfig(fdInterestReceiptFilesDefinition), cashfiles.PackageZipOptions{
+		ModuleLabel: "FD Interest Receipt",
+		IDField:     "receipt_id",
+		LoadMain:    loadFDInterestReceiptPackageMainFile,
+	})
 }
 
 func DownloadFDTDSReceiptPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -171,6 +175,15 @@ func loadFDConfirmationPackageMainFile(ctx context.Context, pool *pgxpool.Pool, 
 		SELECT COALESCE(upload_s3_key, '')
 		FROM investment.fd_confirmation
 		WHERE confirmation_id::text = $1
+		  AND COALESCE(is_deleted, false) = false
+	`, rowID)
+}
+
+func loadFDInterestReceiptPackageMainFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*cashfiles.MainPackageFile, error) {
+	return loadInvestmentMainFile(ctx, pool, `
+		SELECT COALESCE(upload_s3_key, '')
+		FROM investment.fd_interest_receipt
+		WHERE receipt_id::text = $1
 		  AND COALESCE(is_deleted, false) = false
 	`, rowID)
 }

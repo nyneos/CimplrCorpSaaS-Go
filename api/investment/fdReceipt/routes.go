@@ -37,6 +37,9 @@ func RegisterFDReceiptRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
 		mid(http.HandlerFunc(DeleteReceipt(pool))))
 	mux.Handle("/investment/fd/receipt/all",
 		mid(http.HandlerFunc(GetReceiptsWithAudit(pool))))
+	// Main-file (manual attachment) presigned download
+	mux.Handle("/investment/fd/receipt/download",
+		mid(http.HandlerFunc(DownloadReceiptMainFile(pool))))
 	// Approved-only list views
 	mux.Handle("/investment/fd/receipt/approved-active",
 		mid(http.HandlerFunc(GetApprovedActiveReceipts(pool))))
