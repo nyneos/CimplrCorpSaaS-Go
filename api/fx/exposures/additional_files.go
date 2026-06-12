@@ -37,6 +37,14 @@ func DownloadSelectedAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc
 	return additionalfiles.NewDownloadSelectedHandler(pool, exposureAdditionalFilesConfig())
 }
 
+func DownloadExposurePackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, exposureAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "FX Exposure",
+		IDField:     "exposure_header_id",
+		LoadMain:    loadExposureMainPackageFile,
+	})
+}
+
 func DeleteAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, exposureAdditionalFilesConfig())
 }
@@ -54,7 +62,7 @@ func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func exposureAdditionalFilesConfig() additionalfiles.Config {
-	return additionalfiles.Config{
+	return withExposureCrossStage(additionalfiles.Config{
 		Module:                "fx-exposure",
 		AuditSource:           "FX_EXPOSURE",
 		AuditTableName:        fxAdditionalFileAuditTable,
@@ -67,11 +75,34 @@ func exposureAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteExposureAdditionalFile,
 		SoftDeleteTx:          deleteExposureAdditionalFileTx,
 		RecordMainUploadAudit: recordExposureMainUploadAudit,
-	}
+		RecordMainDownloadAudit: recordExposureMainDownloadAudit,
+	})
 }
 
 func recordExposureMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionexposure", "exposure_header_id", "actiontype", parentID, payload)
+}
+
+func recordExposureMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadRecord(ctx, exec, "public.auditactionexposuredownloads", "exposure_header_id", parentID, payload, nil)
+}
+
+func loadExposureMainPackageFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+	names, err := fxEntityNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var uploadS3Key string
+	err = pool.QueryRow(ctx, `
+		SELECT COALESCE(upload_s3_key, '')
+		FROM public.exposure_headers
+		WHERE exposure_header_id::text = $1
+		  AND LOWER(TRIM(entity)) = ANY($2)
+	`, rowID, names).Scan(&uploadS3Key)
+	if err != nil || strings.TrimSpace(uploadS3Key) == "" {
+		return nil, err
+	}
+	return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
 }
 
 func listExposureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

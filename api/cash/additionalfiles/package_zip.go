@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
+	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 
@@ -58,10 +60,12 @@ func NewPackageZipHandler(pool *pgxpool.Pool, cfg Config, opts PackageZipOptions
 		}
 
 		rows := collectPackageRows(r.Context(), pool, cfg, opts, rowIDs)
+		rows = preparePackageRows(r.Context(), rows)
 		if packageRowsFileCount(rows) == 0 {
 			http.Error(w, "no downloadable files found", http.StatusNotFound)
 			return
 		}
+		recordPackageDownloadAudits(r.Context(), pool, cfg, req.UserID, api.ClientIPFromRequest(r), rows)
 
 		zipName := packageZipName(rowIDs, opts.ModuleLabel)
 		w.Header().Set(constants.ContentTypeText, "application/zip")
@@ -69,7 +73,7 @@ func NewPackageZipHandler(pool *pgxpool.Pool, cfg Config, opts PackageZipOptions
 		w.WriteHeader(http.StatusOK)
 
 		zw := zip.NewWriter(w)
-		writePackageRows(r.Context(), zw, rows)
+		writePackageRows(zw, rows)
 		_ = zw.Close()
 	}
 }
@@ -80,8 +84,13 @@ type packageRow struct {
 }
 
 type packageFile struct {
-	FileName string
-	S3Key    string
+	FileName         string
+	StoredFileName   string
+	S3Key            string
+	FileID           string
+	AuditParentID    string
+	IsAdditionalFile bool
+	Body             []byte
 }
 
 func collectPackageRows(ctx context.Context, pool *pgxpool.Pool, cfg Config, opts PackageZipOptions, rowIDs []string) []packageRow {
@@ -96,7 +105,12 @@ func collectPackageRows(ctx context.Context, pool *pgxpool.Pool, cfg Config, opt
 				if strings.TrimSpace(name) == "" {
 					name = objectBaseName(mainFile.UploadS3Key)
 				}
-				row.Files = append(row.Files, packageFile{FileName: name, S3Key: mainFile.UploadS3Key})
+				row.Files = append(row.Files, packageFile{
+					FileName:       name,
+					StoredFileName: name,
+					S3Key:          mainFile.UploadS3Key,
+					AuditParentID:  rowID,
+				})
 			}
 		}
 
@@ -117,7 +131,14 @@ func collectPackageRows(ctx context.Context, pool *pgxpool.Pool, cfg Config, opt
 					if strings.TrimSpace(name) == "" {
 						name = objectBaseName(key)
 					}
-					row.Files = append(row.Files, packageFile{FileName: packageAdditionalFolder + "/" + name, S3Key: key})
+					row.Files = append(row.Files, packageFile{
+						FileName:         packageAdditionalFolder + "/" + name,
+						StoredFileName:   name,
+						S3Key:            key,
+						FileID:           file.FileID,
+						AuditParentID:    additionalParentID,
+						IsAdditionalFile: true,
+					})
 				}
 			}
 		}
@@ -127,13 +148,66 @@ func collectPackageRows(ctx context.Context, pool *pgxpool.Pool, cfg Config, opt
 	return rows
 }
 
-func writePackageRows(ctx context.Context, zw *zip.Writer, rows []packageRow) {
+func preparePackageRows(ctx context.Context, rows []packageRow) []packageRow {
+	prepared := make([]packageRow, 0, len(rows))
 	for _, row := range rows {
-		writePackageRow(ctx, zw, row)
+		files := make([]packageFile, 0, len(row.Files))
+		for _, file := range row.Files {
+			body, err := s3storage.GetObjectBytes(ctx, strings.TrimSpace(file.S3Key))
+			if err != nil {
+				continue
+			}
+			file.Body = body
+			files = append(files, file)
+		}
+		row.Files = files
+		prepared = append(prepared, row)
+	}
+	return prepared
+}
+
+func recordPackageDownloadAudits(ctx context.Context, pool *pgxpool.Pool, cfg Config, userID, requestedIP string, rows []packageRow) {
+	if !auditEnabled(cfg) {
+		return
+	}
+	performedBy := requestedByOrFallback(ctx, userID)
+	requestedAt := time.Now().UTC()
+	for _, row := range rows {
+		for _, file := range row.Files {
+			parentID := strings.TrimSpace(file.AuditParentID)
+			if parentID == "" {
+				parentID = row.RowID
+			}
+			payload := MainUploadAuditPayload{
+				FileID:      strings.TrimSpace(file.FileID),
+				FileName:    strings.TrimSpace(file.StoredFileName),
+				UploadS3Key: strings.TrimSpace(file.S3Key),
+				UploadedBy:  performedBy,
+				UploadedAt:  requestedAt,
+				RequestedIP: requestedIP,
+			}
+			if file.IsAdditionalFile {
+				record := FileRecord{
+					FileID:         payload.FileID,
+					StoredFileName: payload.FileName,
+					UploadS3Key:    payload.UploadS3Key,
+				}
+				if err := recordDownloadAudit(ctx, pool, cfg, parentID, record, performedBy, requestedIP); err != nil && !isUndefinedTableError(err) {
+					continue
+				}
+			}
+			_ = recordMainDownloadAuditSafely(ctx, pool, cfg, parentID, payload)
+		}
 	}
 }
 
-func writePackageRow(ctx context.Context, zw *zip.Writer, row packageRow) {
+func writePackageRows(zw *zip.Writer, rows []packageRow) {
+	for _, row := range rows {
+		writePackageRow(zw, row)
+	}
+}
+
+func writePackageRow(zw *zip.Writer, row packageRow) {
 	used := map[string]int{}
 	rowFolder := safeZipSegment(row.RowID)
 	for _, file := range row.Files {
@@ -142,15 +216,11 @@ func writePackageRow(ctx context.Context, zw *zip.Writer, row packageRow) {
 			parts[i] = safeZipFileName(parts[i])
 		}
 		path := uniqueZipPath(used, rowFolder+"/"+strings.Join(parts, "/"))
-		_ = writeS3ZipFile(ctx, zw, path, file.S3Key)
+		_ = writePreparedZipFile(zw, path, file.Body)
 	}
 }
 
-func writeS3ZipFile(ctx context.Context, zw *zip.Writer, zipPath, s3Key string) bool {
-	body, err := s3storage.GetObjectBytes(ctx, strings.TrimSpace(s3Key))
-	if err != nil {
-		return false
-	}
+func writePreparedZipFile(zw *zip.Writer, zipPath string, body []byte) bool {
 	writer, err := zw.Create(zipPath)
 	if err != nil {
 		return false

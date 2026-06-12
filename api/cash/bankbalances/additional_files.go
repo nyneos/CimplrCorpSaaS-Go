@@ -70,6 +70,7 @@ func bankBalanceAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteBankBalanceAdditionalFile,
 		SoftDeleteTx:          deleteBankBalanceAdditionalFileTx,
 		RecordMainUploadAudit: recordBankBalanceMainUploadAudit,
+		RecordMainDownloadAudit: recordBankBalanceMainDownloadAudit,
 	})
 }
 
@@ -91,6 +92,10 @@ func recordBankBalanceMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID s
 		) VALUES ($1, 'UPLOAD_FILE', 'APPROVED', $2, $3, $4, $5)
 	`, parentID, reason, payload.UploadedBy, payload.UploadedAt, nullIfEmpty(payload.RequestedIP))
 	return err
+}
+
+func recordBankBalanceMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadRecord(ctx, exec, "auditactionbankbalance_downloads", "balance_id", parentID, payload, nil)
 }
 
 func listBankBalanceAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

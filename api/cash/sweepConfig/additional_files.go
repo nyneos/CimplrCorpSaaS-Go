@@ -107,6 +107,7 @@ func sweepPlanningAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteSweepPlanningAdditionalFile,
 		SoftDeleteTx:          deleteSweepPlanningAdditionalFileTx,
 		RecordMainUploadAudit: recordSweepPlanningMainUploadAudit,
+		RecordMainDownloadAudit: recordSweepPlanningMainDownloadAudit,
 	}
 }
 
@@ -123,11 +124,16 @@ func sweepInitiationAdditionalFilesConfig() additionalfiles.Config {
 		GetMany:         getSweepInitiationAdditionalFiles,
 		SoftDelete:      deleteSweepInitiationAdditionalFile,
 		SoftDeleteTx:    deleteSweepInitiationAdditionalFileTx,
+		RecordMainDownloadAudit: recordSweepInitiationMainDownloadAudit,
 	}
 }
 
 func recordSweepPlanningMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 	return additionalfiles.InsertMainUploadAudit(ctx, tx, "cimplrcorpsaas.auditactionsweepconfiguration", "sweep_id", "actiontype", parentID, payload)
+}
+
+func recordSweepPlanningMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadAudit(ctx, exec, "cimplrcorpsaas.auditactionsweepconfiguration", "sweep_id", "actiontype", parentID, payload)
 }
 
 func recordSweepInitiationMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
@@ -151,6 +157,38 @@ func recordSweepInitiationMainUploadAudit(ctx context.Context, tx pgx.Tx, parent
 			si.initiation_id,
 			si.sweep_id,
 			'UPLOAD_FILE',
+			'APPROVED',
+			$2,
+			$3,
+			$4,
+			$5
+		FROM cimplrcorpsaas.sweep_initiation si
+		WHERE si.initiation_id = $1
+	`, parentID, reason, payload.UploadedBy, payload.UploadedAt, nullifyEmpty(payload.RequestedIP))
+	return err
+}
+
+func recordSweepInitiationMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	reason, err := additionalfiles.MainDownloadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = exec.Exec(ctx, `
+		INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
+			initiation_id,
+			sweep_id,
+			actiontype,
+			processing_status,
+			reason,
+			requested_by,
+			requested_at,
+			requested_ip
+		)
+		SELECT
+			si.initiation_id,
+			si.sweep_id,
+			'DOWNLOAD',
 			'APPROVED',
 			$2,
 			$3,
