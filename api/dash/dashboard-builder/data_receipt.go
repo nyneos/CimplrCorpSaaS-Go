@@ -43,7 +43,7 @@ func queryFDMaturitySummary(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 		) a ON true
 		WHERE COALESCE(m.is_deleted, false) = false %s
 		ORDER BY m.maturity_date DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -81,7 +81,7 @@ func queryFDTDSRegister(ctx context.Context, pool *pgxpool.Pool, entityIDs []str
 		) a ON true
 		WHERE COALESCE(t.is_deleted, false) = false %s
 		ORDER BY t.deduction_date DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -125,7 +125,7 @@ func queryFDReceiptAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 		) a ON true
 		WHERE COALESCE(r.is_deleted, false) = false %s
 		ORDER BY r.receipt_date DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -164,7 +164,7 @@ func queryFDReconcileResults(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 		LEFT JOIN investment.fd_master m ON m.fd_id::text = rc.fd_id::text
 		WHERE COALESCE(rc.is_deleted, false) = false %s
 		ORDER BY rc.created_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -209,7 +209,7 @@ func queryFDExceptions(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 		) a ON true
 		WHERE COALESCE(ex.is_deleted, false) = false %s
 		ORDER BY ex.raised_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)

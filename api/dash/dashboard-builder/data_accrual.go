@@ -46,7 +46,7 @@ func queryFDAccrualRunAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		) a ON true
 		WHERE COALESCE(r.is_deleted, false) = false %s
 		ORDER BY r.run_date DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -91,7 +91,7 @@ func queryFDAccrualLedger(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		) a ON true
 		WHERE COALESCE(l.is_deleted, false) = false %s %s
 		ORDER BY l.accrual_period_start DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef, runFilter)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -139,7 +139,7 @@ func queryFDAccrualDetail(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		) a ON true
 		WHERE COALESCE(l.is_deleted, false) = false %s
 		ORDER BY l.created_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -172,7 +172,7 @@ func queryFDAccrualFindings(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 		LEFT JOIN investment.fd_accrual_run r ON f.run_id = r.run_id
 		WHERE 1=1 %s
 		ORDER BY f.created_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -200,7 +200,7 @@ func queryFDAccrualExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityI
 		LEFT JOIN investment.fd_accrual_run r ON l.run_id = r.run_id
 		WHERE 1=1 %s
 		ORDER BY l.logged_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -225,7 +225,7 @@ func queryFDAccrualRunAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 		LEFT JOIN investment.fd_accrual_run r ON r.run_id::text = a.run_id::text
 		WHERE 1=1 %s
 		ORDER BY a.requested_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -250,7 +250,7 @@ func queryFDAccrualLedgerAudit(ctx context.Context, pool *pgxpool.Pool, entityID
 		LEFT JOIN investment.fd_accrual_run r ON r.run_id::text = a.run_id::text
 		WHERE 1=1 %s
 		ORDER BY a.requested_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -274,7 +274,7 @@ func queryFDAccrualExceptions(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LEFT JOIN investment.fd_accrual_run r ON r.run_id::text = e.run_id::text
 		WHERE COALESCE(e.is_deleted, false) = false %s
 		ORDER BY e.created_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -317,7 +317,7 @@ func queryFDAccrualScheduleAll(ctx context.Context, pool *pgxpool.Pool, entityID
 		) a ON true
 		WHERE COALESCE(s.is_deleted, false) = false %s
 		ORDER BY s.created_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -348,7 +348,7 @@ func queryFDAccrualScheduleExecutionLog(ctx context.Context, pool *pgxpool.Pool,
 		FROM investment.fd_accrual_run r
 		WHERE COALESCE(r.is_deleted, false) = false AND r.run_type = 'SCHEDULED' %s
 		ORDER BY r.run_date DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
