@@ -65,8 +65,8 @@ func GetDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		    es.total_payable_exposure,
 		    cs.cover_taken_export,
 		    cs.cover_taken_import,
-		    (es.total_payable_exposure - cs.cover_taken_export) AS outstanding_cover_export,
-		    (es.total_payable_exposure - cs.cover_taken_import) AS outstanding_cover_import
+		    (es.debitors - cs.cover_taken_export) AS outstanding_cover_export,
+		    ((es.creditors + es.lc + es.grn) - cs.cover_taken_import) AS outstanding_cover_import
 		FROM exposure_summary es
 		LEFT JOIN cover_summary cs 
 		    ON es.bu = cs.bu AND es.currency = cs.currency;
@@ -86,6 +86,7 @@ func GetDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := pool.Query(r.Context(), query, buNames)
 		if err != nil {
+			logger.LogError("GetDashboard query failed: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Server error"})
 			return
@@ -97,6 +98,7 @@ func GetDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			var bu, currency string
 			var debitors, creditors, lc, grn, totalPayableExposure, coverTakenExport, coverTakenImport, outstandingCoverExport, outstandingCoverImport sql.NullFloat64
 			if err := rows.Scan(&bu, &currency, &debitors, &creditors, &lc, &grn, &totalPayableExposure, &coverTakenExport, &coverTakenImport, &outstandingCoverExport, &outstandingCoverImport); err != nil {
+				logger.LogError("GetDashboard row scan failed: %v", err)
 				continue
 			}
 			rowMap := map[string]interface{}{
@@ -118,6 +120,9 @@ func GetDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				dashboards = append(dashboards, rowMap)
 				idx++
 			}
+		}
+		if err := rows.Err(); err != nil {
+			logger.LogError("GetDashboard row iteration error: %v", err)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]any{"dashboards": dashboards})
