@@ -254,6 +254,8 @@ func (l *LoggerService) Stop() error {
 	defer l.mu.Unlock()
 	if l.file != nil {
 		instance.Info("[LoggerService] Stopping")
+		// Fall back to stdout before closing so late-running goroutines don't hit a closed fd.
+		instance.SetOutput(os.Stdout)
 		return l.file.Close()
 	}
 	return nil
@@ -280,17 +282,17 @@ func (l *LoggerService) rotateIfNeeded() error {
 		return err
 	}
 	if info.Size() >= l.maxFileBytes && l.maxFileBytes > 0 {
-		l.file.Close()
 		newLog := l.nextLogFileName()
 		file, err := os.OpenFile(newLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 		if err != nil {
 			return err
 		}
+		// Switch output before closing the old file so no write hits a closed fd.
+		instance.SetOutput(io.MultiWriter(file, os.Stdout))
+		old := l.file
 		l.file = file
 		l.currentLog = newLog
-
-		multiWriter := io.MultiWriter(file, os.Stdout)
-		instance.SetOutput(multiWriter)
+		old.Close()
 		instance.WithField("log_file", newLog).Info("[LoggerService] Rotated log file")
 	}
 	return nil

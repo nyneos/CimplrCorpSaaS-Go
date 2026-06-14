@@ -437,7 +437,13 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 
 // ── Balances, Limits & Availability ────────────────────────────────────────
 func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	q := `
+	args := []any{limit}
+	bf, bfArgs := bankNameFilter(ctx, "b", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "b", "as_of_date", len(args)+1)
+	args = append(args, dfArgs...)
+
+	q := fmt.Sprintf(`
 		WITH latest_audit AS (
 			SELECT DISTINCT ON (balance_id)
 				balance_id,
@@ -457,12 +463,12 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 			COALESCE(a.processing_status, '') AS processing_status
 		FROM public.bank_balances_manual b
 		LEFT JOIN latest_audit a ON a.balance_id = b.balance_id::text
-		WHERE COALESCE(b.is_deleted, false) = false
+		WHERE COALESCE(b.is_deleted, false) = false %s %s
 		ORDER BY b.as_of_date DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
 	`
 
-	r, err := pool.Query(ctx, q, limit)
+	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

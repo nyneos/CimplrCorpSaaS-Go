@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"CimplrCorpSaas/api"
@@ -37,7 +38,20 @@ type dataRequest struct {
 	FDID      string   `json:"fd_id"`
 	// ParentID filters child sources by their parent row (e.g. bank_statement_id, run_id, proposal_id).
 	ParentID string `json:"parent_id"`
+	// Dashboard-builder filter band — populated by the frontend "Generate" button.
+	BankIDs  []string `json:"bank_ids"`
+	AsOfDate string   `json:"as_of_date"`
+	AsOnDate string   `json:"as_on_date"`
 }
+
+// Context keys for dashboard-builder filter values stashed by GetDataSource so
+// that helper functions can read them without changing every query signature.
+const (
+	ctxKeyReqBankIDs       = "reqBankIDs"
+	ctxKeyReqBankNamesNorm = "reqBankNamesNorm"
+	ctxKeyReqAsOfDate      = "reqAsOfDate"
+	ctxKeyReqAsOnDate      = "reqAsOnDate"
+)
 
 type dataSourceFn func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error)
 
@@ -169,6 +183,33 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := context.WithValue(r.Context(), "reqEntityNames", reqEntityNames)
+
+		// ── Dashboard-builder filter band ─────────────────────────────────
+		// Resolve the user-selected bank IDs into normalized lower-case
+		// bank_name strings using the prevalidation BankInfo context, so
+		// queries can filter by bank_id (where available) or bank_name
+		// (case-insensitive) without re-querying the bank master.
+		bankIDs := make([]string, 0, len(req.BankIDs))
+		for _, id := range req.BankIDs {
+			if s := strings.TrimSpace(id); s != "" {
+				bankIDs = append(bankIDs, s)
+			}
+		}
+		bankNamesNorm := make([]string, 0, len(bankIDs))
+		seen := make(map[string]struct{}, len(bankIDs))
+		for _, id := range bankIDs {
+			if norm, ok := api.ResolveBankNameNormForFilter(r.Context(), id); ok {
+				if _, dup := seen[norm]; !dup {
+					seen[norm] = struct{}{}
+					bankNamesNorm = append(bankNamesNorm, norm)
+				}
+			}
+		}
+		ctx = context.WithValue(ctx, ctxKeyReqBankIDs, bankIDs)
+		ctx = context.WithValue(ctx, ctxKeyReqBankNamesNorm, bankNamesNorm)
+		ctx = context.WithValue(ctx, ctxKeyReqAsOfDate, strings.TrimSpace(req.AsOfDate))
+		ctx = context.WithValue(ctx, ctxKeyReqAsOnDate, strings.TrimSpace(req.AsOnDate))
+
 		fn, ok := dataSources[req.Source]
 		if !ok {
 			api.RespondWithError(w, http.StatusBadRequest,
@@ -247,12 +288,55 @@ func entityNameFilter(ctx context.Context, alias string, colName string, argOffs
 	return fmt.Sprintf("AND %s.%s = ANY($%d)", alias, colName, argOffset), []any{names}
 }
 
+// bankIDFilter appends a "AND alias.bank_id = ANY($N)" clause when the request
+// included bank IDs in its filter band. Used for tables that store bank_id directly.
+func bankIDFilter(ctx context.Context, alias string, argOffset int) (string, []any) {
+	ids, _ := ctx.Value(ctxKeyReqBankIDs).([]string)
+	if len(ids) == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf("AND %s.bank_id = ANY($%d)", alias, argOffset), []any{ids}
+}
+
+// bankNameFilter appends a case-insensitive bank_name filter using the bank
+// names resolved from the request bank IDs against BankInfo in the session
+// context. Used for tables that only store bank_name.
+func bankNameFilter(ctx context.Context, alias string, argOffset int) (string, []any) {
+	names, _ := ctx.Value(ctxKeyReqBankNamesNorm).([]string)
+	if len(names) == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf("AND LOWER(TRIM(COALESCE(%s.bank_name,''))) = ANY($%d)", alias, argOffset), []any{names}
+}
+
+// dateRangeFilter appends a date range filter on the given column using the
+// request's as_of_date / as_on_date filter band values. Either bound may be
+// omitted; both omitted yields no filter.
+func dateRangeFilter(ctx context.Context, alias, col string, argOffset int) (string, []any) {
+	asOf, _ := ctx.Value(ctxKeyReqAsOfDate).(string)
+	asOn, _ := ctx.Value(ctxKeyReqAsOnDate).(string)
+	switch {
+	case asOf != "" && asOn != "":
+		return fmt.Sprintf("AND %s.%s::date BETWEEN $%d::date AND $%d::date", alias, col, argOffset, argOffset+1), []any{asOf, asOn}
+	case asOf != "":
+		return fmt.Sprintf("AND %s.%s::date >= $%d::date", alias, col, argOffset), []any{asOf}
+	case asOn != "":
+		return fmt.Sprintf("AND %s.%s::date <= $%d::date", alias, col, argOffset), []any{asOn}
+	}
+	return "", nil
+}
+
 // ─── fdBooking ────────────────────────────────────────────────────────────────
 // entity_name and bank_name are columns on fd_booking_request itself.
 
 func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "br", 2)
-	args := append([]any{limit}, efArgs...)
+	args := []any{limit}
+	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
+	args = append(args, efArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "br", "value_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -265,6 +349,13 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 			ORDER BY a.booking_id,
 			         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),
 			                  COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
+		),
+		history AS (
+			SELECT
+				booking_id,
+				MAX(CASE WHEN action_type = 'CREATE' THEN requested_by END) AS created_by
+			FROM investment.fd_audit_booking_request
+			GROUP BY booking_id
 		)
 		SELECT
 			COALESCE(br.booking_id::text,         '')  AS booking_id,
@@ -285,6 +376,13 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 			COALESCE(br.created_by,               '')  AS created_by,
 			COALESCE(br.booking_remarks,          '')  AS booking_remarks,
 			COALESCE(br.booking_status,           '')  AS booking_status,
+			COALESCE(br.tds_plan_id,              '')  AS tds_plan_id,
+			COALESCE(NULLIF(br.payout_frequency_id, ''), br.frequency_id, '') AS payout_frequency_id,
+			COALESCE(br.source_account_number,    '')  AS source_account_number,
+			COALESCE(br.bank_config_id,           '')  AS bank_config_id,
+			COALESCE(br.value_type,               '')  AS value_type,
+			COALESCE(h.created_by, br.created_by, '')  AS created_by,
+			COALESCE(br.booking_remarks,          '')  AS booking_remarks,
 			COALESCE(br.auto_renewal,          FALSE)  AS auto_renewal,
 			COALESCE(br.principal_amount,           0) AS principal_amount,
 			COALESCE(br.interest_rate,              0) AS interest_rate,
@@ -298,7 +396,8 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 			COALESCE(l.processing_status,         '')  AS processing_status
 		FROM investment.fd_booking_request br
 		LEFT JOIN latest_audit l ON l.booking_id = br.booking_id
-		WHERE COALESCE(br.is_deleted, false) = false %s
+		LEFT JOIN history h ON h.booking_id = br.booking_id
+		WHERE COALESCE(br.is_deleted, false) = false %s %s %s
 		ORDER BY GREATEST(
 			COALESCE(l.requested_at,'1970-01-01'::timestamp),
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
@@ -318,8 +417,13 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 // Join with fd_booking_request to get entity_name and bank_name.
 
 func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "br", 2)
-	args := append([]any{limit}, efArgs...)
+	args := []any{limit}
+	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
+	args = append(args, efArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "fc", "actual_start_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -332,6 +436,13 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			ORDER BY a.confirmation_id,
 			         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),
 			                  COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
+		),
+		history AS (
+			SELECT
+				confirmation_id,
+				MAX(CASE WHEN action_type = 'CREATE' THEN requested_by END) AS created_by
+			FROM investment.fd_audit_confirmation
+			GROUP BY confirmation_id
 		)
 		SELECT
 			COALESCE(fc.confirmation_id::text,             '')  AS confirmation_id,
@@ -368,7 +479,8 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 		FROM investment.fd_confirmation fc
 		LEFT JOIN investment.fd_booking_request br ON br.booking_id = fc.booking_id
 		LEFT JOIN latest_audit l ON l.confirmation_id = fc.confirmation_id
-		WHERE COALESCE(fc.is_deleted, false) = false %s
+		LEFT JOIN history h ON h.confirmation_id = fc.confirmation_id
+		WHERE COALESCE(fc.is_deleted, false) = false %s %s %s
 		ORDER BY GREATEST(
 			COALESCE(l.requested_at,'1970-01-01'::timestamp),
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
@@ -388,8 +500,13 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 // entity_name and bank_name are columns on fd_master itself.
 
 func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "m", 2)
-	args := append([]any{limit}, efArgs...)
+	args := []any{limit}
+	ef, efArgs := entityFilter(entityIDs, "m", len(args)+1)
+	args = append(args, efArgs...)
+	bf, bfArgs := bankIDFilter(ctx, "m", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "m", "start_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -402,6 +519,13 @@ func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 			ORDER BY a.fd_id,
 			         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),
 			                  COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
+		),
+		history AS (
+			SELECT
+				fd_id,
+				MAX(CASE WHEN action_type = 'CREATE' THEN requested_by END) AS created_by
+			FROM investment.fd_audit_master
+			GROUP BY fd_id
 		)
 		SELECT
 			COALESCE(m.fd_id::text,           '')  AS fd_id,
@@ -443,8 +567,10 @@ func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 			m.receipt_date,
 			COALESCE(l.processing_status,      '') AS processing_status
 		FROM investment.fd_master m
+		LEFT JOIN investment.fd_booking_request br ON br.booking_id = m.booking_id
 		LEFT JOIN latest_audit l ON l.fd_id = m.fd_id
-		WHERE COALESCE(m.is_deleted, false) = false %s
+		LEFT JOIN history h ON h.fd_id = m.fd_id
+		WHERE COALESCE(m.is_deleted, false) = false %s %s %s
 		ORDER BY GREATEST(
 			COALESCE(l.requested_at,'1970-01-01'::timestamp),
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
@@ -463,8 +589,13 @@ func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 // ─── fdCashflowGroup ──────────────────────────────────────────────────────────
 
 func queryFDCashflowGroup(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "m", 2)
-	args := append([]any{limit}, efArgs...)
+	args := []any{limit}
+	ef, efArgs := entityFilter(entityIDs, "m", len(args)+1)
+	args = append(args, efArgs...)
+	bf, bfArgs := bankIDFilter(ctx, "m", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "m", "start_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -499,7 +630,7 @@ func queryFDCashflowGroup(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 			  AND a.processing_status LIKE 'PENDING%%'
 			LIMIT 1
 		) aud ON true
-		WHERE COALESCE(cf.is_deleted, false) = false %s
+		WHERE COALESCE(cf.is_deleted, false) = false %s %s %s
 		GROUP BY cf.fd_id
 		ORDER BY MAX(m.start_date) DESC
 		LIMIT NULLIF($1, 0)
@@ -577,8 +708,13 @@ func queryFDCashflows(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 // ─── fdClosureInitiateAll ─────────────────────────────────────────────────────
 
 func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "br", 2)
-	args := append([]any{limit}, efArgs...)
+	args := []any{limit}
+	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
+	args = append(args, efArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "ci", "requested_closure_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -611,7 +747,7 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 		LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
 		LEFT JOIN investment.fd_booking_request br ON br.booking_id = m.booking_id
 		LEFT JOIN latest_audit l ON l.closure_initiate_id = ci.closure_initiate_id
-		WHERE COALESCE(ci.is_deleted, false) = false %s
+		WHERE COALESCE(ci.is_deleted, false) = false %s %s %s
 		ORDER BY GREATEST(
 			COALESCE(l.requested_at,'1970-01-01'::timestamp),
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
@@ -630,8 +766,13 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 // ─── fdClosureConfirmAll ──────────────────────────────────────────────────────
 
 func queryFDClosureConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "br", 2)
-	args := append([]any{limit}, efArgs...)
+	args := []any{limit}
+	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
+	args = append(args, efArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "cc", "actual_payout_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -667,7 +808,7 @@ func queryFDClosureConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
 		LEFT JOIN investment.fd_booking_request br ON br.booking_id = m.booking_id
 		LEFT JOIN latest_audit l ON l.closure_confirm_id = cc.closure_confirm_id
-		WHERE COALESCE(cc.is_deleted, false) = false %s
+		WHERE COALESCE(cc.is_deleted, false) = false %s %s %s
 		ORDER BY GREATEST(
 			COALESCE(l.requested_at,'1970-01-01'::timestamp),
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
@@ -686,8 +827,13 @@ func queryFDClosureConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs
 // ─── fdClosurePrematureAll ────────────────────────────────────────────────────
 
 func queryFDClosurePrematureAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "br", 2)
-	args := append([]any{limit}, efArgs...)
+	args := []any{limit}
+	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
+	args = append(args, efArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "cc", "actual_payout_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -723,7 +869,7 @@ func queryFDClosurePrematureAll(ctx context.Context, pool *pgxpool.Pool, entityI
 		LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
 		LEFT JOIN investment.fd_booking_request br ON br.booking_id = m.booking_id
 		LEFT JOIN latest_audit l ON l.closure_confirm_id = cc.closure_confirm_id
-		WHERE COALESCE(cc.is_deleted, false) = false AND cc.closure_type = 'PREMATURE' %s
+		WHERE COALESCE(cc.is_deleted, false) = false AND cc.closure_type = 'PREMATURE' %s %s %s
 		ORDER BY GREATEST(
 			COALESCE(l.requested_at,'1970-01-01'::timestamp),
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
