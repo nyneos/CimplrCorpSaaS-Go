@@ -27,6 +27,13 @@ func DownloadSelectedPendingExposureBucketingAdditionalFilesHandler(pool *pgxpoo
 	return additionalfiles.NewDownloadSelectedHandler(pool, pendingExposureBucketingAdditionalFilesConfig())
 }
 
+func DownloadPendingExposureBucketingPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, pendingExposureBucketingAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "FX Pending Exposure Bucketing",
+		IDField:     "exposure_header_id",
+	})
+}
+
 func DeletePendingExposureBucketingAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, pendingExposureBucketingAdditionalFilesConfig())
 }
@@ -44,7 +51,7 @@ func RejectPendingExposureBucketingAdditionalFileDeleteHandler(pool *pgxpool.Poo
 }
 
 func pendingExposureBucketingAdditionalFilesConfig() additionalfiles.Config {
-	return additionalfiles.Config{
+	return withExposureCrossStage(additionalfiles.Config{
 		Module:                "fx-pending-exposure-bucketing",
 		AuditSource:           "FX_EXPOSURE_BUCKETING",
 		AuditTableName:        fxAdditionalFileAuditTable,
@@ -57,7 +64,8 @@ func pendingExposureBucketingAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deletePendingExposureBucketingAdditionalFile,
 		SoftDeleteTx:          deletePendingExposureBucketingAdditionalFileTx,
 		RecordMainUploadAudit: recordExposureBucketingMainUploadAudit,
-	}
+		RecordMainDownloadAudit: recordExposureBucketingMainDownloadAudit,
+	})
 }
 
 func listPendingExposureBucketingAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

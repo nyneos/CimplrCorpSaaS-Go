@@ -259,7 +259,7 @@ func cashUtilizationUnion(ctx context.Context, deletedClause string, args []inte
 	return query, args, nil
 }
 
-func softDeleteCashCrossStageFile(ctx context.Context, exec auditExecutor, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
+func softDeleteCashCrossStageFile(ctx context.Context, exec AuditExecutor, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 	fileID = strings.TrimSpace(fileID)
 	if fileID == "" {
 		return false, nil

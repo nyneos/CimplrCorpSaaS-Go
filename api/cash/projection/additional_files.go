@@ -68,11 +68,16 @@ func projectionAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteProjectionAdditionalFile,
 		SoftDeleteTx:          deleteProjectionAdditionalFileTx,
 		RecordMainUploadAudit: recordProjectionMainUploadAudit,
+		RecordMainDownloadAudit: recordProjectionMainDownloadAudit,
 	}
 }
 
 func recordProjectionMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 	return additionalfiles.InsertMainUploadAudit(ctx, tx, "cimplrcorpsaas.audit_action_cashflow_proposal", "proposal_id", "action_type", parentID, payload)
+}
+
+func recordProjectionMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadRecord(ctx, exec, "cimplrcorpsaas.audit_cashflow_proposal_downloads", "proposal_id", parentID, payload, nil)
 }
 
 func listProjectionAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

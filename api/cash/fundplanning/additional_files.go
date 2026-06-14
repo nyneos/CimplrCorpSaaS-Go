@@ -69,6 +69,7 @@ func fundPlanAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteFundPlanAdditionalFile,
 		SoftDeleteTx:          deleteFundPlanAdditionalFileTx,
 		RecordMainUploadAudit: recordFundPlanMainUploadAudit,
+		RecordMainDownloadAudit: recordFundPlanMainDownloadAudit,
 	}
 }
 
@@ -89,6 +90,26 @@ func recordFundPlanMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID stri
 	args := []interface{}{parentID, reason, payload.UploadedBy, payload.UploadedAt, nullIfEmpty(payload.RequestedIP)}
 	args = append(args, entityArgs...)
 	_, err = tx.Exec(ctx, query, args...)
+	return err
+}
+
+func recordFundPlanMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	reason, err := additionalfiles.MainDownloadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	entityClause, entityArgs := fundPlanEntityScope(ctx, 5)
+	query := `
+		INSERT INTO public.auditaction_fund_plan_groups (group_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+		SELECT fpg.group_id, 'DOWNLOAD', 'COMPLETED', $2, $3, $4, $5
+		FROM public.fund_plan_groups fpg
+		WHERE fpg.plan_id = $1
+	` + entityClause
+
+	args := []interface{}{parentID, reason, payload.UploadedBy, payload.UploadedAt, nullIfEmpty(payload.RequestedIP)}
+	args = append(args, entityArgs...)
+	_, err = exec.Exec(ctx, query, args...)
 	return err
 }
 

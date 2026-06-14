@@ -69,11 +69,16 @@ func bankStatementAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteBankStatementAdditionalFile,
 		SoftDeleteTx:          deleteBankStatementAdditionalFileTx,
 		RecordMainUploadAudit: recordBankStatementMainUploadAudit,
+		RecordMainDownloadAudit: recordBankStatementMainDownloadAudit,
 	})
 }
 
 func recordBankStatementMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 	return additionalfiles.InsertMainUploadAudit(ctx, tx, "cimplrcorpsaas.auditactionbankstatement", "bankstatementid", "actiontype", parentID, payload)
+}
+
+func recordBankStatementMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadAudit(ctx, exec, "cimplrcorpsaas.auditactionbankstatement", "bankstatementid", "actiontype", parentID, payload)
 }
 
 func listBankStatementAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

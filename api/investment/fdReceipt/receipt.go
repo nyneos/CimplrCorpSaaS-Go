@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,11 +14,15 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// fdInterestReceiptStorageModule is the storage module whose S3 prefix is shared
+const fdInterestReceiptStorageModule = "fd-interest-receipt-additional"
 
 // ─── internal helpers ─────────────────────────────────────────────────────────
 
@@ -32,6 +38,16 @@ func nullStr(v string) interface{} {
 		return nil
 	}
 	return v
+}
+
+// formFloat parses a multipart form numeric value, treating blank as zero.
+func formFloat(v string) float64 {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	f, _ := strconv.ParseFloat(v, 64)
+	return f
 }
 
 type receiptScopeFilter struct {
@@ -253,9 +269,45 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			Narration             string  `json:"narration"`
 			Attachment            string  `json:"attachment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
+
+		// When a manual attachment is present the request arrives as multipart
+		// form-data; otherwise it stays on the existing JSON path.
+		var mainFileBytes []byte
+		var mainFileName string
+		contentType := r.Header.Get(constants.ContentTypeText)
+		if strings.Contains(strings.ToLower(contentType), constants.ContentTypeMultipart) {
+			if err := r.ParseMultipartForm(64 << 20); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+				return
+			}
+			req.UserID = strings.TrimSpace(r.FormValue("user_id"))
+			req.FdID = strings.TrimSpace(r.FormValue("fd_id"))
+			req.ReceiptDate = strings.TrimSpace(r.FormValue("receipt_date"))
+			req.PeriodStart = strings.TrimSpace(r.FormValue("period_start"))
+			req.PeriodEnd = strings.TrimSpace(r.FormValue("period_end"))
+			req.GrossInterestReceived = formFloat(r.FormValue("gross_interest_received"))
+			req.TdsAmountDeducted = formFloat(r.FormValue("tds_amount_deducted"))
+			req.OtherCharges = formFloat(r.FormValue("other_charges"))
+			req.CashflowID = strings.TrimSpace(r.FormValue("cashflow_id"))
+			req.BankReferenceNo = strings.TrimSpace(r.FormValue("bank_reference_no"))
+			req.Narration = strings.TrimSpace(r.FormValue("narration"))
+
+			if file, header, ferr := r.FormFile("attachment"); ferr == nil {
+				defer file.Close()
+				bytesRead, rerr := io.ReadAll(file)
+				if rerr != nil {
+					api.RespondWithError(w, http.StatusBadRequest, "failed to read attachment: "+rerr.Error())
+					return
+				}
+				mainFileBytes = bytesRead
+				mainFileName = header.Filename
+				req.Attachment = header.Filename
+			}
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+				return
+			}
 		}
 		if req.FdID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFDIDRequired)
@@ -383,6 +435,37 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			periodEndArg = req.PeriodEnd
 		}
 
+		// Generate the receipt_id up-front so the same id is reused across the
+		// receipt, audit and TDS inserts.
+		var receiptID string
+		if err = pool.QueryRow(ctx,
+			`SELECT 'IREC-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7))`).Scan(&receiptID); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Receipt ID generation failed: "+err.Error())
+			return
+		}
+
+		// Store the manual attachment as the main file in S3 before the insert.
+		// It lives in a "main" folder that sits alongside the "additional files"
+		// folder under the module prefix, mirroring the other DMS modules.
+		// If the row is not committed the uploaded object is deleted.
+		var uploadS3Key string
+		committed := false
+		defer func() {
+			if !committed && uploadS3Key != "" {
+				_ = s3storage.DeleteFromS3(context.Background(), uploadS3Key)
+			}
+		}()
+		if len(mainFileBytes) > 0 {
+			uploadedAt := time.Now().UTC()
+			storedFileName := s3storage.BuildUploadedFilename(mainFileName, userEmail, uploadedAt)
+			mainFolder := strings.TrimRight(s3storage.GetStoragePrefix(fdInterestReceiptStorageModule), "/") + "/main"
+			uploadS3Key = s3storage.BuildNamedS3Key(mainFolder, "", storedFileName)
+			if err = s3storage.PutObjectToS3(ctx, uploadS3Key, mainFileBytes, s3storage.DetectContentType(mainFileBytes)); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Attachment upload failed: "+err.Error())
+				return
+			}
+		}
+
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed: "+err.Error())
@@ -390,30 +473,30 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
 
-		var receiptID string
-		err = tx.QueryRow(ctx, `
+		_, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_interest_receipt (
 				receipt_id, fd_id, fd_ref_no, entity_id, entity_name,
 				bank_id, bank_name,
 				receipt_date, period_start, period_end,
 				gross_interest_received, tds_amount_deducted, other_charges, net_amount_received,
-				currency, bank_reference_no, narration, attachment,
+				currency, bank_reference_no, narration, attachment, upload_s3_key,
 				ingestion_mode,
 				receipt_status, reconcile_status,
 				is_active, is_deleted
 			) VALUES (
-				'IREC-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
-				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'INR',$14,$15,$16,
+				$1,
+				$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'INR',$15,$16,$17,$18,
 				'MANUAL',
 				'CAPTURED','PENDING',
 				true,false
-			) RETURNING receipt_id`,
+			)`,
+			receiptID,
 			req.FdID, fdRefNo, entityID, entityName,
 			bankID, bankName,
 			receiptDate, periodStartArg, periodEndArg,
 			req.GrossInterestReceived, req.TdsAmountDeducted, req.OtherCharges, net,
-			nullStr(req.BankReferenceNo), nullStr(req.Narration), nullStr(req.Attachment),
-		).Scan(&receiptID)
+			nullStr(req.BankReferenceNo), nullStr(req.Narration), nullStr(req.Attachment), nullStr(uploadS3Key),
+		)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Receipt insert failed: "+err.Error())
 			return
@@ -482,6 +565,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
+		committed = true
 
 		api.LogInfo("[FDReceipt] Created receipt_id=%s fd=%s gross=%.4f tds=%.4f", receiptID, req.FdID, req.GrossInterestReceived, req.TdsAmountDeducted)
 
@@ -532,6 +616,57 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// ─── HANDLER 1b: DownloadReceiptMainFile ──────────────────────────────────────
+// Returns a presigned URL for the manual attachment stored as the receipt's main
+// file, mirroring the bank-balance main-file download flow.
+func DownloadReceiptMainFile(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID    string `json:"user_id"`
+			ReceiptID string `json:"receipt_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.ReceiptID) == "" {
+			api.RespondWithResult(w, false, constants.ErrReceiptIDRequired)
+			return
+		}
+
+		ctx := r.Context()
+		if !requireFDReceiptIDScope(ctx, pool, w, []string{req.ReceiptID}, nil) {
+			return
+		}
+
+		var uploadS3Key string
+		err := pool.QueryRow(ctx, `
+			SELECT COALESCE(upload_s3_key,'')
+			FROM investment.fd_interest_receipt
+			WHERE receipt_id=$1 AND is_deleted=false`, req.ReceiptID).Scan(&uploadS3Key)
+		if err != nil {
+			api.RespondWithResult(w, false, constants.ReceiptNotFound)
+			return
+		}
+
+		key := strings.TrimSpace(uploadS3Key)
+		if key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to generate download url")
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
 	}
 }
 
@@ -1407,6 +1542,7 @@ SELECT
   COALESCE(r.currency,'INR')           AS currency,
   COALESCE(r.bank_reference_no,'')     AS bank_reference_no,
   COALESCE(r.narration,'')             AS narration,
+  COALESCE(r.upload_s3_key,'')         AS upload_s3_key,
   COALESCE(r.receipt_status,'')        AS receipt_status,
   COALESCE(r.reconcile_status,'')      AS reconcile_status,
   COALESCE(r.reconcile_run_id,'')      AS reconcile_run_id,
