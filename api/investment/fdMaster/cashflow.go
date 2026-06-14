@@ -435,17 +435,22 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			WHERE c.confirmation_id = $1`, confirmationID).Scan(&v)
 		rec.TenureYears = v
 	}
-	if confCols["tenure_type"] {
+	// Source tables store this as tenor_type (fd_master uses tenure_type). Read the
+	// real column name; fall back to the legacy tenure_type spelling if a schema has it.
+	confTenorCol := pickFirstExistingColumn(confCols, "tenor_type", "tenure_type")
+	bookingTenorCol := pickFirstExistingColumn(bookingCols, "tenor_type", "tenure_type")
+	if confTenorCol != "" {
 		var v string
-		_ = exec.QueryRow(ctx, `SELECT COALESCE(NULLIF(tenure_type,''),'') FROM investment.fd_confirmation WHERE confirmation_id = $1`, confirmationID).Scan(&v)
+		_ = exec.QueryRow(ctx, fmt.Sprintf(`SELECT COALESCE(NULLIF(%s,''),'') FROM investment.fd_confirmation WHERE confirmation_id = $1`, confTenorCol), confirmationID).Scan(&v)
 		rec.TenureType = v
-	} else if bookingCols["tenure_type"] {
+	}
+	if rec.TenureType == "" && bookingTenorCol != "" {
 		var v string
-		_ = exec.QueryRow(ctx, `
-			SELECT COALESCE(NULLIF(b.tenure_type,''),'')
+		_ = exec.QueryRow(ctx, fmt.Sprintf(`
+			SELECT COALESCE(NULLIF(b.%s,''),'')
 			FROM investment.fd_confirmation c
 			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
-			WHERE c.confirmation_id = $1`, confirmationID).Scan(&v)
+			WHERE c.confirmation_id = $1`, bookingTenorCol), confirmationID).Scan(&v)
 		rec.TenureType = v
 	}
 	// Derive TenorDays from maturity/start dates when tenure was stored only in months or years.

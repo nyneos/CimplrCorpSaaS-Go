@@ -412,9 +412,13 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(i.cashflow_type, '')         AS cashflow_type,
 			COALESCE(i.category_id::text, '')     AS category_id,
 			COALESCE(i.currency_code, '')         AS currency_code,
+			COALESCE(i.department_id::text, '')   AS department_id,
+			COALESCE(i.counterparty_name, '')     AS counterparty_name,
 			COALESCE(i.expected_amount, 0)        AS expected_amount,
 			COALESCE(i.is_recurring, false)       AS is_recurring,
 			COALESCE(i.recurrence_frequency, '')  AS recurrence_frequency,
+			i.start_date,
+			i.end_date,
 			i.maturity_date,
 			COALESCE(i.bank_name, '')             AS bank_name,
 			COALESCE(i.bank_account_number, '')   AS bank_account_number
