@@ -196,7 +196,7 @@ func queryFDExceptions(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 			COALESCE(ex.expected_amount,      0) AS expected_amount,
 			COALESCE(ex.received_amount,      0) AS received_amount,
 			COALESCE(ex.variance_amount,      0) AS variance_amount,
-			ex.raised_at,
+			ex.raised_at AS created_at,
 			COALESCE(a.processing_status,    '') AS processing_status
 		FROM investment.fd_receipt_exception ex
 		LEFT JOIN investment.fd_master m ON m.fd_id::text = ex.fd_id::text

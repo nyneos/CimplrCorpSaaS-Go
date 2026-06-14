@@ -483,10 +483,10 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "br", "value_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "br", "value_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -513,11 +513,18 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 			COALESCE(br.bank_name,                '')  AS bank_name,
 			COALESCE(br.tenor_type,               '')  AS tenor_type,
 			COALESCE(br.interest_type_code,       '')  AS interest_type_code,
-			COALESCE(br.frequency_id,             '')  AS frequency_id,
-			COALESCE(br.day_count_code,           '')  AS day_count_code,
+			COALESCE(br.frequency_id::text,       '')  AS frequency_id,
+			COALESCE(br.payout_frequency_id::text, '') AS payout_frequency_id,
 			COALESCE(br.accrual_frequency_code,   '')  AS accrual_frequency_code,
-			COALESCE(NULLIF(br.reset_type, ''), 'AT_MATURITY') AS reset_type,
+			COALESCE(br.reset_type,               '')  AS reset_type,
+			COALESCE(br.day_count_code,           '')  AS day_count_code,
 			COALESCE(br.product_code,             '')  AS product_code,
+			COALESCE(br.tds_plan_id::text,        '')  AS tds_plan_id,
+			COALESCE(br.source_account_number,    '')  AS source_account_number,
+			COALESCE(br.bank_config_id::text,     '')  AS bank_config_id,
+			COALESCE(br.value_type,               '')  AS value_type,
+			COALESCE(br.created_by,               '')  AS created_by,
+			COALESCE(br.booking_remarks,          '')  AS booking_remarks,
 			COALESCE(br.booking_status,           '')  AS booking_status,
 			COALESCE(br.tds_plan_id,              '')  AS tds_plan_id,
 			COALESCE(NULLIF(br.payout_frequency_id, ''), br.frequency_id, '') AS payout_frequency_id,
@@ -547,7 +554,7 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 			COALESCE(br.created_at,'1970-01-01'::timestamp)
 		) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -563,10 +570,10 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "fc", "actual_start_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "fc", "actual_start_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -595,18 +602,18 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			COALESCE(fc.tenor_type,                        '')  AS tenor_type,
 			COALESCE(fc.confirmed_interest_type_code,      '')  AS confirmed_interest_type_code,
 			COALESCE(fc.confirmation_mode,                 '')  AS confirmation_mode,
-			COALESCE(fc.confirmed_frequency_id,            '')  AS confirmed_frequency_id,
-			COALESCE(NULLIF(fc.payout_frequency_id, ''), fc.confirmed_frequency_id, '') AS payout_frequency_id,
+			COALESCE(fc.confirmed_frequency_id::text,      '')  AS confirmed_frequency_id,
+			COALESCE(fc.payout_frequency_id::text,         '')  AS payout_frequency_id,
 			COALESCE(fc.accrual_frequency_code,            '')  AS accrual_frequency_code,
-			COALESCE(NULLIF(fc.reset_type, ''), NULLIF(br.reset_type, ''), 'AT_MATURITY') AS reset_type,
+			COALESCE(fc.reset_type,                        '')  AS reset_type,
 			COALESCE(fc.confirmation_status,               '')  AS confirmation_status,
 			COALESCE(fc.variance_action,                   '')  AS variance_action,
 			COALESCE(fc.bank_fd_ref_no,                    '')  AS bank_fd_ref_no,
 			COALESCE(fc.bank_reference_number,             '')  AS bank_reference_number,
 			COALESCE(fc.premature_closure_terms,           '')  AS premature_closure_terms,
-			COALESCE(fc.penalty_id,                        '')  AS penalty_id,
+			COALESCE(fc.penalty_id::text,                  '')  AS penalty_id,
 			COALESCE(fc.value_type,                        '')  AS value_type,
-			COALESCE(h.created_by, fc.created_by,          '')  AS created_by,
+			COALESCE(fc.created_by,                        '')  AS created_by,
 			COALESCE(fc.variance_flag,                  FALSE)  AS variance_flag,
 			COALESCE(fc.actual_principal,                   0)  AS actual_principal,
 			COALESCE(fc.confirmed_rate,                     0)  AS confirmed_rate,
@@ -630,7 +637,7 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			COALESCE(fc.created_at,'1970-01-01'::timestamp)
 		) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -646,10 +653,10 @@ func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "m", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankIDFilter(ctx, "m", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "m", "start_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankIDFilter(ctx, "m", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "m", "start_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -679,18 +686,24 @@ func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 			COALESCE(m.bank_id,               '')  AS bank_id,
 			COALESCE(m.bank_name,             '')  AS bank_name,
 			COALESCE(m.interest_type_code,    '')  AS interest_type_code,
-			COALESCE(NULLIF(m.tenure_type, ''), NULLIF(m.tenor_type, ''), '') AS tenure_type,
-			COALESCE(m.frequency_id,          '')  AS frequency_id,
-			COALESCE(NULLIF(m.payout_frequency_id, ''), NULLIF(m.interest_payout_frequency, ''), '') AS payout_frequency_id,
-			COALESCE(m.accrual_frequency_code,'')  AS accrual_frequency_code,
-			COALESCE(NULLIF(m.reset_type, ''), NULLIF(br.reset_type, ''), 'AT_MATURITY') AS reset_type,
+			COALESCE(NULLIF(m.tenure_type, ''),
+				CASE
+					WHEN COALESCE(m.tenure_years,  0) > 0 THEN 'YEARS'
+					WHEN COALESCE(m.tenure_months, 0) > 0 THEN 'MONTHS'
+					WHEN COALESCE(m.tenure_days,   0) > 0 THEN 'DAYS'
+					ELSE ''
+				END)                               AS tenure_type,
+			COALESCE(m.frequency_id::text,    '')  AS frequency_id,
+			COALESCE(m.payout_frequency_id::text, '') AS payout_frequency_id,
+			COALESCE(m.accrual_frequency_code, '') AS accrual_frequency_code,
+			COALESCE(m.reset_type,            '')  AS reset_type,
 			COALESCE(m.fd_status,             '')  AS fd_status,
 			COALESCE(m.bank_fd_ref_no,        '')  AS bank_fd_ref_no,
 			COALESCE(m.bank_reference_number, '')  AS bank_reference_number,
 			COALESCE(m.tds_plan_id,           '')  AS tds_plan_id,
 			COALESCE(m.day_count_code,        '')  AS day_count_code,
-			COALESCE(m.bank_config_id,        '')  AS bank_config_id,
-			COALESCE(h.created_by, m.created_by, '') AS created_by,
+			COALESCE(m.bank_config_id::text,  '')  AS bank_config_id,
+			COALESCE(m.created_by,            '')  AS created_by,
 			COALESCE(m.auto_renewal,       FALSE)  AS auto_renewal,
 			COALESCE(m.principal_amount,        0) AS principal_amount,
 			COALESCE(m.interest_rate,           0) AS interest_rate,
@@ -714,7 +727,7 @@ func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 			COALESCE(m.created_at,'1970-01-01'::timestamp)
 		) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -729,10 +742,10 @@ func queryFDCashflowGroup(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "m", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankIDFilter(ctx, "m", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "m", "start_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankIDFilter(ctx, "m", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "m", "start_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -771,7 +784,7 @@ func queryFDCashflowGroup(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		GROUP BY cf.fd_id
 		ORDER BY MAX(m.start_date) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -848,10 +861,10 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "ci", "requested_closure_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "ci", "requested_closure_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -891,7 +904,7 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(ci.requested_closure_date::timestamp,'1970-01-01'::timestamp)
 		) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -906,10 +919,10 @@ func queryFDClosureConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "cc", "actual_payout_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "cc", "actual_payout_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -952,7 +965,7 @@ func queryFDClosureConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs
 			COALESCE(cc.actual_payout_date::timestamp,'1970-01-01'::timestamp)
 		) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -967,10 +980,10 @@ func queryFDClosurePrematureAll(ctx context.Context, pool *pgxpool.Pool, entityI
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "cc", "actual_payout_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "cc", "actual_payout_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -1013,7 +1026,7 @@ func queryFDClosurePrematureAll(ctx context.Context, pool *pgxpool.Pool, entityI
 			COALESCE(cc.actual_payout_date::timestamp,'1970-01-01'::timestamp)
 		) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {

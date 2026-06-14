@@ -412,9 +412,13 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(i.cashflow_type, '')         AS cashflow_type,
 			COALESCE(i.category_id::text, '')     AS category_id,
 			COALESCE(i.currency_code, '')         AS currency_code,
+			COALESCE(i.department_id::text, '')   AS department_id,
+			COALESCE(i.counterparty_name, '')     AS counterparty_name,
 			COALESCE(i.expected_amount, 0)        AS expected_amount,
 			COALESCE(i.is_recurring, false)       AS is_recurring,
 			COALESCE(i.recurrence_frequency, '')  AS recurrence_frequency,
+			i.start_date,
+			i.end_date,
 			i.maturity_date,
 			COALESCE(i.bank_name, '')             AS bank_name,
 			COALESCE(i.bank_account_number, '')   AS bank_account_number
@@ -434,10 +438,10 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 // ── Balances, Limits & Availability ────────────────────────────────────────
 func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
 	args := []any{limit}
-	// bf, bfArgs := bankNameFilter(ctx, "b", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "b", "as_of_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "b", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "b", "as_of_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -462,7 +466,7 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 		WHERE COALESCE(b.is_deleted, false) = false %s %s
 		ORDER BY b.as_of_date DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`)
+	`, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
