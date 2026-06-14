@@ -483,10 +483,10 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "br", "value_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "br", "value_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -570,10 +570,10 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "fc", "actual_start_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "fc", "actual_start_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -653,10 +653,10 @@ func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "m", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankIDFilter(ctx, "m", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "m", "start_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankIDFilter(ctx, "m", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "m", "start_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -742,10 +742,10 @@ func queryFDCashflowGroup(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "m", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankIDFilter(ctx, "m", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "m", "start_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankIDFilter(ctx, "m", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "m", "start_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -861,10 +861,10 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "ci", "requested_closure_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "ci", "requested_closure_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -919,10 +919,10 @@ func queryFDClosureConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "cc", "actual_payout_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "cc", "actual_payout_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -980,10 +980,10 @@ func queryFDClosurePrematureAll(ctx context.Context, pool *pgxpool.Pool, entityI
 	args := []any{limit}
 	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
 	args = append(args, efArgs...)
-	// bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
-	// args = append(args, bfArgs...)
-	// df, dfArgs := dateRangeFilter(ctx, "cc", "actual_payout_date", len(args)+1)
-	// args = append(args, dfArgs...)
+	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "cc", "actual_payout_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
