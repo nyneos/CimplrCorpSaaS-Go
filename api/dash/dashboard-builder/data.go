@@ -404,7 +404,7 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 			COALESCE(br.created_at,'1970-01-01'::timestamp)
 		) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -487,7 +487,7 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			COALESCE(fc.created_at,'1970-01-01'::timestamp)
 		) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -577,7 +577,7 @@ func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 			COALESCE(m.created_at,'1970-01-01'::timestamp)
 		) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -634,7 +634,7 @@ func queryFDCashflowGroup(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		GROUP BY cf.fd_id
 		ORDER BY MAX(m.start_date) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -754,7 +754,7 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(ci.requested_closure_date::timestamp,'1970-01-01'::timestamp)
 		) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -815,7 +815,7 @@ func queryFDClosureConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs
 			COALESCE(cc.actual_payout_date::timestamp,'1970-01-01'::timestamp)
 		) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -876,7 +876,7 @@ func queryFDClosurePrematureAll(ctx context.Context, pool *pgxpool.Pool, entityI
 			COALESCE(cc.actual_payout_date::timestamp,'1970-01-01'::timestamp)
 		) DESC
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {

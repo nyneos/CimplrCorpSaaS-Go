@@ -466,7 +466,7 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 		WHERE COALESCE(b.is_deleted, false) = false %s %s
 		ORDER BY b.as_of_date DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`
+	`, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
