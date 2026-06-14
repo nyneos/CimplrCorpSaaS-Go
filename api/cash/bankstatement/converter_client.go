@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -56,7 +57,8 @@ func callConvertXLSX(ctx context.Context, docBytes []byte, filename, password st
 
 func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, password, path string) ([]byte, error) {
 	target := r0() + path
-	logger.LogInfo("[svc] POST **** file=%s size=%d", filename, len(docBytes))
+	logger.LogInfo("[svc] step=build_request path=%s file=%q size=%d password_provided=%v encrypted_hint=%v",
+		path, filename, len(docBytes), strings.TrimSpace(password) != "", bytes.Contains(docBytes, []byte("/Encrypt")))
 
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -71,9 +73,12 @@ func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, passwor
 		_ = mw.WriteField("password", password)
 	}
 	_ = mw.Close()
+	logger.LogInfo("[svc] step=form_ready path=%s file=%q multipart_bytes=%d content_type=%q",
+		path, filename, buf.Len(), mw.FormDataContentType())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, &buf)
 	if err != nil {
+		logger.LogError("[svc] step=request_build_failed path=%s file=%q err=%v", path, filename, err)
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
@@ -82,34 +87,55 @@ func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, passwor
 	if tok := strings.TrimSpace(os.Getenv("CONVERT_SVC_KEY")); tok != "" {
 		req.Header.Set("X-Token", tok)
 	}
+	logger.LogInfo("[svc] step=request_send path=%s file=%q token_present=%v", path, filename, strings.TrimSpace(os.Getenv("CONVERT_SVC_KEY")) != "")
 
+	start := time.Now()
 	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
 	if err != nil {
+		logger.LogError("[svc] step=request_failed path=%s file=%q duration_ms=%d err=%v", path, filename, time.Since(start).Milliseconds(), err)
 		return nil, fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
+		logger.LogError("[svc] step=response_read_failed path=%s file=%q status=%d duration_ms=%d err=%v",
+			path, filename, resp.StatusCode, time.Since(start).Milliseconds(), err)
 		return nil, fmt.Errorf("read response: %w", err)
 	}
-	logger.LogInfo("[svc] raw response status=%d body=%s", resp.StatusCode, string(raw))
+	logger.LogInfo("[svc] step=response_received path=%s file=%q status=%d duration_ms=%d bytes=%d body_preview=%q",
+		path, filename, resp.StatusCode, time.Since(start).Milliseconds(), len(raw), previewLogString(string(raw), 700))
 
 	var result convertSvcResponse
 	if err := json.Unmarshal(raw, &result); err != nil {
+		logger.LogError("[svc] step=response_decode_failed path=%s file=%q status=%d err=%v body_preview=%q",
+			path, filename, resp.StatusCode, err, previewLogString(string(raw), 700))
 		return nil, fmt.Errorf("decode response: %w (%.200s)", err, string(raw))
 	}
 	if !result.Success {
+		logger.LogError("[svc] step=converter_rejected path=%s file=%q status=%d error=%q credits_used=%d remaining=%d",
+			path, filename, resp.StatusCode, result.Error, result.CreditsUsed, result.RemainingCredits)
 		return nil, fmt.Errorf("converter error (status=%d): %s", resp.StatusCode, result.Error)
 	}
 
 	out, err := base64.StdEncoding.DecodeString(result.DataB64)
 	if err != nil {
+		logger.LogError("[svc] step=base64_decode_failed path=%s file=%q status=%d data_b64_len=%d err=%v",
+			path, filename, resp.StatusCode, len(result.DataB64), err)
 		return nil, fmt.Errorf("base64 decode: %w", err)
 	}
-	logger.LogInfo("[svc] done credits_used=%d remaining=%d output=%d bytes",
-		result.CreditsUsed, result.RemainingCredits, len(out))
+	logger.LogInfo("[svc] step=done path=%s file=%q credits_used=%d remaining=%d output=%d bytes",
+		path, filename, result.CreditsUsed, result.RemainingCredits, len(out))
 	return out, nil
+}
+
+func previewLogString(s string, limit int) string {
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = strings.ReplaceAll(s, "\r", "\\r")
+	if limit <= 0 || len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "...(truncated)"
 }
 
 // BuildPreviewResponseFromCSVBytes parses csvBytes (a spreadsheet output from
@@ -193,10 +219,14 @@ func buildPreviewResponseFromTxnMaps(txns []map[string]interface{}, csvBytes []b
 	}
 
 	periodStart, periodEnd := extractPeriodFromTxnMaps(txns)
-	openingBalance := extractOpeningBalanceFromCSV(csvBytes)
+	labelledOpeningBalance := extractOpeningBalanceFromCSV(csvBytes)
+	openingBalance := deriveOpeningBalanceFromTxnMaps(txns)
 	closingBalance := extractClosingBalanceFromCSV(csvBytes)
 	if openingBalance == nil {
-		openingBalance = deriveOpeningBalanceFromTxnMaps(txns)
+		openingBalance = labelledOpeningBalance
+	} else if labelledOpeningBalance != nil && math.Abs(*openingBalance-*labelledOpeningBalance) > 0.01 {
+		logger.LogInfo("[PREVIEW] opening balance label mismatch: labelled=%.2f derived_from_first_txn=%.2f; using derived value",
+			*labelledOpeningBalance, *openingBalance)
 	}
 	if closingBalance == nil {
 		closingBalance = deriveClosingBalanceFromTxnMaps(txns)

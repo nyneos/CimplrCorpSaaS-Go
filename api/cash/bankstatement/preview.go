@@ -881,6 +881,17 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			continue
 		}
 
+		alignment := scoreTransactionRowAlignment(row, headerRow, colIdx, prevStmtBalance, prevStmtBalanceOK)
+		if alignment.shifted() {
+			logger.LogInfo("[col-shift] row=%d len=%d headerLen=%d offset=%d start_col=%d score=%d",
+				previewRowNum, len(row), len(headerRow), alignment.offset, alignment.start, alignment.score)
+		}
+
+		// rowAt reads a logical column index with the scored per-row alignment applied.
+		rowAt := func(idx int) string {
+			return alignment.at(row, idx)
+		}
+
 		txn := map[string]interface{}{
 			"account_number":     accountNumber,
 			"entity_id":          entityID,
@@ -893,23 +904,23 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		// Extract tran_id — prefer explicit column; fall back to batchID+seq synthetic ID
 		tranIDStr := ""
 		if idx, ok := colIdx[constants.TranID]; ok && idx < len(row) {
-			tranIDStr = strings.TrimSpace(row[idx])
+			tranIDStr = strings.TrimSpace(rowAt(idx))
 		}
 
 		// Parse dates
 		var transactionDate, valueDate time.Time
 		if idx, ok := colIdx[constants.TransactionDateAlt]; ok && idx < len(row) {
-			if dt, err := parseDate(row[idx]); err == nil {
+			if dt, err := parseDate(rowAt(idx)); err == nil {
 				transactionDate = dt
 			}
 		}
 		if idx, ok := colIdx[constants.ValueDateAlt]; ok && idx < len(row) {
-			if dt, err := parseDate(row[idx]); err == nil {
+			if dt, err := parseDate(rowAt(idx)); err == nil {
 				valueDate = dt
 			}
 		}
 		if idx, ok := colIdx["Date"]; ok && idx < len(row) && transactionDate.IsZero() && valueDate.IsZero() {
-			if dt, err := parseDate(row[idx]); err == nil {
+			if dt, err := parseDate(rowAt(idx)); err == nil {
 				transactionDate = dt
 				valueDate = dt
 			}
@@ -934,9 +945,9 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		// Description
 		description := ""
 		if idx, ok := colIdx[constants.TransactionRemarks]; ok && idx < len(row) {
-			description = sanitizeForPostgres(normalizeCell(row[idx]))
+			description = sanitizeForPostgres(normalizeCell(rowAt(idx)))
 		} else if idx, ok := colIdx["Description"]; ok && idx < len(row) {
-			description = sanitizeForPostgres(normalizeCell(row[idx]))
+			description = sanitizeForPostgres(normalizeCell(rowAt(idx)))
 		}
 		txn["description"] = description
 		if IsStatementOpeningCarryRow(description) {
@@ -948,7 +959,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			// Cheque/ref column fallback
 			for _, hdr := range []string{"Cheque", "Chq", "Reference", "Ref No"} {
 				if idx, ok := colIdx[hdr]; ok && idx < len(row) {
-					if v := strings.TrimSpace(row[idx]); v != "" {
+					if v := strings.TrimSpace(rowAt(idx)); v != "" {
 						tranIDStr = v
 						break
 					}
@@ -979,36 +990,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			singleAmtIdx = idxD
 		}
 
-		// Per-row column shift: some PDF converters insert an extra empty column at page
-		// boundaries (e.g. Canara Bank page 3 gets 9 cols vs 8 on other pages).
-		// Use the parsed header row length as the canonical column count; if this data row
-		// is wider AND the column after the mapped balance position holds a non-zero number,
-		// shift all financial reads by +1 for this row.
-		colShift := 0
-		if len(row) > len(headerRow) {
-			if idxBal, ok := colIdx[constants.BalanceINR]; ok && idxBal+1 < len(row) {
-				// Check non-empty string first: parseAmount("") returns (0,nil) so a
-				// bare empty-string check would always trigger. "-0.00" == 0.0 in
-				// floating point, so val!=0 would miss a genuine zero balance.
-				balNext := strings.TrimSpace(cleanAmount(row[idxBal+1]))
-				if balNext != "" {
-					if _, err := parseAmount(balNext); err == nil {
-						colShift = 1
-						logger.LogInfo("[col-shift] row=%d len=%d headerLen=%d shift=+1", previewRowNum, len(row), len(headerRow))
-					}
-				}
-			}
-		}
-		// rowAt reads a logical column index with the per-row shift applied.
-		rowAt := func(idx int) string {
-			i := idx + colShift
-			if i >= 0 && i < len(row) {
-				return row[i]
-			}
-			return ""
-		}
-
-		if singleAmtIdx >= 0 && okCrDr && idxCrDr >= 0 && idxCrDr+colShift < len(row) {
+		if singleAmtIdx >= 0 && okCrDr && idxCrDr >= 0 {
 			// Single amount column with Dr/Cr indicator
 			crdr := strings.ToLower(strings.TrimSpace(rowAt(idxCrDr)))
 			if val, err := parseAmount(cleanAmount(rowAt(singleAmtIdx))); err == nil && val > 0 {
@@ -1054,11 +1036,26 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		}
 
 		// Temporary per-row debug log — remove once Canara Bank parsing is confirmed correct
-		logger.LogInfo("[ROW-DBG] row=%d len=%d shift=%d rawW=%q rawD=%q rawBal=%q w=%.2f d=%.2f bal=%.2f",
-			previewRowNum, len(row), colShift,
-			func() string { if idxW, ok := colIdx[constants.WithdrawalAmountINR]; ok && idxW < len(row) { return row[idxW] }; return "" }(),
-			func() string { if idxD, ok := colIdx[constants.DepositAmountINR]; ok && idxD < len(row) { return row[idxD] }; return "" }(),
-			func() string { if idxB, ok := colIdx[constants.BalanceINR]; ok && idxB < len(row) { return row[idxB] }; return "" }(),
+		logger.LogInfo("[ROW-DBG] row=%d len=%d shift=%d start=%d score=%d rawW=%q rawD=%q rawBal=%q w=%.2f d=%.2f bal=%.2f",
+			previewRowNum, len(row), alignment.offset, alignment.start, alignment.score,
+			func() string {
+				if idxW, ok := colIdx[constants.WithdrawalAmountINR]; ok {
+					return rowAt(idxW)
+				}
+				return ""
+			}(),
+			func() string {
+				if idxD, ok := colIdx[constants.DepositAmountINR]; ok {
+					return rowAt(idxD)
+				}
+				return ""
+			}(),
+			func() string {
+				if idxB, ok := colIdx[constants.BalanceINR]; ok {
+					return rowAt(idxB)
+				}
+				return ""
+			}(),
 			func() float64 { v, _ := txn["withdrawal_amount"].(float64); return v }(),
 			func() float64 { v, _ := txn["deposit_amount"].(float64); return v }(),
 			curBal,
