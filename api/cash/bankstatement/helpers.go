@@ -542,7 +542,20 @@ func MergeMultiLineDescriptions(rows [][]string, dateColIdx, descColIdx int) [][
 				hasSep = true
 			}
 		}
-		return hasDigit && hasSep
+		if hasDigit && hasSep {
+			return true
+		}
+		// Also match "DD Mon YYYY" / "DD Mon YY" format (e.g. "03 Apr 2026") \u2014 space-separated, no symbol separator
+		if hasDigit && len(s) >= 9 {
+			months := []string{"jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"}
+			sl := strings.ToLower(s)
+			for _, m := range months {
+				if strings.Contains(sl, m) {
+					return true
+				}
+			}
+		}
+		return false
 	}
 
 	for _, row := range rows {
@@ -586,7 +599,12 @@ func MergeMultiLineDescriptions(rows [][]string, dateColIdx, descColIdx int) [][
 							result[lastTxnIdx] = append(result[lastTxnIdx], "")
 						}
 						existing := strings.TrimSpace(result[lastTxnIdx][ci])
+						// Don't append label text onto a cell that already holds a numeric
+						// value — that would corrupt financial columns (e.g. "5.90 Code").
 						if existing != "" {
+							if _, isNum := parseStrictAmount(existing); isNum {
+								continue
+							}
 							result[lastTxnIdx][ci] = existing + " " + extra
 						} else {
 							result[lastTxnIdx][ci] = extra
