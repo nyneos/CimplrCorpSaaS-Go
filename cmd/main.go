@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv" // Add this import
+	"github.com/joho/godotenv" 
 	_ "github.com/lib/pq"
 
 	"CimplrCorpSaas/api"
@@ -110,7 +110,7 @@ func main() {
 	manager := appmanager.NewAppManager()
 
 	// Load service configs from YAML
-	servicesCfg, err := appmanager.LoadServiceSequence("../services.yaml")
+	servicesCfg, err := appmanager.LoadServiceSequence("./services.yaml")
 	if err != nil {
 		log.Fatal("failed to load service sequence:", err)
 	}

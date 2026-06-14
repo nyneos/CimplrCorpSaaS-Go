@@ -42,7 +42,7 @@ func queryFXExposureHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, en
 		LEFT JOIN latest_audit a ON a.exposure_header_id = h.exposure_header_id::text
 		WHERE COALESCE(h.is_deleted, false) = false %s
 		ORDER BY h.value_date DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -83,7 +83,7 @@ func queryFXExposureBucketing(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LEFT JOIN latest_audit a ON a.exposure_header_id = b.exposure_header_id::text
 		WHERE COALESCE(h.is_deleted, false) = false %s
 		ORDER BY b.exposure_header_id
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -125,7 +125,7 @@ func queryFXHedgingProposals(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 		LEFT JOIN latest_audit a ON a.exposure_header_id = hp.exposure_header_id::text
 		WHERE COALESCE(h.is_deleted, false) = false %s
 		ORDER BY hp.created_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -165,7 +165,7 @@ func queryFXHedgeLinksDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LEFT JOIN latest_audit a ON a.exposure_header_id = ehl.exposure_header_id::text AND a.booking_id = ehl.booking_id::text
 		WHERE COALESCE(h.is_deleted, false) = false %s
 		ORDER BY ehl.link_date DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -208,7 +208,7 @@ func queryFXForwardMTM(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 		LEFT JOIN latest_audit a ON a.mtm_id = fm.mtm_id::text
 		WHERE COALESCE(fm.is_deleted, false) = false %s
 		ORDER BY fm.calculated_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -250,7 +250,7 @@ func queryFXForwardBookings(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 		LEFT JOIN latest_audit a ON a.system_transaction_id = fb.system_transaction_id::text
 		WHERE COALESCE(fb.is_deleted, false) = false %s
 		ORDER BY fb.transaction_timestamp DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)

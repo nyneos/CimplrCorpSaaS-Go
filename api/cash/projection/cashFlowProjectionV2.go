@@ -43,6 +43,7 @@ func validateProjectionProposalScope(ctx context.Context, pgxPool *pgxpool.Pool,
 			COALESCE(bank_account_number, '')
 		FROM cimplrcorpsaas.cashflow_proposal_item
 		WHERE proposal_id = $1
+		  AND COALESCE(is_deleted, false) = false
 	`, proposalID)
 	if err != nil {
 		return err
@@ -197,6 +198,7 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT action_type, processing_status
 				FROM cimplrcorpsaas.audit_action_cashflow_proposal
 				WHERE proposal_id = $1
+				  AND action_type IN ('CREATE', 'EDIT', 'DELETE')
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, proposalID).Scan(&latestActionType, &latestStatus)
@@ -282,7 +284,8 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 			SELECT DISTINCT ON (proposal_id) 
 				action_id, proposal_id, processing_status 
 			FROM cimplrcorpsaas.audit_action_cashflow_proposal 
-			WHERE proposal_id = ANY($1) 
+			WHERE proposal_id = ANY($1)
+			  AND action_type IN ('CREATE', 'EDIT', 'DELETE')
 			ORDER BY proposal_id, requested_at DESC, action_id DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
@@ -428,7 +431,8 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 			SELECT DISTINCT ON (proposal_id) 
 				action_id, proposal_id, action_type, processing_status 
 			FROM cimplrcorpsaas.audit_action_cashflow_proposal 
-			WHERE proposal_id = ANY($1) 
+			WHERE proposal_id = ANY($1)
+			  AND action_type IN ('CREATE', 'EDIT', 'DELETE')
 			ORDER BY proposal_id, requested_at DESC, action_id DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
@@ -798,7 +802,8 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM cimplrcorpsaas.audit_action_cashflow_proposal a2
 				WHERE a2.proposal_id = p.proposal_id
-				ORDER BY requested_at DESC
+				  AND a2.action_type IN ('CREATE', 'EDIT', 'DELETE')
+				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) a ON TRUE
 			WHERE p.proposal_id = $1
@@ -862,6 +867,7 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				old_bank_name, old_bank_account_number
 			FROM cimplrcorpsaas.cashflow_proposal_item
 			WHERE proposal_id = $1
+			  AND COALESCE(is_deleted, false) = false
 			ORDER BY created_at
 		`
 
@@ -1048,17 +1054,20 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.processing_status, 'N/A') AS processing_status,
 				COUNT(DISTINCT i.item_id) AS item_count
 			FROM cimplrcorpsaas.cashflow_proposal p
-			LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i ON p.proposal_id = i.proposal_id
+			LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i
+				ON p.proposal_id = i.proposal_id
+			   AND COALESCE(i.is_deleted, false) = false
 			LEFT JOIN LATERAL (
 				SELECT processing_status
 				FROM cimplrcorpsaas.audit_action_cashflow_proposal a2
 				WHERE a2.proposal_id = p.proposal_id
+				  AND a2.action_type IN ('CREATE', 'EDIT', 'DELETE')
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) a ON TRUE
 			WHERE COALESCE(p.is_deleted, false) = false
 			GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, p.upload_s3_key, a.processing_status
-			ORDER BY COALESCE((SELECT GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = p.proposal_id ORDER BY requested_at DESC, action_id DESC LIMIT 1), '1970-01-01'::timestamp) DESC
+			ORDER BY COALESCE((SELECT GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = p.proposal_id AND action_type IN ('CREATE', 'EDIT', 'DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1), '1970-01-01'::timestamp) DESC
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -1361,9 +1370,16 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Delete old items and projections (will recreate from request)
-		if _, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id=$1`, req.ProposalID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to delete old items: "+err.Error())
+		// Soft-delete old items; edited items are inserted as the new active version.
+		if _, err := tx.Exec(ctx, `
+			UPDATE cimplrcorpsaas.cashflow_proposal_item
+			SET is_deleted = TRUE,
+				deleted_at = now(),
+				deleted_by = $2
+			WHERE proposal_id = $1
+			  AND COALESCE(is_deleted, FALSE) = FALSE
+		`, req.ProposalID, requestedBy); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to soft delete old items: "+err.Error())
 			return
 		}
 

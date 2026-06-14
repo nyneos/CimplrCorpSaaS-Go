@@ -856,7 +856,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cpi.counterparty_name,
 				cpi.old_counterparty_name
 			FROM cimplrcorpsaas.cashflow_proposal cp
-			JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cp.proposal_id = cpi.proposal_id
+			JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cp.proposal_id = cpi.proposal_id AND COALESCE(cpi.is_deleted, false) = false
 			WHERE COALESCE(cp.is_deleted, false) = false
 		`
 
@@ -1229,6 +1229,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   counterparty_name, old_counterparty_name
 			FROM cimplrcorpsaas.cashflow_proposal_item
 			WHERE proposal_id = $1
+			  AND COALESCE(is_deleted, false) = false
 			ORDER BY created_at
 		`
 		rows, err := pgxPool.Query(ctx, itemQ, req.ProposalID)
@@ -1581,7 +1582,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var curRec interface{}
 			var curStart interface{}
 			var curEnd interface{}
-			err = tx.QueryRow(ctx, `SELECT category_id, department_id, entity_name, expected_amount, cashflow_type, recurrence_pattern, recurrence_frequency, description, is_recurring, start_date, end_date, counterparty_name FROM cimplrcorpsaas.cashflow_proposal_item WHERE item_id=$1`, itemID).Scan(
+			err = tx.QueryRow(ctx, `SELECT category_id, department_id, entity_name, expected_amount, cashflow_type, recurrence_pattern, recurrence_frequency, description, is_recurring, start_date, end_date, counterparty_name FROM cimplrcorpsaas.cashflow_proposal_item WHERE item_id=$1 AND COALESCE(is_deleted, false) = false`, itemID).Scan(
 				&curCat, &curDept, &curEnt, &curAmt, &curType, &curRecPat, &curRecFreq, &curDesc, &curRec, &curStart, &curEnd, &curCP)
 			if err != nil {
 				api.RespondWithResult(w, false, "Item not found: "+err.Error())

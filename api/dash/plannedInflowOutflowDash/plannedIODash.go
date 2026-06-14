@@ -118,6 +118,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM cashflow_proposal_item i
 				JOIN cashflow_proposal p ON i.proposal_id = p.proposal_id
 				WHERE i.start_date >= $1 AND i.start_date <= $2
+				  AND COALESCE(i.is_deleted, false) = false
 				  AND p.status = 'Active'
 				  AND (
 					SELECT a.processing_status FROM audit_action_cashflow_proposal a
@@ -177,6 +178,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM cashflow_proposal_item i
 				JOIN cashflow_proposal p ON i.proposal_id = p.proposal_id
 				WHERE i.start_date >= $1 AND i.start_date <= $2
+				  AND COALESCE(i.is_deleted, false) = false
 				  AND p.status = 'Active'
 				  AND (
 					SELECT a.processing_status FROM audit_action_cashflow_proposal a

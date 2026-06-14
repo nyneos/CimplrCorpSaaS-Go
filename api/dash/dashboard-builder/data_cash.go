@@ -43,7 +43,7 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 		LEFT JOIN latest_audit a ON a.bankstatementid = b.bank_statement_id
 		WHERE COALESCE(b.is_deleted, false) = false %s
 		ORDER BY b.uploaded_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -89,7 +89,7 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 		LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
 		WHERE 1=1 %s %s
 		ORDER BY t.value_date DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef, stmtFilter)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -135,7 +135,7 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 			COALESCE(pr.counterparty_name,'') AS counterparty_name
 		FROM pr
 		ORDER BY pr.due_date ASC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`
 
 	r, err := pool.Query(ctx, q, args...)
@@ -167,7 +167,7 @@ func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs
 			), '') AS processing_status
 		FROM public.fund_plan_groups s
 		ORDER BY s.group_id DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`
 	args := []any{limit}
 
@@ -202,7 +202,7 @@ func queryCashFundPlanDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LEFT JOIN public.fund_plan_groups g ON d.group_id = g.group_id
 		WHERE 1=1 %s %s
 		ORDER BY d.line_id DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef, groupFilter)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -239,7 +239,7 @@ func queryCashSweepConfig(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		LEFT JOIN latest_audit a ON a.sweep_id = c.sweep_id::text
 		WHERE COALESCE(c.is_deleted, false) = false %s
 		ORDER BY c.updated_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -281,7 +281,7 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		WHERE COALESCE(c.is_deleted, false) = false
 		  AND COALESCE(i.is_deleted, false) = false %s
 		ORDER BY i.initiation_time DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -313,7 +313,7 @@ func queryCashSweepExecutionLogs(ctx context.Context, pool *pgxpool.Pool, entity
 		LEFT JOIN cimplrcorpsaas.sweepconfiguration c ON l.sweep_id = c.sweep_id::text
 		WHERE 1=1 %s
 		ORDER BY l.execution_date DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -344,7 +344,7 @@ func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = l.sweep_id
 		WHERE COALESCE(c.is_deleted, false) = false %s
 		GROUP BY c.entity_name
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -375,12 +375,14 @@ func queryCashProjectionList(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 			COALESCE(a.processing_status, 'N/A') AS processing_status,
 			COUNT(DISTINCT i.item_id) AS item_count
 		FROM cimplrcorpsaas.cashflow_proposal p
-		LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i ON p.proposal_id = i.proposal_id
+		LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i
+			ON p.proposal_id = i.proposal_id
+		   AND COALESCE(i.is_deleted, false) = false
 		LEFT JOIN latest_audit a ON a.proposal_id = p.proposal_id::text
 		WHERE COALESCE(p.is_deleted, false) = false
 		GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, p.upload_s3_key, a.processing_status, a.requested_at, a.checker_at
 		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`
 
 	r, err := pool.Query(ctx, q, limit)
@@ -417,9 +419,9 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(i.bank_name, '')             AS bank_name,
 			COALESCE(i.bank_account_number, '')   AS bank_account_number
 		FROM cimplrcorpsaas.cashflow_proposal_item i
-		WHERE 1=1 %s %s
+		WHERE COALESCE(i.is_deleted, false) = false %s %s
 		ORDER BY i.created_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef, proposalFilter)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -459,8 +461,8 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 		LEFT JOIN latest_audit a ON a.balance_id = b.balance_id::text
 		WHERE COALESCE(b.is_deleted, false) = false %s %s
 		ORDER BY b.as_of_date DESC NULLS LAST
-		LIMIT $1
-	`, bf, df)
+		LIMIT NULLIF($1, 0)
+	`
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -510,7 +512,7 @@ func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 		LEFT JOIN latest_audit a ON a.limit_id = l.limit_id::text
 		WHERE COALESCE(l.is_deleted, false) = false %s
 		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -548,7 +550,7 @@ func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 		LEFT JOIN latest_audit a ON a.utilization_id = u.utilization_id::text
 		WHERE COALESCE(u.is_deleted, false) = false %s
 		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)

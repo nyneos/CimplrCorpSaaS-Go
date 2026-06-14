@@ -416,7 +416,7 @@ GROUP BY COALESCE(NULLIF(m.currency,''),'INR')`
 		if err := pgxPool.QueryRow(ctx,
 			`SELECT COUNT(*)
 			FROM cimplrcorpsaas.cashflow_projection_monthly cpm
-			JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
+			JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
 			JOIN cimplrcorpsaas.cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
 			LEFT JOIN masterentitycash me ON LOWER(TRIM(me.entity_name)) = LOWER(TRIM(COALESCE(cpi.entity_name,'')))
 			WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
@@ -434,7 +434,7 @@ GROUP BY COALESCE(NULLIF(m.currency,''),'INR')`
 	COALESCE(SUM(CASE WHEN cpi.cashflow_type='Outflow' THEN cpm.projected_amount ELSE 0 END),0)::float8,
 	COALESCE(NULLIF(cpi.currency_code,''), COALESCE(cp.base_currency_code,'INR')) AS currency_code
 FROM cimplrcorpsaas.cashflow_projection_monthly cpm
-JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cpm.item_id   = cpi.item_id
+JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cpm.item_id   = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
 JOIN cimplrcorpsaas.cashflow_proposal      cp  ON cpi.proposal_id = cp.proposal_id
 LEFT JOIN masterentitycash me ON LOWER(TRIM(me.entity_name)) = LOWER(TRIM(COALESCE(cpi.entity_name,'')))
 LEFT JOIN LATERAL (
@@ -468,7 +468,7 @@ GROUP BY COALESCE(NULLIF(cpi.currency_code,''), COALESCE(cp.base_currency_code,'
 		projDetailQ := `SELECT cpm.year, cpm.month, cpm.projected_amount, cpi.cashflow_type,
 	COALESCE(NULLIF(cpi.currency_code,''), COALESCE(cp.base_currency_code,'INR')) AS currency_code
 FROM cimplrcorpsaas.cashflow_projection_monthly cpm
-JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cpm.item_id   = cpi.item_id
+JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cpm.item_id   = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
 JOIN cimplrcorpsaas.cashflow_proposal      cp  ON cpi.proposal_id = cp.proposal_id
 LEFT JOIN masterentitycash me ON LOWER(TRIM(me.entity_name)) = LOWER(TRIM(COALESCE(cpi.entity_name,'')))
 LEFT JOIN LATERAL (

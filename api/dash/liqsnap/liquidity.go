@@ -240,6 +240,7 @@ func LiquidityCoverageRatio(ctx context.Context, pgxPool *pgxpool.Pool, scope li
         FROM cashflow_proposal_item cpi
         JOIN cashflow_proposal cp ON cp.proposal_id = cpi.proposal_id
         WHERE cpi.cashflow_type = 'Inflow'
+        AND COALESCE(cpi.is_deleted, false) = false
         AND cpi.start_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '14 days'
         AND cpi.entity_name = ANY($1)
         AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($2);`
@@ -252,6 +253,7 @@ func LiquidityCoverageRatio(ctx context.Context, pgxPool *pgxpool.Pool, scope li
         FROM cashflow_proposal_item cpi
         JOIN cashflow_proposal cp ON cp.proposal_id = cpi.proposal_id
         WHERE cpi.cashflow_type = 'Outflow'
+        AND COALESCE(cpi.is_deleted, false) = false
         AND cpi.start_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '14 days'
         AND cpi.entity_name = ANY($1)
         AND UPPER(TRIM(COALESCE(cp.currency_code, ''))) = ANY($2);`

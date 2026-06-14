@@ -315,7 +315,7 @@ func GetForecastVsActualRows(pgxPool *pgxpool.Pool, horizon int, scope requestSc
 	forecastQ := `
         SELECT COALESCE(cpi.category_id, 'Uncategorized') AS category, cpi.cashflow_type AS type, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount, COALESCE(cp.currency_code,'USD')
         FROM cashflow_projection_monthly cpm
-        JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
+        JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
         JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
         LEFT JOIN LATERAL (
             SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
@@ -468,7 +468,7 @@ func GetForecastVsActualByDateRows(pgxPool *pgxpool.Pool, horizon int, scope req
 	forecastQ := `
         SELECT cpm.year, cpm.month, cpi.category_id, cpi.cashflow_type, COALESCE(cpi.start_date, NULL) as start_date, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount, COALESCE(cp.currency_code,'USD')
         FROM cashflow_projection_monthly cpm
-        JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
+        JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
         JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
         LEFT JOIN LATERAL (
             SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1

@@ -241,8 +241,8 @@ func loadVarianceCase(ctx context.Context, pool *pgxpool.Pool, exceptionID strin
 	return &h, nil
 }
 
-func loadVarianceAuditTrail(ctx context.Context, pool *pgxpool.Pool, exceptionID string) ([]varianceAuditRow, error) {
-	rows, err := pool.Query(ctx, `
+func loadVarianceAuditTrail(ctx context.Context, pool *pgxpool.Pool, exceptionID, resultID string) ([]varianceAuditRow, error) {
+	query := `
 		SELECT
 			audit_id::text,
 			exception_id,
@@ -271,9 +271,47 @@ func loadVarianceAuditTrail(ctx context.Context, pool *pgxpool.Pool, exceptionID
 			ON LOWER(check_user.email) = LOWER(checker_by)
 			OR check_user.id::text = checker_by
 		WHERE exception_id=$1
-		ORDER BY requested_at DESC, audit_id DESC`,
-		exceptionID,
-	)
+	`
+	args := []interface{}{exceptionID}
+
+	if resultID != "" {
+		query += `
+		UNION ALL
+		SELECT
+			('file-' || a.audit_id::text) AS audit_id,
+			$1 AS exception_id,
+			CASE WHEN a.action_type = 'CREATE' THEN 'UPLOAD_FILE' ELSE a.action_type END AS action_type,
+			a.processing_status,
+			COALESCE(a.reason,''),
+			COALESCE(NULLIF(req_user.employee_name, ''), a.requested_by, ''),
+			COALESCE(a.requested_at::text,''),
+			COALESCE(a.requested_ip,''),
+			COALESCE(NULLIF(check_user.employee_name, ''), a.checker_by, ''),
+			COALESCE(a.checker_at::text,''),
+			COALESCE(a.checker_ip,''),
+			COALESCE(a.checker_comment,''),
+			'' AS old_exception_status,
+			'' AS old_proposed_resolution,
+			'' AS old_reason_code,
+			'' AS old_resolution_remarks,
+			'' AS old_attachment,
+			'' AS old_case_type,
+			'' AS old_variance_outcome
+		FROM investment.additional_file_audit a
+		LEFT JOIN users req_user
+			ON LOWER(req_user.email) = LOWER(a.requested_by)
+			OR req_user.id::text = a.requested_by
+		LEFT JOIN users check_user
+			ON LOWER(check_user.email) = LOWER(a.checker_by)
+			OR check_user.id::text = a.checker_by
+		WHERE a.module_key = 'fd-reconcile-result-additional'
+		  AND a.parent_record_id = $2
+	`
+		args = append(args, resultID)
+	}
+	query += ` ORDER BY requested_at DESC, audit_id DESC`
+
+	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

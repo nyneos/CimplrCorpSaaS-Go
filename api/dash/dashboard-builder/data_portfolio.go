@@ -23,7 +23,7 @@ func queryInvestmentOnboardBatch(ctx context.Context, pool *pgxpool.Pool, entity
 			b.completed_at
 		FROM investment.onboard_batch b
 		ORDER BY b.created_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`
 
 	r, err := pool.Query(ctx, q, limit)
@@ -56,7 +56,7 @@ func queryInvestmentProposalMeta(ctx context.Context, pool *pgxpool.Pool, entity
 		) a ON true
 		WHERE COALESCE(p.is_deleted, false) = false %s
 		ORDER BY p.updated_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -92,7 +92,7 @@ func queryInvestmentInitiationAll(ctx context.Context, pool *pgxpool.Pool, entit
 		) a ON true
 		WHERE COALESCE(i.is_deleted, false) = false %s
 		ORDER BY i.transaction_date DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -127,7 +127,7 @@ func queryInvestmentConfirmationAll(ctx context.Context, pool *pgxpool.Pool, ent
 		) a ON true
 		WHERE COALESCE(c.is_deleted, false) = false %s
 		ORDER BY c.nav_date DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -164,7 +164,7 @@ func queryInvestmentPortfolioGet(ctx context.Context, pool *pgxpool.Pool, entity
 		FROM investment.portfolio_snapshot p
 		WHERE 1=1 %s
 		ORDER BY p.created_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -204,7 +204,7 @@ func queryInvestmentRedemptionInitiateAll(ctx context.Context, pool *pgxpool.Poo
 		) a ON true
 		WHERE COALESCE(r.is_deleted, false) = false %s
 		ORDER BY r.transaction_date DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -241,7 +241,7 @@ func queryInvestmentRedemptionConfirmAll(ctx context.Context, pool *pgxpool.Pool
 		) a ON true
 		WHERE COALESCE(c.is_deleted, false) = false %s
 		ORDER BY c.confirmed_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
