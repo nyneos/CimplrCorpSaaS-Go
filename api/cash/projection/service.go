@@ -227,7 +227,9 @@ func uploadCashflowProposalService(
 	}
 	i := 0
 	for rows.Next() && i < len(itemInfos) {
-		rows.Scan(&itemInfos[i].ID)
+		if err := rows.Scan(&itemInfos[i].ID); err != nil {
+			logger.LogError("[projection service] item ID scan failed: %v", err)
+		}
 		i++
 	}
 	rows.Close()

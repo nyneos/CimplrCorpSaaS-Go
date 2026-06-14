@@ -318,12 +318,16 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 	countQ := `SELECT COUNT(DISTINCT p.proposal_id) FROM cimplrcorpsaas.cashflow_proposal p
 		JOIN cimplrcorpsaas.audit_action_cashflow_proposal a ON a.proposal_id = p.proposal_id
 		WHERE a.processing_status = 'APPROVED'`
-	pgxPool.QueryRow(ctx, countQ).Scan(&approvedCount)
+	if err := pgxPool.QueryRow(ctx, countQ).Scan(&approvedCount); err != nil {
+		logger.LogError("[fetchProjections] approved count query row failed: %v", err)
+	}
 	logger.LogInfo("[fetchProjections] Total approved proposals in DB: %d", approvedCount)
 
 	// Check how many projection records exist
 	var projCount int
-	pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.cashflow_projection_monthly`).Scan(&projCount)
+	if err := pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.cashflow_projection_monthly`).Scan(&projCount); err != nil {
+		logger.LogError("[fetchProjections] projection count query row failed: %v", err)
+	}
 	logger.LogInfo("[fetchProjections] Total projection records in DB: %d", projCount)
 
 	// Check how many would match WITHOUT entity/bank filters (just date range)
@@ -348,7 +352,9 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 			OR (pm.year = EXTRACT(YEAR FROM $2::timestamp)::int AND pm.month <= EXTRACT(MONTH FROM $2::timestamp)::int)
 		)
 	`
-	pgxPool.QueryRow(ctx, dateOnlyQ, asOfDate, endDate).Scan(&dateMatchCount)
+	if err := pgxPool.QueryRow(ctx, dateOnlyQ, asOfDate, endDate).Scan(&dateMatchCount); err != nil {
+		logger.LogError("[fetchProjections] date match count query row failed: %v", err)
+	}
 	logger.LogInfo("[fetchProjections] Records matching date range (no entity/bank filter): %d", dateMatchCount)
 
 	// Check sample entity names in proposal items
@@ -357,7 +363,9 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 	var sampleEntities []string
 	for sampleRows.Next() {
 		var entName string
-		sampleRows.Scan(&entName)
+		if err := sampleRows.Scan(&entName); err != nil {
+			logger.LogError("[fetchProjections] sample entity scan failed: %v", err)
+		}
 		sampleEntities = append(sampleEntities, entName)
 	}
 	sampleRows.Close()

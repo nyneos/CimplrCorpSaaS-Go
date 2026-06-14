@@ -1585,7 +1585,9 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for rows.Next() {
 			var aid, cid, atype, pstatus string
-			rows.Scan(&aid, &cid, &atype, &pstatus)
+			if err := rows.Scan(&aid, &cid, &atype, &pstatus); err != nil {
+				logger.LogError("BulkApproveCalendarActions: scan failed: %v", err)
+			}
 
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
 			if ps == constants.StatusApproved {
@@ -1706,7 +1708,9 @@ func BulkRejectCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for rows.Next() {
 			var aid, cid, ps string
-			rows.Scan(&aid, &cid, &ps)
+			if err := rows.Scan(&aid, &cid, &ps); err != nil {
+				logger.LogError("BulkRejectCalendarActions: scan failed: %v", err)
+			}
 
 			found[cid] = true
 			if strings.ToUpper(ps) == constants.StatusApproved {

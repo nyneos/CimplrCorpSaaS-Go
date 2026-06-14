@@ -7,6 +7,7 @@ import (
 	"CimplrCorpSaas/api/utils"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/dependency"
+	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/validation"
 	"encoding/json"
 	"fmt"
@@ -227,9 +228,13 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.QueryRow(ctx, `SELECT 'TYP-' || LPAD(nextval('payable_receivable_seq')::text, 6, '0')`).Scan(&id); err != nil {
-				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
+				if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp); err != nil {
+					logger.LogError("CreatePayableReceivableTypes: rollback to savepoint failed (type_id generation): %v", err)
+				}
 				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to generate type_id: " + err.Error(), "type_name": rrow.TypeName})
-				tx.Commit(ctx)
+				if err := tx.Commit(ctx); err != nil {
+					logger.LogError("CreatePayableReceivableTypes: commit failed (type_id generation): %v", err)
+				}
 				continue
 			}
 			var effFrom, effTo interface{}
@@ -299,9 +304,13 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rrow.ExternalCode,
 				rrow.Segment,
 			).Scan(&id); err != nil {
-				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
+				if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp); err != nil {
+					logger.LogError("CreatePayableReceivableTypes: rollback to savepoint failed (insert): %v", err)
+				}
 				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "type_name": rrow.TypeName})
-				tx.Commit(ctx)
+				if err := tx.Commit(ctx); err != nil {
+					logger.LogError("CreatePayableReceivableTypes: commit failed (insert): %v", err)
+				}
 				continue
 			}
 

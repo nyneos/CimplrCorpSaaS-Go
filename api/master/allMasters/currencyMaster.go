@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	dependency "CimplrCorpSaas/internal/dependency"
+	"CimplrCorpSaas/internal/logger"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -389,7 +390,9 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					var actionType string
 					var requestedByPtr *string
 					var requestedAtPtr *time.Time
-					auditRows.Scan(&actionType, &requestedByPtr, &requestedAtPtr)
+					if err := auditRows.Scan(&actionType, &requestedByPtr, &requestedAtPtr); err != nil {
+						logger.LogError("GetAllCurrencyMaster: audit rows scan failed: %v", err)
+					}
 					auditInfo := api.GetAuditInfo(actionType, requestedByPtr, requestedAtPtr)
 					switch actionType {
 					case "CREATE":
@@ -656,7 +659,9 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var updated []string
 		for rows.Next() {
 			var id, currencyID string
-			rows.Scan(&id, &currencyID)
+			if err := rows.Scan(&id, &currencyID); err != nil {
+				logger.LogError("BulkRejectAuditActions: scan failed: %v", err)
+			}
 			updated = append(updated, id, currencyID)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

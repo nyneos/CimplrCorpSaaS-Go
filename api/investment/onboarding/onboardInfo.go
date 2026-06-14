@@ -11,6 +11,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/logger"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -280,7 +281,9 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 	if err == nil {
 		for amcRows.Next() {
 			var amc AMCInfo
-			amcRows.Scan(&amc.AmcID, &amc.AmcName, &amc.InternalAmcCode, &amc.Status, &amc.IsDeleted, &amc.Enriched)
+			if err := amcRows.Scan(&amc.AmcID, &amc.AmcName, &amc.InternalAmcCode, &amc.Status, &amc.IsDeleted, &amc.Enriched); err != nil {
+				logger.LogError("getBatchInfo: scan amc row failed: %v", err)
+			}
 			batchInfo.Entities.AMC = append(batchInfo.Entities.AMC, amc)
 		}
 		amcRows.Close()
@@ -300,8 +303,10 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 	if err == nil {
 		for schemeRows.Next() {
 			var scheme SchemeInfo
-			schemeRows.Scan(&scheme.SchemeID, &scheme.SchemeName, &scheme.ISIN,
-				&scheme.InternalSchemeCode, &scheme.AmcName, &scheme.Status, &scheme.IsDeleted, &scheme.Enriched)
+			if err := schemeRows.Scan(&scheme.SchemeID, &scheme.SchemeName, &scheme.ISIN,
+				&scheme.InternalSchemeCode, &scheme.AmcName, &scheme.Status, &scheme.IsDeleted, &scheme.Enriched); err != nil {
+				logger.LogError("getBatchInfo: scan scheme row failed: %v", err)
+			}
 			batchInfo.Entities.Scheme = append(batchInfo.Entities.Scheme, scheme)
 		}
 		schemeRows.Close()
@@ -321,7 +326,9 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 	if err == nil {
 		for dpRows.Next() {
 			var dp DPInfo
-			dpRows.Scan(&dp.DPID, &dp.DPName, &dp.DPCode, &dp.Depository, &dp.Status, &dp.IsDeleted, &dp.Enriched)
+			if err := dpRows.Scan(&dp.DPID, &dp.DPName, &dp.DPCode, &dp.Depository, &dp.Status, &dp.IsDeleted, &dp.Enriched); err != nil {
+				logger.LogError("getBatchInfo: scan dp row failed: %v", err)
+			}
 			batchInfo.Entities.DP = append(batchInfo.Entities.DP, dp)
 		}
 		dpRows.Close()
@@ -341,8 +348,10 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 	if err == nil {
 		for dematRows.Next() {
 			var demat DematInfo
-			dematRows.Scan(&demat.DematID, &demat.EntityName, &demat.DPID, &demat.Depository,
-				&demat.DematAccountNumber, &demat.DefaultSettlementAcc, &demat.Status, &demat.IsDeleted, &demat.Enriched)
+			if err := dematRows.Scan(&demat.DematID, &demat.EntityName, &demat.DPID, &demat.Depository,
+				&demat.DematAccountNumber, &demat.DefaultSettlementAcc, &demat.Status, &demat.IsDeleted, &demat.Enriched); err != nil {
+				logger.LogError("getBatchInfo: scan demat row failed: %v", err)
+			}
 			batchInfo.Entities.Demat = append(batchInfo.Entities.Demat, demat)
 		}
 		dematRows.Close()
@@ -363,9 +372,11 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 	if err == nil {
 		for folioRows.Next() {
 			var folio FolioInfo
-			folioRows.Scan(&folio.FolioID, &folio.EntityName, &folio.AmcName, &folio.FolioNumber,
+			if err := folioRows.Scan(&folio.FolioID, &folio.EntityName, &folio.AmcName, &folio.FolioNumber,
 				&folio.FirstHolderName, &folio.DefaultSubscriptionAccount,
-				&folio.DefaultRedemptionAccount, &folio.Status, &folio.IsDeleted, &folio.Enriched)
+				&folio.DefaultRedemptionAccount, &folio.Status, &folio.IsDeleted, &folio.Enriched); err != nil {
+				logger.LogError("getBatchInfo: scan folio row failed: %v", err)
+			}
 			batchInfo.Entities.Folio = append(batchInfo.Entities.Folio, folio)
 		}
 		folioRows.Close()
@@ -380,8 +391,10 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 	if err == nil {
 		for mappingRows.Next() {
 			var mapping OnboardMapping
-			mappingRows.Scan(&mapping.ID, &mapping.ReferenceID, &mapping.ReferenceType,
-				&mapping.ReferenceName, &mapping.Enriched, &mapping.CreatedAt)
+			if err := mappingRows.Scan(&mapping.ID, &mapping.ReferenceID, &mapping.ReferenceType,
+				&mapping.ReferenceName, &mapping.Enriched, &mapping.CreatedAt); err != nil {
+				logger.LogError("getBatchInfo: scan mapping row failed: %v", err)
+			}
 			batchInfo.Mappings = append(batchInfo.Mappings, mapping)
 		}
 		mappingRows.Close()
@@ -398,9 +411,11 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 	if err == nil {
 		for portfolioRows.Next() {
 			var portfolio PortfolioMap
-			portfolioRows.Scan(&portfolio.ID, &portfolio.EntityName, &portfolio.FolioID,
+			if err := portfolioRows.Scan(&portfolio.ID, &portfolio.EntityName, &portfolio.FolioID,
 				&portfolio.FolioNumber, &portfolio.DematID, &portfolio.AmcID,
-				&portfolio.SchemeID, &portfolio.SchemeName, &portfolio.CreatedAt)
+				&portfolio.SchemeID, &portfolio.SchemeName, &portfolio.CreatedAt); err != nil {
+				logger.LogError("getBatchInfo: scan portfolio map row failed: %v", err)
+			}
 			batchInfo.PortfolioMaps = append(batchInfo.PortfolioMaps, portfolio)
 		}
 		portfolioRows.Close()
@@ -416,10 +431,12 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 	if err == nil {
 		for snapshotRows.Next() {
 			var snapshot PortfolioSnapshot
-			snapshotRows.Scan(&snapshot.ID, &snapshot.EntityName, &snapshot.FolioNumber,
+			if err := snapshotRows.Scan(&snapshot.ID, &snapshot.EntityName, &snapshot.FolioNumber,
 				&snapshot.SchemeID, &snapshot.SchemeName, &snapshot.ISIN,
 				&snapshot.TotalUnits, &snapshot.AvgNav, &snapshot.CurrentNav,
-				&snapshot.CurrentValue, &snapshot.GainLoss, &snapshot.CreatedAt)
+				&snapshot.CurrentValue, &snapshot.GainLoss, &snapshot.CreatedAt); err != nil {
+				logger.LogError("getBatchInfo: scan snapshot row failed: %v", err)
+			}
 			batchInfo.Snapshots = append(batchInfo.Snapshots, snapshot)
 		}
 		snapshotRows.Close()
@@ -435,9 +452,11 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 	if err == nil {
 		for txRows.Next() {
 			var tx TransactionSummary
-			txRows.Scan(&tx.ID, &tx.EntityName, &tx.TransactionDate, &tx.TransactionType,
+			if err := txRows.Scan(&tx.ID, &tx.EntityName, &tx.TransactionDate, &tx.TransactionType,
 				&tx.SchemeInternalCode, &tx.FolioNumber, &tx.Amount,
-				&tx.Units, &tx.Nav, &tx.CreatedAt)
+				&tx.Units, &tx.Nav, &tx.CreatedAt); err != nil {
+				logger.LogError("getBatchInfo: scan transaction row failed: %v", err)
+			}
 			batchInfo.Transactions = append(batchInfo.Transactions, tx)
 		}
 		txRows.Close()

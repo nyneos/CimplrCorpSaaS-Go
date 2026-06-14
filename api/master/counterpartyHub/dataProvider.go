@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
+	"CimplrCorpSaas/internal/logger"
 	"context"
 	"encoding/json"
 	"errors"
@@ -405,7 +406,9 @@ func BulkApproveDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var audits []ar
 		for rows.Next() {
 			var a ar
-			rows.Scan(&a.AuditID, &a.ID, &a.ActionType, &a.ReqBy)
+			if err := rows.Scan(&a.AuditID, &a.ID, &a.ActionType, &a.ReqBy); err != nil {
+				logger.LogError("approveDataProvider: audits scan failed: %v", err)
+			}
 			audits = append(audits, a)
 		}
 		rows.Close()
@@ -419,7 +422,9 @@ func BulkApproveDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if strings.ToUpper(a.ActionType) == "DELETE" {
-				tx.Exec(ctx, `UPDATE apibox.data_provider_master SET is_deleted=true WHERE provider_id=$1`, a.ID)
+				if _, err := tx.Exec(ctx, `UPDATE apibox.data_provider_master SET is_deleted=true WHERE provider_id=$1`, a.ID); err != nil {
+					logger.LogError("approveDataProvider: delete data_provider_master exec failed: %v", err)
+				}
 			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE apibox.audit_data_provider
@@ -764,7 +769,9 @@ func GetDataProviderDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var dataTypes []string
 		for dtRows.Next() {
 			var dt string
-			dtRows.Scan(&dt)
+			if err := dtRows.Scan(&dt); err != nil {
+				logger.LogError("getDataProvider: data type scan failed: %v", err)
+			}
 			dataTypes = append(dataTypes, dt)
 		}
 		dtRows.Close()

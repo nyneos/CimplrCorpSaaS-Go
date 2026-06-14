@@ -2442,7 +2442,9 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 					}
 				}
-				tx2.Commit(ctx2)
+				if err := tx2.Commit(ctx2); err != nil {
+					logger.LogError("UploadCostProfitCenterSimple: audit tx commit failed: %v", err)
+				}
 			}(userName, centreCodes)
 
 			batchIDs = append(batchIDs, uuid.New().String())

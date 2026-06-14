@@ -323,7 +323,9 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 					var systemTransactionId, internal_reference_id, order_type, currency_pair string
 					var bookingAmount, total_rate float64
 					var maturityDate string
-					rows.Scan(&systemTransactionId, &internal_reference_id, &order_type, &bookingAmount, &maturityDate, &total_rate, &currency_pair)
+					if err := rows.Scan(&systemTransactionId, &internal_reference_id, &order_type, &bookingAmount, &maturityDate, &total_rate, &currency_pair); err != nil {
+						logger.LogError("mtm forward_bookings lookup: scan failed: %v", err)
+					}
 					bookingMap[internal_reference_id] = systemTransactionId
 					bookingDetailsMap[internal_reference_id] = map[string]interface{}{
 						"order_type":     order_type,
@@ -363,7 +365,9 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 					var bookingId string
 					var runningOpenAmount float64
 					var ledgerSequence int
-					rows.Scan(&bookingId, &runningOpenAmount, &ledgerSequence)
+					if err := rows.Scan(&bookingId, &runningOpenAmount, &ledgerSequence); err != nil {
+						logger.LogError("mtm forward_booking_ledger lookup: scan failed: %v", err)
+					}
 					if lm, ok := ledgerMap[bookingId]; !ok || ledgerSequence > lm["ledger_sequence"].(int) {
 						ledgerMap[bookingId] = map[string]interface{}{
 							"running_open_amount": runningOpenAmount,

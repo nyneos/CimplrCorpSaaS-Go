@@ -179,7 +179,9 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 			for permRows.Next() {
 				var pageName, tabName, action string
 				var allowed interface{}
-				permRows.Scan(&pageName, &tabName, &action, &allowed)
+				if err := permRows.Scan(&pageName, &tabName, &action, &allowed); err != nil {
+					log.Printf("role.go GetRolesPageData: scan permission row failed: %v", err)
+				}
 				if pageName != "roles" {
 					continue
 				}
@@ -234,7 +236,9 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 			for i := range vals {
 				valPtrs[i] = &vals[i]
 			}
-			rows.Scan(valPtrs...)
+			if err := rows.Scan(valPtrs...); err != nil {
+				log.Printf("role.go GetRolesPageData: scan role row failed: %v", err)
+			}
 			rMap := map[string]interface{}{}
 			for i, col := range cols {
 				rMap[col] = vals[i]
@@ -313,7 +317,9 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			var id string
 			var status string
-			rows.Scan(&id, &status)
+			if err := rows.Scan(&id, &status); err != nil {
+				log.Printf("role.go ApproveMultipleRoles: scan id/status row failed: %v", err)
+			}
 			if status == constants.StatusCodeDeleteApproval {
 				toDelete = append(toDelete, id)
 			} else {
@@ -336,7 +342,9 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 					for i := range vals {
 						valPtrs[i] = &vals[i]
 					}
-					delRows.Scan(valPtrs...)
+					if err := delRows.Scan(valPtrs...); err != nil {
+						log.Printf("role.go ApproveMultipleRoles: scan deleted role row failed: %v", err)
+					}
 					roleMap := map[string]interface{}{}
 					for i, col := range cols {
 						roleMap[col] = vals[i]
@@ -362,7 +370,9 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 					for i := range vals {
 						valPtrs[i] = &vals[i]
 					}
-					appRows.Scan(valPtrs...)
+					if err := appRows.Scan(valPtrs...); err != nil {
+						log.Printf("role.go ApproveMultipleRoles: scan approved role row failed: %v", err)
+					}
 					roleMap := map[string]interface{}{}
 					for i, col := range cols {
 						roleMap[col] = vals[i]
@@ -422,7 +432,9 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 			for i := range vals {
 				valPtrs[i] = &vals[i]
 			}
-			rows.Scan(valPtrs...)
+			if err := rows.Scan(valPtrs...); err != nil {
+				log.Printf("role.go DeleteRole: scan deleted role row failed: %v", err)
+			}
 			roleMap := map[string]interface{}{}
 			for i, col := range cols {
 				roleMap[col] = vals[i]
@@ -475,7 +487,9 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 			for i := range vals {
 				valPtrs[i] = &vals[i]
 			}
-			rows.Scan(valPtrs...)
+			if err := rows.Scan(valPtrs...); err != nil {
+				log.Printf("role.go RejectMultipleRoles: scan updated role row failed: %v", err)
+			}
 			roleMap := map[string]interface{}{}
 			for i, col := range cols {
 				roleMap[col] = vals[i]
@@ -503,7 +517,9 @@ func GetRolesForDropdown(db *sql.DB) http.HandlerFunc {
 		roles := []RoleOption{}
 		for rows.Next() {
 			var opt RoleOption
-			rows.Scan(&opt.ID, &opt.Name)
+			if err := rows.Scan(&opt.ID, &opt.Name); err != nil {
+				log.Printf("role.go GetRolesForDropdown: scan role option row failed: %v", err)
+			}
 			roles = append(roles, opt)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -550,7 +566,9 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 		roleNames := []string{}
 		for rows.Next() {
 			var name string
-			rows.Scan(&name)
+			if err := rows.Scan(&name); err != nil {
+				log.Printf("role.go GetJustRoles: scan role name row failed: %v", err)
+			}
 			roleNames = append(roleNames, name)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -574,7 +592,9 @@ func GetJustRolesPERMISSIONapproved(db *sql.DB) http.HandlerFunc {
 		roleNames := []string{}
 		for rows.Next() {
 			var name string
-			rows.Scan(&name)
+			if err := rows.Scan(&name); err != nil {
+				log.Printf("role.go GetJustRolesPERMISSIONapproved: scan role name row failed: %v", err)
+			}
 			roleNames = append(roleNames, name)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -611,7 +631,9 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 			for permRows.Next() {
 				var pageName, tabName, action string
 				var allowed interface{}
-				permRows.Scan(&pageName, &tabName, &action, &allowed)
+				if err := permRows.Scan(&pageName, &tabName, &action, &allowed); err != nil {
+					log.Printf("role.go GetPendingRoles: scan permission row failed: %v", err)
+				}
 				if pageName != "roles" {
 					continue
 				}
@@ -653,7 +675,9 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 			for i := range vals {
 				valPtrs[i] = &vals[i]
 			}
-			rows.Scan(valPtrs...)
+			if err := rows.Scan(valPtrs...); err != nil {
+				log.Printf("role.go GetPendingRoles: scan role row failed: %v", err)
+			}
 			rMap := map[string]interface{}{}
 			for i, col := range cols {
 				rMap[col] = vals[i]
@@ -798,7 +822,9 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 		for i := range vals {
 			valPtrs[i] = &vals[i]
 		}
-		rows.Scan(valPtrs...)
+		if err := rows.Scan(valPtrs...); err != nil {
+			log.Printf("role.go UpdateRole: scan role row failed: %v", err)
+		}
 		roleMap := map[string]interface{}{}
 		for i, col := range cols {
 			roleMap[col] = vals[i]

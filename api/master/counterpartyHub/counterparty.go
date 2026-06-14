@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/logger"
 	"context"
 	"encoding/json"
 	"errors"
@@ -713,24 +714,40 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if strings.ToUpper(a.ActionType) == "DELETE" {
 				switch a.CPType {
 				case "BANK":
-					tx.Exec(ctx, `UPDATE apibox.bank_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID)
+					if _, err := tx.Exec(ctx, `UPDATE apibox.bank_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID); err != nil {
+						logger.LogError("approveCounterparty: cascade delete bank_master exec failed: %v", err)
+					}
 				case "EXCHANGE":
-					tx.Exec(ctx, `UPDATE apibox.exchange_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID)
+					if _, err := tx.Exec(ctx, `UPDATE apibox.exchange_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID); err != nil {
+						logger.LogError("approveCounterparty: cascade delete exchange_master exec failed: %v", err)
+					}
 				case "DATA_PROVIDER":
-					tx.Exec(ctx, `UPDATE apibox.data_provider_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID)
+					if _, err := tx.Exec(ctx, `UPDATE apibox.data_provider_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID); err != nil {
+						logger.LogError("approveCounterparty: cascade delete data_provider_master exec failed: %v", err)
+					}
 				case "CCP_CSD":
-					tx.Exec(ctx, `UPDATE apibox.ccp_csd_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID)
+					if _, err := tx.Exec(ctx, `UPDATE apibox.ccp_csd_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID); err != nil {
+						logger.LogError("approveCounterparty: cascade delete ccp_csd_master exec failed: %v", err)
+					}
 				case "PAYMENT_NETWORK":
-					tx.Exec(ctx, `UPDATE apibox.payment_network_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID)
+					if _, err := tx.Exec(ctx, `UPDATE apibox.payment_network_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID); err != nil {
+						logger.LogError("approveCounterparty: cascade delete payment_network_master exec failed: %v", err)
+					}
 				case "ERP_SYSTEM":
-					tx.Exec(ctx, `UPDATE apibox.erp_system_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID)
+					if _, err := tx.Exec(ctx, `UPDATE apibox.erp_system_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID); err != nil {
+						logger.LogError("approveCounterparty: cascade delete erp_system_master exec failed: %v", err)
+					}
 				}
 			} else {
 				switch a.CPType {
 				case "PAYMENT_NETWORK":
-					tx.Exec(ctx, `UPDATE apibox.payment_network_master SET status='ACTIVE' WHERE counterparty_id=$1`, a.CPID)
+					if _, err := tx.Exec(ctx, `UPDATE apibox.payment_network_master SET status='ACTIVE' WHERE counterparty_id=$1`, a.CPID); err != nil {
+						logger.LogError("approveCounterparty: cascade activate payment_network_master exec failed: %v", err)
+					}
 				case "ERP_SYSTEM":
-					tx.Exec(ctx, `UPDATE apibox.erp_system_master SET status='ACTIVE' WHERE counterparty_id=$1`, a.CPID)
+					if _, err := tx.Exec(ctx, `UPDATE apibox.erp_system_master SET status='ACTIVE' WHERE counterparty_id=$1`, a.CPID); err != nil {
+						logger.LogError("approveCounterparty: cascade activate erp_system_master exec failed: %v", err)
+					}
 				}
 			}
 
@@ -809,7 +826,9 @@ func BulkRejectCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var selfIDs []string
 		for selfRows.Next() {
 			var id string
-			selfRows.Scan(&id)
+			if err := selfRows.Scan(&id); err != nil {
+				logger.LogError("rejectCounterparty: self-reject scan failed: %v", err)
+			}
 			selfIDs = append(selfIDs, id)
 		}
 		selfRows.Close()
@@ -899,7 +918,9 @@ func BulkDeleteCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		found := make(map[string]bool)
 		for existRows.Next() {
 			var id string
-			existRows.Scan(&id)
+			if err := existRows.Scan(&id); err != nil {
+				logger.LogError("rejectCounterparty: existing IDs scan failed: %v", err)
+			}
 			found[id] = true
 		}
 		existRows.Close()

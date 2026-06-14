@@ -26,6 +26,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/logger"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -1235,7 +1236,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// ── 9. Policy exceptions (variance + unresolved accrual) ──────────────
 		run("policy_exceptions", func(ctx context.Context) (interface{}, error) {
 			var openVariance, openAccrualExc int64
-			pool.QueryRow(ctx, `
+			if err := pool.QueryRow(ctx, `
 				SELECT COUNT(*) FROM investment.fd_confirmation
 				WHERE is_deleted=false
 				  AND variance_flag=true
@@ -1243,15 +1244,19 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND EXISTS(
 				    SELECT 1 FROM investment.fd_booking_request b
 				    WHERE b.booking_id=fd_confirmation.booking_id AND b.entity_id = ANY(string_to_array($1, ','))
-				  )`, entityFilter).Scan(&openVariance)
+				  )`, entityFilter).Scan(&openVariance); err != nil {
+				logger.LogError("policy exceptions open variance: query row failed: %v", err)
+			}
 
-			pool.QueryRow(ctx, `
+			if err := pool.QueryRow(ctx, `
 				SELECT COUNT(*) FROM investment.fd_accrual_exception ae
 				WHERE COALESCE(ae.is_deleted,false)=false
 				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
 				  AND EXISTS (
 				    SELECT 1 FROM investment.fd_master m WHERE m.fd_id=ae.fd_id AND m.entity_id = ANY(string_to_array($1, ','))
-				  )`, entityFilter).Scan(&openAccrualExc)
+				  )`, entityFilter).Scan(&openAccrualExc); err != nil {
+				logger.LogError("policy exceptions open accrual exceptions: query row failed: %v", err)
+			}
 
 			return map[string]interface{}{
 				"open_variance_confirmations": openVariance,
@@ -1617,7 +1622,9 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					defer bookingRows.Close()
 					for bookingRows.Next() {
 						var br bRow
-						bookingRows.Scan(&br.ID, &br.Status, &br.Date, &br.By)
+						if err := bookingRows.Scan(&br.ID, &br.Status, &br.Date, &br.By); err != nil {
+							logger.LogError("transaction trace bookings: scan failed: %v", err)
+						}
 						bookings = append(bookings, br)
 					}
 				}
@@ -1645,8 +1652,10 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					defer cfRows.Close()
 					for cfRows.Next() {
 						var cr cfRow
-						cfRows.Scan(&cr.ID, &cr.EventType, &cr.EventDate,
-							&cr.InterestAcc, &cr.NetCashFlow, &cr.TDSAmount, &cr.PostingStatus)
+						if err := cfRows.Scan(&cr.ID, &cr.EventType, &cr.EventDate,
+							&cr.InterestAcc, &cr.NetCashFlow, &cr.TDSAmount, &cr.PostingStatus); err != nil {
+							logger.LogError("transaction trace cashflows: scan failed: %v", err)
+						}
 						cr.InterestAcc = fdRound(cr.InterestAcc, 2)
 						cr.NetCashFlow = fdRound(cr.NetCashFlow, 2)
 						cr.TDSAmount = fdRound(cr.TDSAmount, 2)
@@ -1683,8 +1692,10 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					defer auditRows.Close()
 					for auditRows.Next() {
 						var ar auditTraceRow
-						auditRows.Scan(&ar.Source, &ar.AuditID, &ar.ActionType,
-							&ar.Status, &ar.RequestedBy, &ar.RequestedAt, &ar.CheckerBy)
+						if err := auditRows.Scan(&ar.Source, &ar.AuditID, &ar.ActionType,
+							&ar.Status, &ar.RequestedBy, &ar.RequestedAt, &ar.CheckerBy); err != nil {
+							logger.LogError("transaction trace audit trail: scan failed: %v", err)
+						}
 						auditTrail = append(auditTrail, ar)
 					}
 				}
@@ -1713,8 +1724,10 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					defer overrideRows.Close()
 					for overrideRows.Next() {
 						var or overrideTraceRow
-						overrideRows.Scan(&or.LedgerID, &or.Period, &or.OverrideAmt, &or.OriginalAmt,
-							&or.ReasonCode, &or.Status, &or.ProposedBy, &or.HasEvidence)
+						if err := overrideRows.Scan(&or.LedgerID, &or.Period, &or.OverrideAmt, &or.OriginalAmt,
+							&or.ReasonCode, &or.Status, &or.ProposedBy, &or.HasEvidence); err != nil {
+							logger.LogError("transaction trace overrides: scan failed: %v", err)
+						}
 						or.OverrideAmt = fdRound(or.OverrideAmt, 2)
 						or.OriginalAmt = fdRound(or.OriginalAmt, 2)
 						overrides = append(overrides, or)

@@ -539,7 +539,9 @@ WHERE COALESCE(u.is_deleted, false) = false AND` + fmt.Sprintf(userEntityAccessE
 			for i := range vals {
 				valPtrs[i] = &vals[i]
 			}
-			rows.Scan(valPtrs...)
+			if err := rows.Scan(valPtrs...); err != nil {
+				log.Printf("user.go GetUsers: scan user row failed: %v", err)
+			}
 			rowMap := map[string]interface{}{}
 			for i, col := range cols {
 				rowMap[col] = decodeSQLValue(vals[i])
@@ -706,7 +708,9 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 				valPtrs[i] = &vals[i]
 			}
 
-			rows.Scan(valPtrs...)
+			if err := rows.Scan(valPtrs...); err != nil {
+				log.Printf("user.go GetApprovedUser: scan user row failed: %v", err)
+			}
 
 			userMap := map[string]interface{}{}
 			for i, col := range cols {
@@ -875,7 +879,9 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 			for i := range vals {
 				valPtrs[i] = &vals[i]
 			}
-			rows.Scan(valPtrs...)
+			if err := rows.Scan(valPtrs...); err != nil {
+				log.Printf("user.go UpdateUser: scan user row failed: %v", err)
+			}
 			userMap = map[string]interface{}{}
 			for i, col := range cols {
 				userMap[col] = decodeSQLValue(vals[i])
@@ -999,7 +1005,9 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 			for i := range vals {
 				valPtrs[i] = &vals[i]
 			}
-			rows.Scan(valPtrs...)
+			if err := rows.Scan(valPtrs...); err != nil {
+				log.Printf("user.go DeleteUser: scan user row failed: %v", err)
+			}
 			userMap := map[string]interface{}{}
 			for i, col := range cols {
 				userMap[col] = decodeSQLValue(vals[i])
@@ -1052,7 +1060,9 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 		toApprove := []string{}
 		for rows.Next() {
 			var id, status string
-			rows.Scan(&id, &status)
+			if err := rows.Scan(&id, &status); err != nil {
+				log.Printf("user.go ApproveMultipleUsers: scan id/status row failed: %v", err)
+			}
 			if status == constants.StatusCodeDeleteApproval {
 				toDelete = append(toDelete, id)
 			} else {
@@ -1097,7 +1107,9 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 					for i := range vals {
 						valPtrs[i] = &vals[i]
 					}
-					delRows.Scan(valPtrs...)
+					if err := delRows.Scan(valPtrs...); err != nil {
+						log.Printf("user.go ApproveMultipleUsers: scan deleted user row failed: %v", err)
+					}
 					userMap := map[string]interface{}{}
 					for i, col := range cols {
 						userMap[col] = decodeSQLValue(vals[i])
@@ -1134,7 +1146,9 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 					for i := range vals {
 						valPtrs[i] = &vals[i]
 					}
-					appRows.Scan(valPtrs...)
+					if err := appRows.Scan(valPtrs...); err != nil {
+						log.Printf("user.go ApproveMultipleUsers: scan approved user row failed: %v", err)
+					}
 					userMap := map[string]interface{}{}
 					for i, col := range cols {
 						userMap[col] = decodeSQLValue(vals[i])
@@ -1196,7 +1210,9 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			for i := range vals {
 				valPtrs[i] = &vals[i]
 			}
-			rows.Scan(valPtrs...)
+			if err := rows.Scan(valPtrs...); err != nil {
+				log.Printf("user.go RejectMultipleUsers: scan user row failed: %v", err)
+			}
 			userMap := map[string]interface{}{}
 			for i, col := range cols {
 				userMap[col] = vals[i]

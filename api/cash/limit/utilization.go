@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/logger"
 	"bytes"
 	"context"
 	"encoding/csv"
@@ -1140,7 +1141,9 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				defer drows.Close()
 				for drows.Next() {
 					var id string
-					drows.Scan(&id)
+					if err := drows.Scan(&id); err != nil {
+						logger.LogError("[BulkApproveUtilizations] deleted utilization_id scan failed: %v", err)
+					}
 					deleted = append(deleted, id)
 				}
 			}

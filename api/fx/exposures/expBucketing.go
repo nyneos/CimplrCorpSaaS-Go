@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
 	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/logger"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -197,7 +198,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 					for i := range vals {
 						valPtrs[i] = &vals[i]
 					}
-					rows.Scan(valPtrs...)
+					if err := rows.Scan(valPtrs...); err != nil {
+						logger.LogError("update exposure_headers: scan failed: %v", err)
+					}
 					rowMap := map[string]interface{}{}
 					for i, col := range cols {
 						rowMap[col] = parseDBValue(col, vals[i])
@@ -205,7 +208,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 					updated["header"] = rowMap
 				}
 				rows.Close()
-				db.Exec("UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID)
+				if _, err := db.Exec("UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
+					logger.LogError("update exposure_bucketing status after header update: exec failed: %v", err)
+				}
 			}
 		}
 
@@ -237,7 +242,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 					for i := range vals {
 						valPtrs[i] = &vals[i]
 					}
-					rows.Scan(valPtrs...)
+					if err := rows.Scan(valPtrs...); err != nil {
+						logger.LogError("update exposure_line_items: scan failed: %v", err)
+					}
 					rowMap := map[string]interface{}{}
 					for i, col := range cols {
 						rowMap[col] = parseDBValue(col, vals[i])
@@ -246,7 +253,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 				}
 				updated["lineItems"] = lineItems
 				rows.Close()
-				db.Exec("UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID)
+				if _, err := db.Exec("UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
+					logger.LogError("update exposure_bucketing status after line items update: exec failed: %v", err)
+				}
 			}
 		}
 
@@ -279,7 +288,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 					for i := range vals {
 						valPtrs[i] = &vals[i]
 					}
-					rows.Scan(valPtrs...)
+					if err := rows.Scan(valPtrs...); err != nil {
+						logger.LogError("update exposure_bucketing: scan failed: %v", err)
+					}
 					rowMap := map[string]interface{}{}
 					for i, col := range cols {
 						rowMap[col] = parseDBValue(col, vals[i])
@@ -319,7 +330,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 					for i := range vals {
 						valPtrs[i] = &vals[i]
 					}
-					rows.Scan(valPtrs...)
+					if err := rows.Scan(valPtrs...); err != nil {
+						logger.LogError("update hedging_proposal: scan failed: %v", err)
+					}
 					rowMap := map[string]interface{}{}
 					for i, col := range cols {
 						rowMap[col] = parseDBValue(col, vals[i])
@@ -328,7 +341,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 				}
 				updated["hedging"] = hedging
 				rows.Close()
-				db.Exec("UPDATE hedging_proposal SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID)
+				if _, err := db.Exec("UPDATE hedging_proposal SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
+					logger.LogError("update hedging_proposal status: exec failed: %v", err)
+				}
 			}
 		}
 
@@ -658,7 +673,9 @@ func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
 				for i := range vals {
 					valPtrs[i] = &vals[i]
 				}
-				rows.Scan(valPtrs...)
+				if err := rows.Scan(valPtrs...); err != nil {
+					logger.LogError("approve exposure_bucketing: scan failed: %v", err)
+				}
 				rowMap := map[string]interface{}{}
 				for i, col := range cols {
 					rowMap[col] = parseDBValue(col, vals[i])
@@ -775,7 +792,9 @@ func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
 			for i := range vals {
 				valPtrs[i] = &vals[i]
 			}
-			rows.Scan(valPtrs...)
+			if err := rows.Scan(valPtrs...); err != nil {
+				logger.LogError("reject exposure_bucketing: scan failed: %v", err)
+			}
 			rowMap := map[string]interface{}{}
 			for i, col := range cols {
 				rowMap[col] = parseDBValue(col, vals[i])
