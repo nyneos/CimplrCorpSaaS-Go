@@ -854,7 +854,10 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			_ = dependency.CascadeDelete(ctx, pgxPool, "masterbankaccount", accountID, checkerBy)
 		}
 		if len(accountIDsToDelete) > 0 {
-			_, _ = pgxPool.Exec(r.Context(), `UPDATE masterbankaccount SET is_deleted = true WHERE account_id = ANY($1)`, pq.Array(accountIDsToDelete))
+			if _, err := pgxPool.Exec(r.Context(), `UPDATE masterbankaccount SET is_deleted = true WHERE account_id = ANY($1)`, accountIDsToDelete); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to mark bank accounts as deleted: "+err.Error())
+				return
+			}
 		}
 
 		// Approve remaining audit actions (exclude those that were pending delete)
