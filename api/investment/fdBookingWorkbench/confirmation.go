@@ -133,7 +133,7 @@ func fdConfirmationCaptureRequestFromForm(r *http.Request) fdConfirmationCapture
 func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req fdConfirmationCaptureRequest
-		isMultipart := strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data")
+		isMultipart := strings.Contains(strings.ToLower(r.Header.Get(constants.ContentTypeText)), "multipart/form-data")
 		if isMultipart {
 			if err := r.ParseMultipartForm(32 << 20); err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, "Invalid multipart form: "+err.Error())
@@ -337,7 +337,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Use 422 so axios throws (enabling the catch block on the frontend)
 			// while avoiding misleading HTTP 500 / [ERROR] log noise for a normal
 			// business-logic condition.
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			api.LogInfo("[FDBooking] CaptureConfirmation: variance detected booking=%s run=%s", req.BookingID, runID)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{

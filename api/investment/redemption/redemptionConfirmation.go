@@ -240,7 +240,7 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateRedemptionConfirmationRequest
 		var statementHeader *multipart.FileHeader
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "multipart/form-data") {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText))), "multipart/form-data") {
 			if err := r.ParseMultipartForm(32 << 20); err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort+": "+err.Error())
 				return

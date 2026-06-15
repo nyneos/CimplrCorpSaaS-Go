@@ -10,6 +10,7 @@ import (
 	"CimplrCorpSaas/api/cash/payablerecievable"
 	"CimplrCorpSaas/api/cash/projection"
 	sweepconfig "CimplrCorpSaas/api/cash/sweepConfig"
+	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/travel"
 	"CimplrCorpSaas/internal/observability"
@@ -365,7 +366,7 @@ func StartCashService(db *sql.DB, port string) {
 func cashJSONActionResponses(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isCashJSONActionRoute(r.URL.Path) {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		}
 		next.ServeHTTP(w, r)
 	})

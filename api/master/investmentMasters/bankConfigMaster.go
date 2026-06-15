@@ -1477,7 +1477,7 @@ func DeleteBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(deleteBlockers) > 0 {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,

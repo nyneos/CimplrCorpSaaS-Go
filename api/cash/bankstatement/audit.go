@@ -35,7 +35,7 @@ func GetBankStatementAuditHandler(pool *pgxpool.Pool) http.Handler {
 
 		var body bankStatementAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "bank_statement_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrBankStatementIDRequired)
 			return
 		}
 
@@ -124,7 +124,7 @@ func GetBankStatementDownloadAuditHandler(pool *pgxpool.Pool) http.Handler {
 
 		var body bankStatementDownloadAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "bank_statement_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrBankStatementIDRequired)
 			return
 		}
 
@@ -201,7 +201,7 @@ func GetBankStatementBalanceImpactAuditHandler(pool *pgxpool.Pool) http.Handler 
 
 		var body bankStatementAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "bank_statement_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrBankStatementIDRequired)
 			return
 		}
 
@@ -282,7 +282,7 @@ func GetBankStatementTransactionAuditHandler(pool *pgxpool.Pool) http.Handler {
 
 		var body bankStatementAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "bank_statement_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrBankStatementIDRequired)
 			return
 		}
 

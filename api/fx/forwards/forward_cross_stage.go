@@ -59,7 +59,7 @@ func listForwardCrossStageFiles(ctx context.Context, pool *pgxpool.Pool, module,
 	}
 	union, ok := forwardCrossStageUnion(module, constants.ErrFDReceiptDeletedFilter)
 	if !ok {
-		return nil, fmt.Errorf("module %q is not a cross-stage FX forward module", module)
+		return nil, fmt.Errorf(constants.ErrInvalidCrossStageForwardModule, module)
 	}
 	return additionalfiles.QueryFiles(ctx, pool, union+"\nORDER BY uploaded_at DESC", forwardCrossStageParentID(module, parentID), names)
 }
@@ -75,7 +75,7 @@ func getForwardCrossStageFile(ctx context.Context, pool *pgxpool.Pool, module, p
 	}
 	union, ok := forwardCrossStageUnion(module, d)
 	if !ok {
-		return nil, fmt.Errorf("module %q is not a cross-stage FX forward module", module)
+		return nil, fmt.Errorf(constants.ErrInvalidCrossStageForwardModule, module)
 	}
 	query := fmt.Sprintf("SELECT %s FROM (%s) u WHERE u.file_id::text = $3 LIMIT 1", forwardCrossStageOuterCols, union)
 	return additionalfiles.FirstFile(ctx, pool, query, forwardCrossStageParentID(module, parentID), names, strings.TrimSpace(fileID))
@@ -89,7 +89,7 @@ func getForwardCrossStageFiles(ctx context.Context, pool *pgxpool.Pool, module, 
 	trimmedIDs := trimForwardAdditionalFileIDs(fileIDs)
 	union, ok := forwardCrossStageUnion(module, constants.ErrFDReceiptDeletedFilter)
 	if !ok {
-		return nil, nil, fmt.Errorf("module %q is not a cross-stage FX forward module", module)
+		return nil, nil, fmt.Errorf(constants.ErrInvalidCrossStageForwardModule, module)
 	}
 	query := fmt.Sprintf("SELECT %s FROM (%s) u WHERE u.file_id::text = ANY($3)", forwardCrossStageOuterCols, union)
 	files, err := additionalfiles.QueryFiles(ctx, pool, query, forwardCrossStageParentID(module, parentID), names, trimmedIDs)

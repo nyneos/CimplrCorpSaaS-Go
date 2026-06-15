@@ -111,6 +111,7 @@ const (
 	// ErrFailedToDeleteStagedStatements              = "failed to delete staged statements"
 	ErrFailedToReadTransactionDownloadAuditHistory = "failed to read transaction download audit history"
 	ErrMissingLatestAuditForTransaction            = "missing latest audit for transaction: "
+	ErrBankStatementIDRequired                     = "bank_statement_id is required"
 )
 
 // Additional common messages used across handlers
@@ -530,6 +531,10 @@ const (
 	ErrConfirmedPrincipalAndInterest      = "confirmed_principal_amount and confirmed_interest_rate must be positive"
 	FDAccrualEngine                       = "fd-accrual-engine"
 	ExposureHeaders                       = "public.exposure_headers"
+	UnionAll                              = "\nUNION ALL\n"
+	ErrInvalidCrossStageModule            = "module %q is not a cross-stage FX exposure module"
+	ErrInvalidCrossStageForwardModule     = "module %q is not a cross-stage FX forward module"
+	ErrFailedToUploadFileMetadata         = "file upload metadata failed: %w"
 )
 
 var (

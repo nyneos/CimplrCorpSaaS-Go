@@ -1776,7 +1776,7 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(blockedEntities) > 0 {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
 				constants.ValueSuccess: false,

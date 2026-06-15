@@ -259,7 +259,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			seenCodesInFile[normCode] = sheetRow
-			
+
 			normName := strings.ToUpper(strings.TrimSpace(get(row, "day_count_name")))
 			if prevRow, dup := seenNamesInFile[normName]; dup && normName != "" {
 				sendFail(sheetRow, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching day_count_name: %s)", sheetRow, prevRow, get(row, "day_count_name")))
@@ -1196,7 +1196,7 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(deleteBlockers) > 0 {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,

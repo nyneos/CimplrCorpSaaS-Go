@@ -69,7 +69,7 @@ func smartCatPost(ctx context.Context, cfg smartCatConfig, path string, reqBody 
 	if err != nil {
 		return nil, 0, fmt.Errorf("new request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	req.Header.Set("Authorization", "Bearer "+cfg.Key)
 
 	resp, err := http.DefaultClient.Do(req)

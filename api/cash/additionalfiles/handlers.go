@@ -472,7 +472,11 @@ func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		}
 
 		requestedBy := requestedByOrFallback(r.Context(), req.UserID)
-		if err := recordDeleteRequestAudit(r.Context(), pool, cfg, parentID, *record, requestedBy, api.ClientIPFromRequest(r), strings.TrimSpace(req.Reason)); err != nil {
+		if err := recordDeleteRequestAudit(r.Context(), pool, cfg, parentID, *record, auditActorInfo{
+			RequestedBy: requestedBy,
+			RequestedIP: api.ClientIPFromRequest(r),
+			Reason:      strings.TrimSpace(req.Reason),
+		}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -1206,7 +1210,7 @@ func recordDownloadAudit(ctx context.Context, exec AuditExecutor, cfg Config, pa
 	})
 }
 
-func recordDeleteRequestAudit(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, requestedIP, reason string) error {
+func recordDeleteRequestAudit(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, file FileRecord, actor auditActorInfo) error {
 	requestedAt := time.Now().UTC()
 	return insertAuditEvent(ctx, exec, cfg, fileAuditEvent{
 		EntityID:         file.FileID,
@@ -1215,10 +1219,10 @@ func recordDeleteRequestAudit(ctx context.Context, exec AuditExecutor, cfg Confi
 		FileID:           file.FileID,
 		ActionType:       fileAuditDeleteAction,
 		ProcessingStatus: fileAuditPendingDeleteApproval,
-		RequestedBy:      requestedBy,
+		RequestedBy:      actor.RequestedBy,
 		RequestedAt:      &requestedAt,
-		RequestedIP:      requestedIP,
-		Reason:           reason,
+		RequestedIP:      actor.RequestedIP,
+		Reason:           actor.Reason,
 	})
 }
 
@@ -1530,6 +1534,12 @@ func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, cfg Co
 	event.CheckerComment = strings.TrimSpace(checkerComment.String)
 	event.Reason = strings.TrimSpace(reason.String)
 	return &event, nil
+}
+
+type auditActorInfo struct {
+	RequestedBy string
+	RequestedIP string
+	Reason      string
 }
 
 type deleteAuditDecisionParams struct {

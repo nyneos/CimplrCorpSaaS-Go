@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
 )
 
@@ -43,7 +44,7 @@ import (
 //	}
 func LLMExtractTestHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 		respond := func(v any) { json.NewEncoder(w).Encode(v) }
 		fail := func(msg string) {
@@ -212,7 +213,7 @@ Header rows:
 		return llmAccountInfo{}, fmt.Errorf("llm-acct: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+inferKey)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -287,15 +288,15 @@ func (l llmColumnLayout) toColIdx() map[string]int {
 			out[k] = v
 		}
 	}
-	set(l.col("date"),        "Date", transactionDateHeader)
-	set(l.col("value_date"),  valueDateHeader)
-	set(l.col("tran_id"),     tranIDHeader)
+	set(l.col("date"), "Date", transactionDateHeader)
+	set(l.col("value_date"), valueDateHeader)
+	set(l.col("tran_id"), tranIDHeader)
 	set(l.col("description"), "Description", transactionRemarksHeader)
-	set(l.col("withdrawal"),  withdrawalAmtHeader, "Withdrawal")
-	set(l.col("deposit"),     depositAmtHeader, "Deposit")
-	set(l.col("balance"),     balanceHeader, "Balance")
-	set(l.col("crdr"),        "CrDr")
-	set(l.col("timestamp"),   "TimeStamp")
+	set(l.col("withdrawal"), withdrawalAmtHeader, "Withdrawal")
+	set(l.col("deposit"), depositAmtHeader, "Deposit")
+	set(l.col("balance"), balanceHeader, "Balance")
+	set(l.col("crdr"), "CrDr")
+	set(l.col("timestamp"), "TimeStamp")
 	set(l.col("posted_date"), "PostedDate")
 	return out
 }
@@ -411,7 +412,7 @@ Rows:
 		return llmColumnLayout{}, fmt.Errorf("llm-cols: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+inferKey)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

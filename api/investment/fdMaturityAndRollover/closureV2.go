@@ -1905,7 +1905,7 @@ func CimplrClosureDownload(pool *pgxpool.Pool) http.HandlerFunc {
 
 func CimplrClosureUpload(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "multipart/form-data") {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText))), "multipart/form-data") {
 			uploadCimplrClosureMultipart(w, r, pool)
 			return
 		}
@@ -2036,7 +2036,7 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 		module = "fd-rollover-additional"
 	}
 	s3Key := s3storage.BuildNamedS3Key(s3storage.GetStoragePrefix(module), parentID, storedFileName)
-	contentType := header.Header.Get("Content-Type")
+	contentType := header.Header.Get(constants.ContentTypeText)
 	if contentType == "" {
 		contentType = s3storage.DetectContentType(body)
 	}

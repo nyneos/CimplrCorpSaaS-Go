@@ -619,10 +619,10 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Reuse CreateCompoundingFrequency logic by building rows
 		var inputs []map[string]interface{}
 		var errorsList []map[string]interface{}
-		
+
 		seenCodesInFile := make(map[string]int)
 		seenNamesInFile := make(map[string]int)
-		
+
 		// Fail-fast: validate each row and abort on first validation error
 		for ri, row := range data {
 			get := func(col string) string { return getColumnValue(row, colMap, col) }
@@ -633,7 +633,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			periodsStr := strings.TrimSpace(get("compounding_periods_per_year"))
 			daysStr := strings.TrimSpace(get("days_per_period"))
 			desc := strings.TrimSpace(get("description"))
-			
+
 			normCode := strings.ToUpper(code)
 			if prevRow, dup := seenCodesInFile[normCode]; dup && normCode != "" {
 				errorsList = append(errorsList, map[string]interface{}{
@@ -1143,7 +1143,7 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(deleteBlockers) > 0 {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,

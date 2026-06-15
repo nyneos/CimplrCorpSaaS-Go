@@ -624,7 +624,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var inputs []map[string]interface{}
 		var errorsList []map[string]interface{}
-		
+
 		seenCodesInFile := make(map[string]int)
 		seenNamesInFile := make(map[string]int)
 
@@ -645,7 +645,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				sendFail(ri+2, "Missing required columns")
 				return
 			}
-			
+
 			// in-file duplicate check
 			normCode := strings.ToUpper(strings.TrimSpace(code))
 			if prevRow, dup := seenCodesInFile[normCode]; dup {
@@ -1228,7 +1228,7 @@ func DeleteTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(deleteBlockers) > 0 {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,

@@ -388,7 +388,7 @@ func GetBankStatementDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "bank_statement_id is required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": constants.ErrBankStatementIDRequired})
 			return
 		}
 

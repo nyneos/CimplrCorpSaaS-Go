@@ -311,7 +311,7 @@ func CreateFVOSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 func decodeCreateFVORequest(r *http.Request) (CreateFVORequest, bool, error) {
 	var req CreateFVORequest
-	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
 	if strings.HasPrefix(contentType, "multipart/form-data") {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			return req, true, err

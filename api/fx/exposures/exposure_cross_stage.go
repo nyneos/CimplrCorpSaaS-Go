@@ -42,9 +42,9 @@ func exposureCrossStageUnion(module, d string) (string, bool) {
 	case "fx-exposure":
 		return exposure, true
 	case "fx-pending-exposure-bucketing":
-		return exposure + "\nUNION ALL\n" + pending, true
+		return exposure + constants.UnionAll + pending, true
 	case "fx-exposure-bucketing":
-		return exposure + "\nUNION ALL\n" + pending + "\nUNION ALL\n" + bucketing, true
+		return exposure + constants.UnionAll + pending + constants.UnionAll + bucketing, true
 	}
 	return "", false
 }
@@ -56,7 +56,7 @@ func listExposureCrossStageFiles(ctx context.Context, pool *pgxpool.Pool, module
 	}
 	union, ok := exposureCrossStageUnion(module, constants.ErrFDReceiptDeletedFilter)
 	if !ok {
-		return nil, fmt.Errorf("module %q is not a cross-stage FX exposure module", module)
+		return nil, fmt.Errorf(constants.ErrInvalidCrossStageModule, module)
 	}
 	return additionalfiles.QueryFiles(ctx, pool, union+"\nORDER BY uploaded_at DESC", strings.TrimSpace(parentID), names)
 }
@@ -72,7 +72,7 @@ func getExposureCrossStageFile(ctx context.Context, pool *pgxpool.Pool, module, 
 	}
 	union, ok := exposureCrossStageUnion(module, d)
 	if !ok {
-		return nil, fmt.Errorf("module %q is not a cross-stage FX exposure module", module)
+		return nil, fmt.Errorf(constants.ErrInvalidCrossStageModule, module)
 	}
 	query := fmt.Sprintf("SELECT %s FROM (%s) u WHERE u.file_id::text = $3 LIMIT 1", exposureCrossStageOuterCols, union)
 	return additionalfiles.FirstFile(ctx, pool, query, strings.TrimSpace(parentID), names, strings.TrimSpace(fileID))
@@ -86,7 +86,7 @@ func getExposureCrossStageFiles(ctx context.Context, pool *pgxpool.Pool, module,
 	trimmedIDs := trimFXAdditionalFileIDs(fileIDs)
 	union, ok := exposureCrossStageUnion(module, constants.ErrFDReceiptDeletedFilter)
 	if !ok {
-		return nil, nil, fmt.Errorf("module %q is not a cross-stage FX exposure module", module)
+		return nil, nil, fmt.Errorf(constants.ErrInvalidCrossStageModule, module)
 	}
 	query := fmt.Sprintf("SELECT %s FROM (%s) u WHERE u.file_id::text = ANY($3)", exposureCrossStageOuterCols, union)
 	files, err := additionalfiles.QueryFiles(ctx, pool, query, strings.TrimSpace(parentID), names, trimmedIDs)

@@ -34,6 +34,13 @@ type investmentAuditColumn struct {
 	HasDefault bool
 }
 
+type dynamicAuditEntry struct {
+	Action      string
+	Reason      string
+	Payload     cashfiles.MainUploadAuditPayload
+	ExtraValues map[string]interface{}
+}
+
 var (
 	onboardingFilesDefinition = investmentFileDefinition{
 		Module:        "investment-onboarding-additional",
@@ -280,7 +287,12 @@ func recordDynamicInvestmentMainUploadAudit(ctx context.Context, tx pgx.Tx, tabl
 	if err != nil {
 		return err
 	}
-	return recordDynamicInvestmentMainAudit(ctx, tx, tableName, parentColumns, parentID, "UPLOAD_FILE", reason, payload, extraValues)
+	return recordDynamicInvestmentMainAudit(ctx, tx, tableName, parentColumns, parentID, dynamicAuditEntry{
+		Action:      "UPLOAD_FILE",
+		Reason:      reason,
+		Payload:     payload,
+		ExtraValues: extraValues,
+	})
 }
 
 func recordDynamicInvestmentMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, tableName string, parentColumns []string, parentID string, payload cashfiles.MainUploadAuditPayload, extraValues map[string]interface{}) error {
@@ -288,10 +300,15 @@ func recordDynamicInvestmentMainDownloadAudit(ctx context.Context, exec cashfile
 	if err != nil {
 		return err
 	}
-	return recordDynamicInvestmentMainAudit(ctx, exec, tableName, parentColumns, parentID, "DOWNLOAD", reason, payload, extraValues)
+	return recordDynamicInvestmentMainAudit(ctx, exec, tableName, parentColumns, parentID, dynamicAuditEntry{
+		Action:      "DOWNLOAD",
+		Reason:      reason,
+		Payload:     payload,
+		ExtraValues: extraValues,
+	})
 }
 
-func recordDynamicInvestmentMainAudit(ctx context.Context, exec cashfiles.AuditExecutor, tableName string, parentColumns []string, parentID, action, reason string, payload cashfiles.MainUploadAuditPayload, extraValues map[string]interface{}) error {
+func recordDynamicInvestmentMainAudit(ctx context.Context, exec cashfiles.AuditExecutor, tableName string, parentColumns []string, parentID string, entry dynamicAuditEntry) error {
 	// The shared executor only exposes Exec; the schema introspection below needs
 	// Query. Both pgx.Tx (upload) and *pgxpool.Pool (download) provide it.
 	querier, ok := exec.(investmentAuditQuerier)
@@ -313,27 +330,27 @@ func recordDynamicInvestmentMainAudit(ctx context.Context, exec cashfiles.AuditE
 		values[parentColumn] = parentID
 	}
 	if actionColumn := firstInvestmentAuditColumn(columns, "action_type", "actiontype"); actionColumn != "" {
-		values[actionColumn] = action
+		values[actionColumn] = entry.Action
 	}
 	if _, ok := columns["processing_status"]; ok {
 		values["processing_status"] = constants.StatusApproved
 	}
 	if reasonColumn := firstInvestmentAuditColumn(columns, "reason", "action_reason"); reasonColumn != "" {
-		values[reasonColumn] = reason
+		values[reasonColumn] = entry.Reason
 	}
 	if requestedByColumn := firstInvestmentAuditColumn(columns, "requested_by", "performed_by", "uploaded_by"); requestedByColumn != "" {
-		values[requestedByColumn] = payload.UploadedBy
+		values[requestedByColumn] = entry.Payload.UploadedBy
 	}
 	if _, ok := columns["requested_ip"]; ok {
-		values["requested_ip"] = api.SystemIfBlank(payload.RequestedIP)
+		values["requested_ip"] = api.SystemIfBlank(entry.Payload.RequestedIP)
 	}
 	if _, ok := columns["performed_by_email"]; ok {
-		values["performed_by_email"] = payload.UploadedBy
+		values["performed_by_email"] = entry.Payload.UploadedBy
 	}
 	if requestedAtColumn := firstInvestmentAuditColumn(columns, "requested_at", "created_at", "uploaded_at"); requestedAtColumn != "" {
-		values[requestedAtColumn] = payload.UploadedAt
+		values[requestedAtColumn] = entry.Payload.UploadedAt
 	}
-	for key, value := range extraValues {
+	for key, value := range entry.ExtraValues {
 		if _, ok := columns[key]; ok {
 			values[key] = value
 		}
@@ -1255,7 +1272,7 @@ func uploadCimplrClosureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool,
 		uploadedAt := time.Now().UTC()
 		storedFileName := s3storage.BuildUploadedFilename(header.Filename, uploadedBy, uploadedAt)
 		s3Key := s3storage.BuildNamedS3Key(s3storage.GetStoragePrefix(fdClosureFilesDefinition.Module), parentID, storedFileName)
-		contentType := header.Header.Get("Content-Type")
+		contentType := header.Header.Get(constants.ContentTypeText)
 		if contentType == "" {
 			contentType = s3storage.DetectContentType(body)
 		}
@@ -1268,7 +1285,7 @@ func uploadCimplrClosureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool,
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			_ = s3storage.DeleteFromS3(ctx, s3Key)
-			return nil, fmt.Errorf("file upload metadata failed: %w", err)
+			return nil, fmt.Errorf(constants.ErrFailedToUploadFileMetadata, err)
 		}
 
 		var fileID string
@@ -1295,7 +1312,7 @@ func uploadCimplrClosureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool,
 		if insertErr != nil {
 			_ = tx.Rollback(ctx)
 			_ = s3storage.DeleteFromS3(ctx, s3Key)
-			return nil, fmt.Errorf("file upload metadata failed: %w", insertErr)
+			return nil, fmt.Errorf(constants.ErrFailedToUploadFileMetadata, insertErr)
 		}
 
 		initiateID, confirmID := "", ""
@@ -1323,7 +1340,7 @@ func uploadCimplrClosureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool,
 		}
 		if err := tx.Commit(ctx); err != nil {
 			_ = s3storage.DeleteFromS3(ctx, s3Key)
-			return nil, fmt.Errorf("file upload metadata failed: %w", err)
+			return nil, fmt.Errorf(constants.ErrFailedToUploadFileMetadata, err)
 		}
 
 		uploaded = append(uploaded, cashfiles.FileRecord{

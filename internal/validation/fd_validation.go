@@ -32,8 +32,10 @@ func ValidateFDMasterReferences(ctx context.Context, fields map[string]interface
 	}
 
 	// 4. Validate Interest Type
+	// "interest_type" is the calculation_method label (SIMPLE/COMPOUND/STEPPED), not a master
+	// reference key — only validate the ID/code fields against the approved rows.
 	if types, ok := ctx.Value("ApprovedInterestTypes").([]map[string]string); ok {
-		if errMsg := validateFieldReferences(fields, types, []string{"interest_type", "interest_type_id", "interest_type_code", "confirmed_interest_type_code"}, []string{"interest_id", "interest_type_id", "interest_type_code", "interest_type_name"}, "Interest Type"); errMsg != "" {
+		if errMsg := validateFieldReferences(fields, types, []string{"interest_type_id", "interest_type_code", "confirmed_interest_type_code"}, []string{"interest_id", "interest_type_id", "interest_type_code", "interest_type_name"}, "Interest Type"); errMsg != "" {
 			return errMsg
 		}
 	}

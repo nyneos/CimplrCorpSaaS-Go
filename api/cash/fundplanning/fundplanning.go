@@ -1051,6 +1051,14 @@ func roundToDecimal(val float64, precision int) float64 {
 }
 
 // CreateFundPlan request structures
+type groupCreationMeta struct {
+	PlanID      string
+	EntityName  string
+	Horizon     int
+	UserEmail   string
+	RequestedIP string
+}
+
 type CreateFundPlanRequest struct {
 	UserID     string                 `json:"user_id"`
 	PlanID     string                 `json:"plan_id"`
@@ -1187,7 +1195,13 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Process each group
 		for _, group := range req.Groups {
-			groupResult := processGroupCreation(ctx, tx, req.PlanID, req.EntityName, req.Horizon, group, userEmail, requestedIP)
+			groupResult := processGroupCreation(ctx, tx, groupCreationMeta{
+				PlanID:      req.PlanID,
+				EntityName:  req.EntityName,
+				Horizon:     req.Horizon,
+				UserEmail:   userEmail,
+				RequestedIP: requestedIP,
+			}, group)
 			results = append(results, groupResult)
 		}
 
@@ -1214,7 +1228,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // processGroupCreation handles creation of a single fund plan group with all its components
-func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityName string, horizon int, group FundPlanGroupRequest, userEmail, requestedIP string) map[string]interface{} {
+func processGroupCreation(ctx context.Context, tx pgx.Tx, meta groupCreationMeta, group FundPlanGroupRequest) map[string]interface{} {
 	result := map[string]interface{}{
 		"group_id":             group.GroupID,
 		constants.ValueSuccess: false,
@@ -1254,7 +1268,7 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityN
 		INSERT INTO fund_plan_groups (group_id, plan_id, direction, currency, primary_key, primary_value, total_amount, entity_name, horizon)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
 
-	_, err = tx.Exec(ctx, insertGroupQuery, group.GroupID, planID, direction, currency, primaryKey, primaryValue, group.TotalAmount, entityName, horizon)
+	_, err = tx.Exec(ctx, insertGroupQuery, group.GroupID, meta.PlanID, direction, currency, primaryKey, primaryValue, group.TotalAmount, meta.EntityName, meta.Horizon)
 	if err != nil {
 		result[constants.ValueError] = fmt.Sprintf("failed to insert group: %s", err.Error())
 		return result
@@ -1315,7 +1329,7 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityN
 		RETURNING action_id`
 
 	var actionID string
-	err = tx.QueryRow(ctx, insertAuditQuery, group.GroupID, userEmail, nullIfEmpty(requestedIP)).Scan(&actionID)
+	err = tx.QueryRow(ctx, insertAuditQuery, group.GroupID, meta.UserEmail, nullIfEmpty(meta.RequestedIP)).Scan(&actionID)
 	if err != nil {
 		result[constants.ValueError] = fmt.Sprintf("failed to create audit action: %s", err.Error())
 		return result
