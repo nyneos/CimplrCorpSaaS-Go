@@ -739,7 +739,16 @@ func userFriendlyUploadError(err error) string {
 	}
 
 	// Generic staging/preview wrapper errors — keep last so more specific matchers win.
-	if strings.Contains(msg, "build preview:") || strings.Contains(msg, "stage statement:") {
+	if strings.Contains(msg, "build preview:") {
+		if strings.Contains(msg, "no parsed statements") || strings.Contains(msg, "no transactions found") {
+			return "No transactions were found in the converted PDF. Please ensure you are uploading a real bank statement PDF."
+		}
+		if strings.Contains(msg, "account") {
+			return "Could not identify the bank account in the converted PDF. Please upload the original bank statement or use force_override with an account number."
+		}
+		return "We could not finish preparing this PDF for review. Please try again with the original bank PDF, or upload CSV/Excel if the problem continues."
+	}
+	if strings.Contains(msg, "stage statement:") {
 		return "We could not finish preparing this PDF for review. Please try again with the original bank PDF, or upload CSV/Excel if the problem continues."
 	}
 

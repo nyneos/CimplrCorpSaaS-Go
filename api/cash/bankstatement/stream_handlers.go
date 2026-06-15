@@ -838,14 +838,14 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 			}
 			tx = nil
 			// fall through: parse and return full preview using the existing record ID
-		} else if err != nil && err != sql.ErrNoRows {
+		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) && !errors.Is(err, sql.ErrNoRows) {
 			logger.LogError("[BANK-PREVIEW] step=checksum failed sha256_prefix=%s err=%v", shaPrefix, err)
 			respondWithError(w, err, "Failed to check existing uploads", http.StatusInternalServerError)
 			return
 		}
 		// When USE_PDFCO=true, route single-PDF through pdfco-svc → CSV/XLSX → staged preview
 		// instead of the AI parser. The staging batch is created with a single-file batch.
-		usePDFCo := usePDFCoFromEnv()
+		usePDFCo := usePDFCoFromEnv() || r.FormValue("co_pdf") == "true"
 		logger.LogInfo("[BANK-PREVIEW] step=route ext=%s use_pdfco=%v upload_to_storage=%v", ext, usePDFCo, uploadEnabled)
 		if ext == ".pdf" && usePDFCo {
 			if tx != nil {

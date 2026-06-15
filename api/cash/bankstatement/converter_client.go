@@ -58,8 +58,17 @@ func callConvertXLSX(ctx context.Context, docBytes []byte, filename, password st
 
 func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, password, path string) ([]byte, error) {
 	target := r0() + path
-	logger.LogInfo("[svc] step=build_request path=%s file=%q size=%d password_provided=%v encrypted_hint=%v",
-		path, filename, len(docBytes), strings.TrimSpace(password) != "", bytes.Contains(docBytes, []byte("/Encrypt")))
+
+	tok := strings.TrimSpace(os.Getenv("CONVERT_SVC_KEY"))
+	tokMasked := ""
+	if len(tok) >= 6 {
+		tokMasked = tok[:6] + "***"
+	} else if tok != "" {
+		tokMasked = "***"
+	}
+
+	logger.LogInfo("[svc] step=build_request target=%q path=%s file=%q size=%d token=%q password_provided=%v encrypted_hint=%v",
+		target, path, filename, len(docBytes), tokMasked, strings.TrimSpace(password) != "", bytes.Contains(docBytes, []byte("/Encrypt")))
 
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -79,54 +88,53 @@ func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, passwor
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, &buf)
 	if err != nil {
-		logger.LogError("[svc] step=request_build_failed path=%s file=%q err=%v", path, filename, err)
+		logger.LogError("[svc] step=request_build_failed target=%q file=%q err=%v", target, filename, err)
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
 
-	// Access token — env name intentionally unrelated to the backing service.
-	if tok := strings.TrimSpace(os.Getenv("CONVERT_SVC_KEY")); tok != "" {
+	if tok != "" {
 		req.Header.Set("X-Token", tok)
 	}
-	logger.LogInfo("[svc] step=request_send path=%s file=%q token_present=%v", path, filename, strings.TrimSpace(os.Getenv("CONVERT_SVC_KEY")) != "")
+	logger.LogInfo("[svc] step=request_send target=%q file=%q token_present=%v", target, filename, tok != "")
 
 	start := time.Now()
 	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
 	if err != nil {
-		logger.LogError("[svc] step=request_failed path=%s file=%q duration_ms=%d err=%v", path, filename, time.Since(start).Milliseconds(), err)
+		logger.LogError("[svc] step=request_failed target=%q file=%q duration_ms=%d err=%v", target, filename, time.Since(start).Milliseconds(), err)
 		return nil, fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		logger.LogError("[svc] step=response_read_failed path=%s file=%q status=%d duration_ms=%d err=%v",
-			path, filename, resp.StatusCode, time.Since(start).Milliseconds(), err)
+		logger.LogError("[svc] step=response_read_failed target=%q file=%q status=%d duration_ms=%d err=%v",
+			target, filename, resp.StatusCode, time.Since(start).Milliseconds(), err)
 		return nil, fmt.Errorf("read response: %w", err)
 	}
-	logger.LogInfo("[svc] step=response_received path=%s file=%q status=%d duration_ms=%d bytes=%d body_preview=%q",
-		path, filename, resp.StatusCode, time.Since(start).Milliseconds(), len(raw), previewLogString(string(raw), 700))
+	logger.LogInfo("[svc] step=response_received target=%q file=%q status=%d duration_ms=%d bytes=%d body=%q",
+		target, filename, resp.StatusCode, time.Since(start).Milliseconds(), len(raw), previewLogString(string(raw), 2000))
 
 	var result convertSvcResponse
 	if err := json.Unmarshal(raw, &result); err != nil {
-		logger.LogError("[svc] step=response_decode_failed path=%s file=%q status=%d err=%v body_preview=%q",
-			path, filename, resp.StatusCode, err, previewLogString(string(raw), 700))
-		return nil, fmt.Errorf("decode response: %w (%.200s)", err, string(raw))
+		logger.LogError("[svc] step=response_decode_failed target=%q file=%q status=%d err=%v full_body=%q",
+			target, filename, resp.StatusCode, err, string(raw))
+		return nil, fmt.Errorf("decode response: %w (%.500s)", err, string(raw))
 	}
 	if !result.Success {
-		logger.LogError("[svc] step=converter_rejected path=%s file=%q status=%d error=%q credits_used=%d remaining=%d",
-			path, filename, resp.StatusCode, result.Error, result.CreditsUsed, result.RemainingCredits)
+		logger.LogError("[svc] step=converter_rejected target=%q file=%q status=%d error=%q credits_used=%d remaining=%d full_body=%q",
+			target, filename, resp.StatusCode, result.Error, result.CreditsUsed, result.RemainingCredits, string(raw))
 		return nil, fmt.Errorf("converter error (status=%d): %s", resp.StatusCode, result.Error)
 	}
 
 	out, err := base64.StdEncoding.DecodeString(result.DataB64)
 	if err != nil {
-		logger.LogError("[svc] step=base64_decode_failed path=%s file=%q status=%d data_b64_len=%d err=%v",
-			path, filename, resp.StatusCode, len(result.DataB64), err)
+		logger.LogError("[svc] step=base64_decode_failed target=%q file=%q status=%d data_b64_len=%d err=%v",
+			target, filename, resp.StatusCode, len(result.DataB64), err)
 		return nil, fmt.Errorf("base64 decode: %w", err)
 	}
-	logger.LogInfo("[svc] step=done path=%s file=%q credits_used=%d remaining=%d output=%d bytes",
-		path, filename, result.CreditsUsed, result.RemainingCredits, len(out))
+	logger.LogInfo("[svc] step=done target=%q file=%q credits_used=%d remaining=%d output=%d bytes",
+		target, filename, result.CreditsUsed, result.RemainingCredits, len(out))
 	return out, nil
 }
 

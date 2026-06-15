@@ -115,6 +115,18 @@ func parseDate(s string) (time.Time, error) {
 			return t, nil
 		}
 	}
+	// Handle MM/DD or M/D dates with no year (e.g. "10/02", "3/5") — common in US bank statement PDFs.
+	// Assume current year; if the resulting date is more than 60 days in the future, use previous year.
+	for _, noYearLayout := range []string{"01/02", "1/2", "1/02", "01/2"} {
+		if t, err := time.Parse(noYearLayout, s); err == nil {
+			now := time.Now()
+			candidate := time.Date(now.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+			if candidate.After(now.AddDate(0, 0, 60)) {
+				candidate = candidate.AddDate(-1, 0, 0)
+			}
+			return candidate, nil
+		}
+	}
 	return time.Time{}, fmt.Errorf("could not parse date: %s", s)
 }
 
