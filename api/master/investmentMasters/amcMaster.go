@@ -1343,6 +1343,7 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.source,'') AS source,
 				COALESCE(m.old_source,'') AS old_source,
 				COALESCE(m.is_deleted,false) AS is_deleted,
+				COALESCE(m.upload_s3_key,'') AS upload_s3_key,
 
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.actiontype,'') AS action_type,

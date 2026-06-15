@@ -1914,6 +1914,7 @@ func GetBankConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.old_grace_period_rate_type,'')              AS old_grace_period_rate_type,
 				m.minimum_compounding_period_days,
 				l.old_minimum_compounding_period_days,
+				COALESCE(m.upload_s3_key,'') AS upload_s3_key,
 				COALESCE(m.quarter_definition,'')                      AS quarter_definition,
 				COALESCE(l.old_quarter_definition,'')                  AS old_quarter_definition,
 				COALESCE(m.tds_deduction_timing,'')                    AS tds_deduction_timing,

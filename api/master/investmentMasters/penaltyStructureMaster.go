@@ -1562,6 +1562,7 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.is_active,false) AS is_active,
 				COALESCE(l.old_is_active,false) AS old_is_active,
 				COALESCE(m.is_deleted,false) AS is_deleted,
+				COALESCE(m.upload_s3_key,'') AS upload_s3_key,
 
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_type,'') AS action_type,
@@ -1951,6 +1952,14 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, status, msg)
 				api.LogError("Upload: audit insert failed: %v", err)
 				return
+			}
+		}
+
+		// Persist the uploaded file's S3 key on each created penalty row so the
+		// listing API can surface a download link (mirrors the other FD masters).
+		if s3Key != "" && len(penaltyIDs) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE investment.fd_penalty_structure_master SET upload_s3_key = $1 WHERE penalty_id = ANY($2)`, s3Key, penaltyIDs); err != nil {
+				api.LogError("Failed to store upload_s3_key: %v", err)
 			}
 		}
 

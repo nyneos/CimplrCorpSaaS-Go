@@ -571,7 +571,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		query := `
 			SELECT m.category_id, m.category_name, m.category_type, m.parent_category_name,
-				   m.default_mapping, m.cashflow_nature, m.usage_flag, m.description, m.status,
+				   m.default_mapping, m.cashflow_nature, m.usage_flag, m.description, m.status, m.upload_s3_key,
 				   m.old_category_name, m.old_category_type, m.old_parent_category_name,
 				   m.old_default_mapping, m.old_cashflow_nature, m.old_usage_flag, m.old_description, m.old_status,
 			       m.is_top_level_category, m.is_deleted, m.category_level, m.old_category_level,
@@ -618,6 +618,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				categoryNameI, categoryTypeI                                                       interface{}
 				parentCategoryNameI                                                                *string
 				defaultMappingI, cashflowNatureI, usageFlagI, descriptionI, statusI                interface{}
+				uploadS3KeyI                                                                       interface{}
 				oldCategoryNameI, oldCategoryTypeI                                                 interface{}
 				oldParentCategoryNameI                                                             *string
 				oldDefaultMappingI, oldCashflowNatureI, oldUsageFlagI, oldDescriptionI, oldStatusI interface{}
@@ -639,7 +640,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if err := rows.Scan(
 				&categoryID, &categoryNameI, &categoryTypeI, &parentCategoryNameI,
-				&defaultMappingI, &cashflowNatureI, &usageFlagI, &descriptionI, &statusI,
+				&defaultMappingI, &cashflowNatureI, &usageFlagI, &descriptionI, &statusI, &uploadS3KeyI,
 				&oldCategoryNameI, &oldCategoryTypeI, &oldParentCategoryNameI,
 				&oldDefaultMappingI, &oldCashflowNatureI, &oldUsageFlagI,
 				&oldDescriptionI, &oldStatusI,
@@ -668,6 +669,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"usage_flag":               ifaceToString(usageFlagI),
 					"description":              ifaceToString(descriptionI),
 					constants.KeyStatus:        ifaceToString(statusI),
+					"upload_s3_key":            ifaceToString(uploadS3KeyI),
 					"old_category_name":        ifaceToString(oldCategoryNameI),
 					"old_category_type":        ifaceToString(oldCategoryTypeI),
 					"old_parent_category_name": ifaceToString(oldParentCategoryNameI),

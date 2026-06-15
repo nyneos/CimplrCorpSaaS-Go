@@ -329,6 +329,61 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 	}
 }
 
+
+func NewMainFileDownloadHandler(pool *pgxpool.Pool, cfg Config, loadMain func(ctx context.Context, pool *pgxpool.Pool, parentID string) (*MainPackageFile, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			return
+		}
+
+		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if strings.TrimSpace(body.UserID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			return
+		}
+		if loadMain == nil {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			return
+		}
+
+		mainFile, err := loadMain(r.Context(), pool, parentID)
+		if err != nil || mainFile == nil || strings.TrimSpace(mainFile.UploadS3Key) == "" {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), mainFile.UploadS3Key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to generate download url: "+err.Error())
+			return
+		}
+
+		if auditEnabled(cfg) {
+			fileName := strings.TrimSpace(mainFile.FileName)
+			if fileName == "" {
+				fileName = objectBaseName(mainFile.UploadS3Key)
+			}
+			if auditErr := recordMainDownloadAuditSafely(r.Context(), pool, cfg, parentID, MainUploadAuditPayload{
+				FileName:    fileName,
+				UploadS3Key: strings.TrimSpace(mainFile.UploadS3Key),
+				UploadedBy:  requestedByOrFallback(r.Context(), body.UserID),
+				UploadedAt:  time.Now().UTC(),
+				RequestedIP: api.ClientIPFromRequest(r),
+			}); auditErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, auditErr.Error())
+				return
+			}
+		}
+
+		writeSuccess(w, map[string]interface{}{"download_url": downloadURL})
+	}
+}
+
 func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

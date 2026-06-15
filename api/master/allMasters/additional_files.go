@@ -26,12 +26,14 @@ func newBytesMultipartFile(b []byte) bytesMultipartFile {
 	return bytesMultipartFile{bytes.NewReader(b)}
 }
 
-// masterFilesHandlers groups the 5 HTTP handlers for one master module.
+// masterFilesHandlers groups the HTTP handlers for one master module.
 type masterFilesHandlers struct {
 	List          http.HandlerFunc
 	Upload        http.HandlerFunc
 	Download      http.HandlerFunc
+	DownloadMain  http.HandlerFunc
 	DownloadBulk  http.HandlerFunc
+	PackageZip    http.HandlerFunc
 	Delete        http.HandlerFunc
 	Audit         http.HandlerFunc
 	ApproveDelete http.HandlerFunc
@@ -48,6 +50,7 @@ type masterFilesHandlers struct {
 //   - filesTable   – fully-qualified files table (e.g. "cimplrcorpsaas.master_bank_files")
 type MasterFilesConfigArgs struct {
 	ModuleKey   string
+	ModuleLabel string
 	ParentField string
 	ParentTable string
 	ParentCol   string
@@ -58,15 +61,40 @@ type MasterFilesConfigArgs struct {
 
 func newMasterFilesHandlers(pool *pgxpool.Pool, args MasterFilesConfigArgs) masterFilesHandlers {
 	cfg := buildMasterFilesConfig(args.ModuleKey, args.ParentField, args.ParentTable, args.ParentCol, args.FilesTable, args.AuditTable, args.ActionCol)
+	loadMain := loadMasterMainPackageFile(args.ParentTable, args.ParentCol)
+	moduleLabel := strings.TrimSpace(args.ModuleLabel)
+	if moduleLabel == "" {
+		moduleLabel = args.ModuleKey
+	}
 	return masterFilesHandlers{
 		List:          additionalfiles.NewListHandler(pool, cfg),
 		Upload:        additionalfiles.NewUploadHandler(pool, cfg),
 		Download:      additionalfiles.NewDownloadHandler(pool, cfg),
+		DownloadMain:  additionalfiles.NewMainFileDownloadHandler(pool, cfg, loadMain),
 		DownloadBulk:  additionalfiles.NewDownloadSelectedHandler(pool, cfg),
+		PackageZip:    additionalfiles.NewPackageZipHandler(pool, cfg, additionalfiles.PackageZipOptions{ModuleLabel: moduleLabel, IDField: args.ParentCol, LoadMain: loadMain}),
 		Delete:        additionalfiles.NewDeleteHandler(pool, cfg),
 		Audit:         additionalfiles.NewAuditHandler(pool, cfg),
 		ApproveDelete: additionalfiles.NewApproveDeleteHandler(pool, cfg),
 		RejectDelete:  additionalfiles.NewRejectDeleteHandler(pool, cfg),
+	}
+}
+
+// loadMasterMainPackageFile returns a loader for a master record's own
+// bulk-uploaded file (upload_s3_key on the parent table). Returns (nil, nil)
+// when the row has no stored file, and surfaces query errors so the caller can
+// skip the main file gracefully.
+func loadMasterMainPackageFile(parentTable, parentCol string) func(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+	q := `SELECT COALESCE(upload_s3_key,'') FROM ` + parentTable + ` WHERE ` + parentCol + ` = $1 AND COALESCE(is_deleted, FALSE) = FALSE`
+	return func(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+		var uploadS3Key string
+		if err := pool.QueryRow(ctx, q, rowID).Scan(&uploadS3Key); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(uploadS3Key) == "" {
+			return nil, nil
+		}
+		return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
 	}
 }
 
@@ -116,6 +144,9 @@ func buildMasterFilesConfig(moduleKey, parentField, parentTable, parentCol, file
 		},
 		RecordMainUploadAudit: func(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 			return additionalfiles.InsertMainUploadAudit(ctx, tx, auditTable, parentCol, actionCol, parentID, payload)
+		},
+		RecordMainDownloadAudit: func(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+			return additionalfiles.InsertMainDownloadAudit(ctx, exec, auditTable, parentCol, actionCol, parentID, payload)
 		},
 	}
 }
@@ -168,6 +199,7 @@ func deleteMasterAdditionalFile(ctx context.Context, exec masterFileExec, p mast
 func BankMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
 	return newMasterFilesHandlers(pool, MasterFilesConfigArgs{
 		ModuleKey:   "master-bank",
+		ModuleLabel: "Bank Master",
 		ParentField: "bank_id",
 		ParentTable: "public.masterbank",
 		ParentCol:   "bank_id",
@@ -192,6 +224,7 @@ func CurrencyMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
 func BankAccountMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
 	return newMasterFilesHandlers(pool, MasterFilesConfigArgs{
 		ModuleKey:   "master-bank-account",
+		ModuleLabel: "Bank Account Master",
 		ParentField: "account_id",
 		ParentTable: "public.masterbankaccount",
 		ParentCol:   "account_id",
@@ -228,6 +261,7 @@ func GLAccountMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
 func CashFlowCategoryMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
 	return newMasterFilesHandlers(pool, MasterFilesConfigArgs{
 		ModuleKey:   "master-cashflow-category",
+		ModuleLabel: "Cash Flow Category Master",
 		ParentField: "category_id",
 		ParentTable: "public.mastercashflowcategory",
 		ParentCol:   "category_id",

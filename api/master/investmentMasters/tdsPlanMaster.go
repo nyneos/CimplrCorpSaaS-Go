@@ -1089,6 +1089,7 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.is_active,false) AS is_active,
 				COALESCE(l.old_is_active,false) AS old_is_active,
 				COALESCE(m.is_deleted,false) AS is_deleted,
+				COALESCE(m.upload_s3_key,'') AS upload_s3_key,
 
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_type,'') AS action_type,

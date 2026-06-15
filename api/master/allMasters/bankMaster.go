@@ -241,7 +241,7 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   m.state_province, m.postal_code,
 				   m.old_bank_name, m.old_bank_short_name, m.old_swift_bic_code, m.old_country_of_headquarters, m.old_connectivity_type, m.old_active_status,
 				   m.old_contact_person_name, m.old_contact_person_email, m.old_contact_person_phone, m.old_address_line1, m.old_address_line2, m.old_city,
-				   m.old_state_province, m.old_postal_code
+				   m.old_state_province, m.old_postal_code, m.upload_s3_key
 			FROM masterbank m
 			LEFT JOIN LATERAL (
 				SELECT requested_at, checker_at
@@ -275,6 +275,7 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				oldContactPersonName, oldContactPersonEmail                   *string
 				oldContactPersonPhone, oldAddressLine1, oldAddressLine2       *string
 				oldCity, oldStateProvince, oldPostalCode                      *string
+				uploadS3Key                                                   *string
 			)
 
 			if err := rows.Scan(
@@ -282,6 +283,7 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&contactPersonName, &contactPersonEmail, &contactPersonPhone, &addressLine1, &addressLine2, &city, &stateProvince, &postalCode,
 				&oldBankName, &oldBankShortName, &oldSwiftBicCode, &oldCountryOfHQ, &oldConnectivityType, &oldActiveStatus,
 				&oldContactPersonName, &oldContactPersonEmail, &oldContactPersonPhone, &oldAddressLine1, &oldAddressLine2, &oldCity, &oldStateProvince, &oldPostalCode,
+				&uploadS3Key,
 			); err != nil {
 				errMsg, _ := getUserFriendlyBankError(err, "")
 				anyError = fmt.Errorf("Failed to process data: %v", errMsg)
@@ -326,6 +328,12 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			banks = append(banks, map[string]interface{}{
 				"bank_id":   bankID,
+				"upload_s3_key": func() string {
+					if uploadS3Key != nil {
+						return *uploadS3Key
+					}
+					return ""
+				}(),
 				"bank_name": bankName,
 				"bank_short_name": func() string {
 					if bankShortName != nil {

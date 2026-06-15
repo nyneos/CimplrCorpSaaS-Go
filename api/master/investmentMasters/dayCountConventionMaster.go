@@ -1506,6 +1506,7 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT
 				m.day_count_id,
 				m.day_count_code,
+				COALESCE(m.upload_s3_key,'')          AS upload_s3_key,
 				COALESCE(m.day_count_name,'')         AS day_count_name,
 				COALESCE(l.old_day_count_name,'')     AS old_day_count_name,
 				COALESCE(m.convention_type,'')        AS convention_type,
@@ -1545,7 +1546,7 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.convention_type, l.old_convention_type,
 				m.description, l.old_description,
 				m.formula_example, l.old_formula_example,
-				m.is_active, l.old_is_active, m.is_deleted,
+				m.is_active, l.old_is_active, m.is_deleted, m.upload_s3_key,
 				l.processing_status, l.action_type, l.audit_id,
 				l.requested_by, l.requested_at, l.checker_by, l.checker_at,
 				l.checker_comment, l.reason,
