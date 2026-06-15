@@ -230,6 +230,9 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 				COALESCE(t.payment_channel, '')                  AS payment_channel,
 				t.confidence_score,
 				COALESCE(t.classification_step, '')              AS classification_step,
+				-- Basis/reason for the classification (latest audit log entry)
+				COALESCE(cal.source_ref, '')                     AS classification_basis,
+				COALESCE(t.ai_reasoning, '')                     AS ai_reasoning,
 				-- Review queue fields (only the latest PENDING entry, if any)
 				COALESCE(q.status, '')                           AS review_status,
 				COALESCE(q.suggested_cat::text, '')              AS suggested_cat_id,
@@ -243,6 +246,13 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 				ON mba.account_number = s.account_number AND mba.is_deleted = false
 			LEFT JOIN public.mastercashflowcategory c
 				ON t.category_id = c.category_id
+			LEFT JOIN LATERAL (
+				SELECT source_ref
+				FROM cimplrcorpsaas.classification_audit_log
+				WHERE transaction_id = t.transaction_id
+				ORDER BY classified_at DESC
+				LIMIT 1
+			) cal ON TRUE
 			LEFT JOIN LATERAL (
 				SELECT status, suggested_cat
 				FROM cimplrcorpsaas.categorization_review_queue
@@ -271,26 +281,28 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 
 		for rows.Next() {
 			var (
-				tid                int64
-				entityName         string
-				tranID             sql.NullString
-				desc               string
-				category           sql.NullString
-				categoryID         sql.NullString
-				vdate              time.Time
-				tdate              time.Time
-				withdrawal         sql.NullFloat64
-				deposit            sql.NullFloat64
-				balance            sql.NullFloat64
-				misclassified      bool
-				narrationClean     string
-				narrationRef       string
-				paymentChannel     string
-				confidenceScore    sql.NullFloat64
-				classificationStep string
-				reviewStatus       string
-				suggestedCatID     string
-				suggestedCatName   string
+				tid                  int64
+				entityName           string
+				tranID               sql.NullString
+				desc                 string
+				category             sql.NullString
+				categoryID           sql.NullString
+				vdate                time.Time
+				tdate                time.Time
+				withdrawal           sql.NullFloat64
+				deposit              sql.NullFloat64
+				balance              sql.NullFloat64
+				misclassified        bool
+				narrationClean       string
+				narrationRef         string
+				paymentChannel       string
+				confidenceScore      sql.NullFloat64
+				classificationStep   string
+				classificationBasis  string
+				aiReasoning          string
+				reviewStatus         string
+				suggestedCatID       string
+				suggestedCatName     string
 			)
 
 			if err := rows.Scan(
@@ -311,6 +323,8 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 				&paymentChannel,
 				&confidenceScore,
 				&classificationStep,
+				&classificationBasis,
+				&aiReasoning,
 				&reviewStatus,
 				&suggestedCatID,
 				&suggestedCatName,
@@ -358,11 +372,13 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 				"category_id":        categoryID.String,
 				"misclassified_flag": misclassified,
 				// Smart categorization fields
-				"narration_clean":     narrationClean,
-				"narration_ref":       narrationRef,
-				"payment_channel":     paymentChannel,
-				"confidence_score":    confScore,
-				"classification_step": classificationStep,
+				"narration_clean":       narrationClean,
+				"narration_ref":         narrationRef,
+				"payment_channel":       paymentChannel,
+				"confidence_score":      confScore,
+				"classification_step":   classificationStep,
+				"classification_basis":  classificationBasis,
+				"ai_reasoning":          aiReasoning,
 				// Review / status fields
 				"categorization_status": categorizationStatus,
 				"review_suggested":      reviewSuggested,
