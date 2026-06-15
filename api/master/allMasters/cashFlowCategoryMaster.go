@@ -2291,8 +2291,12 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		tx.Exec(ctx, "SET LOCAL synchronous_commit TO OFF")
-		tx.Exec(ctx, "SET LOCAL statement_timeout = '5min'")
+		if _, err := tx.Exec(ctx, "SET LOCAL synchronous_commit TO OFF"); err != nil {
+			log.Printf("UploadCashFlowCategorySimple: set synchronous_commit failed: %v", err)
+		}
+		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '5min'"); err != nil {
+			log.Printf("UploadCashFlowCategorySimple: set statement_timeout failed: %v", err)
+		}
 		_, _ = tx.Exec(ctx, `DROP TABLE IF EXISTS tmp_mcc;`)
 
 		_, err = tx.Exec(ctx, `

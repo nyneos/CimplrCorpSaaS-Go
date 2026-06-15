@@ -9,6 +9,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/varianceengine"
+	"CimplrCorpSaas/internal/logger"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -485,7 +486,7 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 
 	// ── Finalise run row (only on real ingest) ────────────────────────────────
 	if !dryRun {
-		pool.Exec(ctx, `
+		if _, err := pool.Exec(ctx, `
 			UPDATE investment.fd_receipt_reconcile_run
 			SET run_status               = 'COMPLETED',
 			    completed_at             = now(),
@@ -505,12 +506,14 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 			    total_expected_tds       = $14,
 			    total_received_tds       = $15,
 			    total_tds_variance       = $16
-			WHERE reconcile_run_id = $17`, //nolint:errcheck
+			WHERE reconcile_run_id = $17`,
 			iProcessed, iMatched, iPartial, iUnmatched, iException,
 			tProcessed, tMatched, tPartial, tUnmatched, tException,
 			iTotalExpected, iTotalReceived, iTotalReceived-iTotalExpected,
 			tTotalExpected, tTotalReceived, tTotalReceived-tTotalExpected,
-			runID)
+			runID); err != nil {
+			logger.LogError("reconcileEngine: finalise run exec failed for run %s: %v", runID, err)
+		}
 	}
 
 	return preview, nil
@@ -1182,7 +1185,7 @@ func buildCashflowMap(ctx context.Context, p MapLookupParams) float64 {
 		}
 		total += amount
 
-		pool.Exec(ctx, `
+		if _, err := pool.Exec(ctx, `
 			INSERT INTO investment.fd_receipt_cashflow_map (
 				reconcile_run_id, fd_id,
 				receipt_id, tds_id,
@@ -1192,12 +1195,14 @@ func buildCashflowMap(ctx context.Context, p MapLookupParams) float64 {
 				cashflow_amount, matched_amount,
 				match_status, is_deleted
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,false)
-			ON CONFLICT DO NOTHING`, //nolint:errcheck
+			ON CONFLICT DO NOTHING`,
 			runID, fdID,
 			nullStr(receiptID), nullStr(tdsID),
 			cfID, evType,
 			cfPStart, cfPEnd,
-			amount, p.MatchStatus)
+			amount, p.MatchStatus); err != nil {
+			logger.LogError("buildCashflowMap: insert cashflow map exec failed for run %s: %v", runID, err)
+		}
 	}
 	return total
 }
@@ -1241,7 +1246,7 @@ func buildAccrualMap(ctx context.Context, p MapLookupParams) float64 {
 		}
 		total += amount
 
-		pool.Exec(ctx, `
+		if _, err := pool.Exec(ctx, `
 			INSERT INTO investment.fd_receipt_accrual_map (
 				reconcile_run_id, fd_id,
 				receipt_id, tds_id,
@@ -1250,12 +1255,14 @@ func buildAccrualMap(ctx context.Context, p MapLookupParams) float64 {
 				accrual_amount, matched_amount,
 				match_status, is_deleted
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,false)
-			ON CONFLICT DO NOTHING`, //nolint:errcheck
+			ON CONFLICT DO NOTHING`,
 			runID, fdID,
 			nullStr(receiptID), nullStr(tdsID),
 			ledgerID,
 			acPStart, acPEnd,
-			amount, p.MatchStatus)
+			amount, p.MatchStatus); err != nil {
+			logger.LogError("buildAccrualMap: insert accrual map exec failed for run %s: %v", runID, err)
+		}
 	}
 	return total
 }
@@ -1298,7 +1305,7 @@ func buildAccrualMapTDS(ctx context.Context, p MapLookupParams) float64 {
 		}
 		total += amount
 
-		pool.Exec(ctx, `
+		if _, err := pool.Exec(ctx, `
 			INSERT INTO investment.fd_receipt_accrual_map (
 				reconcile_run_id, fd_id,
 				receipt_id, tds_id,
@@ -1307,12 +1314,14 @@ func buildAccrualMapTDS(ctx context.Context, p MapLookupParams) float64 {
 				accrual_amount, matched_amount,
 				match_status, is_deleted
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,false)
-			ON CONFLICT DO NOTHING`, //nolint:errcheck
+			ON CONFLICT DO NOTHING`,
 			runID, fdID,
 			nullStr(receiptID), nullStr(tdsID),
 			ledgerID,
 			acPStart, acPEnd,
-			amount, p.MatchStatus)
+			amount, p.MatchStatus); err != nil {
+			logger.LogError("buildAccrualMapTDS: insert accrual map exec failed for run %s: %v", runID, err)
+		}
 	}
 	return total
 }

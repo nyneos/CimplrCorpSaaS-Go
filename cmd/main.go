@@ -153,4 +153,7 @@ func main() {
 	if appmanager.GetPgxPool() != nil {
 		appmanager.GetPgxPool().Close()
 	}
+	if err := db.Close(); err != nil {
+		log.Printf("failed to close database/sql DB: %v", err)
+	}
 }

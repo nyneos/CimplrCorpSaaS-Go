@@ -380,12 +380,16 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 		var headerCols, lineCols []string
 		for headerColsRes.Next() {
 			var col string
-			headerColsRes.Scan(&col)
+			if err := headerColsRes.Scan(&col); err != nil {
+				logger.LogError("read header columns metadata: scan failed: %v", err)
+			}
 			headerCols = append(headerCols, col)
 		}
 		for lineColsRes.Next() {
 			var col string
-			lineColsRes.Scan(&col)
+			if err := lineColsRes.Scan(&col); err != nil {
+				logger.LogError("read line columns metadata: scan failed: %v", err)
+			}
 			lineCols = append(lineCols, col)
 		}
 

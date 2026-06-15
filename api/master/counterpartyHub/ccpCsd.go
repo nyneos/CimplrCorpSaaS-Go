@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
+	"CimplrCorpSaas/internal/logger"
 	"context"
 	"encoding/json"
 	"errors"
@@ -398,7 +399,9 @@ func BulkApproveCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var audits []ar
 		for rows.Next() {
 			var a ar
-			rows.Scan(&a.AuditID, &a.ID, &a.ActionType, &a.ReqBy)
+			if err := rows.Scan(&a.AuditID, &a.ID, &a.ActionType, &a.ReqBy); err != nil {
+				logger.LogError("approveCcpCsd: audits scan failed: %v", err)
+			}
 			audits = append(audits, a)
 		}
 		rows.Close()
@@ -410,7 +413,9 @@ func BulkApproveCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if strings.ToUpper(a.ActionType) == "DELETE" {
-				tx.Exec(ctx, `UPDATE apibox.ccp_csd_master SET is_deleted=true WHERE ccp_csd_id=$1`, a.ID)
+				if _, err := tx.Exec(ctx, `UPDATE apibox.ccp_csd_master SET is_deleted=true WHERE ccp_csd_id=$1`, a.ID); err != nil {
+					logger.LogError("approveCcpCsd: delete ccp_csd_master exec failed: %v", err)
+				}
 			}
 			if _, err := tx.Exec(ctx, `UPDATE apibox.audit_ccp_csd SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE audit_id=$3`, userEmail, req.Comment, a.AuditID); err != nil {
 				errList = append(errList, map[string]interface{}{"ccp_csd_id": a.ID, constants.ValueSuccess: false, constants.ValueError: err.Error()})

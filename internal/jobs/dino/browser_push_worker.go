@@ -346,11 +346,13 @@ func bpwSendDigestToUser(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConf
 	}
 
 	var totalUnread int
-	pool.QueryRow(ctx, `
+	if err := pool.QueryRow(ctx, `
 		SELECT COUNT(*)
 		FROM notification_svc.in_app_notification
 		WHERE recipient_user_id = $1 AND is_read = FALSE AND is_deleted = FALSE
-	`, userID).Scan(&totalUnread)
+	`, userID).Scan(&totalUnread); err != nil {
+		logger.LogError("[browser-push-digest] count unread query row failed: %v", err)
+	}
 
 	// Build bullet list body
 	var lines []string
@@ -391,11 +393,13 @@ func bpwSendDigestToUser(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConf
 	}
 
 	// Upsert digest tracker
-	pool.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO notification_svc.push_digest_tracker (user_id, last_digest_at)
 		VALUES ($1, NOW())
 		ON CONFLICT (user_id) DO UPDATE SET last_digest_at = NOW()
-	`, userID)
+	`, userID); err != nil {
+		logger.LogError("[browser-push-digest] upsert digest tracker exec failed: %v", err)
+	}
 
 	logger.LogInfo("[browser-push-digest] sent to userID=%s unread=%d top=%d",
 		userID, totalUnread, len(items))
@@ -460,11 +464,13 @@ func bpwFetchSubscriptions(ctx context.Context, pool *pgxpool.Pool, userID strin
 }
 
 func bpwMarkSent(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow) {
-	pool.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		UPDATE notification_svc.outbox
 		   SET processing_status = 'SENT', sent_at = NOW()
 		 WHERE outbox_id = $1
-	`, row.OutboxID)
+	`, row.OutboxID); err != nil {
+		logger.LogError("[browser-push] mark sent exec failed for outbox=%s: %v", row.OutboxID, err)
+	}
 }
 
 func bpwMarkFailed(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow, errMsg string) {
@@ -472,24 +478,28 @@ func bpwMarkFailed(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow, er
 	if row.RetryCount < retryMax {
 		backoffSecs := float64(retryBackoffSecs) * math.Pow(2, float64(row.RetryCount))
 		nextAt := time.Now().Add(time.Duration(backoffSecs) * time.Second)
-		pool.Exec(ctx, `
+		if _, err := pool.Exec(ctx, `
 			UPDATE notification_svc.outbox
 			   SET processing_status = 'PENDING',
 			       retry_count       = retry_count + 1,
 			       last_error        = $2,
 			       scheduled_at      = $3
 			 WHERE outbox_id = $1
-		`, row.OutboxID, errMsg, nextAt)
+		`, row.OutboxID, errMsg, nextAt); err != nil {
+			logger.LogError("[browser-push] mark retry exec failed for outbox=%s: %v", row.OutboxID, err)
+		}
 		logger.LogInfo("[browser-push] RETRY outbox=%s attempt=%d next=%s",
 			row.OutboxID, row.RetryCount+1, nextAt.Format(time.RFC3339))
 	} else {
-		pool.Exec(ctx, `
+		if _, err := pool.Exec(ctx, `
 			UPDATE notification_svc.outbox
 			   SET processing_status = 'DEAD',
 			       retry_count       = retry_count + 1,
 			       last_error        = $2
 			 WHERE outbox_id = $1
-		`, row.OutboxID, errMsg)
+		`, row.OutboxID, errMsg); err != nil {
+			logger.LogError("[browser-push] mark dead exec failed for outbox=%s: %v", row.OutboxID, err)
+		}
 		logger.LogInfo("[browser-push] DEAD outbox=%s after %d attempts",
 			row.OutboxID, row.RetryCount+1)
 	}
@@ -497,20 +507,24 @@ func bpwMarkFailed(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow, er
 
 func bpwFetchRetryConfig(ctx context.Context, pool *pgxpool.Pool, eventID string) (int, int) {
 	retryMax, retryBackoffSecs := 3, 60
-	pool.QueryRow(ctx, `
+	if err := pool.QueryRow(ctx, `
 		SELECT COALESCE(retry_max,3), COALESCE(retry_backoff_secs,60)
 		FROM notification_svc.notification_config
 		WHERE event_id = $1 AND channel = 'PUSH'
-	`, eventID).Scan(&retryMax, &retryBackoffSecs)
+	`, eventID).Scan(&retryMax, &retryBackoffSecs); err != nil {
+		logger.LogError("[browser-push] fetch retry config query row failed for event=%s: %v", eventID, err)
+	}
 	return retryMax, retryBackoffSecs
 }
 
 func bpwDeactivateSubscription(ctx context.Context, pool *pgxpool.Pool, subID string) {
-	pool.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		UPDATE notification_svc.push_subscription
 		   SET is_active = FALSE, updated_at = NOW()
 		 WHERE id = $1
-	`, subID)
+	`, subID); err != nil {
+		logger.LogError("[browser-push] deactivate subscription exec failed for id=%s: %v", subID, err)
+	}
 	logger.LogInfo("[browser-push] deactivated expired subscription id=%s", subID)
 }
 

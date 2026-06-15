@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
@@ -1081,7 +1082,9 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				defer drows.Close()
 				for drows.Next() {
 					var id string
-					drows.Scan(&id)
+					if err := drows.Scan(&id); err != nil {
+						logger.LogError("[BulkApproveBankLimits] deleted limit_id scan failed: %v", err)
+					}
 					deleted = append(deleted, id)
 				}
 			}

@@ -391,14 +391,18 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rrow.IsDeleted,
 				nil,
 			).Scan(&id); err != nil {
-				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
+				if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp); err != nil {
+					logger.LogError("CreateGLAccounts: rollback to savepoint failed (insert): %v", err)
+				}
 				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "gl_account_code": rrow.GLAccountCode})
 				continue
 			}
 
 			auditQ := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
 			if _, err := tx.Exec(ctx, auditQ, id, nil, createdBy); err != nil {
-				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
+				if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp); err != nil {
+					logger.LogError("CreateGLAccounts: rollback to savepoint failed (audit insert): %v", err)
+				}
 				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "gl_account_id": id})
 				continue
 			}

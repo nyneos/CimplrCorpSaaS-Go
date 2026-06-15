@@ -564,7 +564,7 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 }
 
 // StartGateway starts the API gateway server
-func StartGateway(port string, pathPrefix string) {
+func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, string) {
 	mux := http.NewServeMux()
 
 	// Initialize and register the SSE server at /events
@@ -858,14 +858,23 @@ func StartGateway(port string, pathPrefix string) {
 	// handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux))))
 	cert := os.Getenv("TLS_CERT")
 	key := os.Getenv("TLS_KEY")
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: handler,
+	}
+	return server, cert, key
+}
+
+func StartGateway(port string, pathPrefix string) {
+	server, cert, key := NewGatewayServer(port, pathPrefix)
 	var err error
 	if cert != "" && key != "" {
-		err = http.ListenAndServeTLS(":"+port, cert, key, handler)
+		err = server.ListenAndServeTLS(cert, key)
 	} else {
-		logger.LogInfo("TLS_CERT or TLS_KEY not set; starting HTTP on :%s", port)
-		err = http.ListenAndServe(":"+port, handler)
+		logger.LogInfo("TLS_CERT or TLS_KEY not set; starting HTTP on %s", server.Addr)
+		err = server.ListenAndServe()
 	}
-	if err != nil {
+	if err != nil && err != http.ErrServerClosed {
 		logger.LogError("Gateway server failed: %v", err)
 	}
 }

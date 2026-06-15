@@ -18,6 +18,7 @@ package push
 
 import (
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/logger"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -157,11 +158,13 @@ func handleUnsubscribe(w http.ResponseWriter, r *http.Request, pool *pgxpool.Poo
 		return
 	}
 
-	pool.Exec(r.Context(), `
+	if _, err := pool.Exec(r.Context(), `
 		UPDATE notification_svc.push_subscription
 		   SET is_active = FALSE, updated_at = NOW()
 		 WHERE user_id = $1 AND endpoint = $2
-	`, userID, req.Endpoint)
+	`, userID, req.Endpoint); err != nil {
+		logger.LogError("[handleUnsubscribe] deactivate subscription exec failed for user=%s: %v", userID, err)
+	}
 
 	writeOK(w, map[string]string{"message": "unsubscribed"})
 }

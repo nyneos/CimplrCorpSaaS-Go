@@ -579,7 +579,9 @@ func BulkApproveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				defer drows.Close()
 				for drows.Next() {
 					var id string
-					drows.Scan(&id)
+					if err := drows.Scan(&id); err != nil {
+						logger.LogError("[BulkApproveSweepConfigurations] deleted sweep_id scan failed: %v", err)
+					}
 					deleted = append(deleted, id)
 				}
 			}

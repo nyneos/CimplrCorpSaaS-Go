@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
+	"CimplrCorpSaas/internal/logger"
 	"context"
 	"encoding/json"
 	"errors"
@@ -547,7 +548,9 @@ func BulkApproveERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var audits []ar
 		for rows.Next() {
 			var a ar
-			rows.Scan(&a.AuditID, &a.ID, &a.ActionType, &a.ReqBy)
+			if err := rows.Scan(&a.AuditID, &a.ID, &a.ActionType, &a.ReqBy); err != nil {
+				logger.LogError("approveErp: audits scan failed: %v", err)
+			}
 			audits = append(audits, a)
 		}
 		rows.Close()
@@ -559,7 +562,9 @@ func BulkApproveERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if strings.ToUpper(a.ActionType) == "DELETE" {
-				tx.Exec(ctx, `UPDATE apibox.erp_system_master SET is_deleted=true WHERE erp_system_id=$1`, a.ID)
+				if _, err := tx.Exec(ctx, `UPDATE apibox.erp_system_master SET is_deleted=true WHERE erp_system_id=$1`, a.ID); err != nil {
+					logger.LogError("approveErp: delete erp_system_master exec failed: %v", err)
+				}
 			}
 			if _, err := tx.Exec(ctx, `UPDATE apibox.audit_erp_system SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE audit_id=$3`, userEmail, req.Comment, a.AuditID); err != nil {
 				errList = append(errList, map[string]interface{}{"erp_system_id": a.ID, constants.ValueSuccess: false, constants.ValueError: err.Error()})

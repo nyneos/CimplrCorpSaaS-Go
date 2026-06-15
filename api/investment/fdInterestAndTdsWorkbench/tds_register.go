@@ -836,11 +836,13 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		var entityID string
 		_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, req.TDSID).Scan(&entityID)
 
-		tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO investment.fd_tds_receipt_audit
 				(tds_id, action_type, processing_status, requested_by, requested_at, requested_ip, checker_comment)
 			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, now(), $3, $4)`,
-			req.TDSID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), nullIfEmpty(req.Reason)) //nolint:errcheck
+			req.TDSID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), nullIfEmpty(req.Reason)); err != nil {
+			api.LogError("[TDSUpdate] insert audit exec failed for %s: %v", req.TDSID, err)
+		}
 
 		if err = tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
@@ -953,12 +955,14 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: "not CAPTURED or not found"})
 				continue
 			}
-			tx.Exec(ctx, `
+			if _, err := tx.Exec(ctx, `
 				UPDATE investment.fd_tds_receipt_audit
 				SET processing_status = 'APPROVED', checker_by = $1,
 				    checker_at = now(), checker_comment = $2, checker_ip = $3
 				WHERE tds_id = $4 AND processing_status = 'PENDING_APPROVAL'`,
-				api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), tdsID) //nolint:errcheck
+				api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), tdsID); err != nil {
+				api.LogError("[TDSApprove] update audit exec failed for %s: %v", tdsID, err)
+			}
 			if err = tx.Commit(ctx); err != nil {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: "commit failed"})
 				continue
@@ -1048,12 +1052,14 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx) //nolint:errcheck
 				continue
 			}
-			tx.Exec(ctx, `
+			if _, err := tx.Exec(ctx, `
 				UPDATE investment.fd_tds_receipt_audit
 				SET processing_status = 'REJECTED', checker_by = $1,
 				    checker_at = now(), checker_comment = $2, checker_ip = $3
 				WHERE tds_id = $4 AND processing_status = 'PENDING_APPROVAL'`,
-				api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), tdsID) //nolint:errcheck
+				api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), tdsID); err != nil {
+				api.LogError("[TDSReject] update audit exec failed for %s: %v", tdsID, err)
+			}
 			if err = tx.Commit(ctx); err != nil {
 				continue
 			}
@@ -1141,7 +1147,7 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			UPDATE investment.fd_tds_receipt_audit
 			SET processing_status = 'REJECTED',
 			    checker_by        = $1,
@@ -1150,7 +1156,9 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			    checker_ip        = $3
 			WHERE tds_id = $4
 			  AND processing_status = 'PENDING_APPROVAL'`,
-			api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.TDSID) //nolint:errcheck
+			api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.TDSID); err != nil {
+			api.LogError("[TDSReject] update audit exec failed for %s: %v", req.TDSID, err)
+		}
 
 		if err = tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
@@ -1358,10 +1366,12 @@ func BulkDeleteTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			// Record deletion in audit
-			tx.Exec(ctx, `
+			if _, err := tx.Exec(ctx, `
 				UPDATE investment.fd_tds_receipt_audit
 				SET deleted_by = $1, deleted_at = now()
-				WHERE tds_id = $2`, userEmail, tdsID) //nolint:errcheck
+				WHERE tds_id = $2`, userEmail, tdsID); err != nil {
+				api.LogError("[TDSDelete] update audit exec failed for %s: %v", tdsID, err)
+			}
 			if err = tx.Commit(ctx); err != nil {
 				failed++
 				continue

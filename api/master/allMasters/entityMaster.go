@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/logger"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -305,7 +306,9 @@ func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
 			for i := range cols {
 				valPtrs[i] = &vals[i]
 			}
-			entitiesRows.Scan(valPtrs...)
+			if err := entitiesRows.Scan(valPtrs...); err != nil {
+				logger.LogError("GetEntityHierarchy: entities scan failed: %v", err)
+			}
 			for i, col := range cols {
 				e[col] = vals[i]
 			}
@@ -339,7 +342,9 @@ func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
 			for i := range cols {
 				valPtrs[i] = &vals[i]
 			}
-			relRows.Scan(valPtrs...)
+			if err := relRows.Scan(valPtrs...); err != nil {
+				logger.LogError("GetEntityHierarchy: relationships scan failed: %v", err)
+			}
 			for i, col := range cols {
 				rel[col] = vals[i]
 			}
@@ -443,7 +448,9 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 			parentMap := map[string][]string{}
 			for relRows.Next() {
 				var parent, child string
-				relRows.Scan(&parent, &child)
+				if err := relRows.Scan(&parent, &child); err != nil {
+					logger.LogError("ApproveEntity: relationships scan failed: %v", err)
+				}
 				parentMap[parent] = append(parentMap[parent], child)
 			}
 			// var getAllDescendants func([]string) []string
@@ -484,7 +491,9 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 				for i := range cols {
 					valPtrs[i] = &vals[i]
 				}
-				rows.Scan(valPtrs...)
+				if err := rows.Scan(valPtrs...); err != nil {
+					logger.LogError("ApproveEntity: entity scan failed: %v", err)
+				}
 				entity := map[string]interface{}{}
 				for i, col := range cols {
 					entity[col] = vals[i]
@@ -553,7 +562,9 @@ func RejectEntitiesBulk(db *sql.DB) http.HandlerFunc {
 		parentMap := map[string][]string{}
 		for relRows.Next() {
 			var parent, child string
-			relRows.Scan(&parent, &child)
+			if err := relRows.Scan(&parent, &child); err != nil {
+				logger.LogError("RejectEntitiesBulk: relationships scan failed: %v", err)
+			}
 			parentMap[parent] = append(parentMap[parent], child)
 		}
 		getAllDescendants := func(ids []string) []string {
@@ -594,7 +605,9 @@ func RejectEntitiesBulk(db *sql.DB) http.HandlerFunc {
 			for i := range cols {
 				valPtrs[i] = &vals[i]
 			}
-			rows.Scan(valPtrs...)
+			if err := rows.Scan(valPtrs...); err != nil {
+				logger.LogError("RejectEntitiesBulk: entity scan failed: %v", err)
+			}
 			entity := map[string]interface{}{}
 			for i, col := range cols {
 				entity[col] = vals[i]
@@ -683,7 +696,9 @@ func GetAllEntityNames(db *sql.DB) http.HandlerFunc {
 		var names []string
 		for rows.Next() {
 			var name string
-			rows.Scan(&name)
+			if err := rows.Scan(&name); err != nil {
+				logger.LogError("GetAllEntityNames: name scan failed: %v", err)
+			}
 			names = append(names, name)
 		}
 		json.NewEncoder(w).Encode(names)
@@ -759,7 +774,9 @@ func DeleteEntity(db *sql.DB) http.HandlerFunc {
 			for i := range cols {
 				valPtrs[i] = &vals[i]
 			}
-			rows.Scan(valPtrs...)
+			if err := rows.Scan(valPtrs...); err != nil {
+				logger.LogError("DeleteEntity: entity scan failed: %v", err)
+			}
 			entity := map[string]interface{}{}
 			for i, col := range cols {
 				entity[col] = vals[i]
@@ -813,7 +830,9 @@ func FindParentAtLevel(db *sql.DB) http.HandlerFunc {
 		var names []string
 		for rows.Next() {
 			var name string
-			rows.Scan(&name)
+			if err := rows.Scan(&name); err != nil {
+				logger.LogError("FindParentAtLevel: name scan failed: %v", err)
+			}
 			names = append(names, name)
 		}
 		json.NewEncoder(w).Encode(names)
@@ -856,7 +875,9 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			var page, tab, action string
 			var allowed bool
-			rows.Scan(&page, &tab, &action, &allowed)
+			if err := rows.Scan(&page, &tab, &action, &allowed); err != nil {
+				logger.LogError("GetRenderVarsHierarchical: permissions scan failed: %v", err)
+			}
 			if pages[page] == nil {
 				pages[page] = map[string]interface{}{}
 			}
@@ -894,7 +915,9 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
 			for i := range cols {
 				valPtrs[i] = &vals[i]
 			}
-			entitiesRows.Scan(valPtrs...)
+			if err := entitiesRows.Scan(valPtrs...); err != nil {
+				logger.LogError("GetRenderVarsHierarchical: entities scan failed: %v", err)
+			}
 			for i, col := range cols {
 				e[col] = vals[i]
 			}
@@ -927,7 +950,9 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
 			for i := range cols {
 				valPtrs[i] = &vals[i]
 			}
-			relRows.Scan(valPtrs...)
+			if err := relRows.Scan(valPtrs...); err != nil {
+				logger.LogError("GetRenderVarsHierarchical: relationships scan failed: %v", err)
+			}
 			for i, col := range cols {
 				rel[col] = vals[i]
 			}

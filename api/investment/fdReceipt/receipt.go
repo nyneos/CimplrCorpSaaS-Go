@@ -2565,20 +2565,24 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDReceipt] IngestReconciliation panic run=%s: %v", rID, rec)
-					pool.Exec(context.Background(),
+					if _, err := pool.Exec(context.Background(),
 						`UPDATE investment.fd_receipt_reconcile_run
 						 SET run_status='FAILED', error_message=$1, completed_at=now()
 						 WHERE reconcile_run_id=$2`,
-						fmt.Sprintf("panic: %v", rec), rID) //nolint:errcheck
+						fmt.Sprintf("panic: %v", rec), rID); err != nil {
+						api.LogError("[FDReceipt] IngestReconciliation mark-failed exec failed run=%s: %v", rID, err)
+					}
 				}
 			}()
 			bgCtx := context.Background()
 			if rErr := runReconciliation(bgCtx, pool, rID, filterReceiptIDs, filterTDSIDs); rErr != nil {
 				api.LogError("[FDReceipt] IngestReconciliation failed run=%s: %v", rID, rErr)
-				pool.Exec(bgCtx,
+				if _, err := pool.Exec(bgCtx,
 					`UPDATE investment.fd_receipt_reconcile_run
 					 SET run_status='FAILED', error_message=$1, completed_at=now()
-					 WHERE reconcile_run_id=$2`, rErr.Error(), rID) //nolint:errcheck
+					 WHERE reconcile_run_id=$2`, rErr.Error(), rID); err != nil {
+					api.LogError("[FDReceipt] IngestReconciliation mark-failed exec failed run=%s: %v", rID, err)
+				}
 			}
 		}(runID, req.EntityID, userEmail)
 

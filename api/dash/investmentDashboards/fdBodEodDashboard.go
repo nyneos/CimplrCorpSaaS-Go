@@ -37,6 +37,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/logger"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -1034,49 +1035,61 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 			// C1: statement ingestion done (no unmatched today)
 			var unmatchedCount int64
-			pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_interest_receipt
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_interest_receipt
 				WHERE is_deleted=false AND DATE(created_at)=$1::date
 				AND COALESCE(reconciliation_status,'UNMATCHED') IN ('UNMATCHED','PENDING','')
-				AND (entity_id = ANY(string_to_array($2, ',')))`, today, entityFilter).Scan(&unmatchedCount)
+				AND (entity_id = ANY(string_to_array($2, ',')))`, today, entityFilter).Scan(&unmatchedCount); err != nil {
+				logger.LogError("eod checklist C1 unmatched count: query row failed: %v", err)
+			}
 
 			// C2: high variance cases addressed
 			var openVariance int64
-			pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_confirmation
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_confirmation
 				WHERE is_deleted=false AND variance_flag=true
 				AND COALESCE(variance_action,'PENDING') = 'PENDING'
 				AND EXISTS(
 				    SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=fd_confirmation.booking_id AND (b.entity_id = ANY(string_to_array($1, ',')))
-				)`, entityFilter).Scan(&openVariance)
+				)`, entityFilter).Scan(&openVariance); err != nil {
+				logger.LogError("eod checklist C2 open variance: query row failed: %v", err)
+			}
 
 			// C3: GL postings clear
 			var failedPostings int64
-			pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_cashflow_schedule cf
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_cashflow_schedule cf
 				JOIN investment.fd_master m ON m.fd_id=cf.fd_id AND m.is_deleted=false
 				WHERE cf.is_deleted=false AND cf.posting_status='FAILED'
-				AND (m.entity_id = ANY(string_to_array($1, ',')))`, entityFilter).Scan(&failedPostings)
+				AND (m.entity_id = ANY(string_to_array($1, ',')))`, entityFilter).Scan(&failedPostings); err != nil {
+				logger.LogError("eod checklist C3 failed postings: query row failed: %v", err)
+			}
 
 			// C4: no critical exceptions open
 			var criticalExceptions int64
-			pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_accrual_exception ae
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_accrual_exception ae
 				WHERE COALESCE(ae.is_deleted,false)=false
 				AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
 				AND EXISTS (
 				    SELECT 1 FROM investment.fd_master m WHERE m.fd_id=ae.fd_id AND m.entity_id = ANY(string_to_array($1, ','))
-				)`, entityFilter).Scan(&criticalExceptions)
+				)`, entityFilter).Scan(&criticalExceptions); err != nil {
+				logger.LogError("eod checklist C4 critical exceptions: query row failed: %v", err)
+			}
 
 			// C5: latest accrual run completed
 			var latestRunStatus string
-			pool.QueryRow(ctx, `SELECT COALESCE(run_status,'') FROM investment.fd_accrual_run
+			if err := pool.QueryRow(ctx, `SELECT COALESCE(run_status,'') FROM investment.fd_accrual_run
 				WHERE is_deleted=false AND (entity_id = ANY(string_to_array($1, ',')))
-				ORDER BY run_date DESC LIMIT 1`, entityFilter).Scan(&latestRunStatus)
+				ORDER BY run_date DESC LIMIT 1`, entityFilter).Scan(&latestRunStatus); err != nil {
+				logger.LogError("eod checklist C5 latest run status: query row failed: %v", err)
+			}
 
 			// C6: maturities processed (closure requests completed for today maturities)
 			var pendingMaturities int64
-			pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_master m
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_master m
 				WHERE m.is_deleted=false AND m.maturity_date=$1::date
 				AND m.fd_status IN ('ACTIVE','MATURED')
 				AND NOT (`+sqlAnyClosureProcessed+`)
-				AND (m.entity_id = ANY(string_to_array($2, ',')))`, today, entityFilter).Scan(&pendingMaturities)
+				AND (m.entity_id = ANY(string_to_array($2, ',')))`, today, entityFilter).Scan(&pendingMaturities); err != nil {
+				logger.LogError("eod checklist C6 pending maturities: query row failed: %v", err)
+			}
 
 			accrualDone := latestRunStatus == "COMPLETED" || latestRunStatus == "POSTED"
 

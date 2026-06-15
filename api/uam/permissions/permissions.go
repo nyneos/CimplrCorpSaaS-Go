@@ -245,7 +245,9 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 			var id int
 			var page, action string
 			var tab sql.NullString
-			rows.Scan(&id, &page, &tab, &action)
+			if err := rows.Scan(&id, &page, &tab, &action); err != nil {
+				logger.LogError("permissions.go UpsertRolePermissions: scan permission id row failed: %v", err)
+			}
 			key := fmt.Sprintf(constants.FormatPipelineTripleAlt, page, tab.String, action)
 			permissionIdMap[key] = id
 		}
@@ -280,7 +282,9 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 				for exRows.Next() {
 					var pid int
 					var allowed sql.NullBool
-					exRows.Scan(&pid, &allowed)
+					if err := exRows.Scan(&pid, &allowed); err != nil {
+						logger.LogError("permissions.go UpsertRolePermissions: scan existing allowed row failed: %v", err)
+					}
 					existingAllowed[pid] = allowed
 				}
 				exRows.Close()
@@ -545,7 +549,9 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 		}
 		for fetchRows.Next() {
 			var t targetRow
-			fetchRows.Scan(&t.ID, &t.RoleID, &t.PermID, &t.NewValue)
+			if err := fetchRows.Scan(&t.ID, &t.RoleID, &t.PermID, &t.NewValue); err != nil {
+				logger.LogError("permissions.go UpdateRolePermissionsStatusByName: scan target row failed: %v", err)
+			}
 			targets = append(targets, t)
 		}
 		fetchRows.Close()
@@ -621,16 +627,20 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 		}
 		for rid := range affectedRoles {
 			var pendingCount int
-			tx.QueryRow(`
+			if err := tx.QueryRow(`
 				SELECT COUNT(*) FROM public.role_permission_requests
 				WHERE role_id = $1 AND LOWER(status) = 'pending'
-			`, rid).Scan(&pendingCount)
+			`, rid).Scan(&pendingCount); err != nil {
+				logger.LogError("permissions.go UpdateRolePermissionsStatusByName: query pending count failed: %v", err)
+			}
 
 			newRoleStatus := action
 			if pendingCount > 0 {
 				newRoleStatus = "Pending"
 			}
-			tx.Exec(`UPDATE public.roles SET roles_permission_status = $1 WHERE id = $2`, newRoleStatus, rid)
+			if _, err := tx.Exec(`UPDATE public.roles SET roles_permission_status = $1 WHERE id = $2`, newRoleStatus, rid); err != nil {
+				logger.LogError("permissions.go UpdateRolePermissionsStatusByName: update role permission status failed: %v", err)
+			}
 		}
 
 		if err := tx.Commit(); err != nil {
@@ -660,7 +670,9 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 				var ae auditEntry
 				var tab sql.NullString
 				var oldValue sql.NullBool
-				auditRows.Scan(&ae.RequestID, &ae.PageName, &tab, &ae.Action, &oldValue, &ae.NewValue)
+				if err := auditRows.Scan(&ae.RequestID, &ae.PageName, &tab, &ae.Action, &oldValue, &ae.NewValue); err != nil {
+					logger.LogError("permissions.go UpdateRolePermissionsStatusByName: scan audit row failed: %v", err)
+				}
 				if tab.Valid {
 					ae.TabName = &tab.String
 				}

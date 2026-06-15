@@ -392,7 +392,9 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(holdings) == 0 {
 			// Check if onboard_transaction table has any data at all
 			var txCount int
-			tx.QueryRow(ctx, "SELECT COUNT(*) FROM investment.onboard_transaction WHERE LOWER(COALESCE(transaction_type,'')) IN ('buy','purchase','subscription')").Scan(&txCount)
+			if err := tx.QueryRow(ctx, "SELECT COUNT(*) FROM investment.onboard_transaction WHERE LOWER(COALESCE(transaction_type,'')) IN ('buy','purchase','subscription')").Scan(&txCount); err != nil {
+				logger.LogError("mtmActivity: count onboard transactions query row failed: %v", err)
+			}
 
 			if txCount == 0 {
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No investment transactions found. Please upload transaction data before running MTM for %s", req.AccountingPeriod))
@@ -1274,7 +1276,9 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(holdings) == 0 {
 			// Check if onboard_transaction table has any data at all
 			var txCount int
-			pgxPool.QueryRow(ctx, "SELECT COUNT(*) FROM investment.onboard_transaction WHERE LOWER(COALESCE(transaction_type,'')) IN ('buy','purchase','subscription')").Scan(&txCount)
+			if err := pgxPool.QueryRow(ctx, "SELECT COUNT(*) FROM investment.onboard_transaction WHERE LOWER(COALESCE(transaction_type,'')) IN ('buy','purchase','subscription')").Scan(&txCount); err != nil {
+				logger.LogError("mtmActivity: count onboard transactions query row failed: %v", err)
+			}
 
 			if txCount == 0 {
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No investment transactions found. Please upload transaction data before running MTM for %s", req.AccountingPeriod))

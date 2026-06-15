@@ -110,7 +110,9 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, pool *pgxpool.
 	}
 
 	var acctCurrency sql.NullString
-	pool.QueryRow(ctx, `SELECT currency FROM public.masterbankaccount WHERE account_number = $1`, input.AccountNumber).Scan(&acctCurrency)
+	if err := pool.QueryRow(ctx, `SELECT currency FROM public.masterbankaccount WHERE account_number = $1`, input.AccountNumber).Scan(&acctCurrency); err != nil {
+		logger.LogError("[bankstatement upload] account currency query row failed for account=%s: %v", input.AccountNumber, err)
+	}
 
 	var currencyCode string
 	if acctCurrency.Valid {

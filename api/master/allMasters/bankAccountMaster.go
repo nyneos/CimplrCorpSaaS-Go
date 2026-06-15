@@ -8,6 +8,7 @@ import (
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
 	dependency "CimplrCorpSaas/internal/dependency"
+	"CimplrCorpSaas/internal/logger"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -793,7 +794,9 @@ func BulkRejectBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var updated []string
 		for rows.Next() {
 			var id, accountID string
-			rows.Scan(&id, &accountID)
+			if err := rows.Scan(&id, &accountID); err != nil {
+				logger.LogError("BulkRejectBankAccountAuditActions: scan failed: %v", err)
+			}
 			updated = append(updated, id, accountID)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -832,7 +835,9 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			defer delRows.Close()
 			for delRows.Next() {
 				var id, accountID string
-				delRows.Scan(&id, &accountID)
+				if err := delRows.Scan(&id, &accountID); err != nil {
+					logger.LogError("BulkApproveBankAccountAuditActions: delete rows scan failed: %v", err)
+				}
 				deleted = append(deleted, id, accountID)
 				accountIDsToDelete = append(accountIDsToDelete, accountID)
 			}
@@ -873,7 +878,9 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		var updated []string
 		for rows.Next() {
 			var id, accountID string
-			rows.Scan(&id, &accountID)
+			if err := rows.Scan(&id, &accountID); err != nil {
+				logger.LogError("BulkApproveBankAccountAuditActions: scan failed: %v", err)
+			}
 			updated = append(updated, id, accountID)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

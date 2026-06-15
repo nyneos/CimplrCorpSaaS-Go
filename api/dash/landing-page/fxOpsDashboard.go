@@ -574,7 +574,9 @@ func getExposureMaturities(ctx context.Context, db *pgxpool.Pool, entities []str
 		defer hedgeRows.Close()
 		for hedgeRows.Next() {
 			var expID string
-			hedgeRows.Scan(&expID)
+			if err := hedgeRows.Scan(&expID); err != nil {
+				logger.LogError("fx ops hedged exposures: scan failed: %v", err)
+			}
 			hedgedMap[expID] = true
 		}
 	}
@@ -699,7 +701,9 @@ func getSettlementPerformance(ctx context.Context, db *pgxpool.Pool, entities []
 		JOIN exposure_headers eh ON s.exposure_header_id = eh.exposure_header_id
 		%s s.settlement_date > $1::date
 	`, upcomingEntityFilter)
-	db.QueryRow(ctx, upcomingQuery, upcomingArgs...).Scan(&summary.Upcoming)
+	if err := db.QueryRow(ctx, upcomingQuery, upcomingArgs...).Scan(&summary.Upcoming); err != nil {
+		logger.LogError("fx ops upcoming settlements: query row failed: %v", err)
+	}
 
 	// Auto-reconciled percentage (placeholder logic)
 	total := summary.Confirmed + summary.Pending

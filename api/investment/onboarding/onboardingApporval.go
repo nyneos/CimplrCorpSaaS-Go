@@ -9,6 +9,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/logger"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -210,7 +211,9 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 
 	for rows.Next() {
 		var id string
-		rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			logger.LogError("approveAMCBatch: scan amc id failed: %v", err)
+		}
 		amcIDs = append(amcIDs, id)
 	}
 
@@ -238,7 +241,9 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 
 	for auditRows.Next() {
 		var actionID, amcID, actionType, status string
-		auditRows.Scan(&actionID, &amcID, &actionType, &status)
+		if err := auditRows.Scan(&actionID, &amcID, &actionType, &status); err != nil {
+			logger.LogError("approveAMCBatch: scan audit row failed: %v", err)
+		}
 		amcsWithAudit[amcID] = true
 
 		if action == constants.AuditActionApprove {
@@ -330,7 +335,9 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 
 	for rows.Next() {
 		var id string
-		rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			logger.LogError("approveSchemeBatch: scan scheme id failed: %v", err)
+		}
 		schemeIDs = append(schemeIDs, id)
 	}
 
@@ -358,7 +365,9 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 
 	for auditRows.Next() {
 		var actionID, schemeID, actionType, status string
-		auditRows.Scan(&actionID, &schemeID, &actionType, &status)
+		if err := auditRows.Scan(&actionID, &schemeID, &actionType, &status); err != nil {
+			logger.LogError("approveSchemeBatch: scan audit row failed: %v", err)
+		}
 		schemesWithAudit[schemeID] = true
 
 		if action == constants.AuditActionApprove && status == constants.StatusPendingDeleteApproval {
@@ -436,7 +445,9 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 
 	for rows.Next() {
 		var id string
-		rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			logger.LogError("approveDPBatch: scan dp id failed: %v", err)
+		}
 		dpIDs = append(dpIDs, id)
 	}
 
@@ -463,7 +474,9 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 
 	for auditRows.Next() {
 		var actionID, dpID, actionType, status string
-		auditRows.Scan(&actionID, &dpID, &actionType, &status)
+		if err := auditRows.Scan(&actionID, &dpID, &actionType, &status); err != nil {
+			logger.LogError("approveDPBatch: scan audit row failed: %v", err)
+		}
 		dpsWithAudit[dpID] = true
 
 		if action == constants.AuditActionApprove && status == constants.StatusPendingDeleteApproval {
@@ -542,7 +555,9 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 
 	for rows.Next() {
 		var id string
-		rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			logger.LogError("approveDematBatch: scan demat id failed: %v", err)
+		}
 		dematIDs = append(dematIDs, id)
 	}
 
@@ -569,7 +584,9 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 
 	for auditRows.Next() {
 		var actionID, dematID, actionType, status string
-		auditRows.Scan(&actionID, &dematID, &actionType, &status)
+		if err := auditRows.Scan(&actionID, &dematID, &actionType, &status); err != nil {
+			logger.LogError("approveDematBatch: scan audit row failed: %v", err)
+		}
 		dematsWithAudit[dematID] = true
 
 		if action == constants.AuditActionApprove && status == constants.StatusPendingDeleteApproval {
@@ -648,7 +665,9 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 
 	for rows.Next() {
 		var id string
-		rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			logger.LogError("approveFolioBatch: scan folio id failed: %v", err)
+		}
 		folioIDs = append(folioIDs, id)
 	}
 
@@ -675,7 +694,9 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 
 	for auditRows.Next() {
 		var actionID, folioID, actionType, status string
-		auditRows.Scan(&actionID, &folioID, &actionType, &status)
+		if err := auditRows.Scan(&actionID, &folioID, &actionType, &status); err != nil {
+			logger.LogError("approveFolioBatch: scan audit row failed: %v", err)
+		}
 		foliosWithAudit[folioID] = true
 
 		if action == constants.AuditActionApprove && status == constants.StatusPendingDeleteApproval {

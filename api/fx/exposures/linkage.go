@@ -128,7 +128,9 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 			for i := range vals {
 				valPtrs[i] = &vals[i]
 			}
-			bookRows.Scan(valPtrs...)
+			if err := bookRows.Scan(valPtrs...); err != nil {
+				logger.LogError("hedge links bookings: scan failed: %v", err)
+			}
 			row := map[string]interface{}{}
 			for i, col := range bookCols {
 				// Convert []uint8 to string for keys we use as map keys or for lookups
@@ -162,7 +164,9 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 				for hedgeRows.Next() {
 					var bookingId interface{}
 					var linkedAmount float64
-					hedgeRows.Scan(&bookingId, &linkedAmount)
+					if err := hedgeRows.Scan(&bookingId, &linkedAmount); err != nil {
+						logger.LogError("hedge links linked amount: scan failed: %v", err)
+					}
 					// Convert booking_id to string for map key
 					var bookingIDStr string
 					switch v := bookingId.(type) {
@@ -193,7 +197,9 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 		if err == nil {
 			for buRows.Next() {
 				var name string
-				buRows.Scan(&name)
+				if err := buRows.Scan(&name); err != nil {
+					logger.LogError("hedge links bu compliance: scan failed: %v", err)
+				}
 				buCompliance[name] = true
 			}
 			buRows.Close()
@@ -313,7 +319,9 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 			for i := range vals {
 				valPtrs[i] = &vals[i]
 			}
-			headRows.Scan(valPtrs...)
+			if err := headRows.Scan(valPtrs...); err != nil {
+				logger.LogError("exposure headers linkage: scan failed: %v", err)
+			}
 			row := map[string]interface{}{}
 			for i, col := range headCols {
 				// Convert []uint8 to string for all string fields
@@ -354,7 +362,9 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 				for hedgeRows.Next() {
 					var exposureHeaderId interface{}
 					var hedgeAmount float64
-					hedgeRows.Scan(&exposureHeaderId, &hedgeAmount)
+					if err := hedgeRows.Scan(&exposureHeaderId, &hedgeAmount); err != nil {
+						logger.LogError("exposure headers hedge amount: scan failed: %v", err)
+					}
 					// normalize key to string
 					var key string
 					switch v := exposureHeaderId.(type) {
@@ -391,7 +401,9 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 		if err == nil {
 			for buRows.Next() {
 				var name string
-				buRows.Scan(&name)
+				if err := buRows.Scan(&name); err != nil {
+					logger.LogError("exposure headers bu compliance: scan failed: %v", err)
+				}
 				buCompliance[name] = true
 			}
 			buRows.Close()

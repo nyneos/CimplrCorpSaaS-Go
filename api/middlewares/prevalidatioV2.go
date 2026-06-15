@@ -757,10 +757,18 @@ func SessionMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 				return
 			}
+			clientIP := api.ClientIPFromRequest(r)
+			sessionIP := api.NormalizeClientIP(session.ClientIP)
+			if strings.TrimSpace(sessionIP) != "" && strings.TrimSpace(clientIP) != "" && sessionIP != clientIP {
+				logger.LogError("Invalid dashboard session for user_id=%s: request IP %s does not match session IP %s", userID, clientIP, sessionIP)
+				api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+				return
+			}
 
 			ctx = context.WithValue(ctx, "session_info", session)
 			ctx = context.WithValue(ctx, "session", session) // backward compat: api.GetSessionFromCtx reads "session"
 			ctx = context.WithValue(ctx, "user_id", userID)
+			ctx = context.WithValue(ctx, api.ClientIPContextKey, clientIP)
 
 			validationResult, err := validation.PreValidateRequest(ctx, db, userID)
 			if err != nil {
