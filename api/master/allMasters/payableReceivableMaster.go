@@ -386,6 +386,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_oracle_source, m.old_tally_voucher_type, m.old_tally_tax_class, m.old_tally_ledger_group, m.old_sage_nominal_control, m.old_sage_analysis_code,
 				m.is_deleted,
 				m.old_external_code, m.old_segment,
+				m.upload_s3_key,
 				a.processing_status, a.requested_by, a.requested_at, a.actiontype, a.action_id,
 				a.checker_by, a.checker_at, a.checker_comment, a.reason
 			FROM masterpayablereceivabletype m
@@ -498,6 +499,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				oldSageAnalysisCodeI          interface{}
 				oldExternalCodeI              interface{}
 				oldSegmentI                   interface{}
+				uploadS3KeyI                  interface{}
 				isDeletedI                    interface{}
 				processingStatusI             interface{}
 				requestedByI                  interface{}
@@ -527,6 +529,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldOracleSourceI, &oldTallyVoucherTypeI, &oldTallyTaxClassI, &oldTallyLedgerGroupI, &oldSageNominalControlI, &oldSageAnalysisCodeI,
 				&isDeletedI,
 				&oldExternalCodeI, &oldSegmentI,
+				&uploadS3KeyI,
 				&processingStatusI, &requestedByI, &requestedAtI, &actionTypeI, &actionIDI, &checkerByI, &checkerAtI, &checkerCommentI, &reasonI,
 			); err != nil {
 				continue
@@ -608,6 +611,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"old_sage_analysis_code":          ifaceToString(oldSageAnalysisCodeI),
 				"old_external_code":               ifaceToString(oldExternalCodeI),
 				"old_segment":                     ifaceToString(oldSegmentI),
+				"upload_s3_key":                   ifaceToString(uploadS3KeyI),
 				"processing_status":               ifaceToString(processingStatusI),
 				"is_deleted":                      ifaceToString(isDeletedI),
 				"requested_by":                    ifaceToString(requestedByI),

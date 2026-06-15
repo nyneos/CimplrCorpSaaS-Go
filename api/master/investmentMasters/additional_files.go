@@ -26,22 +26,25 @@ func newBytesMultipartFile(b []byte) bytesMultipartFile {
 	return bytesMultipartFile{bytes.NewReader(b)}
 }
 
-// investmentFilesHandlers groups the 5 HTTP handlers for one investment master module.
+// investmentFilesHandlers groups the HTTP handlers for one investment master module.
 type investmentFilesHandlers struct {
 	List          http.HandlerFunc
 	Upload        http.HandlerFunc
 	Download      http.HandlerFunc
+	DownloadMain  http.HandlerFunc
 	DownloadBulk  http.HandlerFunc
+	PackageZip    http.HandlerFunc
 	Delete        http.HandlerFunc
 	Audit         http.HandlerFunc
 	ApproveDelete http.HandlerFunc
 	RejectDelete  http.HandlerFunc
 }
 
-// newInvestmentFilesHandlers builds all five handlers for an investment master
+// newInvestmentFilesHandlers builds all handlers for an investment master
 // module with no entity-level access scoping.
 type InvestmentFilesConfigArgs struct {
 	ModuleKey   string
+	ModuleLabel string
 	ParentField string
 	ParentTable string
 	ParentCol   string
@@ -52,15 +55,40 @@ type InvestmentFilesConfigArgs struct {
 
 func newInvestmentFilesHandlers(pool *pgxpool.Pool, args InvestmentFilesConfigArgs) investmentFilesHandlers {
 	cfg := buildInvestmentFilesConfig(args.ModuleKey, args.ParentField, args.ParentTable, args.ParentCol, args.FilesTable, args.AuditTable, args.ActionCol)
+	loadMain := loadInvestmentMainPackageFile(args.ParentTable, args.ParentCol)
+	moduleLabel := strings.TrimSpace(args.ModuleLabel)
+	if moduleLabel == "" {
+		moduleLabel = args.ModuleKey
+	}
 	return investmentFilesHandlers{
 		List:          additionalfiles.NewListHandler(pool, cfg),
 		Upload:        additionalfiles.NewUploadHandler(pool, cfg),
 		Download:      additionalfiles.NewDownloadHandler(pool, cfg),
+		DownloadMain:  additionalfiles.NewMainFileDownloadHandler(pool, cfg, loadMain),
 		DownloadBulk:  additionalfiles.NewDownloadSelectedHandler(pool, cfg),
+		PackageZip:    additionalfiles.NewPackageZipHandler(pool, cfg, additionalfiles.PackageZipOptions{ModuleLabel: moduleLabel, IDField: args.ParentCol, LoadMain: loadMain}),
 		Delete:        additionalfiles.NewDeleteHandler(pool, cfg),
 		Audit:         additionalfiles.NewAuditHandler(pool, cfg),
 		ApproveDelete: additionalfiles.NewApproveDeleteHandler(pool, cfg),
 		RejectDelete:  additionalfiles.NewRejectDeleteHandler(pool, cfg),
+	}
+}
+
+// loadInvestmentMainPackageFile returns a loader for a master record's own
+// bulk-uploaded file (upload_s3_key on the parent table). Returns (nil, nil) when
+// the row has no stored file, and surfaces query errors (e.g. a table that has no
+// upload_s3_key column yet) so the caller can skip the main file gracefully.
+func loadInvestmentMainPackageFile(parentTable, parentCol string) func(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+	q := `SELECT COALESCE(upload_s3_key,'') FROM ` + parentTable + ` WHERE ` + parentCol + ` = $1 AND COALESCE(is_deleted, FALSE) = FALSE`
+	return func(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+		var uploadS3Key string
+		if err := pool.QueryRow(ctx, q, rowID).Scan(&uploadS3Key); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(uploadS3Key) == "" {
+			return nil, nil
+		}
+		return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
 	}
 }
 
@@ -110,6 +138,9 @@ func buildInvestmentFilesConfig(moduleKey, parentField, parentTable, parentCol, 
 		},
 		RecordMainUploadAudit: func(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 			return additionalfiles.InsertMainUploadAudit(ctx, tx, auditTable, parentCol, actionCol, parentID, payload)
+		},
+		RecordMainDownloadAudit: func(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+			return additionalfiles.InsertMainDownloadAudit(ctx, exec, auditTable, parentCol, actionCol, parentID, payload)
 		},
 	}
 }
@@ -222,6 +253,7 @@ func FolioMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
 func InterestTypeMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
 	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
 		ModuleKey:   "master-interest-type",
+		ModuleLabel: "Interest Type Master",
 		ParentField: "interest_id",
 		ParentTable: "investment.fd_interest_type_master",
 		ParentCol:   "interest_id",
@@ -234,6 +266,7 @@ func InterestTypeMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers
 func PenaltyStructureMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
 	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
 		ModuleKey:   "master-penalty-structure",
+		ModuleLabel: "Penalty Structure Master",
 		ParentField: "penalty_id",
 		ParentTable: "investment.fd_penalty_structure_master",
 		ParentCol:   "penalty_id",
@@ -246,6 +279,7 @@ func PenaltyStructureMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHand
 func CompoundingFrequencyMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
 	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
 		ModuleKey:   "master-compounding-frequency",
+		ModuleLabel: "Compounding Frequency Master",
 		ParentField: "frequency_id",
 		ParentTable: "investment.fd_compounding_frequency_master",
 		ParentCol:   "frequency_id",
@@ -258,6 +292,7 @@ func CompoundingFrequencyMasterFilesHandlers(pool *pgxpool.Pool) investmentFiles
 func TDSPlanMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
 	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
 		ModuleKey:   "master-tds-plan",
+		ModuleLabel: "TDS Master",
 		ParentField: "tds_plan_id",
 		ParentTable: "investment.fd_tds_plan_master",
 		ParentCol:   "tds_plan_id",
@@ -282,6 +317,7 @@ func CalendarMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
 func DayCountConventionMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
 	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
 		ModuleKey:   "master-day-count-convention",
+		ModuleLabel: "Day Count Convention Master",
 		ParentField: "day_count_code",
 		ParentTable: "investment.fd_day_count_convention_master",
 		ParentCol:   "day_count_code",
@@ -294,6 +330,7 @@ func DayCountConventionMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHa
 func BankConfigMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
 	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
 		ModuleKey:   "master-bank-config",
+		ModuleLabel: "Bank Config Master",
 		ParentField: "config_id",
 		ParentTable: "investment.fd_bank_config_master",
 		ParentCol:   "config_id",
@@ -306,6 +343,7 @@ func BankConfigMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
 func BankRateCardMasterFilesHandlers(pool *pgxpool.Pool) investmentFilesHandlers {
 	return newInvestmentFilesHandlers(pool, InvestmentFilesConfigArgs{
 		ModuleKey:   "master-bank-rate-card",
+		ModuleLabel: "Bank Rate Card Master",
 		ParentField: "rate_card_id",
 		ParentTable: "investment.fd_bank_rate_card_master",
 		ParentCol:   "rate_card_id",

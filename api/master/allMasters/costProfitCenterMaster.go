@@ -1336,6 +1336,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
                 m.tally_ledger_group, m.old_tally_ledger_group,
                 m.sage_department_code, m.old_sage_department_code,
                 m.sage_cost_centre_code, m.old_sage_cost_centre_code,
+                m.upload_s3_key,
                 a.processing_status, a.requested_by, a.requested_at, a.actiontype, a.action_id,
                 a.checker_by, a.checker_at, a.checker_comment, a.reason
             FROM mastercostprofitcenter m
@@ -1397,7 +1398,8 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tallyLedgerNameI, oldTallyLedgerNameI,
 				tallyLedgerGroupI, oldTallyLedgerGroupI,
 				sageDeptCodeI, oldSageDeptCodeI,
-				sageCostCentreCodeI, oldSageCostCentreCodeI interface{}
+				sageCostCentreCodeI, oldSageCostCentreCodeI,
+				uploadS3KeyI interface{}
 			)
 
 			if err := rows.Scan(
@@ -1424,6 +1426,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&tallyLedgerGroupI, &oldTallyLedgerGroupI,
 				&sageDeptCodeI, &oldSageDeptCodeI,
 				&sageCostCentreCodeI, &oldSageCostCentreCodeI,
+				&uploadS3KeyI,
 				&procStatusI, &requestedByI, &requestedAtI, &actionTypeI, &actionIDI,
 				&checkerByI, &checkerAtI, &checkerCommentI, &reasonI); err != nil {
 				continue
@@ -1435,6 +1438,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"data": map[string]interface{}{
 					// Basic fields
 					"centre_id":          centreID,
+					"upload_s3_key":      ifaceToString(uploadS3KeyI),
 					"centre_code":        ifaceToString(centreCodeI),
 					"centre_name":        ifaceToString(centreNameI),
 					"centre_type":        ifaceToString(centreTypeI),

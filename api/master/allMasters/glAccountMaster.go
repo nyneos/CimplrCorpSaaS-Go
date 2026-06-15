@@ -502,7 +502,8 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.oracle_ledger, m.old_oracle_ledger, m.oracle_coa, m.old_oracle_coa, m.oracle_balancing_seg, m.old_oracle_balancing_seg, m.oracle_natural_account, m.old_oracle_natural_account,
 				m.tally_ledger_name, m.old_tally_ledger_name, m.tally_ledger_group, m.old_tally_ledger_group, m.sage_nominal_code, m.old_sage_nominal_code,
 				m.sage_cost_centre, m.old_sage_cost_centre, m.sage_department, m.old_sage_department, m.posting_allowed, m.old_posting_allowed,
-				m.reconciliation_required, m.old_reconciliation_required, m.is_cash_bank, m.old_is_cash_bank, m.gl_account_level, m.old_gl_account_level, m.is_top_level_gl_account, m.is_deleted
+				m.reconciliation_required, m.old_reconciliation_required, m.is_cash_bank, m.old_is_cash_bank, m.gl_account_level, m.old_gl_account_level, m.is_top_level_gl_account, m.is_deleted,
+				m.upload_s3_key
 			FROM masterglaccount m
 			LEFT JOIN LATERAL (
 				SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason
@@ -547,6 +548,7 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tallyNameI, oldTallyNameI, tallyGroupI, oldTallyGroupI, sageNominalI, oldSageNominalI                                        interface{}
 				sageCostCentreI, oldSageCostCentreI, sageDeptI, oldSageDeptI, postingAllowedI, oldPostingAllowedI                            interface{}
 				reconReqI, oldReconReqI, isCashBankI, oldIsCashBankI, glLevelI, oldGlLevelI                                                  interface{}
+				uploadS3KeyI                                                                                                                 interface{}
 				isTopLevelBool, isDeletedBool                                                                                                bool
 			)
 
@@ -562,6 +564,7 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&tallyNameI, &oldTallyNameI, &tallyGroupI, &oldTallyGroupI, &sageNominalI, &oldSageNominalI,
 				&sageCostCentreI, &oldSageCostCentreI, &sageDeptI, &oldSageDeptI, &postingAllowedI, &oldPostingAllowedI,
 				&reconReqI, &oldReconReqI, &isCashBankI, &oldIsCashBankI, &glLevelI, &oldGlLevelI, &isTopLevelBool, &isDeletedBool,
+				&uploadS3KeyI,
 			); err != nil {
 				continue
 			}
@@ -596,6 +599,7 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"old_gl_account_level":    ifaceToInt(oldGlLevelI),
 					"is_top_level_gl_account": isTopLevelBool,
 					"is_deleted":              isDeletedBool,
+					"upload_s3_key":           ifaceToString(uploadS3KeyI),
 
 					"effective_from":     ifaceToDateString(effectiveFromI),
 					"old_effective_from": ifaceToDateString(oldEffectiveFromI),
