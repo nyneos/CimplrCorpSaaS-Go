@@ -103,13 +103,7 @@ var dataSources = map[string]dataSourceFn{
 		return queryFDAccrualRunAll(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"fdAccrualLedger": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryFDAccrualLedger(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
-	},
-	"fdAccrualDetail": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryFDAccrualDetail(ctx, pool, req.EntityIDs, req.Limit)
-	},
-	"fdAccrualFindings": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryFDAccrualFindings(ctx, pool, req.EntityIDs, req.Limit)
+		return queryFDAccrualLedger(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"fdAccrualExecutionLog": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryFDAccrualExecutionLog(ctx, pool, req.EntityIDs, req.Limit)
@@ -120,14 +114,12 @@ var dataSources = map[string]dataSourceFn{
 	"fdAccrualLedgerAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryFDAccrualLedgerAudit(ctx, pool, req.EntityIDs, req.Limit)
 	},
-	"fdAccrualExceptions": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryFDAccrualExceptions(ctx, pool, req.EntityIDs, req.Limit)
-	},
+
 	"fdAccrualScheduleAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryFDAccrualScheduleAll(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"fdAccrualScheduleExecutionLog": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryFDAccrualScheduleExecutionLog(ctx, pool, req.EntityIDs, req.Limit)
+		return queryFDAccrualScheduleExecutionLog(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
 	},
 	// ── Portfolio & Proposal ───────────────────────────────────────────────────
 	"investmentOnboardBatch": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
