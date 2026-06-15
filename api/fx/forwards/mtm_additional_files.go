@@ -29,6 +29,14 @@ func DownloadSelectedMTMAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerF
 	return additionalfiles.NewDownloadSelectedHandler(pool, mtmAdditionalFilesConfig())
 }
 
+func DownloadMTMPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, mtmAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "FX MTM",
+		IDField:     "mtm_id",
+		LoadMain:    loadMTMMainPackageFile,
+	})
+}
+
 func DeleteMTMAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, mtmAdditionalFilesConfig())
 }
@@ -46,7 +54,7 @@ func RejectMTMAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func mtmAdditionalFilesConfig() additionalfiles.Config {
-	return additionalfiles.Config{
+	return withForwardCrossStage(additionalfiles.Config{
 		Module:                "fx-mtm",
 		AuditSource:           "FX_FORWARD_MTM",
 		AuditTableName:        fxAdditionalFileAuditTable,
@@ -59,11 +67,35 @@ func mtmAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteMTMAdditionalFile,
 		SoftDeleteTx:          deleteMTMAdditionalFileTx,
 		RecordMainUploadAudit: recordMTMMainUploadAudit,
-	}
+		RecordMainDownloadAudit: recordMTMMainDownloadAudit,
+	})
 }
 
 func recordMTMMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionforwardmtm", "mtm_id", "actiontype", parentID, payload)
+}
+
+func recordMTMMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadRecord(ctx, exec, "public.auditactionforwardmtmdownloads", "mtm_id", parentID, payload, nil)
+}
+
+func loadMTMMainPackageFile(ctx context.Context, pool *pgxpool.Pool, rowID string) (*additionalfiles.MainPackageFile, error) {
+	names, err := forwardEntityNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	mtmID := normalizeMTMID(rowID)
+	var uploadS3Key string
+	err = pool.QueryRow(ctx, `
+		SELECT COALESCE(upload_s3_key, '')
+		FROM public.forward_mtm
+		WHERE mtm_id = $1
+		  AND LOWER(TRIM(entity)) = ANY($2)
+	`, mtmID, names).Scan(&uploadS3Key)
+	if err != nil || strings.TrimSpace(uploadS3Key) == "" {
+		return nil, err
+	}
+	return &additionalfiles.MainPackageFile{UploadS3Key: uploadS3Key}, nil
 }
 
 func listMTMAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

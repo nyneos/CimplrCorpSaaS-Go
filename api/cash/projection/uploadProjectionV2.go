@@ -3,6 +3,7 @@ package projection
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/cash/additionalfiles"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
@@ -56,6 +57,8 @@ type itemInfoV2 struct {
 // Monthly projections are AUTO-CALCULATED based on recurring + frequency
 func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+
 		start := time.Now()
 		logger.LogInfo("[UploadCashflowProposalV2] Start %s %s", r.Method, r.URL.Path)
 		defer func() {
@@ -415,6 +418,25 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			(proposal_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip)
 			VALUES ($1,'CREATE','PENDING_APPROVAL','Imported via V2 uploader',$2,now(),$3)
 		`, proposalID, requestedBy, projectionNullIfEmpty(api.ClientIPFromRequest(r))); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, parseConstraintError(err))
+			return
+		}
+		uploadAuditAt := time.Now().UTC()
+		uploadAuditReason, err := additionalfiles.MainUploadAuditReasonJSON(additionalfiles.MainUploadAuditPayload{
+			FileName:    fh.Filename,
+			UploadedBy:  requestedBy,
+			UploadedAt:  uploadAuditAt,
+			RequestedIP: api.ClientIPFromRequest(r),
+		})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to build upload audit: "+err.Error())
+			return
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal
+			(proposal_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip)
+			VALUES ($1,'UPLOAD_FILE',$2,$3,$4,$5,$6)
+		`, proposalID, constants.StatusApproved, uploadAuditReason, requestedBy, uploadAuditAt, projectionNullIfEmpty(api.ClientIPFromRequest(r))); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, parseConstraintError(err))
 			return
 		}

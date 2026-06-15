@@ -27,6 +27,13 @@ func DownloadSelectedExposureBucketingAdditionalFilesHandler(pool *pgxpool.Pool)
 	return additionalfiles.NewDownloadSelectedHandler(pool, exposureBucketingAdditionalFilesConfig())
 }
 
+func DownloadExposureBucketingPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return additionalfiles.NewPackageZipHandler(pool, exposureBucketingAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
+		ModuleLabel: "FX Exposure Bucketing",
+		IDField:     "exposure_header_id",
+	})
+}
+
 func DeleteExposureBucketingAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return additionalfiles.NewDeleteHandler(pool, exposureBucketingAdditionalFilesConfig())
 }
@@ -44,7 +51,7 @@ func RejectExposureBucketingAdditionalFileDeleteHandler(pool *pgxpool.Pool) http
 }
 
 func exposureBucketingAdditionalFilesConfig() additionalfiles.Config {
-	return additionalfiles.Config{
+	return withExposureCrossStage(additionalfiles.Config{
 		Module:                "fx-exposure-bucketing",
 		AuditSource:           "FX_EXPOSURE_BUCKETING",
 		AuditTableName:        fxAdditionalFileAuditTable,
@@ -57,11 +64,16 @@ func exposureBucketingAdditionalFilesConfig() additionalfiles.Config {
 		SoftDelete:            deleteExposureBucketingAdditionalFile,
 		SoftDeleteTx:          deleteExposureBucketingAdditionalFileTx,
 		RecordMainUploadAudit: recordExposureBucketingMainUploadAudit,
-	}
+		RecordMainDownloadAudit: recordExposureBucketingMainDownloadAudit,
+	})
 }
 
 func recordExposureBucketingMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionexposurebucketing", "exposure_header_id", "actiontype", parentID, payload)
+}
+
+func recordExposureBucketingMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadAudit(ctx, exec, "public.auditactionexposurebucketing", "exposure_header_id", "actiontype", parentID, payload)
 }
 
 func listExposureBucketingAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

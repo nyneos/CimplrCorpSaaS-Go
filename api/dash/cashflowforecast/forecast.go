@@ -204,7 +204,7 @@ func GetForecastKPIs(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, sc
 	aggQ := `
 		SELECT cpi.cashflow_type, cp.currency_code, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount
 		FROM cashflow_projection_monthly cpm
-		JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
+		JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
 		JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
 		LEFT JOIN LATERAL (
 			SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
@@ -263,7 +263,7 @@ func GetForecastRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, sc
 	fetchQ := `
         SELECT cpm.year, cpm.month, cpi.cashflow_type, cpi.category_id, cpi.description, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount, cp.currency_code
         FROM cashflow_projection_monthly cpm
-        JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
+        JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
         JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
         LEFT JOIN LATERAL (
             SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
@@ -362,7 +362,7 @@ func GetForecastDailyRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon in
 	monthlyQ := `
         SELECT cpm.year, cpm.month, cpi.cashflow_type, cp.currency_code, cpi.start_date, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount
         FROM cashflow_projection_monthly cpm
-        JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
+        JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
         JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
         LEFT JOIN LATERAL (
             SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
@@ -626,7 +626,8 @@ func GetForecastCategorySums(ctx context.Context, pgxPool *pgxpool.Pool, horizon
 		LEFT JOIN LATERAL (
 			SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
 		) aa ON TRUE
-		WHERE aa.processing_status = 'APPROVED'
+		WHERE COALESCE(cpi.is_deleted, false) = false
+		  AND aa.processing_status = 'APPROVED'
 	`
 
 	whereClauses := ""

@@ -120,7 +120,8 @@ func BuildProjectionNotifPayload(ctx context.Context, pool *pgxpool.Pool, propos
 			SELECT processing_status
 			FROM cimplrcorpsaas.audit_action_cashflow_proposal a2
 			WHERE a2.proposal_id = p.proposal_id
-			ORDER BY requested_at DESC
+			  AND a2.action_type IN ('CREATE', 'EDIT', 'DELETE')
+			ORDER BY requested_at DESC, action_id DESC
 			LIMIT 1
 		) a ON TRUE
 		WHERE p.proposal_id = ANY($1)`
@@ -151,6 +152,7 @@ func BuildProjectionNotifPayload(ctx context.Context, pool *pgxpool.Pool, propos
 			old_bank_name, old_bank_account_number
 		FROM cimplrcorpsaas.cashflow_proposal_item
 		WHERE proposal_id = ANY($1)
+		  AND COALESCE(is_deleted, false) = false
 		ORDER BY proposal_id, created_at`
 
 	itemRows, err := pool.Query(ctx, itemQuery, proposalIDs)

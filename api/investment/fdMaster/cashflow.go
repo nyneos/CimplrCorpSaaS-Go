@@ -123,19 +123,19 @@ func stampCumulativeFields(rows []CashflowRow, fd *FDRecord, tdsRate float64, is
 type BankConfig struct {
 	ConfigID                     string
 	DayCountCode                 string // DC-ACT-365 | DC-ACT-360 | DC-ACT-ACT | DC-30-360
-	CapitalizationScheduleType   string // ANNIVERSARY | CALENDAR_QTR_END
-	QuarterDefinition            string // CALENDAR_QUARTER | 90_DAYS
-	TDSDeductionTiming           string // ACCRUAL_ANNUAL | MATURITY | NONE
-	RoundingMethod               string // ROUND | TRUNCATE | ROUND_UP | ROUND_DOWN
-	RoundingFrequency            string // EACH_PERIOD | AT_MATURITY
+	CapitalizationScheduleType   string // ANNIVERSARY | CALENDAR_QTR_END | MONTH_END | FIXED_DAY
+	QuarterDefinition            string // ACTUAL_QTR_END | 90_DAYS (legacy alias: CALENDAR_QUARTER)
+	TDSDeductionTiming           string // ACCRUAL_ANNUAL | RECEIPT | MATURITY | NONE
+	RoundingMethod               string // ROUND | FLOOR | CEIL (legacy: TRUNCATE | ROUND_UP | ROUND_DOWN)
+	RoundingFrequency            string // EACH_PERIOD | FINAL_ONLY (legacy alias: AT_MATURITY)
 	InterestRoundingDecimals     int
-	AccrualStartConvention       string // INCLUDE | EXCLUDE
-	AccrualEndConvention         string // INCLUDE | EXCLUDE
-	PeriodBoundaryDefinition     string // INCL_START_EXCL_END | INCL_BOTH
+	AccrualStartConvention       string // INCLUDE | EXCLUDE | NEXT_WD
+	AccrualEndConvention         string // INCLUDE | EXCLUDE | PRECEDING_WD
+	PeriodBoundaryDefinition     string // INCL_START_EXCL_END | EXCL_START_INCL_END | INCL_BOTH | EXCL_BOTH
 	WeekendAccrual               bool
 	HolidayAccrual               bool
 	HolidayCalendarCode          string // e.g. "Q" or "IN" — code from mastercalendar
-	BrokenPeriodMethod           string // SIMPLE | NONE
+	BrokenPeriodMethod           string // SIMPLE | COMPOUND | HYBRID | NONE
 	CapitalizationDateAdjustment string // NO_ADJUST / PRECEDING_WD / FOLLOWING_WD
 	BrokenPeriodLocation         string // FIRST / LAST / BOTH
 	GracePeriodDays              int
@@ -435,17 +435,22 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			WHERE c.confirmation_id = $1`, confirmationID).Scan(&v)
 		rec.TenureYears = v
 	}
-	if confCols["tenure_type"] {
+	// Source tables store this as tenor_type (fd_master uses tenure_type). Read the
+	// real column name; fall back to the legacy tenure_type spelling if a schema has it.
+	confTenorCol := pickFirstExistingColumn(confCols, "tenor_type", "tenure_type")
+	bookingTenorCol := pickFirstExistingColumn(bookingCols, "tenor_type", "tenure_type")
+	if confTenorCol != "" {
 		var v string
-		_ = exec.QueryRow(ctx, `SELECT COALESCE(NULLIF(tenure_type,''),'') FROM investment.fd_confirmation WHERE confirmation_id = $1`, confirmationID).Scan(&v)
+		_ = exec.QueryRow(ctx, fmt.Sprintf(`SELECT COALESCE(NULLIF(%s,''),'') FROM investment.fd_confirmation WHERE confirmation_id = $1`, confTenorCol), confirmationID).Scan(&v)
 		rec.TenureType = v
-	} else if bookingCols["tenure_type"] {
+	}
+	if rec.TenureType == "" && bookingTenorCol != "" {
 		var v string
-		_ = exec.QueryRow(ctx, `
-			SELECT COALESCE(NULLIF(b.tenure_type,''),'')
+		_ = exec.QueryRow(ctx, fmt.Sprintf(`
+			SELECT COALESCE(NULLIF(b.%s,''),'')
 			FROM investment.fd_confirmation c
 			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
-			WHERE c.confirmation_id = $1`, confirmationID).Scan(&v)
+			WHERE c.confirmation_id = $1`, bookingTenorCol), confirmationID).Scan(&v)
 		rec.TenureType = v
 	}
 	// Derive TenorDays from maturity/start dates when tenure was stored only in months or years.
@@ -1281,13 +1286,21 @@ func isNonAccrualDay(d time.Time, cfg *BankConfig, cal HolidayCalendarInfo) bool
 // replaces simple date-subtraction when the bank excludes non-working days.
 func countAccrualDays(conventionType string, periodStart, periodEnd time.Time, cfg *BankConfig, cal HolidayCalendarInfo) int {
 	// Respect accrual start/end conventions by adjusting the window.
+	// INCLUDE (default) keeps the boundary; EXCLUDE knocks one day off;
+	// NEXT_WD / PRECEDING_WD snap a non-working boundary to the nearest working day.
 	start := periodStart
 	end := periodEnd
-	if strings.EqualFold(cfg.AccrualStartConvention, "EXCLUDE") {
+	switch strings.ToUpper(strings.TrimSpace(cfg.AccrualStartConvention)) {
+	case "EXCLUDE":
 		start = start.AddDate(0, 0, 1)
+	case "NEXT_WD":
+		start = NextWorkingDay(start, cal)
 	}
-	if strings.EqualFold(cfg.AccrualEndConvention, "EXCLUDE") {
+	switch strings.ToUpper(strings.TrimSpace(cfg.AccrualEndConvention)) {
+	case "EXCLUDE":
 		end = end.AddDate(0, 0, -1)
+	case "PRECEDING_WD":
+		end = PrevWorkingDay(end, cal)
 	}
 	if !end.After(start) {
 		return 0
@@ -1421,6 +1434,20 @@ func getDivisorAndDaysWithCal(conventionType string, periodStart, periodEnd time
 	}
 	// For all other conventions count working days if needed.
 	effectiveDays := countAccrualDays(conventionType, periodStart, periodEnd, cfg, cal)
+	// period_boundary_definition (BRD): ACT-based conventions only (30/360 returned above).
+	//   INCL_START_EXCL_END / EXCL_START_INCL_END — span count unchanged (end − start)
+	//   INCL_BOTH — both boundary dates accrue → one extra day
+	//   EXCL_BOTH — neither boundary accrues → one day less
+	if cfg != nil {
+		switch strings.ToUpper(strings.TrimSpace(cfg.PeriodBoundaryDefinition)) {
+		case "INCL_BOTH":
+			effectiveDays++
+		case "EXCL_BOTH":
+			if effectiveDays > 0 {
+				effectiveDays--
+			}
+		}
+	}
 	switch norm {
 	case "ACT_360":
 		return 360, effectiveDays
@@ -1855,14 +1882,7 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 		if days <= 0 {
 			days = 1
 		}
-		// INCL_BOTH adds start day to count — only for ACT-based conventions, not 30/360 (formula-based)
-		if strings.EqualFold(cfg.PeriodBoundaryDefinition, "INCL_BOTH") {
-			normConv := strings.ToUpper(strings.NewReplacer("/", "_", "-", "_").Replace(effectiveConvention))
-			normConv = strings.TrimPrefix(normConv, "DC_")
-			if normConv != "30_360" {
-				days++
-			}
-		}
+		// period_boundary_definition is applied inside getDivisorAndDaysWithCal.
 		// Count holidays within this period
 		holidaysInPeriod := countHolidaysInRange(start, end, cfg, calInfo)
 		ae := &accrualEntry{
@@ -2325,14 +2345,7 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 		if days <= 0 {
 			days = 1
 		}
-		// INCL_BOTH: only applies to ACT-based conventions; 30/360 is formula-based
-		if strings.EqualFold(cfg.PeriodBoundaryDefinition, "INCL_BOTH") {
-			normConv := strings.ToUpper(strings.NewReplacer("/", "_", "-", "_").Replace(effectiveConvention))
-			normConv = strings.TrimPrefix(normConv, "DC_")
-			if normConv != "30_360" {
-				days++
-			}
-		}
+		// period_boundary_definition is applied inside getDivisorAndDaysWithCal.
 		accrualRows = append(accrualRows, &aEntry{PeriodStart: start, PeriodEnd: end, PeriodDays: days, Divisor: divisor})
 	}
 

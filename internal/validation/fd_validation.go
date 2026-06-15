@@ -60,8 +60,25 @@ func ValidateFDMasterReferences(ctx context.Context, fields map[string]interface
 	}
 
 	// 8. Validate Compounding Frequency (interest_payout_frequency / frequency_id)
+	// payout_frequency_id and interest_payout_frequency can be "AT_MATURITY" — a valid
+	// engine sentinel meaning no periodic payout. It is NOT a row in fd_compounding_frequency_master
+	// so must be excluded from master-reference validation.
+	// accrual_frequency_code carries engine codes (MONTHLY, QUARTERLY, DAILY, …) which are
+	// interpreted by freqTypeToMonths() and are also not master references.
 	if freqs, ok := ctx.Value("ApprovedCompoundingFrequencies").([]map[string]string); ok {
-		if errMsg := validateFieldReferences(fields, freqs, []string{"frequency_id", "interest_payout_frequency", "payout_frequency_id", "accrual_frequency_code", "compounding_frequency", "confirmed_frequency_id"}, []string{"frequency_id", "frequency_code", "frequency_name"}, "Frequency"); errMsg != "" {
+		freqFields := make(map[string]interface{}, len(fields))
+		for k, v := range fields {
+			freqFields[k] = v
+		}
+		// Strip AT_MATURITY sentinel from payout frequency fields before master validation.
+		for _, k := range []string{"interest_payout_frequency", "payout_frequency_id"} {
+			if strings.EqualFold(strings.TrimSpace(fieldString(fields, k)), "AT_MATURITY") {
+				delete(freqFields, k)
+			}
+		}
+		// accrual_frequency_code is an engine code (MONTHLY, QUARTERLY, …), not a master ref.
+		delete(freqFields, "accrual_frequency_code")
+		if errMsg := validateFieldReferences(freqFields, freqs, []string{"frequency_id", "interest_payout_frequency", "payout_frequency_id", "compounding_frequency", "confirmed_frequency_id"}, []string{"frequency_id", "frequency_code", "frequency_name"}, "Frequency"); errMsg != "" {
 			return errMsg
 		}
 	}

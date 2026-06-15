@@ -704,7 +704,7 @@ func buildDailyMaps(ctx context.Context, db *pgxpool.Pool, entities []string, st
 
 	projQ := fmt.Sprintf(`SELECT cpm.year, cpm.month, cpi.cashflow_type, COALESCE(cp.currency_code,'INR'), cpi.start_date, COALESCE(SUM(cpm.projected_amount),0)::float8
 		FROM cashflow_projection_monthly cpm
-		JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
+		JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
 		JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
 		LEFT JOIN LATERAL (SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1) aa ON TRUE
 		WHERE aa.processing_status = 'APPROVED' AND (cpm.year*12 + cpm.month) BETWEEN $1 AND $2%s

@@ -335,7 +335,9 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 	dateOnlyQ := `
 		SELECT COUNT(*)
 		FROM cimplrcorpsaas.cashflow_projection_monthly pm
-		JOIN cimplrcorpsaas.cashflow_proposal_item i ON i.item_id = pm.item_id
+		JOIN cimplrcorpsaas.cashflow_proposal_item i
+			ON i.item_id = pm.item_id
+		   AND COALESCE(i.is_deleted, false) = false
 		JOIN (
 			SELECT DISTINCT ON (p.proposal_id) p.proposal_id
 			FROM cimplrcorpsaas.cashflow_proposal p
@@ -358,7 +360,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 	logger.LogInfo("[fetchProjections] Records matching date range (no entity/bank filter): %d", dateMatchCount)
 
 	// Check sample entity names in proposal items
-	sampleQ := `SELECT DISTINCT i.entity_name FROM cimplrcorpsaas.cashflow_proposal_item i LIMIT 5`
+	sampleQ := `SELECT DISTINCT i.entity_name FROM cimplrcorpsaas.cashflow_proposal_item i WHERE COALESCE(i.is_deleted, false) = false LIMIT 5`
 	sampleRows, _ := pgxPool.Query(ctx, sampleQ)
 	var sampleEntities []string
 	for sampleRows.Next() {
@@ -404,7 +406,9 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 			pm.month,
 			pm.projected_amount
 		FROM cimplrcorpsaas.cashflow_projection_monthly pm
-		JOIN cimplrcorpsaas.cashflow_proposal_item i ON i.item_id = pm.item_id
+		JOIN cimplrcorpsaas.cashflow_proposal_item i
+			ON i.item_id = pm.item_id
+		   AND COALESCE(i.is_deleted, false) = false
 		JOIN approved_proposals ap ON ap.proposal_id = i.proposal_id
 		LEFT JOIN public.masterentitycash me ON LOWER(TRIM(me.entity_name)) = LOWER(TRIM(i.entity_name))
 		-- Prefer matching master bank account by account_number first (entity_id may not be present in proposals)

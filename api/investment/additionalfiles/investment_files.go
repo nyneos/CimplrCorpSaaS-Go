@@ -234,9 +234,15 @@ func splitInvestmentAuditTableName(tableName string) (string, string) {
 	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 }
 
-func loadInvestmentAuditColumns(ctx context.Context, tx pgx.Tx, tableName string) (map[string]investmentAuditColumn, error) {
+// cashfiles.AuditExecutor only exposes Exec.
+type investmentAuditQuerier interface {
+	Query(context.Context, string, ...interface{}) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...interface{}) pgx.Row
+}
+
+func loadInvestmentAuditColumns(ctx context.Context, q investmentAuditQuerier, tableName string) (map[string]investmentAuditColumn, error) {
 	schemaName, relationName := splitInvestmentAuditTableName(tableName)
-	rows, err := tx.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		SELECT column_name,
 		       is_nullable = 'YES' AS nullable,
 		       column_default IS NOT NULL OR is_identity = 'YES' AS has_default
@@ -274,8 +280,26 @@ func recordDynamicInvestmentMainUploadAudit(ctx context.Context, tx pgx.Tx, tabl
 	if err != nil {
 		return err
 	}
+	return recordDynamicInvestmentMainAudit(ctx, tx, tableName, parentColumns, parentID, "UPLOAD_FILE", reason, payload, extraValues)
+}
 
-	columns, err := loadInvestmentAuditColumns(ctx, tx, tableName)
+func recordDynamicInvestmentMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, tableName string, parentColumns []string, parentID string, payload cashfiles.MainUploadAuditPayload, extraValues map[string]interface{}) error {
+	reason, err := cashfiles.MainDownloadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+	return recordDynamicInvestmentMainAudit(ctx, exec, tableName, parentColumns, parentID, "DOWNLOAD", reason, payload, extraValues)
+}
+
+func recordDynamicInvestmentMainAudit(ctx context.Context, exec cashfiles.AuditExecutor, tableName string, parentColumns []string, parentID, action, reason string, payload cashfiles.MainUploadAuditPayload, extraValues map[string]interface{}) error {
+	// The shared executor only exposes Exec; the schema introspection below needs
+	// Query. Both pgx.Tx (upload) and *pgxpool.Pool (download) provide it.
+	querier, ok := exec.(investmentAuditQuerier)
+	if !ok {
+		return nil
+	}
+
+	columns, err := loadInvestmentAuditColumns(ctx, querier, tableName)
 	if err != nil {
 		return err
 	}
@@ -289,7 +313,7 @@ func recordDynamicInvestmentMainUploadAudit(ctx context.Context, tx pgx.Tx, tabl
 		values[parentColumn] = parentID
 	}
 	if actionColumn := firstInvestmentAuditColumn(columns, "action_type", "actiontype"); actionColumn != "" {
-		values[actionColumn] = "UPLOAD_FILE"
+		values[actionColumn] = action
 	}
 	if _, ok := columns["processing_status"]; ok {
 		values["processing_status"] = constants.StatusApproved
@@ -376,7 +400,7 @@ func recordDynamicInvestmentMainUploadAudit(ctx context.Context, tx pgx.Tx, tabl
 		strings.Join(insertColumns, ", "),
 		strings.Join(placeholders, ", "),
 	)
-	_, err = tx.Exec(ctx, query, args...)
+	_, err = exec.Exec(ctx, query, args...)
 	return err
 }
 
@@ -541,7 +565,7 @@ func recordFDTDSReceiptMainUploadAudit(ctx context.Context, tx pgx.Tx, tdsID str
 			requested_ip
 		) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		tdsID,
-		"EDIT",
+		"UPLOAD_FILE",
 		constants.StatusApproved,
 		reason,
 		payload.UploadedBy,
@@ -608,6 +632,190 @@ func recordFDAccrualLedgerMainUploadAudit(ctx context.Context, tx pgx.Tx, ledger
 
 func recordFDAccountingJournalMainUploadAudit(ctx context.Context, tx pgx.Tx, entryID string, payload cashfiles.MainUploadAuditPayload) error {
 	return recordDynamicInvestmentMainUploadAudit(ctx, tx, "investment.accounting_journal_entry_audit", []string{"entry_id"}, entryID, payload, nil)
+}
+
+// Download-audit counterparts: same tables and parent columns as the upload
+// helpers above, but record a DOWNLOAD action. They run on a cashfiles.AuditExecutor
+// (the pool) so they can be invoked from the package ZIP / individual download paths.
+
+func recordInvestmentProposalMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, proposalID string, payload cashfiles.MainUploadAuditPayload) error {
+	return cashfiles.InsertMainDownloadAudit(ctx, exec, "investment.auditactionproposal", "proposal_id", "actiontype", proposalID, payload)
+}
+
+func recordInvestmentConfirmationMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, confirmationID string, payload cashfiles.MainUploadAuditPayload) error {
+	return cashfiles.InsertMainDownloadAudit(ctx, exec, "investment.auditactioninvestmentconfirmation", "confirmation_id", "actiontype", confirmationID, payload)
+}
+
+func recordInvestmentInitiationMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, initiationID string, payload cashfiles.MainUploadAuditPayload) error {
+	return cashfiles.InsertMainDownloadAudit(ctx, exec, "investment.auditactioninitiation", "initiation_id", "actiontype", initiationID, payload)
+}
+
+func recordRedemptionInitiationMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, redemptionID string, payload cashfiles.MainUploadAuditPayload) error {
+	return cashfiles.InsertMainDownloadAudit(ctx, exec, "investment.auditactionredemption", "redemption_id", "actiontype", redemptionID, payload)
+}
+
+func recordRedemptionConfirmationMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, redemptionConfirmID string, payload cashfiles.MainUploadAuditPayload) error {
+	return cashfiles.InsertMainDownloadAudit(ctx, exec, "investment.auditactionredemptionconfirmation", "redemption_confirm_id", "actiontype", redemptionConfirmID, payload)
+}
+
+func recordAccountingActivityMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, activityID string, payload cashfiles.MainUploadAuditPayload) error {
+	return cashfiles.InsertMainDownloadAudit(ctx, exec, "investment.auditactionaccountingactivity", "activity_id", "actiontype", activityID, payload)
+}
+
+func recordFDBookingMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, bookingID string, payload cashfiles.MainUploadAuditPayload) error {
+	return recordDynamicInvestmentMainDownloadAudit(ctx, exec, "investment.fd_audit_booking_request", []string{"booking_id"}, bookingID, payload, nil)
+}
+
+func recordFDConfirmationMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, confirmationID string, payload cashfiles.MainUploadAuditPayload) error {
+	return recordDynamicInvestmentMainDownloadAudit(ctx, exec, "investment.fd_audit_confirmation", []string{"confirmation_id"}, confirmationID, payload, nil)
+}
+
+func recordFDMasterMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, fdID string, payload cashfiles.MainUploadAuditPayload) error {
+	return recordDynamicInvestmentMainDownloadAudit(ctx, exec, "investment.fd_audit_master", []string{"fd_id", "master_id", "confirmation_id"}, fdID, payload, nil)
+}
+
+func recordFDClosureMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, closureRequestID string, payload cashfiles.MainUploadAuditPayload) error {
+	reason, err := cashfiles.MainDownloadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = exec.Exec(ctx, `
+		INSERT INTO investment.fd_audit_closure_request (
+			closure_request_id,
+			action_type,
+			processing_status,
+			action_reason,
+			performed_by,
+			performed_by_email,
+			requested_ip,
+			created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		closureRequestID,
+		"DOWNLOAD",
+		"COMPLETED",
+		reason,
+		payload.UploadedBy,
+		payload.UploadedBy,
+		api.SystemIfBlank(payload.RequestedIP),
+		payload.UploadedAt,
+	)
+	return err
+}
+
+func recordFDCashflowMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, fdID string, payload cashfiles.MainUploadAuditPayload) error {
+	return recordDynamicInvestmentMainDownloadAudit(ctx, exec, constants.QuerryAuditCashflowSchedule, []string{"fd_id", "master_id"}, fdID, payload, nil)
+}
+
+func recordFDInterestReceiptMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, receiptID string, payload cashfiles.MainUploadAuditPayload) error {
+	reason, err := cashfiles.MainDownloadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = exec.Exec(ctx, `
+		INSERT INTO investment.fd_interest_receipt_audit (
+			receipt_id,
+			action_type,
+			processing_status,
+			reason,
+			requested_by,
+			requested_at,
+			requested_ip
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		receiptID,
+		"DOWNLOAD",
+		constants.StatusApproved,
+		reason,
+		payload.UploadedBy,
+		payload.UploadedAt,
+		api.SystemIfBlank(payload.RequestedIP),
+	)
+	return err
+}
+
+func recordFDTDSReceiptMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, tdsID string, payload cashfiles.MainUploadAuditPayload) error {
+	reason, err := cashfiles.MainDownloadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = exec.Exec(ctx, `
+		INSERT INTO investment.fd_tds_receipt_audit (
+			tds_id,
+			action_type,
+			processing_status,
+			reason,
+			requested_by,
+			requested_at,
+			requested_ip
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		tdsID,
+		"DOWNLOAD",
+		constants.StatusApproved,
+		reason,
+		payload.UploadedBy,
+		payload.UploadedAt,
+		api.SystemIfBlank(payload.RequestedIP),
+	)
+	return err
+}
+
+func recordFDReceiptExceptionMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, exceptionID string, payload cashfiles.MainUploadAuditPayload) error {
+	reason, err := cashfiles.MainDownloadAuditReasonJSON(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = exec.Exec(ctx, `
+		INSERT INTO investment.fd_receipt_exception_audit (
+			exception_id,
+			action_type,
+			processing_status,
+			reason,
+			requested_by,
+			requested_at,
+			requested_ip
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		exceptionID,
+		"DOWNLOAD",
+		"APPROVED",
+		reason,
+		payload.UploadedBy,
+		payload.UploadedAt,
+		api.SystemIfBlank(payload.RequestedIP),
+	)
+	return err
+}
+
+func recordFDAccrualRunMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, runID string, payload cashfiles.MainUploadAuditPayload) error {
+	return recordDynamicInvestmentMainDownloadAudit(ctx, exec, "investment.fd_accrual_run_audit", []string{"run_id"}, runID, payload, nil)
+}
+
+func recordFDAccrualScheduleConfigMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, configID string, payload cashfiles.MainUploadAuditPayload) error {
+	return recordDynamicInvestmentMainDownloadAudit(ctx, exec, "investment.fd_accrual_schedule_config_audit", []string{"config_id"}, configID, payload, nil)
+}
+
+func recordFDAccrualLedgerMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, ledgerID string, payload cashfiles.MainUploadAuditPayload) error {
+	extra := map[string]interface{}{}
+	if querier, ok := exec.(investmentAuditQuerier); ok {
+		var runID, fdID string
+		if err := querier.QueryRow(ctx, `
+			SELECT COALESCE(run_id, ''), COALESCE(fd_id, '')
+			FROM investment.fd_accrual_ledger
+			WHERE ledger_id = $1
+		`, ledgerID).Scan(&runID, &fdID); err != nil {
+			return err
+		}
+		extra["run_id"] = runID
+		extra["fd_id"] = fdID
+	}
+
+	return recordDynamicInvestmentMainDownloadAudit(ctx, exec, "investment.fd_accrual_ledger_audit", []string{"ledger_id"}, ledgerID, payload, extra)
+}
+
+func recordFDAccountingJournalMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, entryID string, payload cashfiles.MainUploadAuditPayload) error {
+	return recordDynamicInvestmentMainDownloadAudit(ctx, exec, "investment.accounting_journal_entry_audit", []string{"entry_id"}, entryID, payload, nil)
 }
 
 func ListOnboardAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -1686,45 +1894,62 @@ func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Con
 	switch def.Module {
 	case proposalFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordInvestmentProposalMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordInvestmentProposalMainDownloadAudit
 	case initiationFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordInvestmentInitiationMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordInvestmentInitiationMainDownloadAudit
 	case confirmationFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordInvestmentConfirmationMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordInvestmentConfirmationMainDownloadAudit
 	case redemptionInitiationFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordRedemptionInitiationMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordRedemptionInitiationMainDownloadAudit
 	case redemptionConfirmationFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordRedemptionConfirmationMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordRedemptionConfirmationMainDownloadAudit
 	case accountingActivityFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordAccountingActivityMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordAccountingActivityMainDownloadAudit
 	case fdBookingFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDBookingMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDBookingMainDownloadAudit
 	case fdConfirmationFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDConfirmationMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDConfirmationMainDownloadAudit
 	case fdMasterFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDMasterMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDMasterMainDownloadAudit
 	case fdClosureFilesDefinition.Module, fdRolloverFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDClosureMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDClosureMainDownloadAudit
 	case fdCashflowFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDCashflowMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDCashflowMainDownloadAudit
 	case fdInterestReceiptFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDInterestReceiptMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDInterestReceiptMainDownloadAudit
 	case fdTDSReceiptFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDTDSReceiptMainUploadAudit
-	case fdReconcileResultFilesDefinition.Module:
-		cfg.RecordMainUploadAudit = recordFDReconcileResultMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDTDSReceiptMainDownloadAudit
 	case fdReceiptExceptionFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDReceiptExceptionMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDReceiptExceptionMainDownloadAudit
 	case varianceExceptionFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDReceiptExceptionMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDReceiptExceptionMainDownloadAudit
 		cfg.RequireMainUploadAudit = true
 	case fdAccrualRunFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDAccrualRunMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDAccrualRunMainDownloadAudit
 	case fdAccrualScheduleConfigFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDAccrualScheduleConfigMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDAccrualScheduleConfigMainDownloadAudit
 	case fdAccrualLedgerFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDAccrualLedgerMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDAccrualLedgerMainDownloadAudit
 	case fdAccountingJournalFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDAccountingJournalMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDAccountingJournalMainDownloadAudit
 	}
 
 	if isFDCrossStageModule(def.Module) {

@@ -58,87 +58,237 @@ type dataSourceFn func(ctx context.Context, pool *pgxpool.Pool, req dataRequest)
 // dataSources maps each source name to its query function, replacing the switch.
 var dataSources = map[string]dataSourceFn{
 	// ── FD Core ────────────────────────────────────────────────────────────────
-	"fdBooking":              func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDBooking(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdConfirmation":         func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDConfirmation(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdActivation":           func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDActivation(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdCashflowGroup":        func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDCashflowGroup(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdCashflows":            func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDCashflows(ctx, pool, req.EntityIDs, req.Limit, req.FDID) },
-	"fdClosureInitiateAll":   func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDClosureInitiateAll(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdClosureConfirmAll":    func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDClosureConfirmAll(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdClosurePrematureAll":  func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDClosurePrematureAll(ctx, pool, req.EntityIDs, req.Limit) },
+	"fdBooking": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDBooking(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdConfirmation": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDConfirmation(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdActivation": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDActivation(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdCashflowGroup": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDCashflowGroup(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdCashflows": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDCashflows(ctx, pool, req.EntityIDs, req.Limit, req.FDID)
+	},
+	"fdClosureInitiateAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDClosureInitiateAll(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdClosureConfirmAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDClosureConfirmAll(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdClosurePrematureAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDClosurePrematureAll(ctx, pool, req.EntityIDs, req.Limit)
+	},
 	// ── Maturity & Receipt ─────────────────────────────────────────────────────
-	"fdMaturitySummary":   func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDMaturitySummary(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdTdsRegister":       func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDTDSRegister(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdReceiptAll":        func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDReceiptAll(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdReconcileResults":  func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDReconcileResults(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdExceptions":        func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDExceptions(ctx, pool, req.EntityIDs, req.Limit) },
+	"fdMaturitySummary": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDMaturitySummary(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdTdsRegister": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDTDSRegister(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdReceiptAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDReceiptAll(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdReconcileResults": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDReconcileResults(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdExceptions": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDExceptions(ctx, pool, req.EntityIDs, req.Limit)
+	},
 	// ── Accrual ────────────────────────────────────────────────────────────────
-	"fdAccrualRunAll":               func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDAccrualRunAll(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdAccrualLedger":               func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDAccrualLedger(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"fdAccrualDetail":               func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDAccrualDetail(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdAccrualFindings":             func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDAccrualFindings(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdAccrualExecutionLog":         func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDAccrualExecutionLog(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdAccrualRunAudit":             func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDAccrualRunAudit(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdAccrualLedgerAudit":          func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDAccrualLedgerAudit(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdAccrualExceptions":           func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDAccrualExceptions(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdAccrualScheduleAll":          func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDAccrualScheduleAll(ctx, pool, req.EntityIDs, req.Limit) },
-	"fdAccrualScheduleExecutionLog": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDAccrualScheduleExecutionLog(ctx, pool, req.EntityIDs, req.Limit) },
+	"fdAccrualRunAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDAccrualRunAll(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdAccrualLedger": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDAccrualLedger(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"fdAccrualDetail": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDAccrualDetail(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdAccrualFindings": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDAccrualFindings(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdAccrualExecutionLog": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDAccrualExecutionLog(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdAccrualRunAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDAccrualRunAudit(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdAccrualLedgerAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDAccrualLedgerAudit(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdAccrualExceptions": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDAccrualExceptions(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdAccrualScheduleAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDAccrualScheduleAll(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fdAccrualScheduleExecutionLog": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDAccrualScheduleExecutionLog(ctx, pool, req.EntityIDs, req.Limit)
+	},
 	// ── Portfolio & Proposal ───────────────────────────────────────────────────
-	"investmentOnboardBatch":             func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentOnboardBatch(ctx, pool, req.EntityIDs, req.Limit) },
-	"investmentProposalMeta":             func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentProposalMeta(ctx, pool, req.EntityIDs, req.Limit) },
-	"investmentInitiationAll":            func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentInitiationAll(ctx, pool, req.EntityIDs, req.Limit) },
-	"investmentConfirmationAll":          func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentConfirmationAll(ctx, pool, req.EntityIDs, req.Limit) },
-	"investmentPortfolioGet":             func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentPortfolioGet(ctx, pool, req.EntityIDs, req.Limit) },
-	"investmentRedemptionInitiateAll":    func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentRedemptionInitiateAll(ctx, pool, req.EntityIDs, req.Limit) },
-	"investmentRedemptionConfirmAll":     func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentRedemptionConfirmAll(ctx, pool, req.EntityIDs, req.Limit) },
+	"investmentOnboardBatch": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentOnboardBatch(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"investmentProposalMeta": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentProposalMeta(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"investmentInitiationAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentInitiationAll(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"investmentConfirmationAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentConfirmationAll(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"investmentPortfolioGet": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentPortfolioGet(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"investmentRedemptionInitiateAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentRedemptionInitiateAll(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"investmentRedemptionConfirmAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentRedemptionConfirmAll(ctx, pool, req.EntityIDs, req.Limit)
+	},
 	// ── Cash Module ────────────────────────────────────────────────────────────
-	"cashBankStatements":            func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashBankStatements(ctx, pool, req.EntityIDs, req.Limit) },
-	"cashBankStatementTransactions": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashBankStatementTransactions(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"cashPayableReceivable":         func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashPayableReceivable(ctx, pool, req.EntityIDs, req.Limit) },
-	"cashFundPlanSummary":           func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashFundPlanSummary(ctx, pool, req.EntityIDs, req.Limit) },
-	"cashFundPlanDetails":           func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashFundPlanDetails(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"cashSweepConfig":               func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashSweepConfig(ctx, pool, req.EntityIDs, req.Limit) },
-	"cashSweepInitiation":           func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashSweepInitiation(ctx, pool, req.EntityIDs, req.Limit) },
-	"cashSweepExecutionLogs":        func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashSweepExecutionLogs(ctx, pool, req.EntityIDs, req.Limit) },
-	"cashSweepAllExecutionLogs":     func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashSweepAllExecutionLogs(ctx, pool, req.EntityIDs, req.Limit) },
-	"cashSweepStatistics":           func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashSweepStatistics(ctx, pool, req.EntityIDs, req.Limit) },
-	"cashProjectionList":            func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashProjectionList(ctx, pool, req.EntityIDs, req.Limit) },
-	"cashProjectionDetail":          func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashProjectionDetail(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"cashBankBalances":              func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashBankBalances(ctx, pool, req.EntityIDs, req.Limit) },
-	"cashFundAvailability":          func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashFundAvailability(ctx, pool, req.EntityIDs, req.Limit) },
-	"cashBankLimits":                func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashBankLimits(ctx, pool, req.EntityIDs, req.Limit) },
-	"cashUtilizations":              func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashUtilizations(ctx, pool, req.EntityIDs, req.Limit) },
+	"cashBankStatements": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashBankStatements(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashBankStatementTransactions": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashBankStatementTransactions(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"cashPayableReceivable": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashPayableReceivable(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashFundPlanSummary": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashFundPlanSummary(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashFundPlanDetails": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashFundPlanDetails(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"cashSweepConfig": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashSweepConfig(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashSweepInitiation": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashSweepInitiation(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashSweepExecutionLogs": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashSweepExecutionLogs(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashSweepAllExecutionLogs": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashSweepAllExecutionLogs(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashSweepStatistics": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashSweepStatistics(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashProjectionList": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashProjectionList(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashProjectionDetail": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashProjectionDetail(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"cashBankBalances": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashBankBalances(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashFundAvailability": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashFundAvailability(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashBankLimits": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashBankLimits(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashUtilizations": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashUtilizations(ctx, pool, req.EntityIDs, req.Limit)
+	},
 	// ── Audit sub-sources ──────────────────────────────────────────────────────
-	"fdBookingAudit":                    func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDBookingAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"fdConfirmationAudit":               func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDConfirmationAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"fdActivationAudit":                 func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDActivationAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"fdCashflowAudit":                   func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDCashflowAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"fdClosureInitiateAudit":            func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDClosureInitiateAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"fdClosureConfirmAudit":             func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDClosureConfirmAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"fdTdsAudit":                        func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDTdsAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"fdReceiptAudit":                    func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDReceiptAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"fdExceptionAudit":                  func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFDExceptionAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"cashBankStatementAudit":            func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashBankStatementAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"cashSweepConfigAudit":              func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashSweepConfigAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"cashSweepInitiationAudit":          func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashSweepInitiationAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"cashProjectionAudit":               func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashProjectionAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"cashFundPlanAudit":                 func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryCashFundPlanAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"investmentProposalAudit":           func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentProposalAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"investmentInitiationAudit":         func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentInitiationAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"investmentConfirmationAudit":       func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentConfirmationAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"investmentRedemptionAudit":         func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentRedemptionAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"investmentRedemptionConfirmAudit":  func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentRedemptionConfirmAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"fxForwardBookingAudit":             func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFXForwardBookingAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"fxExposureAudit":                   func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFXExposureAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
-	"investmentOnboardBatchInfo":        func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryInvestmentOnboardBatchInfo(ctx, pool, req.EntityIDs, req.Limit, req.ParentID) },
+	"fdBookingAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDBookingAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"fdConfirmationAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDConfirmationAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"fdActivationAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDActivationAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"fdCashflowAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDCashflowAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"fdClosureInitiateAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDClosureInitiateAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"fdClosureConfirmAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDClosureConfirmAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"fdTdsAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDTdsAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"fdReceiptAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDReceiptAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"fdExceptionAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFDExceptionAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"cashBankStatementAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashBankStatementAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"cashSweepConfigAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashSweepConfigAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"cashSweepInitiationAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashSweepInitiationAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"cashProjectionAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashProjectionAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"cashFundPlanAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashFundPlanAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"investmentProposalAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentProposalAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"investmentInitiationAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentInitiationAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"investmentConfirmationAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentConfirmationAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"investmentRedemptionAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentRedemptionAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"investmentRedemptionConfirmAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentRedemptionConfirmAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"fxForwardBookingAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXForwardBookingAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"fxExposureAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXExposureAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
+	"investmentOnboardBatchInfo": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentOnboardBatchInfo(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+	},
 	// ── FX Module ──────────────────────────────────────────────────────────────
-	"fxExposureHeadersLineItems":          func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFXExposureHeadersLineItems(ctx, pool, req.EntityIDs, req.Limit) },
-	"fxExposureBucketing":                 func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFXExposureBucketing(ctx, pool, req.EntityIDs, req.Limit) },
-	"fxHedgingProposals":                  func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFXHedgingProposals(ctx, pool, req.EntityIDs, req.Limit) },
-	"fxHedgeLinksDetails":                 func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFXHedgeLinksDetails(ctx, pool, req.EntityIDs, req.Limit) },
-	"fxForwardMTM":                        func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFXForwardMTM(ctx, pool, req.EntityIDs, req.Limit) },
-	"fxForwardBookingList":                func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFXForwardBookings(ctx, pool, req.EntityIDs, req.Limit) },
-	"fxEntityRelevantForwardBookings":     func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) { return queryFXEntityRelevantForwardBookings(ctx, pool, req.EntityIDs, req.Limit) },
+	"fxExposureHeadersLineItems": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXExposureHeadersLineItems(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fxExposureBucketing": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXExposureBucketing(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fxHedgingProposals": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXHedgingProposals(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fxHedgeLinksDetails": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXHedgeLinksDetails(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fxForwardMTM": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXForwardMTM(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fxForwardBookingList": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXForwardBookings(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"fxEntityRelevantForwardBookings": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXEntityRelevantForwardBookings(ctx, pool, req.EntityIDs, req.Limit)
+	},
 }
 
 // GetDataSource — POST /dash/builder/data
@@ -178,8 +328,8 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if req.Limit <= 0 || req.Limit > 2000 {
-			req.Limit = 500
+		if req.Limit < 0 {
+			req.Limit = 0
 		}
 
 		ctx := context.WithValue(r.Context(), "reqEntityNames", reqEntityNames)
@@ -363,11 +513,18 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 			COALESCE(br.bank_name,                '')  AS bank_name,
 			COALESCE(br.tenor_type,               '')  AS tenor_type,
 			COALESCE(br.interest_type_code,       '')  AS interest_type_code,
-			COALESCE(br.frequency_id,             '')  AS frequency_id,
-			COALESCE(br.day_count_code,           '')  AS day_count_code,
+			COALESCE(br.frequency_id::text,       '')  AS frequency_id,
+			COALESCE(br.payout_frequency_id::text, '') AS payout_frequency_id,
 			COALESCE(br.accrual_frequency_code,   '')  AS accrual_frequency_code,
-			COALESCE(NULLIF(br.reset_type, ''), 'AT_MATURITY') AS reset_type,
+			COALESCE(br.reset_type,               '')  AS reset_type,
+			COALESCE(br.day_count_code,           '')  AS day_count_code,
 			COALESCE(br.product_code,             '')  AS product_code,
+			COALESCE(br.tds_plan_id::text,        '')  AS tds_plan_id,
+			COALESCE(br.source_account_number,    '')  AS source_account_number,
+			COALESCE(br.bank_config_id::text,     '')  AS bank_config_id,
+			COALESCE(br.value_type,               '')  AS value_type,
+			COALESCE(br.created_by,               '')  AS created_by,
+			COALESCE(br.booking_remarks,          '')  AS booking_remarks,
 			COALESCE(br.booking_status,           '')  AS booking_status,
 			COALESCE(br.tds_plan_id,              '')  AS tds_plan_id,
 			COALESCE(NULLIF(br.payout_frequency_id, ''), br.frequency_id, '') AS payout_frequency_id,
@@ -396,7 +553,7 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
 			COALESCE(br.created_at,'1970-01-01'::timestamp)
 		) DESC
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -445,18 +602,18 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			COALESCE(fc.tenor_type,                        '')  AS tenor_type,
 			COALESCE(fc.confirmed_interest_type_code,      '')  AS confirmed_interest_type_code,
 			COALESCE(fc.confirmation_mode,                 '')  AS confirmation_mode,
-			COALESCE(fc.confirmed_frequency_id,            '')  AS confirmed_frequency_id,
-			COALESCE(NULLIF(fc.payout_frequency_id, ''), fc.confirmed_frequency_id, '') AS payout_frequency_id,
+			COALESCE(fc.confirmed_frequency_id::text,      '')  AS confirmed_frequency_id,
+			COALESCE(fc.payout_frequency_id::text,         '')  AS payout_frequency_id,
 			COALESCE(fc.accrual_frequency_code,            '')  AS accrual_frequency_code,
-			COALESCE(NULLIF(fc.reset_type, ''), NULLIF(br.reset_type, ''), 'AT_MATURITY') AS reset_type,
+			COALESCE(fc.reset_type,                        '')  AS reset_type,
 			COALESCE(fc.confirmation_status,               '')  AS confirmation_status,
 			COALESCE(fc.variance_action,                   '')  AS variance_action,
 			COALESCE(fc.bank_fd_ref_no,                    '')  AS bank_fd_ref_no,
 			COALESCE(fc.bank_reference_number,             '')  AS bank_reference_number,
 			COALESCE(fc.premature_closure_terms,           '')  AS premature_closure_terms,
-			COALESCE(fc.penalty_id,                        '')  AS penalty_id,
+			COALESCE(fc.penalty_id::text,                  '')  AS penalty_id,
 			COALESCE(fc.value_type,                        '')  AS value_type,
-			COALESCE(h.created_by, fc.created_by,          '')  AS created_by,
+			COALESCE(fc.created_by,                        '')  AS created_by,
 			COALESCE(fc.variance_flag,                  FALSE)  AS variance_flag,
 			COALESCE(fc.actual_principal,                   0)  AS actual_principal,
 			COALESCE(fc.confirmed_rate,                     0)  AS confirmed_rate,
@@ -479,7 +636,7 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
 			COALESCE(fc.created_at,'1970-01-01'::timestamp)
 		) DESC
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -529,18 +686,24 @@ func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 			COALESCE(m.bank_id,               '')  AS bank_id,
 			COALESCE(m.bank_name,             '')  AS bank_name,
 			COALESCE(m.interest_type_code,    '')  AS interest_type_code,
-			COALESCE(NULLIF(m.tenure_type, ''), NULLIF(m.tenor_type, ''), '') AS tenure_type,
-			COALESCE(m.frequency_id,          '')  AS frequency_id,
-			COALESCE(NULLIF(m.payout_frequency_id, ''), NULLIF(m.interest_payout_frequency, ''), '') AS payout_frequency_id,
-			COALESCE(m.accrual_frequency_code,'')  AS accrual_frequency_code,
-			COALESCE(NULLIF(m.reset_type, ''), NULLIF(br.reset_type, ''), 'AT_MATURITY') AS reset_type,
+			COALESCE(NULLIF(m.tenure_type, ''),
+				CASE
+					WHEN COALESCE(m.tenure_years,  0) > 0 THEN 'YEARS'
+					WHEN COALESCE(m.tenure_months, 0) > 0 THEN 'MONTHS'
+					WHEN COALESCE(m.tenure_days,   0) > 0 THEN 'DAYS'
+					ELSE ''
+				END)                               AS tenure_type,
+			COALESCE(m.frequency_id::text,    '')  AS frequency_id,
+			COALESCE(m.payout_frequency_id::text, '') AS payout_frequency_id,
+			COALESCE(m.accrual_frequency_code, '') AS accrual_frequency_code,
+			COALESCE(m.reset_type,            '')  AS reset_type,
 			COALESCE(m.fd_status,             '')  AS fd_status,
 			COALESCE(m.bank_fd_ref_no,        '')  AS bank_fd_ref_no,
 			COALESCE(m.bank_reference_number, '')  AS bank_reference_number,
 			COALESCE(m.tds_plan_id,           '')  AS tds_plan_id,
 			COALESCE(m.day_count_code,        '')  AS day_count_code,
-			COALESCE(m.bank_config_id,        '')  AS bank_config_id,
-			COALESCE(h.created_by, m.created_by, '') AS created_by,
+			COALESCE(m.bank_config_id::text,  '')  AS bank_config_id,
+			COALESCE(m.created_by,            '')  AS created_by,
 			COALESCE(m.auto_renewal,       FALSE)  AS auto_renewal,
 			COALESCE(m.principal_amount,        0) AS principal_amount,
 			COALESCE(m.interest_rate,           0) AS interest_rate,
@@ -563,7 +726,7 @@ func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
 			COALESCE(m.created_at,'1970-01-01'::timestamp)
 		) DESC
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -620,7 +783,7 @@ func queryFDCashflowGroup(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		WHERE COALESCE(cf.is_deleted, false) = false %s %s %s
 		GROUP BY cf.fd_id
 		ORDER BY MAX(m.start_date) DESC
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -682,7 +845,7 @@ func queryFDCashflows(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
 			COALESCE(cf.created_at,'1970-01-01'::timestamp)
 		) DESC
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef, fdFilter)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -740,7 +903,7 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
 			COALESCE(ci.requested_closure_date::timestamp,'1970-01-01'::timestamp)
 		) DESC
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -801,7 +964,7 @@ func queryFDClosureConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
 			COALESCE(cc.actual_payout_date::timestamp,'1970-01-01'::timestamp)
 		) DESC
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -862,7 +1025,7 @@ func queryFDClosurePrematureAll(ctx context.Context, pool *pgxpool.Pool, entityI
 			COALESCE(l.checker_at,'1970-01-01'::timestamp),
 			COALESCE(cc.actual_payout_date::timestamp,'1970-01-01'::timestamp)
 		) DESC
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, ef, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)

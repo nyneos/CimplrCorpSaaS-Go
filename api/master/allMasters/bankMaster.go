@@ -1263,7 +1263,11 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = dependency.CascadeDelete(r.Context(), pgxPool, "masterbank", bankID, checkerBy)
 		}
 		if len(bankIDsToDelete) > 0 {
-			_, _ = pgxPool.Exec(r.Context(), `UPDATE masterbank SET is_deleted = true WHERE bank_id = ANY($1)`, pq.Array(bankIDsToDelete))
+			if _, err := pgxPool.Exec(r.Context(), `UPDATE masterbank SET is_deleted = true WHERE bank_id = ANY($1)`, bankIDsToDelete); err != nil {
+				errMsg, statusCode := getUserFriendlyBankError(err, "Failed to mark banks as deleted")
+				api.RespondWithError(w, statusCode, errMsg)
+				return
+			}
 		}
 
 		// Then, approve the rest by bank_ids

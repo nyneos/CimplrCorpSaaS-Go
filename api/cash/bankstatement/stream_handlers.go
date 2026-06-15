@@ -2,6 +2,7 @@ package bankstatement
 
 import (
 	api "CimplrCorpSaas/api"
+	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	apipreval "CimplrCorpSaas/api/middlewares"
 	notif "CimplrCorpSaas/api/notification/catalog"
@@ -29,6 +30,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 )
 
@@ -623,7 +625,7 @@ func handleZipBankStatementUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *
 				bgCtx := context.Background()
 				succeeded, failed := 0, 0
 				for _, f := range files {
-					stagingIDs, err := processPDFViaPDFCo(bgCtx, pool, f.data, f.filename, bgBatchID, "")
+					stagingIDs, err := processPDFViaPDFCo(bgCtx, pool, f.data, f.filename, bgBatchID, "", "")
 					if err != nil {
 						logger.LogError("[ZIP-PDF-BG] failed %s: %v", f.filename, err)
 						_, _ = insertStagingStatement(bgCtx, pool, insertStagingStatementParams{
@@ -731,11 +733,24 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 
 		// parse multipart form (support file field named "file")
 		if err := r.ParseMultipartForm(50 << 20); err != nil {
+			logger.LogError("[BANK-PREVIEW] step=parse_multipart failed content_type=%q content_length=%d err=%v",
+				r.Header.Get(constants.ContentTypeText), r.ContentLength, err)
 			respondWithError(w, err, "Failed to parse multipart form", http.StatusBadRequest)
 			return
 		}
+		formKeys := make([]string, 0, len(r.MultipartForm.Value))
+		for k := range r.MultipartForm.Value {
+			formKeys = append(formKeys, k)
+		}
+		fileKeys := make([]string, 0, len(r.MultipartForm.File))
+		for k := range r.MultipartForm.File {
+			fileKeys = append(fileKeys, k)
+		}
+		logger.LogInfo("[BANK-PREVIEW] step=parse_multipart ok content_type=%q content_length=%d form_keys=%v file_keys=%v",
+			r.Header.Get(constants.ContentTypeText), r.ContentLength, formKeys, fileKeys)
 
 		if r.MultipartForm == nil || r.MultipartForm.File == nil || len(r.MultipartForm.File["file"]) == 0 {
+			logger.LogError("[BANK-PREVIEW] step=file_lookup failed file_field_count=0")
 			respondWithError(w, nil, constants.ErrFileUploadFailed, http.StatusBadRequest)
 			return
 		}
@@ -743,7 +758,8 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 		// Detect file type by extension and route to appropriate handler
 		fh := r.MultipartForm.File["file"][0]
 		ext := strings.ToLower(filepath.Ext(fh.Filename))
-		logger.LogInfo("[BANK-PREVIEW] uploaded filename=%s ext=%s", fh.Filename, ext)
+		logger.LogInfo("[BANK-PREVIEW] step=file_detect filename=%q ext=%s header_size=%d header_content_type=%q",
+			fh.Filename, ext, fh.Size, fh.Header.Get(constants.ContentTypeText))
 		// try to log user_id field if present
 		uploadUserID := ""
 		if vals := r.MultipartForm.Value["user_id"]; len(vals) > 0 {
@@ -774,11 +790,18 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
+			logger.LogError("[BANK-PREVIEW] step=file_read failed filename=%q err=%v", header.Filename, err)
 			respondWithError(w, err, "Failed to read uploaded file", http.StatusInternalServerError)
 			return
 		}
 
 		checksum := computeSHA256(fileBytes)
+		shaPrefix := checksum
+		if len(shaPrefix) > 12 {
+			shaPrefix = shaPrefix[:12]
+		}
+		logger.LogInfo("[BANK-PREVIEW] step=file_read ok filename=%q bytes=%d sha256_prefix=%s pdf_encrypted_hint=%v",
+			header.Filename, len(fileBytes), shaPrefix, bytes.Contains(fileBytes, []byte("/Encrypt")))
 
 		// Prepare object path if storage upload is enabled, but do not perform
 		// the external upload yet. We will upload only after parsing succeeds so
@@ -807,6 +830,7 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 		var existingID sql.NullString
 		err = tx.QueryRow(ctx, `SELECT id FROM cimplrcorpsaas.bank_pdf_uploads WHERE checksum_sha256 = $1 LIMIT 1`, checksum).Scan(&existingID)
 		if err == nil && existingID.Valid {
+			logger.LogInfo("[BANK-PREVIEW] step=checksum existing_upload id=%s sha256_prefix=%s", existingID.String, shaPrefix)
 			// already exists — rollback the open transaction but continue parsing
 			// so the caller receives the full preview data instead of a bare {exists} stub
 			if rerr := tx.Rollback(ctx); rerr != nil {
@@ -814,13 +838,15 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 			}
 			tx = nil
 			// fall through: parse and return full preview using the existing record ID
-		} else if err != nil && !(errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows)) {
+		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) && !errors.Is(err, sql.ErrNoRows) {
+			logger.LogError("[BANK-PREVIEW] step=checksum failed sha256_prefix=%s err=%v", shaPrefix, err)
 			respondWithError(w, err, "Failed to check existing uploads", http.StatusInternalServerError)
 			return
 		}
 		// When USE_PDFCO=true, route single-PDF through pdfco-svc → CSV/XLSX → staged preview
 		// instead of the AI parser. The staging batch is created with a single-file batch.
-		usePDFCo := usePDFCoFromEnv()
+		usePDFCo := usePDFCoFromEnv() || r.FormValue("co_pdf") == "true"
+		logger.LogInfo("[BANK-PREVIEW] step=route ext=%s use_pdfco=%v upload_to_storage=%v", ext, usePDFCo, uploadEnabled)
 		if ext == ".pdf" && usePDFCo {
 			if tx != nil {
 				_ = tx.Rollback(ctx)
@@ -829,6 +855,9 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 			forceOverride := r.FormValue("force_override") == "true"
 			accountNums := parseAccountNumbers(r.MultipartForm.Value)
 			accountOverridePDF := ""
+			password := r.FormValue("password")
+			logger.LogInfo("[BANK-PREVIEW] step=pdfco_inputs force_override=%v account_numbers_count=%d password_provided=%v co_pdf=%q",
+				forceOverride, len(accountNums), password != "", r.FormValue("co_pdf"))
 			if forceOverride {
 				if len(accountNums) == 0 {
 					respondWithError(w, nil, "force_override=true requires at least one account number in account_numbers", http.StatusBadRequest)
@@ -842,12 +871,15 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 			}
 			batchID, batchErr := insertStagingBatch(ctx, pool, uploadUserID, header.Filename, 1)
 			if batchErr != nil {
+				logger.LogError("[BANK-PREVIEW] step=staging_batch failed filename=%q user_id=%q err=%v", header.Filename, uploadUserID, batchErr)
 				respondWithError(w, batchErr, "Failed to create staging batch", http.StatusInternalServerError)
 				return
 			}
-			stagingIDs, pdfErr := processPDFViaPDFCo(ctx, pool, fileBytes, header.Filename, batchID, accountOverridePDF)
+			logger.LogInfo("[BANK-PREVIEW] step=staging_batch ok batch_id=%s", batchID)
+			stagingIDs, pdfErr := processPDFViaPDFCo(ctx, pool, fileBytes, header.Filename, batchID, accountOverridePDF, password)
 			if pdfErr != nil {
 				_ = finaliseStagingBatch(ctx, pool, batchID, 0, 1)
+				logger.LogError("[BANK-PREVIEW] step=pdfco_pipeline failed batch_id=%s filename=%q err=%v", batchID, header.Filename, pdfErr)
 				// Let userFriendlyUploadError classify converter vs parse vs master-data failures.
 				respondWithError(w, pdfErr, "", http.StatusInternalServerError)
 				return
@@ -861,6 +893,8 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 			if len(stagingIDs) > 0 {
 				primaryStagingID = stagingIDs[0]
 			}
+			logger.LogInfo("[BANK-PREVIEW] step=pdfco_pipeline ok batch_id=%s staging_count=%d primary_staging_id=%s",
+				batchID, len(stagingIDs), primaryStagingID)
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -874,71 +908,13 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 			return
 		}
 
-		log.Printf("[BANK-PREVIEW] converting PDF/DOCX via finparse /convert/csv")
-		csvBytes, convErr := callConvertCSV(ctx, fileBytes, header.Filename, "")
+		password := r.FormValue("password")
+		logger.LogInfo("[BANK-PREVIEW] converting PDF/DOCX via finparse /convert/csv password_provided=%v", password != "")
+		csvBytes, convErr := callConvertCSV(ctx, fileBytes, header.Filename, password)
 		if convErr != nil {
 			if tx != nil {
 				if rerr := tx.Rollback(ctx); rerr != nil {
 					log.Printf("failed to rollback tx after conversion error: %v", rerr)
-				}
-			}
-		}
-		// v := z4()
-		// v := q9()
-		v := q8()
-		v = attachStreamKey(v)
-		// if v[0] != 'h' {
-		// 	v = z4()
-		// }
-
-		logger.LogInfo("[BANK-PREVIEW] proxying PDF/DOCX to parsing service =****")
-		// Build multipart/form-data body with field name `pdf` (file)
-		var b bytes.Buffer
-		mw := multipart.NewWriter(&b)
-		fw, err := mw.CreateFormFile("pdf", header.Filename)
-		if err != nil {
-			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
-			return
-		}
-		if _, err := fw.Write(fileBytes); err != nil {
-			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
-			return
-		}
-		if err := mw.Close(); err != nil {
-			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
-			return
-		}
-
-		req, err := http.NewRequestWithContext(ctx, "POST", v, &b)
-		if err != nil {
-			respondWithError(w, err, "Failed to create parsing request", http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
-
-		client := &http.Client{Timeout: 0}
-		resp, err := client.Do(req)
-		if err != nil {
-			respondWithError(w, err, "Failed to connect to parsing service", http.StatusInternalServerError)
-			return
-		}
-		defer resp.Body.Close()
-
-		// Read the complete AI response
-		aiResponseBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			respondWithError(w, err, "Failed to read parsing response", http.StatusInternalServerError)
-			return
-		}
-
-		// Parse the AI response to merge with our upload data
-		var aiResponse map[string]interface{}
-		if err := json.Unmarshal(aiResponseBytes, &aiResponse); err != nil {
-			logger.LogError("AI response parsing error: %v, raw: %s", err, string(aiResponseBytes))
-			// rollback the transaction because parsing failed
-			if tx != nil {
-				if rerr := tx.Rollback(ctx); rerr != nil {
-					logger.LogError("failed to rollback tx after parse error: %v", rerr)
 				}
 				tx = nil
 			}
@@ -946,6 +922,7 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 			return
 		}
 
+		var aiResponse map[string]interface{}
 		accountForConvert := ""
 		if r.FormValue("force_override") == "true" {
 			if nums := parseAccountNumbers(r.MultipartForm.Value); len(nums) == 1 {
@@ -994,15 +971,21 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		// Insert metadata row now that parsing (and optional storage upload)
-		// have succeeded.
-		id, err := insertUploadRowTx(ctx, tx, header.Filename, objectPath, checksum)
-		if err != nil {
-			// attempt to delete uploaded object if we uploaded earlier
-			if uploadEnabled {
-				if derr := deleteFromSupabase(ctx, objectPath); derr != nil {
-					logger.LogError("failed to delete uploaded object after insert failure: %v", derr)
+		// have succeeded. Skip when the same checksum already exists — tx is nil
+		// in that case and existingID already holds the row id.
+		var id string
+		if existingID.Valid {
+			id = existingID.String
+		} else {
+			var insertErr error
+			id, insertErr = insertUploadRowTx(ctx, tx, header.Filename, objectPath, checksum)
+			if insertErr != nil {
+				if uploadEnabled {
+					if derr := deleteFromSupabase(ctx, objectPath); derr != nil {
+						logger.LogError("failed to delete uploaded object after insert failure: %v", derr)
+					}
 				}
-				respondWithError(w, err, "Failed to persist upload metadata", http.StatusInternalServerError)
+				respondWithError(w, insertErr, "Failed to persist upload metadata", http.StatusInternalServerError)
 				return
 			}
 		}
@@ -1434,11 +1417,19 @@ func CommitHandler(pool *pgxpool.Pool) http.Handler {
 		// 	return
 		// }
 
-		// lookup entity id and currency from masterbankaccount (public schema)
+		// lookup active master account details and enforce the same scope checks as V2 upload.
 		var entityID sql.NullString
 		var acctCurrency sql.NullString
-		if err := tx.QueryRow(ctx, `SELECT entity_id, currency FROM public.masterbankaccount WHERE account_number=$1 LIMIT 1`, accountNumber).Scan(&entityID, &acctCurrency); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
+		var bankNameForScope sql.NullString
+		if err := tx.QueryRow(ctx, `
+			SELECT mba.entity_id, mba.currency, COALESCE(mb.bank_name, '')
+			  FROM public.masterbankaccount mba
+			  LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+			 WHERE mba.account_number = $1
+			   AND COALESCE(mba.is_deleted, false) = false
+			 LIMIT 1
+		`, accountNumber).Scan(&entityID, &acctCurrency, &bankNameForScope); err != nil {
+			if err == sql.ErrNoRows {
 				tx.Rollback(ctx)
 				respondWithError(w, nil, "Bank account not found in master data. Please add this account to the system before uploading statements.", http.StatusBadRequest)
 				return
@@ -1449,7 +1440,6 @@ func CommitHandler(pool *pgxpool.Pool) http.Handler {
 			}
 		}
 
-		// Load category rules before insert so matching runs correctly during bulk insert.
 		entityIDStr := ""
 		if entityID.Valid {
 			entityIDStr = entityID.String
@@ -1458,6 +1448,30 @@ func CommitHandler(pool *pgxpool.Pool) http.Handler {
 		if acctCurrency.Valid {
 			currencyCode = acctCurrency.String
 		}
+		if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 && !apictx.IsEntityAllowed(ctx, entityIDStr) {
+			tx.Rollback(ctx)
+			respondWithError(w, nil, "You do not have access to the entity mapped to this bank account.", http.StatusForbidden)
+			return
+		}
+		if bankNameForScope.Valid && strings.TrimSpace(bankNameForScope.String) != "" {
+			if names := apictx.GetBankNamesFromCtx(ctx); len(names) > 0 && !apictx.IsBankAllowed(ctx, bankNameForScope.String) {
+				tx.Rollback(ctx)
+				respondWithError(w, nil, constants.ErrBankNotAllowed, http.StatusForbidden)
+				return
+			}
+		}
+		if len(ctxutil.FromContext(ctx).BankAccounts) > 0 && !ctxutil.FromContext(ctx).HasApprovedBankAccount(accountNumber) {
+			tx.Rollback(ctx)
+			respondWithError(w, nil, "Bank account is not approved or not accessible for this user.", http.StatusForbidden)
+			return
+		}
+		if currencyCode != "" && len(ctxApprovedCurrencies(ctx)) > 0 && !ctxutil.FromContext(ctx).HasApprovedCurrency(currencyCode) {
+			tx.Rollback(ctx)
+			respondWithError(w, nil, constants.ErrCurrencyNotAllowed, http.StatusForbidden)
+			return
+		}
+
+		// Load category rules before insert so matching runs correctly during bulk insert.
 		rules, _ := loadCategoryRuleComponentsPgx(ctx, pool, accountNumber, entityIDStr, currencyCode)
 
 		// Parse period dates from metadata
@@ -2140,29 +2154,39 @@ func DownloadPDFHandler(pool *pgxpool.Pool) http.Handler {
 // the CSV into a preview response, and stages the result in pdf_staging_statement.
 // accountOverride is the optional forced master account (same semantics as force_override + account_numbers on CSV upload).
 // Returns (stagingID, error).
-func processPDFViaPDFCo(ctx context.Context, pool *pgxpool.Pool, pdfBytes []byte, filename, batchID string, accountOverride string) (stagingIDs []string, err error) {
-	csvBytes, err := callConvertCSV(ctx, pdfBytes, filename, "")
+func processPDFViaPDFCo(ctx context.Context, pool *pgxpool.Pool, pdfBytes []byte, filename, batchID string, accountOverride string, password string) (stagingIDs []string, err error) {
+	logger.LogInfo("[BANK-PREVIEW] step=pdfco_convert_start batch_id=%s filename=%q bytes=%d account_override=%v password_provided=%v pdf_encrypted_hint=%v",
+		batchID, filename, len(pdfBytes), strings.TrimSpace(accountOverride) != "", strings.TrimSpace(password) != "", bytes.Contains(pdfBytes, []byte("/Encrypt")))
+	csvBytes, err := callConvertCSV(ctx, pdfBytes, filename, password)
 	if err != nil {
+		logger.LogError("[BANK-PREVIEW] step=pdfco_convert_failed batch_id=%s filename=%q err=%v", batchID, filename, err)
 		return nil, fmt.Errorf("convert: %w", err)
 	}
 	if len(csvBytes) == 0 {
+		logger.LogError("[BANK-PREVIEW] step=pdfco_convert_empty batch_id=%s filename=%q", batchID, filename)
 		return nil, fmt.Errorf("received empty output from conversion service")
 	}
+	logger.LogInfo("[BANK-PREVIEW] step=pdfco_convert_ok batch_id=%s filename=%q csv_bytes=%d", batchID, filename, len(csvBytes))
 
 	previews, perr := BuildPreviewResponsesFromCSVBytes(ctx, pool, csvBytes, filename, accountOverride)
 	if perr != nil {
+		logger.LogError("[BANK-PREVIEW] step=pdfco_build_preview_failed batch_id=%s filename=%q err=%v", batchID, filename, perr)
 		return nil, fmt.Errorf("build preview: %w", perr)
 	}
 	if len(previews) == 0 {
+		logger.LogError("[BANK-PREVIEW] step=pdfco_build_preview_empty batch_id=%s filename=%q", batchID, filename)
 		return nil, fmt.Errorf("build preview: no parsed statements")
 	}
-	for _, preview := range previews {
+	logger.LogInfo("[BANK-PREVIEW] step=pdfco_build_preview_ok batch_id=%s filename=%q preview_count=%d", batchID, filename, len(previews))
+	for idx, preview := range previews {
 		sid, serr := insertStagingStatement(ctx, pool, insertStagingStatementParams{
 			BatchID: batchID, Filename: filename, CSVURL: "", RawStatement: preview, Status: "parsed",
 		})
 		if serr != nil {
+			logger.LogError("[BANK-PREVIEW] step=pdfco_stage_failed batch_id=%s filename=%q preview_index=%d err=%v", batchID, filename, idx, serr)
 			return nil, fmt.Errorf("stage statement: %w", serr)
 		}
+		logger.LogInfo("[BANK-PREVIEW] step=pdfco_stage_ok batch_id=%s filename=%q preview_index=%d staging_id=%s", batchID, filename, idx, sid)
 		stagingIDs = append(stagingIDs, sid)
 	}
 	return stagingIDs, nil

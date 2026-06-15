@@ -203,6 +203,56 @@ var bankConfigFieldPairs = map[string]int{
 	"is_active":                       26,
 }
 
+// bankConfigEnumValues lists the accepted values per BRD field (BRD tokens first,
+// legacy/engine synonyms after). Validation is case-insensitive.
+var bankConfigEnumValues = map[string][]string{
+	"capitalization_schedule_type":   {"ANNIVERSARY", "CALENDAR_QTR_END", "MONTH_END", "FIXED_DAY", "CALENDAR_QUARTER_END", "QUARTER_END", "ACTUAL_QTR_END"},
+	"capitalization_date_adjustment": {"NO_ADJUST", "PRECEDING_WD", "FOLLOWING_WD"},
+	"accrual_start_convention":       {"INCLUDE", "EXCLUDE", "NEXT_WD"},
+	"accrual_end_convention":         {"INCLUDE", "EXCLUDE", "PRECEDING_WD"},
+	"period_boundary_definition":     {"INCL_START_EXCL_END", "EXCL_START_INCL_END", "INCL_BOTH", "EXCL_BOTH"},
+	"broken_period_method":           {"SIMPLE", "COMPOUND", "HYBRID", "NONE"},
+	"broken_period_location":         {"FIRST", "LAST", "BOTH"},
+	"rounding_method":                {"ROUND", "FLOOR", "CEIL", "TRUNCATE", "ROUND_UP", "ROUND_DOWN"},
+	"rounding_frequency":             {"EACH_PERIOD", "FINAL_ONLY", "AT_MATURITY"},
+	"quarter_definition":             {"ACTUAL_QTR_END", "90_DAYS", "CALENDAR_QUARTER"},
+	"tds_deduction_timing":           {"ACCRUAL_ANNUAL", "RECEIPT", "MATURITY", "ACCRUAL", "NONE"},
+	"grace_period_rate_type":         {"SAME_RATE", "SAVINGS_RATE", "NO_INTEREST"},
+}
+
+// validateBankConfigEnum checks value against the allowed list for field.
+// Empty values are not checked here (required-ness is enforced separately).
+func validateBankConfigEnum(field, value string) error {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return nil
+	}
+	allowed := bankConfigEnumValues[field]
+	for _, a := range allowed {
+		if strings.EqualFold(v, a) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s has invalid value %q (allowed: %s)", field, v, strings.Join(allowed, ", "))
+}
+
+// validateBankConfigFieldsMap enum-checks any BRD enum fields present in an
+// edit-request field map (string values only; non-enum fields are ignored).
+func validateBankConfigFieldsMap(fields map[string]interface{}) error {
+	for k, v := range fields {
+		k = strings.ToLower(strings.TrimSpace(k))
+		if _, isEnum := bankConfigEnumValues[k]; !isEnum {
+			continue
+		}
+		if s, ok := v.(string); ok {
+			if err := validateBankConfigEnum(k, s); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func validateBankConfigFields(input BankConfigInput) error {
 	if strings.TrimSpace(input.BankCode) == "" {
 		return fmt.Errorf("bank_code is required")
@@ -210,35 +260,36 @@ func validateBankConfigFields(input BankConfigInput) error {
 	if strings.TrimSpace(input.DayCountCode) == "" {
 		return fmt.Errorf(constants.ErrDayCountCodeRequired)
 	}
-	if strings.TrimSpace(input.CapitalizationScheduleType) == "" {
-		return fmt.Errorf("capitalization_schedule_type is required")
+	required := []struct{ field, value string }{
+		{"capitalization_schedule_type", input.CapitalizationScheduleType},
+		{"capitalization_date_adjustment", input.CapitalizationDateAdjustment},
+		{"accrual_start_convention", input.AccrualStartConvention},
+		{"accrual_end_convention", input.AccrualEndConvention},
+		{"period_boundary_definition", input.PeriodBoundaryDefinition},
+		{"broken_period_method", input.BrokenPeriodMethod},
+		{"broken_period_location", input.BrokenPeriodLocation},
+		{"rounding_method", input.RoundingMethod},
+		{"rounding_frequency", input.RoundingFrequency},
+		{"tds_deduction_timing", input.TdsDeductionTiming},
 	}
-	if strings.TrimSpace(input.CapitalizationDateAdjustment) == "" {
-		return fmt.Errorf("capitalization_date_adjustment is required")
+	for _, f := range required {
+		if strings.TrimSpace(f.value) == "" {
+			return fmt.Errorf("%s is required", f.field)
+		}
+		if err := validateBankConfigEnum(f.field, f.value); err != nil {
+			return err
+		}
 	}
-	if strings.TrimSpace(input.AccrualStartConvention) == "" {
-		return fmt.Errorf("accrual_start_convention is required")
+	// Optional enum fields — validated only when provided.
+	if input.QuarterDefinition != nil {
+		if err := validateBankConfigEnum("quarter_definition", *input.QuarterDefinition); err != nil {
+			return err
+		}
 	}
-	if strings.TrimSpace(input.AccrualEndConvention) == "" {
-		return fmt.Errorf("accrual_end_convention is required")
-	}
-	if strings.TrimSpace(input.PeriodBoundaryDefinition) == "" {
-		return fmt.Errorf("period_boundary_definition is required")
-	}
-	if strings.TrimSpace(input.BrokenPeriodMethod) == "" {
-		return fmt.Errorf("broken_period_method is required")
-	}
-	if strings.TrimSpace(input.BrokenPeriodLocation) == "" {
-		return fmt.Errorf("broken_period_location is required")
-	}
-	if strings.TrimSpace(input.RoundingMethod) == "" {
-		return fmt.Errorf("rounding_method is required")
-	}
-	if strings.TrimSpace(input.RoundingFrequency) == "" {
-		return fmt.Errorf("rounding_frequency is required")
-	}
-	if strings.TrimSpace(input.TdsDeductionTiming) == "" {
-		return fmt.Errorf("tds_deduction_timing is required")
+	if input.GracePeriodRateType != nil {
+		if err := validateBankConfigEnum("grace_period_rate_type", *input.GracePeriodRateType); err != nil {
+			return err
+		}
 	}
 	if strings.TrimSpace(input.EffectiveFrom) == "" {
 		return fmt.Errorf("effective_from is required (YYYY-MM-DD)")
@@ -580,16 +631,24 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// uniqueness pre-check (fail-fast)
-			
+
 			// in-file duplicate check
 			ptVal := "null"
-			if input.ProductType != nil { ptVal = *input.ProductType }
+			if input.ProductType != nil {
+				ptVal = *input.ProductType
+			}
 			minAmtVal := "null"
-			if input.MinimumAmount != nil { minAmtVal = fmt.Sprintf("%v", *input.MinimumAmount) }
+			if input.MinimumAmount != nil {
+				minAmtVal = fmt.Sprintf("%v", *input.MinimumAmount)
+			}
 			maxAmtVal := "null"
-			if input.MaximumAmount != nil { maxAmtVal = fmt.Sprintf("%v", *input.MaximumAmount) }
+			if input.MaximumAmount != nil {
+				maxAmtVal = fmt.Sprintf("%v", *input.MaximumAmount)
+			}
 			efToVal := "null"
-			if input.EffectiveTo != nil { efToVal = *input.EffectiveTo }
+			if input.EffectiveTo != nil {
+				efToVal = *input.EffectiveTo
+			}
 
 			key := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
 				input.BankCode, ptVal, minAmtVal, maxAmtVal, input.DayCountCode, input.CapitalizationScheduleType,
@@ -597,13 +656,13 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				input.PeriodBoundaryDefinition, input.HolidayCalendarCode, input.BrokenPeriodMethod,
 				input.BrokenPeriodLocation, input.RoundingMethod, input.RoundingFrequency,
 				input.TdsDeductionTiming, input.EffectiveFrom, efToVal)
-			
+
 			if prevRow, dup := seenKeysInFile[key]; dup {
 				sendFail(i+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching unique keys)", i+2, prevRow))
 				return
 			}
 			seenKeysInFile[key] = i + 2
-			
+
 			if exists, existingID, err := bankConfigExists(ctx, pgxPool, input); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 				return
@@ -1036,6 +1095,11 @@ func UpdateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			oldConfigNotes, oldIsActive,
 		}
 
+		if err := validateBankConfigFieldsMap(req.Fields); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		var sets []string
 		var args []interface{}
 		pos := 1
@@ -1258,6 +1322,14 @@ func UpdateBankConfigBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
 					"Record not found: config_id=%s â€” the entire bulk update has been rolled back", update.ConfigID))
+				return
+			}
+
+			if err := validateBankConfigFieldsMap(update.Fields); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+					"Validation failed for config_id=%s: %s — the entire bulk update has been rolled back",
+					update.ConfigID, err.Error()))
 				return
 			}
 

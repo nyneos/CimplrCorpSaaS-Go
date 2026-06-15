@@ -731,7 +731,7 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// --- Step 4: Soft delete corresponding currencies ---
 		if len(currencyIDsToDelete) > 0 {
 			delCurQuery := `UPDATE mastercurrency SET is_deleted = true, status = 'Inactive' WHERE currency_id = ANY($1)`
-			if _, err := pgxPool.Exec(ctx, delCurQuery, pq.Array(currencyIDsToDelete)); err != nil {
+			if _, err := pgxPool.Exec(ctx, delCurQuery, currencyIDsToDelete); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDatabaseDeleteFailed)
 				return
 			}

@@ -108,6 +108,7 @@ func transactionAdditionalFilesConfig(kind string) additionalfiles.Config {
 			SoftDelete:            deleteReceivableAdditionalFile,
 			SoftDeleteTx:          deleteReceivableAdditionalFileTx,
 			RecordMainUploadAudit: recordReceivableMainUploadAudit,
+			RecordMainDownloadAudit: recordReceivableMainDownloadAudit,
 		}
 	}
 
@@ -123,6 +124,7 @@ func transactionAdditionalFilesConfig(kind string) additionalfiles.Config {
 		SoftDelete:            deletePayableAdditionalFile,
 		SoftDeleteTx:          deletePayableAdditionalFileTx,
 		RecordMainUploadAudit: recordPayableMainUploadAudit,
+		RecordMainDownloadAudit: recordPayableMainDownloadAudit,
 	}
 }
 
@@ -132,6 +134,14 @@ func recordPayableMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID strin
 
 func recordReceivableMainUploadAudit(ctx context.Context, tx pgx.Tx, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
 	return additionalfiles.InsertMainUploadAudit(ctx, tx, "public.auditactionreceivable", "receivable_id", "actiontype", parentID, payload)
+}
+
+func recordPayableMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadRecord(ctx, exec, "auditactiontransactiondownloads", "transaction_id", parentID, payload, map[string]string{"transaction_type": "PAYABLE"})
+}
+
+func recordReceivableMainDownloadAudit(ctx context.Context, exec additionalfiles.AuditExecutor, parentID string, payload additionalfiles.MainUploadAuditPayload) error {
+	return additionalfiles.InsertMainDownloadRecord(ctx, exec, "auditactiontransactiondownloads", "transaction_id", parentID, payload, map[string]string{"transaction_type": "RECEIVABLE"})
 }
 
 func listPayableAdditionalFiles(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]additionalfiles.FileRecord, error) {

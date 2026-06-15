@@ -565,6 +565,7 @@ type SimulateCashflowRequest struct {
 	HolidayAccrual               *bool   `json:"holiday_accrual"`
 	TDSDeductionTiming           *string `json:"tds_deduction_timing"`
 	QuarterDefinition            *string `json:"quarter_definition"`
+	MinimumCompoundingPeriodDays *int    `json:"minimum_compounding_period_days"`
 	// User-overridable first cap / payout event dates (YYYY-MM-DD).
 	// First event lands on this date; later cap/payout events step by frequency.
 	// applyFirstPayoutDateOverride may still nudge value_date when it differs from event_date.
@@ -1166,6 +1167,9 @@ func applyConfigOverrides(cfg *BankConfig, req *SimulateCashflowRequest) {
 	}
 	if req.QuarterDefinition != nil {
 		cfg.QuarterDefinition = *req.QuarterDefinition
+	}
+	if req.MinimumCompoundingPeriodDays != nil {
+		cfg.MinimumCompoundingPeriodDays = *req.MinimumCompoundingPeriodDays
 	}
 }
 

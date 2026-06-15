@@ -61,6 +61,8 @@ func NewCashServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, error)
 	}
 	mux.Handle("/cash/upload-bank-statement", cashChain(bankstatement.UploadBankStatementV2Handler(pgxPool)))
 	mux.Handle("/cash/upload-bank-statement-zip", cashChain(bankstatement.UploadZippedBankStatementsHandler(pgxPool)))
+	// LLM extraction test — no DB, no auth required on data, safe to call manually
+	mux.Handle("/cash/bank-statement/llm-extract", cashChain(bankstatement.LLMExtractTestHandler()))
 
 	// Preview and categorization endpoints (NO DB insertion, fast preview with categorization)
 	mux.Handle("/cash/preview-categorize", cashChain(bankstatement.PreviewBankStatementHandler(pgxPool)))

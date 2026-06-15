@@ -376,14 +376,22 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN investment.fd_master fd ON fd.fd_id = tds.fd_id
 			LEFT JOIN latest_audit la ON la.tds_id = tds.tds_id
 			LEFT JOIN history h ON h.tds_id = tds.tds_id
-			LEFT JOIN uam.approval_instance ai
-				ON ai.record_id = tds.tds_id
-				AND ai.module_code = 'FIXED_DEPOSIT'
-				AND ai.status = 'PENDING'
-				AND ai.is_deleted = false
-			LEFT JOIN uam.approval_instance_eye aie
-				ON aie.instance_id = ai.instance_id
-				AND aie.status = 'ACTIVE'
+			LEFT JOIN LATERAL (
+				SELECT ai.* FROM uam.approval_instance ai
+				WHERE ai.record_id = tds.tds_id
+				  AND ai.module_code = 'FIXED_DEPOSIT'
+				  AND ai.status = 'PENDING'
+				  AND ai.is_deleted = false
+				ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+				LIMIT 1
+			) ai ON true
+			LEFT JOIN LATERAL (
+				SELECT aie.* FROM uam.approval_instance_eye aie
+				WHERE aie.instance_id = ai.instance_id
+				  AND aie.status = 'ACTIVE'
+				ORDER BY aie.position ASC, aie.instance_eye_id ASC
+				LIMIT 1
+			) aie ON true
 			WHERE tds.is_deleted = false
 		  AND tds.ingestion_source = 'TDS_WORKBENCH'`
 

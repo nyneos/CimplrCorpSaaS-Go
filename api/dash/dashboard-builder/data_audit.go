@@ -76,7 +76,7 @@ func auditQueryInner(
 		FROM %s
 		WHERE 1=1 %s
 		ORDER BY requested_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, cfg.PKCol, cfg.ParentCol, cfg.ActionCol, extra, cfg.Table, parentFilter)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -181,7 +181,7 @@ func queryCashProjectionAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		FROM cimplrcorpsaas.audit_action_cashflow_proposal
 		WHERE 1=1 %s
 		ORDER BY requested_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, parentFilter)
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -269,7 +269,7 @@ func queryInvestmentOnboardBatchInfo(ctx context.Context, pool *pgxpool.Pool, en
 		FROM investment.onboard_batch ob
 		%s
 		ORDER BY ob.created_at DESC NULLS LAST
-		LIMIT $1
+		LIMIT NULLIF($1, 0)
 	`, parentFilter)
 
 	r, err := pool.Query(ctx, q, args...)
