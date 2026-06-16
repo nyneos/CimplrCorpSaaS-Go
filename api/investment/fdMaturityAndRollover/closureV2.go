@@ -1645,6 +1645,8 @@ func CimplrMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.interest_rate,0) AS interest_rate,
 				COALESCE(m.interest_type_code,'') AS interest_type_code,
 				COALESCE(m.tenure_days,0) AS tenure_days,
+				COALESCE(m.tenure_months,0) AS tenure_months,
+				COALESCE(m.tenure_years,0) AS tenure_years,
 				m.start_date::text AS start_date,
 				m.maturity_date::text AS maturity_date,
 				COALESCE(m.fd_status,'') AS fd_status,
