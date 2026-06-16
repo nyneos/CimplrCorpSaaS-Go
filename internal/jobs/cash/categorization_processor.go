@@ -175,6 +175,20 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 		  AND (t.classification_step IS NULL OR t.classification_step NOT IN ('CORRECTION', 'CONFIRMATION'))
 		  AND ($1 = '' OR t.bank_statement_id::text = $1)
 		  AND COALESCE(bs.is_deleted, false) = false
+		  AND EXISTS (
+		      SELECT 1 FROM (
+		          SELECT processing_status FROM cimplrcorpsaas.auditactionbankstatement
+		          WHERE bankstatementid = bs.bank_statement_id
+		            AND COALESCE(actiontype, '') NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
+		          ORDER BY
+		            CASE WHEN actiontype = 'DELETE' AND processing_status = 'PENDING_DELETE_APPROVAL' THEN 1
+		                 WHEN processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL') AND actiontype IN ('CREATE', 'EDIT', 'RECAT') THEN 2
+		                 WHEN actiontype IN ('CREATE', 'EDIT', 'RECAT', 'DELETE') THEN 3
+		                 ELSE 4 END,
+		            requested_at DESC, action_id DESC
+		          LIMIT 1
+		      ) la WHERE la.processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL')
+		  )
 	`, filterBSID).Scan(&totalCount); err != nil {
 		return fmt.Errorf("count transactions: %w", err)
 	}
@@ -230,6 +244,20 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 			  )
 			  AND ($3 = '' OR t.bank_statement_id::text = $3)
 			  AND COALESCE(bs.is_deleted, false) = false
+			  AND EXISTS (
+			      SELECT 1 FROM (
+			          SELECT processing_status FROM cimplrcorpsaas.auditactionbankstatement
+			          WHERE bankstatementid = bs.bank_statement_id
+			            AND COALESCE(actiontype, '') NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
+			          ORDER BY
+			            CASE WHEN actiontype = 'DELETE' AND processing_status = 'PENDING_DELETE_APPROVAL' THEN 1
+			                 WHEN processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL') AND actiontype IN ('CREATE', 'EDIT', 'RECAT') THEN 2
+			                 WHEN actiontype IN ('CREATE', 'EDIT', 'RECAT', 'DELETE') THEN 3
+			                 ELSE 4 END,
+			            requested_at DESC, action_id DESC
+			          LIMIT 1
+			      ) la WHERE la.processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL')
+			  )
 			ORDER BY t.transaction_id
 			LIMIT $2
 		`, lastID, batchSize, filterBSID)

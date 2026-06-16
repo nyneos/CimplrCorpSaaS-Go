@@ -4007,16 +4007,58 @@ func fetchCimplrFiles(ctx context.Context, pool *pgxpool.Pool, col, id string) [
 }
 
 func fetchCimplrAudit(ctx context.Context, pool *pgxpool.Pool, stage, id string) []map[string]interface{} {
+	var mainAudit []map[string]interface{}
+	var fileAudit []map[string]interface{}
+
 	if stage == "confirm" {
-		return fetchCimplrSubRows(ctx, pool, `
+		mainAudit = fetchCimplrSubRows(ctx, pool, `
 			SELECT * FROM cimplr.fd_closure_confirm_audit
 			WHERE closure_confirm_id=$1
 			ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, audit_id DESC`, id)
+			
+		fileAudit = fetchCimplrSubRows(ctx, pool, `
+			SELECT
+				audit_id,
+				file_id,
+				'UPLOAD_FILE' AS action_type,
+				requested_by,
+				requested_at,
+				requested_ip,
+				reason,
+				checker_by,
+				checker_at,
+				checker_ip,
+				checker_comment,
+				processing_status
+			FROM cimplr.fd_closure_files_audit
+			WHERE closure_confirm_id=$1
+			ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, audit_id DESC`, id)
+	} else {
+		mainAudit = fetchCimplrSubRows(ctx, pool, `
+			SELECT * FROM cimplr.fd_closure_initiate_audit
+			WHERE closure_initiate_id=$1
+			ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, audit_id DESC`, id)
+			
+		fileAudit = fetchCimplrSubRows(ctx, pool, `
+			SELECT
+				audit_id,
+				file_id,
+				'UPLOAD_FILE' AS action_type,
+				requested_by,
+				requested_at,
+				requested_ip,
+				reason,
+				checker_by,
+				checker_at,
+				checker_ip,
+				checker_comment,
+				processing_status
+			FROM cimplr.fd_closure_files_audit
+			WHERE closure_initiate_id=$1
+			ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, audit_id DESC`, id)
 	}
-	return fetchCimplrSubRows(ctx, pool, `
-		SELECT * FROM cimplr.fd_closure_initiate_audit
-		WHERE closure_initiate_id=$1
-		ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, audit_id DESC`, id)
+
+	return append(mainAudit, fileAudit...)
 }
 
 func fetchCimplrApprovalWorkflow(ctx context.Context, pool *pgxpool.Pool, recordID string) interface{} {

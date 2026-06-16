@@ -1193,7 +1193,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(payIDs) > 0 {
 			for _, pid := range payIDs {
 				var aid, atype, status string
-				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`, pid).Scan(&aid, &atype, &status); err != nil {
+				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionpayable WHERE payable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1`, pid).Scan(&aid, &atype, &status); err != nil {
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + pid})
 					return
 				}
@@ -1216,7 +1216,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(recIDs) > 0 {
 			for _, rid := range recIDs {
 				var aid, atype, status string
-				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`, rid).Scan(&aid, &atype, &status); err != nil {
+				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionreceivable WHERE receivable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1`, rid).Scan(&aid, &atype, &status); err != nil {
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + rid})
 					return
 				}
@@ -1351,7 +1351,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := pgxPool.QueryRow(ctx, `
 				SELECT action_id, actiontype, processing_status
 				FROM auditactionpayable
-				WHERE payable_id = $1
+				WHERE payable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, pid).Scan(&aid, &atype, &status); err != nil {
@@ -1378,7 +1378,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := pgxPool.QueryRow(ctx, `
 				SELECT action_id, actiontype, processing_status
 				FROM auditactionreceivable
-				WHERE receivable_id = $1
+				WHERE receivable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, rid).Scan(&aid, &atype, &status); err != nil {

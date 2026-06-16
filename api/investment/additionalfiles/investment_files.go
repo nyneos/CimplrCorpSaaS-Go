@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"database/sql"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -1509,19 +1510,261 @@ func DownloadSelectedFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.Ha
 }
 
 func DeleteFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
-	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	legacyHandler := cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, parentID, err := fdClosureAdditionalJSONParent(r, fdClosureFilesDefinition.ParentIDField)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		idKind, err := cimplrClosureAdditionalIDKind(r.Context(), pool, parentID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
+			return
+		}
+		if idKind == "" {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			legacyHandler(w, r)
+			return
+		}
+
+		var req struct {
+			FileID string `json:"file_id"`
+			UserID string `json:"user_id"`
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			return
+		}
+		if strings.TrimSpace(req.UserID) == "" || strings.TrimSpace(req.FileID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id and file_id required")
+			return
+		}
+
+		record, err := getCimplrClosureAdditionalFile(r.Context(), pool, parentID, idKind, req.FileID)
+		if err != nil || record == nil {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			return
+		}
+
+		tx, err := pool.Begin(r.Context())
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		_, err = tx.Exec(r.Context(), "UPDATE cimplr.fd_closure_files SET is_deleted = true, deleted_by = $1, deleted_at = NOW() WHERE file_id = $2::uuid", req.UserID, req.FileID)
+		if err != nil {
+			tx.Rollback(r.Context())
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		parentColumn := "closure_confirm_id"
+		if idKind == "initiate" {
+			parentColumn = "closure_initiate_id"
+		}
+		
+		_, err = tx.Exec(r.Context(), fmt.Sprintf(`
+			INSERT INTO cimplr.fd_closure_files_audit (
+				file_id, %s, action_type, processing_status,
+				reason, requested_by, requested_at, requested_ip
+			) VALUES ($1::uuid, $2, 'DELETE', 'APPROVED', $3, $4, NOW(), $5)`, parentColumn),
+			req.FileID, parentID, req.Reason, req.UserID, api.ClientIPFromRequest(r))
+		if err != nil {
+			tx.Rollback(r.Context())
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		tx.Commit(r.Context())
+		writeInvestmentAdditionalSuccess(w, map[string]interface{}{"message": "File deleted successfully."})
+	}
+}
+
+type investmentFileAuditEvent struct {
+	AuditID          string     `json:"audit_id"`
+	ModuleKey        string     `json:"module_key"`
+	ParentRecordID   string     `json:"parent_record_id"`
+	FileID           string     `json:"file_id"`
+	EntityID         string     `json:"entity_id"`
+	ActionType       string     `json:"action_type"`
+	RequestedBy      string     `json:"requested_by"`
+	RequestedAt      *time.Time `json:"requested_at"`
+	RequestedIP      string     `json:"requested_ip"`
+	CheckerBy        string     `json:"checker_by"`
+	CheckerAt        *time.Time `json:"checker_at"`
+	CheckerIP        string     `json:"checker_ip"`
+	CheckerComment   string     `json:"checker_comment"`
+	ProcessingStatus string     `json:"processing_status"`
+	Reason           string     `json:"reason"`
+}
+
+func listCimplrClosureFileAuditEvents(ctx context.Context, pool *pgxpool.Pool, parentID, idKind, fileID string) ([]investmentFileAuditEvent, error) {
+	parentColumn := "closure_confirm_id"
+	if idKind == "initiate" {
+		parentColumn = "closure_initiate_id"
+	}
+	query := fmt.Sprintf(`
+		SELECT audit_id, %s, file_id::text, action_type, processing_status, COALESCE(reason,''), COALESCE(requested_by,''), requested_at, COALESCE(requested_ip,''), COALESCE(checker_by,''), checker_at, COALESCE(checker_ip,''), COALESCE(checker_comment,'')
+		FROM cimplr.fd_closure_files_audit
+		WHERE %s = $1 AND file_id = $2::uuid
+		ORDER BY requested_at ASC, audit_id ASC
+	`, parentColumn, parentColumn)
+
+	rows, err := pool.Query(ctx, query, parentID, fileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []investmentFileAuditEvent
+	for rows.Next() {
+		var event investmentFileAuditEvent
+		var actionID string
+		var parentRecordID sql.NullString
+		var requestedBy sql.NullString
+		var requestedAt sql.NullTime
+		var requestedIP sql.NullString
+		var checkerBy sql.NullString
+		var checkerAt sql.NullTime
+		var checkerIP sql.NullString
+		var checkerComment sql.NullString
+		var reason sql.NullString
+		if err := rows.Scan(
+			&actionID,
+			&parentRecordID,
+			&event.FileID,
+			&event.ActionType,
+			&event.ProcessingStatus,
+			&reason,
+			&requestedBy,
+			&requestedAt,
+			&requestedIP,
+			&checkerBy,
+			&checkerAt,
+			&checkerIP,
+			&checkerComment,
+		); err != nil {
+			return nil, err
+		}
+
+		event.EntityID = event.FileID
+		event.ModuleKey = fdClosureFilesDefinition.Module
+		event.ParentRecordID = strings.TrimSpace(parentRecordID.String)
+		event.RequestedBy = strings.TrimSpace(requestedBy.String)
+		event.RequestedIP = strings.TrimSpace(requestedIP.String)
+		if requestedAt.Valid {
+			t := requestedAt.Time
+			event.RequestedAt = &t
+		}
+		event.CheckerBy = strings.TrimSpace(checkerBy.String)
+		event.CheckerIP = strings.TrimSpace(checkerIP.String)
+		if checkerAt.Valid {
+			t := checkerAt.Time
+			event.CheckerAt = &t
+		}
+		event.CheckerComment = strings.TrimSpace(checkerComment.String)
+		event.Reason = strings.TrimSpace(reason.String)
+		event.AuditID = actionID
+
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 func AuditFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
-	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	legacyHandler := cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, parentID, err := fdClosureAdditionalJSONParent(r, fdClosureFilesDefinition.ParentIDField)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		idKind, err := cimplrClosureAdditionalIDKind(r.Context(), pool, parentID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
+			return
+		}
+		if idKind == "" {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			legacyHandler(w, r)
+			return
+		}
+
+		var req struct {
+			FileID string `json:"file_id"`
+			UserID string `json:"user_id"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			return
+		}
+		if strings.TrimSpace(req.FileID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
+			return
+		}
+
+		record, err := getCimplrClosureAdditionalFile(r.Context(), pool, parentID, idKind, req.FileID)
+		if err != nil || record == nil {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			return
+		}
+
+		events, err := listCimplrClosureFileAuditEvents(r.Context(), pool, parentID, idKind, req.FileID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		if len(events) == 0 {
+			uploadedAt := record.UploadedAt
+			events = append(events, investmentFileAuditEvent{
+				EntityID:         record.FileID,
+				ModuleKey:        fdClosureFilesDefinition.Module,
+				ParentRecordID:   parentID,
+				FileID:           record.FileID,
+				ActionType:       "CREATE",
+				ProcessingStatus: "COMPLETED",
+				RequestedBy:      record.UploadedBy,
+				RequestedAt:      &uploadedAt,
+			})
+		}
+		writeInvestmentAdditionalSuccess(w, events)
+	}
 }
 
 func ApproveDeleteFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
-	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	legacyHandler := cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, parentID, err := fdClosureAdditionalJSONParent(r, fdClosureFilesDefinition.ParentIDField)
+		if err == nil {
+			idKind, _ := cimplrClosureAdditionalIDKind(r.Context(), pool, parentID)
+			if idKind != "" {
+				api.RespondWithError(w, http.StatusBadRequest, "Approval workflow not applicable for this file type.")
+				return
+			}
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		legacyHandler(w, r)
+	}
 }
 
 func RejectDeleteFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
-	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	legacyHandler := cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdClosureFilesDefinition))
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, parentID, err := fdClosureAdditionalJSONParent(r, fdClosureFilesDefinition.ParentIDField)
+		if err == nil {
+			idKind, _ := cimplrClosureAdditionalIDKind(r.Context(), pool, parentID)
+			if idKind != "" {
+				api.RespondWithError(w, http.StatusBadRequest, "Approval workflow not applicable for this file type.")
+				return
+			}
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		legacyHandler(w, r)
+	}
 }
 
 func ListFDRolloverAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {

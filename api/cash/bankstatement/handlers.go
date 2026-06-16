@@ -100,15 +100,21 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 		bankIDs := scopeValues(scope.Banks, "bank_id")
 		currencyCodes := scopeValues(scope.Currencies, "currency_code")
 		rows, err := pool.Query(ctx, `
-										WITH latest_audit AS (
-											SELECT a.*
+										WITH prioritized_audit AS (
+											SELECT a.*,
+												ROW_NUMBER() OVER(PARTITION BY a.bankstatementid ORDER BY
+													CASE WHEN a.actiontype = 'DELETE' AND a.processing_status = 'PENDING_DELETE_APPROVAL' THEN 1
+													WHEN a.processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL') AND a.actiontype IN ('CREATE', 'EDIT', 'RECAT') THEN 2
+													WHEN a.actiontype IN ('CREATE', 'EDIT', 'RECAT', 'DELETE') THEN 3
+													ELSE 4 END,
+													a.requested_at DESC,
+													a.action_id DESC
+												) as rn
 											FROM cimplrcorpsaas.auditactionbankstatement a
-											INNER JOIN (
-												SELECT bankstatementid, MAX(action_id) AS max_action_id
-												FROM cimplrcorpsaas.auditactionbankstatement
-												WHERE COALESCE(actiontype, '') <> 'UPLOAD_FILE'
-												GROUP BY bankstatementid
-											) b ON a.bankstatementid = b.bankstatementid AND a.action_id = b.max_action_id
+											WHERE COALESCE(a.actiontype, '') NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
+										),
+										latest_audit AS (
+											SELECT * FROM prioritized_audit WHERE rn = 1
 										)
 										SELECT s.bank_statement_id, e.entity_name, s.account_number, s.statement_period_start, s.statement_period_end, s.opening_balance, s.closing_balance, s.uploaded_at,
 													 la.actiontype, la.processing_status, la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason,

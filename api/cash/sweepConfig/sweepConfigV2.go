@@ -765,7 +765,7 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			auditLatest := `SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM cimplrcorpsaas.auditactionsweepconfiguration WHERE sweep_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`
+			auditLatest := `SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM cimplrcorpsaas.auditactionsweepconfiguration WHERE sweep_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1`
 			var processingStatusPtr, requestedByPtr, actionTypePtr, actionIDPtr, checkerByPtr, checkerCommentPtr, reasonPtr *string
 			var requestedAtPtr, checkerAtPtr *time.Time
 			_ = pgxPool.QueryRow(ctx, auditLatest, sweepID).Scan(&processingStatusPtr, &requestedByPtr, &requestedAtPtr, &actionTypePtr, &actionIDPtr, &checkerByPtr, &checkerAtPtr, &checkerCommentPtr, &reasonPtr)
@@ -931,7 +931,7 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		sel := `SELECT DISTINCT ON (sweep_id) action_id, sweep_id, actiontype, processing_status FROM cimplrcorpsaas.auditactionsweepconfiguration WHERE sweep_id = ANY($1) ORDER BY sweep_id, requested_at DESC, action_id DESC`
+		sel := `SELECT DISTINCT ON (sweep_id) action_id, sweep_id, actiontype, processing_status FROM cimplrcorpsaas.auditactionsweepconfiguration WHERE sweep_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY sweep_id, requested_at DESC, action_id DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.SweepIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to fetch latest audits: "+err.Error())
@@ -1061,7 +1061,7 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		sel := `SELECT DISTINCT ON (sweep_id) action_id, sweep_id, processing_status FROM cimplrcorpsaas.auditactionsweepconfiguration WHERE sweep_id = ANY($1) ORDER BY sweep_id, requested_at DESC, action_id DESC`
+		sel := `SELECT DISTINCT ON (sweep_id) action_id, sweep_id, processing_status FROM cimplrcorpsaas.auditactionsweepconfiguration WHERE sweep_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY sweep_id, requested_at DESC, action_id DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.SweepIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to fetch latest audits: "+err.Error())

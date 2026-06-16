@@ -928,7 +928,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 			}
 		}()
-		sel := `SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, processing_status FROM auditactionbankstatement WHERE bankstatementid = ANY($1) ORDER BY bankstatementid, requested_at DESC, action_id DESC`
+		sel := `SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, processing_status FROM auditactionbankstatement WHERE bankstatementid = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY bankstatementid, requested_at DESC, action_id DESC`
 		rows, err := tx.Query(ctx, sel, req.IDs)
 		if err != nil {
 			api.RespondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
