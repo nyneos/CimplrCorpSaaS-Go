@@ -301,8 +301,12 @@ func recordDynamicInvestmentMainDownloadAudit(ctx context.Context, exec cashfile
 	if err != nil {
 		return err
 	}
+	actionType := "DOWNLOAD"
+	if payload.IsPreview {
+		actionType = "PREVIEW"
+	}
 	return recordDynamicInvestmentMainAudit(ctx, exec, tableName, parentColumns, parentID, dynamicAuditEntry{
-		Action:      "DOWNLOAD",
+		Action:      actionType,
 		Reason:      reason,
 		Payload:     payload,
 		ExtraValues: extraValues,
@@ -1330,7 +1334,7 @@ func uploadCimplrClosureAdditionalFiles(ctx context.Context, pool *pgxpool.Pool,
 			fileID,
 			initiateID,
 			confirmID,
-			"File uploaded from FD Closure additional files",
+			fmt.Sprintf("Uploaded file: %s", storedFileName),
 			api.SystemIfBlank(uploadedBy),
 			uploadedAt,
 			api.SystemIfBlank(api.ClientIPFromRequest(r)),
@@ -1481,7 +1485,9 @@ func DownloadFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc
 		}
 
 		var req struct {
-			FileID string `json:"file_id"`
+			FileID  string `json:"file_id"`
+			UserID  string `json:"user_id"`
+			Preview bool   `json:"preview"`
 		}
 		_ = json.Unmarshal(body, &req)
 		record, err := getCimplrClosureAdditionalFile(r.Context(), pool, parentID, idKind, req.FileID)
@@ -1498,6 +1504,24 @@ func DownloadFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to generate download url: "+err.Error())
 			return
 		}
+
+		actionType := "DOWNLOAD"
+		reasonStr := fmt.Sprintf("Downloaded file: %s", record.StoredFileName)
+		if req.Preview {
+			actionType = "PREVIEW"
+			reasonStr = fmt.Sprintf("Previewed file: %s", record.StoredFileName)
+		}
+
+		parentColumn := "closure_confirm_id"
+		if idKind == "initiate" {
+			parentColumn = "closure_initiate_id"
+		}
+
+		requestedBy := api.SystemIfBlank(req.UserID)
+		_, _ = pool.Exec(r.Context(), fmt.Sprintf(`
+			INSERT INTO cimplr.fd_closure_files_audit (file_id, %s, action_type, processing_status, reason, requested_by, requested_at, requested_ip)
+			VALUES ($1, $2, $3, 'COMPLETED', $4, $5, NOW(), $6)
+		`, parentColumn), record.FileID, parentID, actionType, reasonStr, requestedBy, api.ClientIPFromRequest(r))
 		writeInvestmentAdditionalSuccess(w, map[string]interface{}{
 			"download_url": downloadURL,
 			"file_id":      record.FileID,
@@ -1567,11 +1591,9 @@ func DeleteFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		
 		_, err = tx.Exec(r.Context(), fmt.Sprintf(`
-			INSERT INTO cimplr.fd_closure_files_audit (
-				file_id, %s, action_type, processing_status,
-				reason, requested_by, requested_at, requested_ip
-			) VALUES ($1::uuid, $2, 'DELETE', 'APPROVED', $3, $4, NOW(), $5)`, parentColumn),
-			req.FileID, parentID, req.Reason, req.UserID, api.ClientIPFromRequest(r))
+			INSERT INTO cimplr.fd_closure_files_audit (file_id, %s, action_type, processing_status, reason, requested_by, requested_at, requested_ip)
+			VALUES ($1, $2, 'DELETE', 'PENDING_DELETE_APPROVAL', $3, $4, NOW(), $5)
+		`, parentColumn), req.FileID, parentID, fmt.Sprintf("Deleted file: %s", record.StoredFileName), req.UserID, api.ClientIPFromRequest(r))
 		if err != nil {
 			tx.Rollback(r.Context())
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())

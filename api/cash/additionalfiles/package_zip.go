@@ -192,7 +192,7 @@ func recordPackageDownloadAudits(ctx context.Context, pool *pgxpool.Pool, cfg Co
 					StoredFileName: payload.FileName,
 					UploadS3Key:    payload.UploadS3Key,
 				}
-				if err := recordDownloadAudit(ctx, pool, cfg, parentID, record, performedBy, requestedIP); err != nil && !isUndefinedTableError(err) {
+				if err := recordDownloadAudit(ctx, pool, cfg, parentID, record, performedBy, requestedIP, false); err != nil && !isUndefinedTableError(err) {
 					continue
 				}
 			}

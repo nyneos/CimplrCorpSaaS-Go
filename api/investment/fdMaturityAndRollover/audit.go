@@ -110,7 +110,7 @@ func GetClosureAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				('file-' || a.audit_id::text) AS audit_id,
 				a.parent_record_id AS closure_request_id,
 				a.file_id,
-				'UPLOAD_FILE' AS action_type,
+				CASE WHEN a.action_type = 'CREATE' THEN 'UPLOAD_FILE' ELSE a.action_type END AS action_type,
 				COALESCE(a.processing_status, '') AS processing_status,
 				COALESCE(a.requested_by, '') AS performed_by,
 				COALESCE(a.requested_by, '') AS performed_by_email,
@@ -124,7 +124,6 @@ func GetClosureAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN investment.fd_rollover_request_files rf ON rf.file_id = a.file_id AND rf.closure_request_id::text = a.parent_record_id
 			WHERE a.module_key IN ('fd-closure-additional', 'fd-rollover-additional')
 			  AND a.parent_record_id = $1
-			  AND a.action_type = 'CREATE'
 			  AND (cf.file_id IS NOT NULL OR rf.file_id IS NOT NULL)
 			ORDER BY a.requested_at DESC`, req.ClosureRequestID)
 		if err != nil {

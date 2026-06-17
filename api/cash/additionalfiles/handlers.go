@@ -72,6 +72,7 @@ type MainUploadAuditPayload struct {
 	UploadedBy  string    `json:"uploaded_by"`
 	UploadedAt  time.Time `json:"uploaded_at"`
 	RequestedIP string    `json:"requested_ip,omitempty"`
+	IsPreview   bool      `json:"is_preview,omitempty"`
 }
 
 type Config struct {
@@ -100,8 +101,9 @@ type Config struct {
 }
 
 type downloadRequest struct {
-	UserID string `json:"user_id"`
-	FileID string `json:"file_id"`
+	UserID  string `json:"user_id"`
+	FileID  string `json:"file_id"`
+	Preview bool   `json:"preview"`
 }
 
 type downloadSelectedRequest struct {
@@ -303,7 +305,7 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		if auditEnabled(cfg) {
 			performedBy := requestedByOrFallback(r.Context(), req.UserID)
 			requestedIP := api.ClientIPFromRequest(r)
-			if err := recordDownloadAudit(r.Context(), pool, cfg, parentID, *record, performedBy, requestedIP); err != nil {
+			if err := recordDownloadAudit(r.Context(), pool, cfg, parentID, *record, performedBy, requestedIP, req.Preview); err != nil {
 				if !isUndefinedTableError(err) {
 					api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 					return
@@ -316,6 +318,7 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 				UploadedBy:  performedBy,
 				UploadedAt:  time.Now().UTC(),
 				RequestedIP: requestedIP,
+				IsPreview:   req.Preview,
 			}); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 				return
@@ -434,7 +437,7 @@ func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc
 				continue
 			}
 			if auditEnabled(cfg) {
-				if auditErr := recordDownloadAudit(r.Context(), pool, cfg, parentID, record, performedBy, requestedIP); auditErr != nil {
+				if auditErr := recordDownloadAudit(r.Context(), pool, cfg, parentID, record, performedBy, requestedIP, false); auditErr != nil {
 					if isUndefinedTableError(auditErr) {
 						files = append(files, map[string]string{
 							"file_id":      record.FileID,
@@ -1240,28 +1243,41 @@ func recordCreateAuditTx(ctx context.Context, exec AuditExecutor, cfg Config, pa
 	})
 }
 
-func recordDownloadAudit(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, requestedIP string) error {
+func recordDownloadAudit(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, requestedIP string, isPreview bool) error {
 	requestedAt := time.Now().UTC()
-	reason, err := MainDownloadAuditReasonJSON(MainUploadAuditPayload{
-		FileID:     file.FileID,
-		FileName:   file.StoredFileName,
-		UploadedBy: requestedBy,
-		UploadedAt: requestedAt,
-	})
+	
+	actionType := fileAuditDownloadAction
+	eventType := "ADDITIONAL_FILE_DOWNLOAD"
+	if isPreview {
+		actionType = "PREVIEW"
+		eventType = "ADDITIONAL_FILE_PREVIEW"
+	}
+
+	reasonPayload := map[string]interface{}{
+		"event_type":    eventType,
+		"file_name":     strings.TrimSpace(file.StoredFileName),
+		"downloaded_by": requestedBy,
+		"downloaded_at": requestedAt.UTC().Format(time.RFC3339),
+	}
+	if fileID := strings.TrimSpace(file.FileID); fileID != "" {
+		reasonPayload["file_id"] = fileID
+	}
+	reasonBytes, err := json.Marshal(reasonPayload)
 	if err != nil {
 		return err
 	}
+
 	return insertAuditEvent(ctx, exec, cfg, fileAuditEvent{
 		EntityID:         file.FileID,
 		ModuleKey:        cfg.Module,
 		ParentRecordID:   parentID,
 		FileID:           file.FileID,
-		ActionType:       fileAuditDownloadAction,
+		ActionType:       actionType,
 		ProcessingStatus: fileAuditCompletedStatus,
 		RequestedBy:      requestedBy,
 		RequestedAt:      &requestedAt,
 		RequestedIP:      requestedIP,
-		Reason:           reason,
+		Reason:           string(reasonBytes),
 	})
 }
 
@@ -1340,8 +1356,12 @@ func MainUploadAuditReasonJSON(payload MainUploadAuditPayload) (string, error) {
 }
 
 func MainDownloadAuditReasonJSON(payload MainUploadAuditPayload) (string, error) {
+	eventType := "ADDITIONAL_FILE_DOWNLOAD"
+	if payload.IsPreview {
+		eventType = "ADDITIONAL_FILE_PREVIEW"
+	}
 	reasonPayload := map[string]interface{}{
-		"event_type":    "ADDITIONAL_FILE_DOWNLOAD",
+		"event_type":    eventType,
 		"file_name":     strings.TrimSpace(payload.FileName),
 		"downloaded_by": strings.TrimSpace(payload.UploadedBy),
 		"downloaded_at": payload.UploadedAt.UTC().Format(time.RFC3339),
@@ -1379,13 +1399,18 @@ func InsertMainDownloadAudit(ctx context.Context, exec AuditExecutor, tableName,
 		return err
 	}
 
+	actionType := fileAuditDownloadAction
+	if payload.IsPreview {
+		actionType = "PREVIEW"
+	}
+
 	query := fmt.Sprintf(
 		`INSERT INTO %s (%s, %s, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		tableName,
 		parentColumn,
 		actionColumn,
 	)
-	_, err = exec.Exec(ctx, query, parentID, fileAuditDownloadAction, fileAuditApprovedStatus, reason, payload.UploadedBy, payload.UploadedAt, nullIfBlank(payload.RequestedIP))
+	_, err = exec.Exec(ctx, query, parentID, actionType, fileAuditApprovedStatus, reason, payload.UploadedBy, payload.UploadedAt, nullIfBlank(payload.RequestedIP))
 	return err
 }
 

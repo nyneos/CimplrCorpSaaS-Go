@@ -59,7 +59,7 @@ func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				('file-' || a.audit_id::text) AS audit_id,
 				a.parent_record_id AS fd_id,
 				a.file_id,
-				'UPLOAD_FILE' AS action_type,
+				CASE WHEN a.action_type = 'CREATE' THEN 'UPLOAD_FILE' ELSE a.action_type END AS action_type,
 				COALESCE(a.processing_status, '') AS processing_status,
 				COALESCE(a.reason, '') AS reason,
 				COALESCE(a.requested_by, '') AS requested_by,
@@ -73,7 +73,6 @@ func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			JOIN investment.fd_master_files f ON f.file_id = a.file_id AND f.fd_id::text = a.parent_record_id
 			WHERE a.module_key = 'fd-master-additional'
 			  AND a.parent_record_id = $1
-			  AND a.action_type = 'CREATE'
 			ORDER BY a.requested_at DESC`, fdID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
@@ -167,7 +166,7 @@ func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					('file-' || a.audit_id::text) AS audit_id,
 					a.parent_record_id AS fd_id,
 					a.file_id,
-					'UPLOAD_FILE' AS action_type,
+					CASE WHEN a.action_type = 'CREATE' THEN 'UPLOAD_FILE' ELSE a.action_type END AS action_type,
 					COALESCE(a.processing_status, '') AS audit_status,
 					COALESCE(a.reason, '') AS reason,
 					COALESCE(a.requested_by, '') AS requested_by,
@@ -181,7 +180,6 @@ func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				JOIN investment.fd_cashflow_files f ON f.file_id = a.file_id AND f.fd_id::text = a.parent_record_id
 				WHERE a.module_key = 'fd-cashflow-additional'
 				  AND a.parent_record_id = $1
-				  AND a.action_type = 'CREATE'
 				ORDER BY a.requested_at DESC`, fdID)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
