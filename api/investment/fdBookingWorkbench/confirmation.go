@@ -2315,6 +2315,16 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		uploadKeyExpr := resolveFDConfirmationUploadKeyExpression(ctx, pgxPool, "c")
+		confCols, colErr := loadFDTableColumns(ctx, pgxPool, "investment", "fd_confirmation")
+		if colErr != nil {
+			msg, status := getUserFriendlyFDError(colErr, constants.ErrLoadBookingSchemaFailed)
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		prematureClosureTermsExpr := "'' AS premature_closure_terms"
+		if confCols["premature_closure_terms"] {
+			prematureClosureTermsExpr = "COALESCE(c.premature_closure_terms,'') AS premature_closure_terms"
+		}
 		scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "b", 1)
 
 		q := fmt.Sprintf(`
@@ -2367,6 +2377,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(NULLIF(BTRIM(c.bank_reference_number::text),''),
 				         c.bank_fd_ref_no, '')                                        AS bank_reference_number,
 				COALESCE(TO_CHAR(c.confirmation_received_date,'YYYY-MM-DD'),'')       AS receipt_date,
+				%s,
 				COALESCE(c.tenor_type,'')                                              AS confirmed_tenor_type,
 				COALESCE(c.tenor_days,0)                                               AS confirmed_tenor_days,
 				COALESCE(c.tenor_months,0)                                             AS confirmed_tenor_months,
@@ -2487,7 +2498,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY GREATEST(
 				COALESCE(l.requested_at,'1970-01-01'::timestamp),
 				COALESCE(l.checker_at,'1970-01-01'::timestamp)
-			) DESC`, bookingAccountExpr, uploadKeyExpr, scopeWhere)
+			) DESC`, bookingAccountExpr, prematureClosureTermsExpr, uploadKeyExpr, scopeWhere)
 
 		rows, err := pgxPool.Query(ctx, q, scopeArgs...)
 		if err != nil {
