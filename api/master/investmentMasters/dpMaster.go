@@ -209,6 +209,46 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
+			// Per-row validation — mirror CreateDPSingle required-field + enum checks
+			validDepositories := map[string]bool{"NSDL": true, "CDSL": true}
+			for i, row := range dataRows {
+				rowNum := i + 2 // 1-indexed; +1 for header row
+				dpName, dpCode, depository := "", "", ""
+				if pos, ok := headerPos["dp_name"]; ok && pos < len(row) {
+					dpName = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["dp_code"]; ok && pos < len(row) {
+					dpCode = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["depository"]; ok && pos < len(row) {
+					depository = strings.TrimSpace(row[pos])
+				}
+				if dpName == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: dp_name is required", rowNum))
+					return
+				}
+				if dpCode == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: dp_code is required", rowNum))
+					return
+				}
+				// DP code format: NSDL = IN + 6 digits (e.g. IN300098), CDSL = 8 digits (e.g. 12345678)
+				dpCodeUpper := strings.ToUpper(dpCode)
+				isNSDLCode := len(dpCodeUpper) == 8 && strings.HasPrefix(dpCodeUpper, "IN") && isAllDigits(dpCodeUpper[2:])
+				isCDSLCode := len(dpCode) == 8 && isAllDigits(dpCode)
+				if !isNSDLCode && !isCDSLCode {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: dp_code '%s' is invalid — must be NSDL format (IN + 6 digits, e.g. IN300098) or CDSL format (8 digits, e.g. 12345678)", rowNum, dpCode))
+					return
+				}
+				if depository == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: depository is required", rowNum))
+					return
+				}
+				if !validDepositories[strings.ToUpper(depository)] {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: depository must be 'NSDL' or 'CDSL', got '%s'", rowNum, depository))
+					return
+				}
+			}
+
 			// S3 upload before opening transaction
 			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {

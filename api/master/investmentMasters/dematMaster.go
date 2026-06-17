@@ -255,7 +255,9 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Validate all rows before processing
+			validDematDepositories := map[string]bool{"NSDL": true, "CDSL": true}
 			for i, row := range dataRows {
+				rowNum := i + 2 // 1-indexed; +1 for header row
 				var entityName, dpID, settlementAcc string
 				if pos, ok := headerPos["entity_name"]; ok && pos < len(row) {
 					entityName = strings.TrimSpace(row[pos])
@@ -270,6 +272,52 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if pos, ok := headerPos["default_settlement_account"]; ok && pos < len(row) {
 					settlementAcc = strings.TrimSpace(row[pos])
 				}
+				dematAccNum, depository := "", ""
+				if pos, ok := headerPos["demat_account_number"]; ok && pos < len(row) {
+					dematAccNum = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["depository"]; ok && pos < len(row) {
+					depository = strings.TrimSpace(row[pos])
+				}
+
+				// Required field checks — mirror CreateDematSingle validation
+				if entityName == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: entity_name is required", rowNum))
+					return
+				}
+				if dpID == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: dp_id is required", rowNum))
+					return
+				}
+				if dematAccNum == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: demat_account_number is required", rowNum))
+					return
+				}
+				if depository == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: depository is required", rowNum))
+					return
+				}
+				if !validDematDepositories[strings.ToUpper(depository)] {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: depository must be 'NSDL' or 'CDSL', got '%s'", rowNum, depository))
+					return
+				}
+				// Format check matching the UI: NSDL = IN + 14 digits (16 chars), CDSL = 16 digits
+				switch strings.ToUpper(depository) {
+				case "NSDL":
+					if len(dematAccNum) != 16 || !strings.HasPrefix(strings.ToUpper(dematAccNum), "IN") || !isAllDigits(dematAccNum[2:]) {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: demat_account_number '%s' invalid for NSDL — must be 'IN' followed by 14 digits (e.g. IN12345678901234)", rowNum, dematAccNum))
+						return
+					}
+				case "CDSL":
+					if len(dematAccNum) != 16 || !isAllDigits(dematAccNum) {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: demat_account_number '%s' invalid for CDSL — must be exactly 16 digits", rowNum, dematAccNum))
+						return
+					}
+				}
+				if settlementAcc == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: default_settlement_account is required", rowNum))
+					return
+				}
 
 				// Validate entity
 				entityFound := false
@@ -280,7 +328,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !entityFound {
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Entity '%s' not in accessible entities", i+1, entityName))
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Entity '%s' not in accessible entities", rowNum, entityName))
 					return
 				}
 
@@ -294,7 +342,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !dpFound {
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: DP '%s' not in approved DPs", i+1, dpID))
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: DP '%s' not in approved DPs", rowNum, dpID))
 					return
 				}
 
@@ -307,7 +355,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !accountFound {
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Settlement account '%s' not in approved bank accounts", i+1, settlementAcc))
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Settlement account '%s' not in approved bank accounts", rowNum, settlementAcc))
 					return
 				}
 			}

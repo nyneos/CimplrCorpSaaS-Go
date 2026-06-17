@@ -299,6 +299,92 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
+			// Per-row validation — mirror CreateSchemeSingle required-field + format checks
+			validRiskRatings := map[string]bool{"Low": true, "Medium": true, "High": true}
+			validMethods := map[string]bool{"FIFO": true, "LIFO": true, "WEIGHTED_AVERAGE": true}
+			type schemeRequiredField struct{ col, label string }
+			schemeRequiredFields := []schemeRequiredField{
+				{"scheme_name", "scheme_name"},
+				{"amc_name", "amc_name"},
+				{"internal_scheme_code", "internal_scheme_code"},
+				{"internal_risk_rating", "internal_risk_rating"},
+				{"erp_gl_account", "erp_gl_account"},
+			}
+			for i, row := range dataRows {
+				rowNum := i + 2 // 1-indexed; +1 for header row
+				for _, rf := range schemeRequiredFields {
+					val := ""
+					if pos, ok := headerPos[rf.col]; ok && pos < len(row) {
+						val = strings.TrimSpace(row[pos])
+					}
+					if val == "" {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: %s is required", rowNum, rf.label))
+						return
+					}
+				}
+
+				// internal_scheme_code must be alphanumeric
+				if pos, ok := headerPos["internal_scheme_code"]; ok && pos < len(row) {
+					code := strings.TrimSpace(row[pos])
+					if code != "" && !isAlphanumeric(code) {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: internal_scheme_code must be alphanumeric (letters and numbers only), got '%s'", rowNum, code))
+						return
+					}
+				}
+
+				// erp_gl_account must be numeric, 5–20 digits
+				if pos, ok := headerPos["erp_gl_account"]; ok && pos < len(row) {
+					gl := strings.TrimSpace(row[pos])
+					if gl != "" && (!isAllDigits(gl) || len(gl) < 5 || len(gl) > 20) {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: erp_gl_account must be numeric with 5–20 digits, got '%s'", rowNum, gl))
+						return
+					}
+				}
+
+				// internal_risk_rating must be Low, Medium, or High
+				if pos, ok := headerPos["internal_risk_rating"]; ok && pos < len(row) {
+					rating := strings.TrimSpace(row[pos])
+					if rating != "" && !validRiskRatings[rating] {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: internal_risk_rating must be 'Low', 'Medium', or 'High', got '%s'", rowNum, rating))
+						return
+					}
+				}
+
+				// method must be FIFO, LIFO, or WEIGHTED_AVERAGE if provided
+				if pos, ok := headerPos["method"]; ok && pos < len(row) {
+					method := strings.TrimSpace(row[pos])
+					if method != "" && !validMethods[strings.ToUpper(method)] {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: method must be 'FIFO', 'LIFO', or 'WEIGHTED_AVERAGE', got '%s'", rowNum, method))
+						return
+					}
+				}
+
+				// Validate ISIN uniqueness per row if provided
+				if pos, ok := headerPos["isin"]; ok && pos < len(row) {
+					isin := strings.TrimSpace(row[pos])
+					if isin != "" {
+						var exists int
+						dbErr := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, isin).Scan(&exists)
+						if dbErr == nil {
+							api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Scheme with ISIN '%s' already exists", rowNum, isin))
+							return
+						}
+					}
+				}
+				// Validate internal_scheme_code uniqueness per row
+				if pos, ok := headerPos["internal_scheme_code"]; ok && pos < len(row) {
+					code := strings.TrimSpace(row[pos])
+					if code != "" {
+						var exists int
+						dbErr := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE internal_scheme_code=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, code).Scan(&exists)
+						if dbErr == nil {
+							api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Scheme with internal_scheme_code '%s' already exists", rowNum, code))
+							return
+						}
+					}
+				}
+			}
+
 			// S3 upload before opening transaction
 			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {

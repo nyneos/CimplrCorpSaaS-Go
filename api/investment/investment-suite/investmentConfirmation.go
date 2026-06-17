@@ -2062,3 +2062,30 @@ func stringOrNull(s *string) interface{} {
 	}
 	return *s
 }
+
+// GetConfirmationDetail returns full detail for a single investment confirmation.
+func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ConfirmationID string `json:"confirmation_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+		if strings.TrimSpace(req.ConfirmationID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "confirmation_id is required")
+			return
+		}
+		rows, err := fetchConfirmationRows(r.Context(), pgxPool, []string{req.ConfirmationID})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		if len(rows) == 0 {
+			api.RespondWithError(w, http.StatusNotFound, "confirmation not found")
+			return
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"data": rows[0]})
+	}
+}

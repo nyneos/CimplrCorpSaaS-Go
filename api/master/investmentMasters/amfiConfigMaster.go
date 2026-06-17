@@ -12,18 +12,20 @@ func GetAMFISchemeMasterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
+		// scheme_nav_name is unique per plan type; scheme_name is not (same base name for all plans).
+		// We join to masterscheme only on the unique amfi_scheme_code to avoid false matches.
 		query := `
 			SELECT DISTINCT ON (sm.scheme_code)
-			sm.scheme_code,
-			sm.amc_name,
-			sm.scheme_name,
-			COALESCE(sm.isin_div_reinvestment, '') AS isin
+				sm.scheme_code,
+				sm.amc_name,
+				COALESCE(sm.scheme_nav_name, sm.scheme_name) AS scheme_name,
+				COALESCE(sm.isin_div_reinvestment, '') AS isin
 			FROM investment.amfi_scheme_master_staging sm
 			LEFT JOIN investment.masterscheme ms
-				ON (ms.amfi_scheme_code = sm.scheme_code::text 
-					OR (ms.scheme_name = sm.scheme_name AND ms.amc_name = sm.amc_name))
-			WHERE ms.scheme_id IS NULL OR COALESCE(ms.is_deleted, false) = true
-			ORDER BY sm.scheme_code, sm.scheme_name;
+				ON ms.amfi_scheme_code = sm.scheme_code::text
+				AND COALESCE(ms.is_deleted, false) = false
+			WHERE ms.scheme_id IS NULL
+			ORDER BY sm.scheme_code;
 		`
 
 		rows, err := pgxPool.Query(ctx, query)
@@ -54,6 +56,9 @@ func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
+		// scheme_name in amfi_nav_staging is the scheme_nav_name equivalent from the AMFI file
+		// (it already distinguishes plan types). Join only on amfi_scheme_code to avoid false matches.
+		// DISTINCT ON (scheme_code) ordered by nav_date DESC gives the latest NAV per scheme.
 		query := `
 			SELECT DISTINCT ON (nv.scheme_code)
 				nv.scheme_code,
@@ -64,9 +69,10 @@ func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				TO_CHAR(nv.nav_date, 'YYYY-MM-DD') AS nav_date
 			FROM investment.amfi_nav_staging nv
 			LEFT JOIN investment.masterscheme ms
-				ON (ms.amfi_scheme_code = nv.scheme_code::text 
-					OR (ms.scheme_name = nv.scheme_name AND ms.amc_name = nv.amc_name))
-			WHERE ms.scheme_id IS NULL OR COALESCE(ms.is_deleted, false) = true
+				ON ms.amfi_scheme_code = nv.scheme_code::text
+				AND COALESCE(ms.is_deleted, false) = false
+			WHERE ms.scheme_id IS NULL
+			  AND nv.nav_date IS NOT NULL
 			ORDER BY nv.scheme_code, nv.nav_date DESC
 		`
 
@@ -195,29 +201,33 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			amcNames[i] = a.Name
 		}
 
+		// scheme_nav_name is unique per plan type; join NAV on scheme_code and pick latest nav_date.
 		schemeQuery := `
-			SELECT DISTINCT ON (sm.scheme_code)
+			WITH latest_nav AS (
+				SELECT DISTINCT ON (scheme_code)
+					scheme_code,
+					nav_value,
+					nav_date
+				FROM investment.amfi_nav_staging
+				WHERE nav_date IS NOT NULL
+				ORDER BY scheme_code, nav_date DESC
+			)
+			SELECT
 				sm.amc_name,
 				sm.scheme_code,
-				sm.scheme_name,
+				COALESCE(sm.scheme_nav_name, sm.scheme_name) AS scheme_name,
 				COALESCE(sm.isin_div_reinvestment, '') AS isin,
-				nv.nav_value,
-				TO_CHAR(nv.nav_date, 'YYYY-MM-DD') AS nav_date
+				ln.nav_value,
+				TO_CHAR(ln.nav_date, 'YYYY-MM-DD') AS nav_date
 			FROM investment.amfi_scheme_master_staging sm
-			LEFT JOIN investment.amfi_nav_staging nv 
-				ON nv.scheme_code = sm.scheme_code
-			LEFT JOIN investment.masterscheme ms
-				ON (ms.amfi_scheme_code = sm.scheme_code::text 
-					OR (ms.scheme_name = sm.scheme_name AND ms.amc_name = sm.amc_name))
+			LEFT JOIN latest_nav ln ON ln.scheme_code = sm.scheme_code
 			WHERE sm.amc_name = ANY($1)
-				AND (ms.scheme_id IS NULL OR COALESCE(ms.is_deleted, false) = true)
-				-- Ensure we don't return schemes that already exist in masterscheme by exact amfi_scheme_code match
 				AND NOT EXISTS (
 					SELECT 1 FROM investment.masterscheme m2
 					WHERE m2.amfi_scheme_code = sm.scheme_code::text
 					  AND COALESCE(m2.is_deleted, false) = false
 				)
-			ORDER BY sm.scheme_code, nv.nav_date DESC NULLS LAST;
+			ORDER BY sm.scheme_nav_name;
 		`
 
 		schemeRows, err := pgxPool.Query(ctx, schemeQuery, amcNames)

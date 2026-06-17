@@ -210,6 +210,69 @@ func ifaceToString(v interface{}) string {
 	}
 }
 
+// isAllDigits returns true if s is non-empty and all characters are ASCII digits.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isAlphanumeric returns true if s is non-empty and all characters are A-Z, a-z, or 0-9.
+func isAlphanumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+			return false
+		}
+	}
+	return true
+}
+
+// isAlphaSpace returns true if s is non-empty and all characters are letters or spaces.
+func isAlphaSpace(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == ' ') {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidIFSC returns true if s matches IFSC format: 4 letters + '0' + 6 alphanumeric (11 chars total).
+func isValidIFSC(s string) bool {
+	if len(s) != 11 {
+		return false
+	}
+	for i, c := range s {
+		switch {
+		case i < 4:
+			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+				return false
+			}
+		case i == 4:
+			if c != '0' {
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -290,18 +353,6 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			// S3 upload before opening transaction
-			s3Key, storedFileName := "", ""
-			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-amc")
-				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
-				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
-				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
-					return
-				}
-			}
-
 			headers := normalizeHeader(records[0])
 			dataRows := records[1:]
 
@@ -320,6 +371,125 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			headerPos := map[string]int{}
 			for i, h := range headers {
 				headerPos[h] = i
+			}
+
+			// Per-row validation — mirror CreateAMCSingle required-field checks
+			// Runs before S3 upload so validation failures don't orphan S3 objects
+			for i, row := range dataRows {
+				rowNum := i + 2 // 1-indexed; +1 for header row
+				amcName, amcCode, email := "", "", ""
+				if pos, ok := headerPos["amc_name"]; ok && pos < len(row) {
+					amcName = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["internal_amc_code"]; ok && pos < len(row) {
+					amcCode = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["primary_contact_email"]; ok && pos < len(row) {
+					email = strings.TrimSpace(row[pos])
+				}
+				beneficiary, bankAcctNo, bankName, bankIfsc, mfuCode, camsCode, erpCode := "", "", "", "", "", "", ""
+				if pos, ok := headerPos["amc_beneficiary_name"]; ok && pos < len(row) {
+					beneficiary = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["amc_bank_account_no"]; ok && pos < len(row) {
+					bankAcctNo = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["amc_bank_name"]; ok && pos < len(row) {
+					bankName = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["amc_bank_ifsc"]; ok && pos < len(row) {
+					bankIfsc = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["mfu_amc_code"]; ok && pos < len(row) {
+					mfuCode = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["cams_amc_code"]; ok && pos < len(row) {
+					camsCode = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["erp_vendor_code"]; ok && pos < len(row) {
+					erpCode = strings.TrimSpace(row[pos])
+				}
+
+				// Required field checks
+				if amcName == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: amc_name is required", rowNum))
+					return
+				}
+				if amcCode == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: internal_amc_code is required", rowNum))
+					return
+				}
+				if !isAlphanumeric(amcCode) {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: internal_amc_code must be alphanumeric (letters and numbers only), got '%s'", rowNum, amcCode))
+					return
+				}
+				if beneficiary == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: amc_beneficiary_name is required", rowNum))
+					return
+				}
+				if !isAlphaSpace(beneficiary) {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: amc_beneficiary_name must contain letters only, got '%s'", rowNum, beneficiary))
+					return
+				}
+				if bankAcctNo == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: amc_bank_account_no is required", rowNum))
+					return
+				}
+				if !isAllDigits(bankAcctNo) || len(bankAcctNo) < 8 || len(bankAcctNo) > 20 {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: amc_bank_account_no must be 8–20 digits, got '%s'", rowNum, bankAcctNo))
+					return
+				}
+				if bankName == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: amc_bank_name is required", rowNum))
+					return
+				}
+				if bankIfsc == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: amc_bank_ifsc is required", rowNum))
+					return
+				}
+				if !isValidIFSC(bankIfsc) {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: amc_bank_ifsc '%s' is invalid — expected format: 4 letters + 0 + 6 alphanumeric (e.g. HDFC0001234)", rowNum, bankIfsc))
+					return
+				}
+				if mfuCode == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: mfu_amc_code is required", rowNum))
+					return
+				}
+				if !isAlphanumeric(mfuCode) {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: mfu_amc_code must be alphanumeric, got '%s'", rowNum, mfuCode))
+					return
+				}
+				if camsCode == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: cams_amc_code is required", rowNum))
+					return
+				}
+				if !isAlphanumeric(camsCode) {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: cams_amc_code must be alphanumeric, got '%s'", rowNum, camsCode))
+					return
+				}
+				if erpCode == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: erp_vendor_code is required", rowNum))
+					return
+				}
+				if email != "" {
+					atIdx := strings.Index(email, "@")
+					if atIdx < 1 || atIdx == len(email)-1 || !strings.Contains(email[atIdx+1:], ".") {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: primary_contact_email '%s' is not a valid email address", rowNum, email))
+						return
+					}
+				}
+			}
+
+			// S3 upload — after validation so failures don't orphan S3 objects
+			s3Key, storedFileName := "", ""
+			if s3storage.IsS3UploadEnabled() {
+				folder := s3storage.GetStoragePrefix("master-amc")
+				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
+				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					return
+				}
 			}
 
 			copyRows := make([][]interface{}, len(dataRows))

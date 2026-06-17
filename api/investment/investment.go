@@ -63,6 +63,7 @@ func NewInvestmentServer(pool *pgxpool.Pool, db *sql.DB, port string) *http.Serv
 	mux.Handle("/investment/onboard/schemes-enriched", mfMid(http.HandlerFunc(onboard.GetAMFISchemesByMultipleAMCs(pool))))
 	mux.Handle("/investment/onboard/folios-enriched", mfMid(http.HandlerFunc(onboard.GetFoliosBySchemeListSimple(pool))))
 	mux.Handle("/investment/onboard/folios-grouped", mfMid(http.HandlerFunc(onboard.GetFoliosBySchemeListGrouped(pool))))
+	mux.Handle("/investment/onboard/entity-folios", mfMid(http.HandlerFunc(onboard.GetFoliosByEntity(pool))))
 	mux.Handle("/investment/onboard/demat-enriched", mfMid(http.HandlerFunc(onboard.GetDematWithDPInfo(pool))))
 	mux.Handle("/investment/onboard/dps-enriched", mfMid(http.HandlerFunc(onboard.GetAllDPs(pool))))
 	mux.Handle("/investment/onboard/upload", mfMid(http.HandlerFunc(onboard.UploadInvestmentBulkk(pool))))
@@ -82,6 +83,7 @@ func NewInvestmentServer(pool *pgxpool.Pool, db *sql.DB, port string) *http.Serv
 
 	mux.Handle("/investment/onboard/batch/approve", mfMid(http.HandlerFunc(onboard.BulkApproveBatch(pool))))
 	mux.Handle("/investment/onboard/batch/info", mfMid(http.HandlerFunc(onboard.GetBatchInfo(pool))))
+	mux.Handle("/investment/onboard/batch/delete", mfMid(http.HandlerFunc(onboard.DeleteOnboardBatch(pool))))
 	mux.Handle("/investment/onboard/batch", mfMid(http.HandlerFunc(onboard.GetAllBatches(pool))))
 	mux.Handle("/investment/onboard/audit-history", mfMid(http.HandlerFunc(onboard.GetOnboardingAuditHistory(pool))))
 
@@ -118,6 +120,7 @@ func NewInvestmentServer(pool *pgxpool.Pool, db *sql.DB, port string) *http.Serv
 	mux.Handle("/investment/initiation/reject", mfMid(http.HandlerFunc(investmentsuite.BulkRejectInitiationActions(pool))))
 	mux.Handle("/investment/initiation/approved-active", mfMid(http.HandlerFunc(investmentsuite.GetApprovedActiveInitiations(pool))))
 	mux.Handle("/investment/initiation/all", mfMid(http.HandlerFunc(investmentsuite.GetInitiationsWithAudit(pool))))
+	mux.Handle("/investment/initiation/detail", mfMid(http.HandlerFunc(investmentsuite.GetInitiationDetail(pool))))
 	mux.Handle("/investment/initiation/audit-history", mfMid(http.HandlerFunc(investmentsuite.GetInitiationAuditHistory(pool))))
 	mux.Handle("/investment/initiation/package-zip", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentfiles.DownloadInitiationPackageZipHandler(pool))))
 	mux.Handle("/investment/initiation/additional-files/list", mfMid(http.HandlerFunc(investmentfiles.ListInitiationAdditionalFilesHandler(pool))))
@@ -141,6 +144,7 @@ func NewInvestmentServer(pool *pgxpool.Pool, db *sql.DB, port string) *http.Serv
 	mux.Handle("/investment/confirmation/approve", mfMid(http.HandlerFunc(investmentsuite.BulkApproveConfirmationActions(pool))))
 	mux.Handle("/investment/confirmation/reject", mfMid(http.HandlerFunc(investmentsuite.BulkRejectConfirmationActions(pool))))
 	mux.Handle("/investment/confirmation/all", mfMid(http.HandlerFunc(investmentsuite.GetConfirmationsWithAudit(pool))))
+	mux.Handle("/investment/confirmation/detail", mfMid(http.HandlerFunc(investmentsuite.GetConfirmationDetail(pool))))
 	// mux.Handle("/investment/confirmations/all", mfMid(http.HandlerFunc(investmentsuite.GetAllConfirmationsWithAudit(pool))))
 	mux.Handle("/investment/confirmation/approved", mfMid(http.HandlerFunc(investmentsuite.GetApprovedConfirmations(pool))))
 	mux.Handle("/investment/confirmation/confirm", mfMid(http.HandlerFunc(investmentsuite.ConfirmInvestment(pool))))
@@ -157,6 +161,8 @@ func NewInvestmentServer(pool *pgxpool.Pool, db *sql.DB, port string) *http.Serv
 	// Investment redemption/portfolio endpoints
 	mux.Handle("/investment/portfolio/get", mfMid(http.HandlerFunc(redemption.GetPortfolioWithTransactions(pool))))
 	mux.Handle("/investment/portfolio/refresh", mfMid(http.HandlerFunc(portfolio.RefreshPortfolioSnapshots(pool))))
+	mux.Handle("/investment/portfolio/transactions", mfMid(http.HandlerFunc(portfolio.GetPortfolioTransactions(pool))))
+	mux.Handle("/investment/onboard/batch/delete-transaction", mfMid(http.HandlerFunc(onboard.DeleteOnboardTransaction(pool))))
 	mux.Handle("/investment/redemption/calculate-fifo", mfMid(http.HandlerFunc(redemption.CalculateRedemptionFIFO(pool))))
 
 	// Redemption initiation endpoints
@@ -193,6 +199,7 @@ func NewInvestmentServer(pool *pgxpool.Pool, db *sql.DB, port string) *http.Serv
 	mux.Handle("/investment/redemption/confirmation/approve", mfMid(http.HandlerFunc(redemption.BulkApproveRedemptionConfirmationActions(pool))))
 	mux.Handle("/investment/redemption/confirmation/reject", mfMid(http.HandlerFunc(redemption.BulkRejectRedemptionConfirmationActions(pool))))
 	mux.Handle("/investment/redemption/confirmation/all", mfMid(http.HandlerFunc(redemption.GetRedemptionConfirmationsWithAudit(pool))))
+	mux.Handle("/investment/redemption/confirmation/detail", mfMid(http.HandlerFunc(redemption.GetRedemptionConfirmationDetail(pool))))
 	mux.Handle("/investment/redemption/confirmation/approved", mfMid(http.HandlerFunc(redemption.GetApprovedRedemptionConfirmations(pool))))
 	mux.Handle("/investment/redemption/confirmation/confirm", mfMid(http.HandlerFunc(redemption.ConfirmRedemption(pool))))
 	mux.Handle("/investment/redemption/confirmation/audit-history", mfMid(http.HandlerFunc(redemption.GetRedemptionConfirmationAuditHistory(pool))))

@@ -1096,7 +1096,8 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				post_trade_holding,
 				old_post_trade_holding,
 				current_holding,
-				old_current_holding
+				old_current_holding,
+				COALESCE(initiation_status, false) AS initiation_status
 			FROM investment.investment_proposal_allocation
 			WHERE proposal_id = $1
 			  AND COALESCE(is_deleted, false) = false

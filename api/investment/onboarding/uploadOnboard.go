@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"regexp"
@@ -121,6 +122,95 @@ func defaultIfEmpty(val, def string) string {
 		return def
 	}
 	return val
+}
+
+// isBlankRecord returns true when every meaningful string field is empty (UI placeholder rows).
+func isBlankAMC(a AMCInput) bool {
+	return strings.TrimSpace(a.AmcName) == "" && strings.TrimSpace(a.InternalAmcCode) == ""
+}
+func isBlankScheme(s SchemeInput) bool {
+	return strings.TrimSpace(s.SchemeName) == "" && strings.TrimSpace(s.AmcName) == ""
+}
+func isBlankFolio(f FolioInput) bool {
+	return strings.TrimSpace(f.FolioNumber) == "" && strings.TrimSpace(f.EntityName) == ""
+}
+func isBlankDP(d DPInput) bool {
+	return strings.TrimSpace(d.DPName) == "" && strings.TrimSpace(d.DPCode) == ""
+}
+func isBlankDemat(dm DematInput) bool {
+	return strings.TrimSpace(dm.EntityName) == "" && strings.TrimSpace(dm.DematAccountNumber) == ""
+}
+
+// validateAMCRequired mirrors the AMC master: amc_name + internal_amc_code required for new AMCs.
+func validateAMCRequired(i int, a AMCInput) string {
+	if strings.TrimSpace(a.AmcName) == "" {
+		return fmt.Sprintf("AMC #%d: amc_name is required", i+1)
+	}
+	if !a.Enriched && strings.TrimSpace(a.InternalAmcCode) == "" {
+		return fmt.Sprintf("AMC #%d '%s': internal_amc_code is required for new AMCs", i+1, a.AmcName)
+	}
+	return ""
+}
+
+// validateSchemeRequired mirrors the scheme master: scheme_name + amc_name + internal_scheme_code required for new.
+func validateSchemeRequired(i int, s SchemeInput) string {
+	if strings.TrimSpace(s.SchemeName) == "" {
+		return fmt.Sprintf("Scheme #%d: scheme_name is required", i+1)
+	}
+	if strings.TrimSpace(s.AmcName) == "" {
+		return fmt.Sprintf("Scheme #%d '%s': amc_name is required", i+1, s.SchemeName)
+	}
+	if !s.Enriched && strings.TrimSpace(s.InternalSchemeCode) == "" {
+		return fmt.Sprintf("Scheme #%d '%s': internal_scheme_code is required for new schemes", i+1, s.SchemeName)
+	}
+	return ""
+}
+
+// validateFolioRequired: entity_name + folio_number required; subscription/redemption accounts required for new folios.
+func validateFolioRequired(i int, f FolioInput) string {
+	if strings.TrimSpace(f.EntityName) == "" {
+		return fmt.Sprintf("Folio #%d: entity_name is required", i+1)
+	}
+	if strings.TrimSpace(f.FolioNumber) == "" {
+		return fmt.Sprintf("Folio #%d (entity: %s): folio_number is required", i+1, f.EntityName)
+	}
+	if !f.Enriched && strings.TrimSpace(f.FolioID) == "" {
+		if strings.TrimSpace(f.DefaultSubscriptionAccount) == "" {
+			return fmt.Sprintf("Folio #%d '%s': default_subscription_account is required", i+1, f.FolioNumber)
+		}
+		if strings.TrimSpace(f.DefaultRedemptionAccount) == "" {
+			return fmt.Sprintf("Folio #%d '%s': default_redemption_account is required", i+1, f.FolioNumber)
+		}
+	}
+	return ""
+}
+
+// validateDPRequired: dp_name + dp_code + depository required.
+func validateDPRequired(i int, d DPInput) string {
+	if strings.TrimSpace(d.DPName) == "" {
+		return fmt.Sprintf("DP #%d: dp_name is required", i+1)
+	}
+	if strings.TrimSpace(d.DPCode) == "" {
+		return fmt.Sprintf("DP #%d '%s': dp_code is required", i+1, d.DPName)
+	}
+	if strings.TrimSpace(d.Depository) == "" {
+		return fmt.Sprintf("DP #%d '%s': depository is required", i+1, d.DPName)
+	}
+	return ""
+}
+
+// validateDematRequired: entity_name + demat_account_number + settlement account required for new demats.
+func validateDematRequired(i int, dm DematInput) string {
+	if strings.TrimSpace(dm.EntityName) == "" {
+		return fmt.Sprintf("Demat #%d: entity_name is required", i+1)
+	}
+	if strings.TrimSpace(dm.DematAccountNumber) == "" {
+		return fmt.Sprintf("Demat #%d (entity: %s): demat_account_number is required", i+1, dm.EntityName)
+	}
+	if !dm.Enriched && strings.TrimSpace(dm.DefaultSettlementAccount) == "" {
+		return fmt.Sprintf("Demat #%d '%s': default_settlement_account is required", i+1, dm.DematAccountNumber)
+	}
+	return ""
 }
 
 func validateOnboardingUploadScope(ctx context.Context, w http.ResponseWriter, amcs []AMCInput, schemes []SchemeInput, demats []DematInput, folios []FolioInput) bool {
@@ -403,6 +493,14 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Process AMCs
 		logger.LogInfo("[bulk] starting AMC processing, found %d AMCs", len(amcs))
 		for i, a := range amcs {
+			if isBlankAMC(a) {
+				logger.LogInfo("[bulk] amc[%d] skipped: blank placeholder row", i)
+				continue
+			}
+			if msg := validateAMCRequired(i, a); msg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, msg)
+				return
+			}
 			logger.LogInfo("[bulk] processing amc[%d]: %+v", i, a)
 			// lookup by internal code or name
 			var existing string
@@ -478,7 +576,15 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		logger.LogInfo("[bulk] AMC processing completed. Total processed: %d, Total created: %d", len(amcs), counts["amc"])
 
 		// Process DP
-		for _, d := range dps {
+		for i, d := range dps {
+			if isBlankDP(d) {
+				logger.LogInfo("[bulk] dp[%d] skipped: blank placeholder row", i)
+				continue
+			}
+			if msg := validateDPRequired(i, d); msg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, msg)
+				return
+			}
 			logger.LogInfo("[bulk] processing dp: %+v", d)
 			var existing string
 			if d.DPCode != "" {
@@ -520,7 +626,15 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Process Demat
-		for _, dm := range demats {
+		for i, dm := range demats {
+			if isBlankDemat(dm) {
+				logger.LogInfo("[bulk] demat[%d] skipped: blank placeholder row", i)
+				continue
+			}
+			if msg := validateDematRequired(i, dm); msg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, msg)
+				return
+			}
 			logger.LogInfo("[bulk] processing demat: %+v", dm)
 			var existing string
 			if dm.DematAccountNumber != "" {
@@ -562,7 +676,15 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Process Folios
-		for _, f := range folios {
+		for i, f := range folios {
+			if isBlankFolio(f) {
+				logger.LogInfo("[bulk] folio[%d] skipped: blank placeholder row", i)
+				continue
+			}
+			if msg := validateFolioRequired(i, f); msg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, msg)
+				return
+			}
 			logger.LogInfo("[bulk] processing folio: %+v", f)
 			if f.Enriched && f.FolioID != "" {
 				logger.LogInfo("[bulk] folio is enriched with ID, using: %s", f.FolioID)
@@ -648,7 +770,15 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Process Schemes (after AMCs so amc exists)
-		for _, s := range schemes {
+		for i, s := range schemes {
+			if isBlankScheme(s) {
+				logger.LogInfo("[bulk] scheme[%d] skipped: blank placeholder row", i)
+				continue
+			}
+			if msg := validateSchemeRequired(i, s); msg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, msg)
+				return
+			}
 			logger.LogInfo("[bulk] processing scheme: %+v", s)
 			var existing string
 
@@ -914,20 +1044,37 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// Insert transactions with validation and enrichment
-			for _, tr := range txRows {
-				// Validate transaction against enriched data if provided
+			// Insert transactions with strict validation
+			for rowNum, tr := range txRows {
+				// ── Amount validations ───────────────────────────────────────────────
+				if tr.Amount < 0 {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+						"Transaction row %d: amount cannot be negative (%.2f). Use TransactionType to indicate direction (Purchase/Sell).",
+						rowNum+1, tr.Amount))
+					return
+				}
+				if tr.Nav > 0 && tr.Units > 0 {
+					expected := tr.Nav * tr.Units
+					if math.Abs(tr.Amount-expected) > expected*0.01 { // 1% tolerance for rounding
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+							"Transaction row %d: amount (%.2f) must equal NAV (%.4f) × Units (%.4f) = %.2f (difference exceeds 1%% rounding tolerance).",
+							rowNum+1, tr.Amount, tr.Nav, tr.Units, expected))
+						return
+					}
+				}
+
+				// Log enrichment lookups (informational only — resolution happens below)
 				if enrichedScheme, exists := enrichedSchemesByCode[tr.SchemeInternalCode]; exists {
-					logger.LogInfo("[bulk] transaction scheme %s validated against enriched scheme: %s", tr.SchemeInternalCode, enrichedScheme.SchemeName)
+					logger.LogInfo("[bulk] tx row %d: scheme '%s' found in batch as '%s'", rowNum+1, tr.SchemeInternalCode, enrichedScheme.SchemeName)
 				}
 				if tr.FolioNumber != "" {
 					if enrichedFolio, exists := enrichedFoliosByNumber[tr.FolioNumber]; exists {
-						logger.LogInfo("[bulk] transaction folio %s validated against enriched folio for entity: %s", tr.FolioNumber, enrichedFolio.EntityName)
+						logger.LogInfo("[bulk] tx row %d: folio '%s' found in batch for entity '%s'", rowNum+1, tr.FolioNumber, enrichedFolio.EntityName)
 					}
 				}
 				if tr.DematAccNumber != "" {
 					if enrichedDemat, exists := enrichedDematsByNumber[tr.DematAccNumber]; exists {
-						logger.LogInfo("[bulk] transaction demat %s validated against enriched demat for entity: %s", tr.DematAccNumber, enrichedDemat.EntityName)
+						logger.LogInfo("[bulk] tx row %d: demat '%s' found in batch for entity '%s'", rowNum+1, tr.DematAccNumber, enrichedDemat.EntityName)
 					}
 				}
 
@@ -991,6 +1138,29 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					} else {
 						_ = tx.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.DematAccNumber).Scan(&dematID)
 					}
+				}
+
+				// ── Strict cross-reference checks ───────────────────────────────────
+				// scheme_internal_code MUST resolve to a scheme in this batch or in masterscheme
+				if tr.SchemeInternalCode != "" && schemeID == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+						"Transaction row %d: scheme_internal_code '%s' was not found in this batch or in approved schemes. Transactions must reference schemes included in this upload.",
+						rowNum+1, tr.SchemeInternalCode))
+					return
+				}
+				// folio_number MUST resolve when provided
+				if tr.FolioNumber != "" && folioID == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+						"Transaction row %d: folio_number '%s' was not found in this batch or in master folios.",
+						rowNum+1, tr.FolioNumber))
+					return
+				}
+				// demat_account_number MUST resolve when provided
+				if tr.DematAccNumber != "" && dematID == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+						"Transaction row %d: demat_account_number '%s' was not found in this batch or in master demat accounts.",
+						rowNum+1, tr.DematAccNumber))
+					return
 				}
 
 				// Insert transaction with resolved IDs and entity_name

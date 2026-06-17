@@ -87,16 +87,11 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Clean input (trim + lower)
+		// Normalise input (trim + lower) — no approval check needed here;
+		// this is a read-only AMFI staging lookup used during onboarding where
+		// the AMC may not be approved yet.
 		for i, a := range req.AMCs {
 			req.AMCs[i] = strings.ToLower(strings.TrimSpace(a))
-		}
-		amcRows := make([]map[string]interface{}, 0, len(req.AMCs))
-		for _, amc := range req.AMCs {
-			amcRows = append(amcRows, map[string]interface{}{"amc_name": amc, "amc_id": amc})
-		}
-		if !validateOnboardingLookupRows(w, r, amcRows) {
-			return
 		}
 
 		query := `
@@ -104,38 +99,39 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT unnest($1::text[]) AS amc_key
 			),
 			target_amcs AS (
-				SELECT DISTINCT amc_name 
+				SELECT DISTINCT amc_name
 				FROM investment.masteramc m
-				JOIN input_amcs i 
+				JOIN input_amcs i
 					ON LOWER(TRIM(m.amc_name)) = i.amc_key
 					OR LOWER(TRIM(m.amc_id)) = i.amc_key
 				WHERE m.is_deleted = false
 				UNION
 				SELECT DISTINCT s.amc_name
 				FROM investment.amfi_scheme_master_staging s
-				JOIN input_amcs i 
+				JOIN input_amcs i
 					ON LOWER(TRIM(s.amc_name)) = i.amc_key
 			)
-			SELECT 
+			SELECT
 				s.amc_name,
-				s.scheme_name,
-				-- some AMFI staging sources may not have an internal_scheme_code column; return empty string as a fallback
+				COALESCE(s.scheme_nav_name, s.scheme_name) AS scheme_name,
 				'' AS internal_scheme_code,
-				s.isin_div_payout_growth AS isin,
+				COALESCE(s.isin_div_payout_growth, '') AS isin,
 				COALESCE(s.isin_div_reinvestment, '') AS isin_reinvest,
-				CASE 
-					WHEN m.isin IS NOT NULL AND m.is_deleted = false THEN true
+				s.scheme_code,
+				CASE
+					WHEN m.scheme_id IS NOT NULL AND COALESCE(m.is_deleted, false) = false THEN true
 					ELSE false
 				END AS enriched
 			FROM investment.amfi_scheme_master_staging s
-			JOIN target_amcs a 
+			JOIN target_amcs a
 				ON LOWER(TRIM(s.amc_name)) = LOWER(TRIM(a.amc_name))
 			LEFT JOIN investment.masterscheme m
-				ON LOWER(TRIM(s.isin_div_payout_growth)) = LOWER(TRIM(m.isin))
-				AND m.is_deleted = false
-			WHERE s.isin_div_payout_growth IS NOT NULL 
-			  AND s.isin_div_payout_growth <> ''
-			ORDER BY s.amc_name, s.scheme_name;
+				ON (
+					(COALESCE(s.isin_div_payout_growth,'') <> '' AND LOWER(TRIM(s.isin_div_payout_growth)) = LOWER(TRIM(m.isin)))
+					OR m.amfi_scheme_code = s.scheme_code::text
+				)
+				AND COALESCE(m.is_deleted, false) = false
+			ORDER BY s.amc_name, scheme_name;
 		`
 
 		rows, err := pgxPool.Query(ctx, query, req.AMCs)
@@ -147,16 +143,18 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := []map[string]interface{}{}
 		for rows.Next() {
-			var amcName, schemeName, internal_scheme_code, isin, isinReinvest string
+			var amcName, schemeName, internalSchemeCode, isin, isinReinvest string
+			var schemeCode int64
 			var enriched bool
-			_ = rows.Scan(&amcName, &schemeName, &internal_scheme_code, &isin, &isinReinvest, &enriched)
+			_ = rows.Scan(&amcName, &schemeName, &internalSchemeCode, &isin, &isinReinvest, &schemeCode, &enriched)
 			out = append(out, map[string]interface{}{
 				"amc_name":             amcName,
 				"scheme_name":          schemeName,
 				"isin":                 isin,
 				"isin_reinvest":        isinReinvest,
+				"scheme_code":          schemeCode,
 				"enriched":             enriched,
-				"internal_scheme_code": internal_scheme_code,
+				"internal_scheme_code": internalSchemeCode,
 			})
 		}
 
@@ -438,6 +436,66 @@ func GetDematWithDPInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if rows.Err() != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "rows iteration failed: "+rows.Err().Error())
 			return
+		}
+
+		api.RespondWithPayload(w, true, "", out)
+	}
+}
+
+// GetFoliosByEntity returns all existing folios for a given entity (and optional AMC),
+// regardless of which schemes are mapped — any scheme can be added to an existing folio.
+func GetFoliosByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		var req struct {
+			EntityName string `json:"entity_name"`
+			AmcName    string `json:"amc_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.EntityName == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
+			return
+		}
+
+		// Use $2 = '' trick to make amc_name filter optional without fmt
+		query := `
+			SELECT
+				mf.folio_id,
+				mf.folio_number,
+				mf.entity_name,
+				COALESCE(mf.amc_name, '') AS amc_name,
+				COALESCE(mf.status, '') AS status
+			FROM investment.masterfolio mf
+			WHERE COALESCE(mf.is_deleted, false) = false
+			  AND mf.entity_name = $1
+			  AND ($2 = '' OR LOWER(TRIM(mf.amc_name)) = LOWER(TRIM($2)))
+			ORDER BY mf.amc_name, mf.folio_number;
+		`
+
+		rows, err := pgxPool.Query(ctx, query, req.EntityName, req.AmcName)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		out := []map[string]interface{}{}
+		for rows.Next() {
+			var folioID, folioNumber, entityName, amcName, status string
+			if err := rows.Scan(&folioID, &folioNumber, &entityName, &amcName, &status); err != nil {
+				continue
+			}
+			out = append(out, map[string]interface{}{
+				"folio_id":     folioID,
+				"folio_number": folioNumber,
+				"entity_name":  entityName,
+				"amc_name":     amcName,
+				"status":       status,
+			})
 		}
 
 		api.RespondWithPayload(w, true, "", out)

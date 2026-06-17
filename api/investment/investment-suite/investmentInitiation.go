@@ -107,6 +107,29 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		// Block re-initiation if an active (non-rejected) initiation already exists for this proposal+scheme
+		if strings.TrimSpace(req.ProposalID) != "" && strings.TrimSpace(req.SchemeID) != "" {
+			var activeCount int
+			checkErr := pgxPool.QueryRow(ctx, `
+				SELECT COUNT(*) FROM investment.investment_initiation ii
+				JOIN (
+					SELECT DISTINCT ON (initiation_id)
+						initiation_id, processing_status
+					FROM investment.auditactioninitiation
+					ORDER BY initiation_id, requested_at DESC
+				) latest ON latest.initiation_id = ii.initiation_id
+				WHERE ii.proposal_id = $1
+				  AND ii.scheme_id = $2
+				  AND UPPER(latest.processing_status) NOT IN ('REJECTED','CANCELLED','DELETED')
+			`, req.ProposalID, req.SchemeID).Scan(&activeCount)
+			if checkErr == nil && activeCount > 0 {
+				api.RespondWithError(w, http.StatusBadRequest,
+					"An active initiation already exists for this proposal and scheme. Delete the existing initiation before creating a new one.")
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
@@ -1009,18 +1032,19 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN LATERAL (
 				SELECT ans.nav_value, ans.nav_date
 				FROM investment.amfi_nav_staging ans
-				WHERE (
-					(ans.scheme_code::text = s.internal_scheme_code) OR
-					(ans.isin_div_payout_growth = s.isin) OR
-					(ans.scheme_name = s.scheme_name)
-				)
-				ORDER BY ans.nav_date DESC, ans.file_date DESC
+				WHERE ans.nav_date IS NOT NULL
+				  AND (
+				    (COALESCE(s.amfi_scheme_code,'') <> '' AND ans.scheme_code::text = s.amfi_scheme_code)
+				    OR (COALESCE(s.isin,'') <> '' AND (ans.isin_div_payout_growth = s.isin OR ans.isin_div_reinvestment = s.isin))
+				  )
+				ORDER BY ans.nav_date DESC
 				LIMIT 1
 			) nav ON true
 			WHERE UPPER(COALESCE(l.processing_status,'')) = 'APPROVED'
 					AND COALESCE(m.is_deleted, false) = false
 					AND m.initiation_id NOT IN (
-						SELECT initiation_id FROM investment.investment_confirmation 
+						SELECT initiation_id FROM investment.investment_confirmation
+						WHERE COALESCE(is_deleted, false) = false
 					)
 		`
 		args := []interface{}{}
@@ -1073,30 +1097,21 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			navValue, _ := rec["nav"].(float64)
 			if navValue == 0 {
 				// Try to get AMFI scheme code to fetch from MFapi
-				var amfiSchemeCode, internalCode, isin string
+				var amfiSchemeCode string
 
-				// Get scheme_id and all possible identifiers to query for AMFI code
 				schemeID, _ := rec["scheme_id"].(string)
 				if schemeID != "" {
 					err := pgxPool.QueryRow(ctx, `
-						SELECT 
-							COALESCE(amfi_scheme_code, ''),
-							COALESCE(internal_scheme_code, ''),
-							COALESCE(isin, '')
+						SELECT COALESCE(amfi_scheme_code, '')
 						FROM investment.masterscheme
-						WHERE scheme_id = $1 OR internal_scheme_code = $1 OR isin = $1 OR scheme_name = $1
+						WHERE scheme_id = $1
 						LIMIT 1
-					`, schemeID).Scan(&amfiSchemeCode, &internalCode, &isin)
+					`, schemeID).Scan(&amfiSchemeCode)
 
-					// Try multiple codes in order of preference
+					// Only try the numeric AMFI scheme code — MFapi doesn't accept internal codes
 					codesToTry := []string{}
-					if err == nil {
-						if amfiSchemeCode != "" {
-							codesToTry = append(codesToTry, amfiSchemeCode)
-						}
-						if internalCode != "" && internalCode != amfiSchemeCode {
-							codesToTry = append(codesToTry, internalCode)
-						}
+					if err == nil && amfiSchemeCode != "" {
+						codesToTry = append(codesToTry, amfiSchemeCode)
 					}
 
 					// Try each code until we get a valid NAV
@@ -1245,12 +1260,12 @@ func fetchInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []strin
 		LEFT JOIN LATERAL (
 			SELECT ans.nav_value, ans.nav_date
 			FROM investment.amfi_nav_staging ans
-			WHERE (
-				(ans.scheme_code::text = s.internal_scheme_code) OR
-				(ans.isin_div_payout_growth = s.isin) OR
-				(ans.scheme_name = s.scheme_name)
-			)
-			ORDER BY ans.nav_date DESC, ans.file_date DESC
+			WHERE ans.nav_date IS NOT NULL
+			  AND (
+			    (COALESCE(s.amfi_scheme_code,'') <> '' AND ans.scheme_code::text = s.amfi_scheme_code)
+			    OR (COALESCE(s.isin,'') <> '' AND (ans.isin_div_payout_growth = s.isin OR ans.isin_div_reinvestment = s.isin))
+			  )
+			ORDER BY ans.nav_date DESC
 			LIMIT 1
 		) nav ON true
 	`
@@ -1408,4 +1423,31 @@ func defaultIfEmpty(val, defaultVal string) string {
 		return defaultVal
 	}
 	return val
+}
+
+// GetInitiationDetail returns full detail for a single investment initiation.
+func GetInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			InitiationID string `json:"initiation_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+		if strings.TrimSpace(req.InitiationID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "initiation_id is required")
+			return
+		}
+		rows, err := fetchInitiationRows(r.Context(), pgxPool, []string{req.InitiationID})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		if len(rows) == 0 {
+			api.RespondWithError(w, http.StatusNotFound, "initiation not found")
+			return
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"data": rows[0]})
+	}
 }

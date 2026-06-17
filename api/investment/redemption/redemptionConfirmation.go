@@ -2143,3 +2143,30 @@ func ConfirmRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", result)
 	}
 }
+
+// GetRedemptionConfirmationDetail returns full detail for a single redemption confirmation.
+func GetRedemptionConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			RedemptionConfirmID string `json:"redemption_confirm_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+		if strings.TrimSpace(req.RedemptionConfirmID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "redemption_confirm_id is required")
+			return
+		}
+		rows, err := fetchRedemptionConfirmationRows(r.Context(), pgxPool, []string{req.RedemptionConfirmID})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		if len(rows) == 0 {
+			api.RespondWithError(w, http.StatusNotFound, "redemption confirmation not found")
+			return
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"data": rows[0]})
+	}
+}

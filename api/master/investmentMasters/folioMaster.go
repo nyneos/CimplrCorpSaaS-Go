@@ -200,7 +200,46 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			approvedSchemes, _ := ctx.Value("ApprovedSchemes").([]map[string]string)
 
 			// Validate entities, AMCs, and bank accounts from uploaded data
-			for _, r := range dataRows {
+			for idx, r := range dataRows {
+				rowNum := idx + 2 // 1-indexed; +1 for header row
+
+				// Required field checks — mirror CreateFolioSingle validation
+				for _, rf := range []struct{ col, label string }{
+					{"entity_name", "entity_name"},
+					{"amc_name", "amc_name"},
+					{"folio_number", "folio_number"},
+					{"first_holder_name", "first_holder_name"},
+					{"default_subscription_account", "default_subscription_account"},
+					{"default_redemption_account", "default_redemption_account"},
+				} {
+					val := ""
+					if pos, ok := headerPos[rf.col]; ok && pos < len(r) {
+						val = strings.TrimSpace(r[pos])
+					}
+					if val == "" {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: %s is required", rowNum, rf.label))
+						return
+					}
+				}
+
+				// folio_number must be numeric only
+				if pos, ok := headerPos["folio_number"]; ok && pos < len(r) {
+					folioNum := strings.TrimSpace(r[pos])
+					if folioNum != "" && !isAllDigits(folioNum) {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: folio_number must contain digits only, got '%s'", rowNum, folioNum))
+						return
+					}
+				}
+
+				// first_holder_name must be letters and spaces only
+				if pos, ok := headerPos["first_holder_name"]; ok && pos < len(r) {
+					name := strings.TrimSpace(r[pos])
+					if name != "" && !isAlphaSpace(name) {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: first_holder_name must contain only letters and spaces, got '%s'", rowNum, name))
+						return
+					}
+				}
+
 				// Validate entity
 				entityName := strings.TrimSpace(r[headerPos["entity_name"]])
 				entityFound := false
@@ -211,7 +250,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !entityFound {
-					api.RespondWithError(w, 403, "Access denied. Entity '"+entityName+"' not in your accessible entities")
+					api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Row %d: Entity '%s' not in your accessible entities", rowNum, entityName))
 					return
 				}
 
@@ -225,7 +264,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !amcFound {
-					api.RespondWithError(w, 400, constants.ErrAMCNotFoundOrNotApprovedActive+amcName)
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: %s", rowNum, constants.ErrAMCNotFoundOrNotApprovedActive+amcName))
 					return
 				}
 
@@ -239,7 +278,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !subAcctFound {
-					api.RespondWithError(w, 400, "Subscription account not found or not approved/active: "+subAcct)
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Subscription account '%s' not found or not approved/active", rowNum, subAcct))
 					return
 				}
 
@@ -253,7 +292,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !redAcctFound {
-					api.RespondWithError(w, 400, "Redemption account not found or not approved/active: "+redAcct)
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Redemption account '%s' not found or not approved/active", rowNum, redAcct))
 					return
 				}
 			}
@@ -735,11 +774,15 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		// Get user's accessible entities from context
-		approvedEntities := api.GetEntityNamesFromCtx(ctx)
-		if len(approvedEntities) == 0 {
+		// Get user's accessible entities from context (trim to handle trailing spaces in DB)
+		rawEntities := api.GetEntityNamesFromCtx(ctx)
+		if len(rawEntities) == 0 {
 			api.RespondWithError(w, http.StatusForbidden, "No accessible entities found")
 			return
+		}
+		approvedEntities := make([]string, len(rawEntities))
+		for i, e := range rawEntities {
+			approvedEntities[i] = strings.TrimSpace(e)
 		}
 
 		// Get approved AMCs from context
@@ -751,12 +794,13 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Get approved bank accounts from context
+		// Get approved bank account numbers from context
+		// masterfolio stores account_number (not account_id) in default_subscription/redemption_account
 		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
-		accountIdentifiers := make([]string, 0, len(approvedBankAccounts))
+		accountNumbers := make([]string, 0, len(approvedBankAccounts))
 		for _, acc := range approvedBankAccounts {
 			if acc["account_number"] != "" {
-				accountIdentifiers = append(accountIdentifiers, acc["account_number"])
+				accountNumbers = append(accountNumbers, acc["account_number"])
 			}
 		}
 
@@ -779,17 +823,21 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.default_redemption_account
 			FROM investment.masterfolio m
 			JOIN latest l ON l.folio_id = m.folio_id
-			WHERE 
+			WHERE
 				UPPER(l.processing_status) = 'APPROVED'
 				AND UPPER(m.status) = 'ACTIVE'
 				AND COALESCE(m.is_deleted,false)=false
-				AND m.entity_name = ANY($1)
+				AND TRIM(m.entity_name) = ANY($1)
 				AND m.amc_name = ANY($2)
-				AND (m.default_subscription_account = ANY($3) OR m.default_redemption_account = ANY($3))
+				AND (
+					array_length($3::text[], 1) IS NULL
+					OR m.default_subscription_account = ANY($3)
+					OR m.default_redemption_account = ANY($3)
+				)
 			ORDER BY m.entity_name, m.folio_number;
 		`
 
-		rows, err := pgxPool.Query(ctx, q, approvedEntities, amcNames, accountIdentifiers)
+		rows, err := pgxPool.Query(ctx, q, approvedEntities, amcNames, accountNumbers)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "query")
 			api.RespondWithError(w, status, msg)
