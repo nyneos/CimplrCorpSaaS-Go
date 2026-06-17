@@ -1016,7 +1016,8 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if scheme["scheme_id"] == refTrimmed ||
 						strings.EqualFold(scheme["scheme_name"], refTrimmed) ||
 						scheme["isin"] == refTrimmed ||
-						scheme["internal_scheme_code"] == refTrimmed {
+						scheme["internal_scheme_code"] == refTrimmed ||
+						scheme["amfi_scheme_code"] == refTrimmed {
 						mappingRows = append(mappingRows, []interface{}{folioID, scheme["scheme_id"], "Active", nil})
 						break
 					}
