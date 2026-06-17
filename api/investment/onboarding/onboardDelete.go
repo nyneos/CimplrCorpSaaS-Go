@@ -77,7 +77,7 @@ func DeleteOnboardBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError,
-					fmt.Sprintf("delete %s failed: %s", s.auditTable, err.Error()))
+					fmt.Sprintf(constants.ErrFailedToDeleteItem, s.auditTable, err.Error()))
 				return
 			}
 			deleted[s.auditTable] = tag.RowsAffected()
@@ -128,7 +128,7 @@ func DeleteOnboardBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tag, err := tx.Exec(ctx, q, req.BatchID)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError,
-					fmt.Sprintf("delete %s failed: %s", step.table, err.Error()))
+					fmt.Sprintf(constants.ErrFailedToDeleteItem, step.table, err.Error()))
 				return
 			}
 			deleted[step.key] = tag.RowsAffected()
@@ -148,7 +148,7 @@ func DeleteOnboardBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError,
-					fmt.Sprintf("delete %s failed: %s", tbl, err.Error()))
+					fmt.Sprintf(constants.ErrFailedToDeleteItem, tbl, err.Error()))
 				return
 			}
 			deleted[tbl] = tag.RowsAffected()

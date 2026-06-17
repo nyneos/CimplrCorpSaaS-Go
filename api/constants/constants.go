@@ -535,6 +535,9 @@ const (
 	ErrInvalidCrossStageModule            = "module %q is not a cross-stage FX exposure module"
 	ErrInvalidCrossStageForwardModule     = "module %q is not a cross-stage FX forward module"
 	ErrFailedToUploadFileMetadata         = "file upload metadata failed: %w"
+	ErrFailedToDeleteItem                 = "delete %s failed: %s"
+	AMCName                               = "s.amc_name"
+	SchemeName                            = "s.scheme_name"
 )
 
 var (

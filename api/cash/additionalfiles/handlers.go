@@ -305,7 +305,7 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		if auditEnabled(cfg) {
 			performedBy := requestedByOrFallback(r.Context(), req.UserID)
 			requestedIP := api.ClientIPFromRequest(r)
-			if err := recordDownloadAudit(r.Context(), pool, cfg, parentID, *record, performedBy, requestedIP, req.Preview); err != nil {
+			if err := recordDownloadAudit(r.Context(), pool, cfg, parentID, *record, downloadActorInfo{RequestedBy: performedBy, RequestedIP: requestedIP, IsPreview: req.Preview}); err != nil {
 				if !isUndefinedTableError(err) {
 					api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 					return
@@ -437,7 +437,7 @@ func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc
 				continue
 			}
 			if auditEnabled(cfg) {
-				if auditErr := recordDownloadAudit(r.Context(), pool, cfg, parentID, record, performedBy, requestedIP, false); auditErr != nil {
+				if auditErr := recordDownloadAudit(r.Context(), pool, cfg, parentID, record, downloadActorInfo{RequestedBy: performedBy, RequestedIP: requestedIP}); auditErr != nil {
 					if isUndefinedTableError(auditErr) {
 						files = append(files, map[string]string{
 							"file_id":      record.FileID,
@@ -1243,12 +1243,12 @@ func recordCreateAuditTx(ctx context.Context, exec AuditExecutor, cfg Config, pa
 	})
 }
 
-func recordDownloadAudit(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, requestedIP string, isPreview bool) error {
+func recordDownloadAudit(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, file FileRecord, actor downloadActorInfo) error {
 	requestedAt := time.Now().UTC()
-	
+
 	actionType := fileAuditDownloadAction
 	eventType := "ADDITIONAL_FILE_DOWNLOAD"
-	if isPreview {
+	if actor.IsPreview {
 		actionType = "PREVIEW"
 		eventType = "ADDITIONAL_FILE_PREVIEW"
 	}
@@ -1256,7 +1256,7 @@ func recordDownloadAudit(ctx context.Context, exec AuditExecutor, cfg Config, pa
 	reasonPayload := map[string]interface{}{
 		"event_type":    eventType,
 		"file_name":     strings.TrimSpace(file.StoredFileName),
-		"downloaded_by": requestedBy,
+		"downloaded_by": actor.RequestedBy,
 		"downloaded_at": requestedAt.UTC().Format(time.RFC3339),
 	}
 	if fileID := strings.TrimSpace(file.FileID); fileID != "" {
@@ -1274,9 +1274,9 @@ func recordDownloadAudit(ctx context.Context, exec AuditExecutor, cfg Config, pa
 		FileID:           file.FileID,
 		ActionType:       actionType,
 		ProcessingStatus: fileAuditCompletedStatus,
-		RequestedBy:      requestedBy,
+		RequestedBy:      actor.RequestedBy,
 		RequestedAt:      &requestedAt,
-		RequestedIP:      requestedIP,
+		RequestedIP:      actor.RequestedIP,
 		Reason:           string(reasonBytes),
 	})
 }
@@ -1620,6 +1620,12 @@ type auditActorInfo struct {
 	RequestedBy string
 	RequestedIP string
 	Reason      string
+}
+
+type downloadActorInfo struct {
+	RequestedBy string
+	RequestedIP string
+	IsPreview   bool
 }
 
 type deleteAuditDecisionParams struct {

@@ -16,7 +16,7 @@ type TxFilter struct {
 	EntityName string `json:"entity_name"`
 	AmcName    string `json:"amc_name"`
 	SchemeName string `json:"scheme_name"`
-	TxType     string `json:"tx_type"`   // "Investment" | "Redemption" | "Onboard" | ""
+	TxType     string `json:"tx_type"` // "Investment" | "Redemption" | "Onboard" | ""
 	Status     string `json:"status"`
 	DateFrom   string `json:"date_from"` // YYYY-MM-DD
 	DateTo     string `json:"date_to"`   // YYYY-MM-DD
@@ -35,22 +35,22 @@ type PortfolioTxRow struct {
 	ProcessingStatus string  `json:"processing_status"`
 
 	// Detail columns shown in the expandable row
-	AmcName    string `json:"amc_name"`
-	SchemeCode string `json:"scheme_code"` // internal_scheme_code
-	ISIN       string `json:"isin"`
-	FolioNumber      string  `json:"folio_number"`
-	DematNumber      string  `json:"demat_number"`
-	TransactionDate  string  `json:"transaction_date"`
-	TransactionType  string  `json:"transaction_type"` // Purchase/Sell for Onboard
-	Units            float64 `json:"units"`
-	Nav              float64 `json:"nav"`
-	NavDate          string  `json:"nav_date"`
-	NetAmount        float64 `json:"net_amount"`
-	StampDuty        float64 `json:"stamp_duty"`
-	ExitLoad         float64 `json:"exit_load"`
-	TDS         float64 `json:"tds"`
-	ConfirmedAt string  `json:"confirmed_at"`
-	Source           string  `json:"source"` // how it was created
+	AmcName         string  `json:"amc_name"`
+	SchemeCode      string  `json:"scheme_code"` // internal_scheme_code
+	ISIN            string  `json:"isin"`
+	FolioNumber     string  `json:"folio_number"`
+	DematNumber     string  `json:"demat_number"`
+	TransactionDate string  `json:"transaction_date"`
+	TransactionType string  `json:"transaction_type"` // Purchase/Sell for Onboard
+	Units           float64 `json:"units"`
+	Nav             float64 `json:"nav"`
+	NavDate         string  `json:"nav_date"`
+	NetAmount       float64 `json:"net_amount"`
+	StampDuty       float64 `json:"stamp_duty"`
+	ExitLoad        float64 `json:"exit_load"`
+	TDS             float64 `json:"tds"`
+	ConfirmedAt     string  `json:"confirmed_at"`
+	Source          string  `json:"source"` // how it was created
 
 	// IDs
 	InitiationID   string `json:"initiation_id"`
@@ -214,7 +214,7 @@ func GetPortfolioTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) la ON true
 			WHERE COALESCE(c.is_deleted,false)=false%s`,
 			schemeJoin, folioJoin, dematJoin,
-			buildWhere("i.entity_name", "s.amc_name", "s.scheme_name", "c.status", "i.transaction_date", false))
+			buildWhere("i.entity_name", constants.AMCName, constants.SchemeName, "c.status", "i.transaction_date", false))
 
 		redemptSQL := fmt.Sprintf(`
 			SELECT
@@ -256,7 +256,7 @@ func GetPortfolioTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) la ON true
 			WHERE COALESCE(c.is_deleted,false)=false%s`,
 			schemeJoin, folioJoin, dematJoin,
-			buildWhere("i.entity_name", "s.amc_name", "s.scheme_name", "c.status", "i.requested_date", false))
+			buildWhere("i.entity_name", constants.AMCName, constants.SchemeName, "c.status", "i.requested_date", false))
 
 		onboardSchemeJoin := `LEFT JOIN investment.masterscheme s ON (s.scheme_id::text = ot.scheme_id OR s.internal_scheme_code = ot.scheme_internal_code)`
 		onboardFolioJoin := `LEFT JOIN investment.masterfolio mf ON mf.folio_id = ot.folio_id`
@@ -299,7 +299,7 @@ func GetPortfolioTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE 1=1%s`,
 			onboardSchemeJoin, onboardFolioJoin, onboardDematJoin,
 			// skipStatus=true because onboard rows have fixed 'ONBOARDED' status
-			buildWhere("COALESCE(ot.entity_name, mf.entity_name, md.entity_name)", "s.amc_name", "s.scheme_name", "ob.status", "ot.transaction_date", ps.statusIdx > 0))
+			buildWhere("COALESCE(ot.entity_name, mf.entity_name, md.entity_name)", constants.AMCName, constants.SchemeName, "ob.status", "ot.transaction_date", ps.statusIdx > 0))
 
 		var parts []string
 		txLower := strings.ToLower(f.TxType)
