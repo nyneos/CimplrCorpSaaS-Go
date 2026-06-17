@@ -1090,7 +1090,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					// If not found, query DB
 					if entityName == "" {
-						_ = tx.QueryRow(ctx, `SELECT entity_name FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false`, tr.FolioNumber).Scan(&entityName)
+						_ = tx.QueryRow(ctx, `SELECT entity_name FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.FolioNumber).Scan(&entityName)
 					}
 				} else if tr.DematAccNumber != "" {
 					// Try from demats map first
@@ -1102,7 +1102,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					// If not found, query DB
 					if entityName == "" {
-						_ = tx.QueryRow(ctx, `SELECT entity_name FROM investment.masterdemataccount WHERE demat_account_number=$1 AND COALESCE(is_deleted,false)=false`, tr.DematAccNumber).Scan(&entityName)
+						_ = tx.QueryRow(ctx, `SELECT entity_name FROM investment.masterdemataccount WHERE demat_account_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.DematAccNumber).Scan(&entityName)
 					}
 				}
 

@@ -162,6 +162,7 @@ func NewInvestmentServer(pool *pgxpool.Pool, db *sql.DB, port string) *http.Serv
 	mux.Handle("/investment/portfolio/get", mfMid(http.HandlerFunc(redemption.GetPortfolioWithTransactions(pool))))
 	mux.Handle("/investment/portfolio/refresh", mfMid(http.HandlerFunc(portfolio.RefreshPortfolioSnapshots(pool))))
 	mux.Handle("/investment/portfolio/transactions", mfMid(http.HandlerFunc(portfolio.GetPortfolioTransactions(pool))))
+	mux.Handle("/investment/portfolio/holdings", mfMid(http.HandlerFunc(portfolio.GetPortfolioHoldings(pool))))
 	mux.Handle("/investment/onboard/batch/delete-transaction", mfMid(http.HandlerFunc(onboard.DeleteOnboardTransaction(pool))))
 	mux.Handle("/investment/redemption/calculate-fifo", mfMid(http.HandlerFunc(redemption.CalculateRedemptionFIFO(pool))))
 

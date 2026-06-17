@@ -92,6 +92,54 @@ WITH scheme_resolved AS (
     LEFT JOIN investment.masterscheme ms ON ms.scheme_id = fsm.scheme_id
     LEFT JOIN investment.masterscheme ms2 ON (ms2.scheme_id::text = ot.scheme_id OR ms2.internal_scheme_code = ot.scheme_internal_code)
     WHERE ($1::text[] IS NULL OR COALESCE(mf.entity_name, md.entity_name, ot.entity_name) = ANY($1::text[]))
+    
+    UNION ALL
+    
+    SELECT
+        i.transaction_date,
+        'Purchase' AS transaction_type,
+        c.net_amount AS amount,
+        c.allotted_units AS units,
+        c.nav,
+        i.entity_name,
+        mf.folio_number,
+        md.demat_account_number AS demat_acc_number,
+        i.folio_id,
+        i.demat_id,
+        COALESCE(s.scheme_id::text, i.scheme_id) AS scheme_id,
+        COALESCE(s.scheme_name, i.scheme_id) AS scheme_name,
+        s.isin
+    FROM investment.investment_confirmation c
+    JOIN investment.investment_initiation i ON i.initiation_id = c.initiation_id
+    LEFT JOIN investment.masterfolio mf ON (mf.folio_id::text = i.folio_id OR mf.folio_number = i.folio_id)
+    LEFT JOIN investment.masterdemataccount md ON (md.demat_id::text = i.demat_id OR md.demat_account_number = i.demat_id)
+    LEFT JOIN investment.masterscheme s ON (s.scheme_id::text = i.scheme_id OR s.internal_scheme_code = i.scheme_id OR s.isin = i.scheme_id OR s.scheme_name = i.scheme_id)
+    WHERE c.status = 'CONFIRMED' AND COALESCE(c.is_deleted, false) = false
+      AND ($1::text[] IS NULL OR i.entity_name = ANY($1::text[]))
+      
+    UNION ALL
+    
+    SELECT
+        i.requested_date AS transaction_date,
+        'Sell' AS transaction_type,
+        c.gross_proceeds AS amount,
+        c.actual_units AS units,
+        c.actual_nav AS nav,
+        i.entity_name,
+        mf.folio_number,
+        md.demat_account_number AS demat_acc_number,
+        i.folio_id,
+        i.demat_id,
+        COALESCE(s.scheme_id::text, i.scheme_id) AS scheme_id,
+        COALESCE(s.scheme_name, i.scheme_id) AS scheme_name,
+        s.isin
+    FROM investment.redemption_confirmation c
+    JOIN investment.redemption_initiation i ON i.redemption_id = c.redemption_id
+    LEFT JOIN investment.masterfolio mf ON (mf.folio_id::text = i.folio_id OR mf.folio_number = i.folio_id)
+    LEFT JOIN investment.masterdemataccount md ON (md.demat_id::text = i.demat_id OR md.demat_account_number = i.demat_id)
+    LEFT JOIN investment.masterscheme s ON (s.scheme_id::text = i.scheme_id OR s.internal_scheme_code = i.scheme_id OR s.isin = i.scheme_id OR s.scheme_name = i.scheme_id)
+    WHERE c.status = 'CONFIRMED' AND COALESCE(c.is_deleted, false) = false
+      AND ($1::text[] IS NULL OR i.entity_name = ANY($1::text[]))
 ),
 transaction_summary AS (
     SELECT

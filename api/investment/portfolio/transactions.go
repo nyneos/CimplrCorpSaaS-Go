@@ -265,7 +265,7 @@ func GetPortfolioTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		onboardSQL := fmt.Sprintf(`
 			SELECT
 				'Onboard'::text                                                               AS tx_type,
-				COALESCE(ot.entity_name,'')                                                   AS entity_name,
+				COALESCE(ot.entity_name, mf.entity_name, md.entity_name, '')                  AS entity_name,
 				COALESCE(s.scheme_name,ot.scheme_internal_code,'')                            AS scheme_name,
 				COALESCE(s.amfi_scheme_code,'')                                               AS amfi_scheme_code,
 				COALESCE(ot.amount,0)::numeric                                                AS amount,
@@ -299,7 +299,7 @@ func GetPortfolioTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE 1=1%s`,
 			onboardSchemeJoin, onboardFolioJoin, onboardDematJoin,
 			// skipStatus=true because onboard rows have fixed 'ONBOARDED' status
-			buildWhere("ot.entity_name", "s.amc_name", "s.scheme_name", "ob.status", "ot.transaction_date", ps.statusIdx > 0))
+			buildWhere("COALESCE(ot.entity_name, mf.entity_name, md.entity_name)", "s.amc_name", "s.scheme_name", "ob.status", "ot.transaction_date", ps.statusIdx > 0))
 
 		var parts []string
 		txLower := strings.ToLower(f.TxType)
