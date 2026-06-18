@@ -412,10 +412,10 @@ var nonTxnKeywords = []string{
 	"please do not share", "computer generated", "does not require",
 	"power of attorney",
 
-	// Balance summary rows
+	// Balance summary rows (use longer phrases — bare "avl" false-matches narrations like "HEATING-SAVLI")
 	"closing balance", "opening balance",
 	"new balance", "new val",
-	"avl balance", "available balance", "avl", "avil",
+	"avl balance", "available balance",
 
 	// Page / statement totals (skipped as they are summation rows, not transactions)
 	"page total", "statement total", "grand total",
@@ -423,7 +423,7 @@ var nonTxnKeywords = []string{
 	"cumulative total", "cumulative totals",
 
 	// Statement summary section (SBI / UBI / other banks)
-	"statement summary", "brought forward",
+	"statement summary",
 
 	// SBI-specific
 	"page no.", "page no ", "powappsrv4",
@@ -446,6 +446,21 @@ var nonTxnKeywords = []string{
 	"miv/st/bank", "banking &financial services",
 }
 
+// nonTxnKeywordMatches returns true when kw appears in cell as a phrase, not a
+// substring inside unrelated words (e.g. "avl" inside "HEATING-SAVLI").
+func nonTxnKeywordMatches(cell, kw string) bool {
+	lc := strings.ToLower(strings.TrimSpace(cell))
+	if lc == "" {
+		return false
+	}
+	if len(kw) <= 4 {
+		pattern := `(?i)(?:^|[^a-z0-9])` + regexp.QuoteMeta(kw) + `(?:[^a-z0-9]|$)`
+		matched, _ := regexp.MatchString(pattern, lc)
+		return matched
+	}
+	return strings.Contains(lc, kw)
+}
+
 // IsNonTransactionRow checks whether any of the given candidate cell values
 // (lower-cased, trimmed) contain a non-transaction keyword. This covers footer,
 // summary, informational, and page-break rows across all bank formats.
@@ -456,7 +471,7 @@ func IsNonTransactionRow(candidateCells ...string) bool {
 			continue
 		}
 		for _, kw := range nonTxnKeywords {
-			if strings.Contains(lc, kw) {
+			if nonTxnKeywordMatches(lc, kw) {
 				return true
 			}
 		}
@@ -625,6 +640,40 @@ func MergeMultiLineDescriptions(rows [][]string, dateColIdx, descColIdx int) [][
 		}
 	}
 	return result
+}
+
+// scanOpeningBalanceFromRows finds labelled opening balance in statement header/meta rows
+// (above or including the transaction header). Mirrors V2 / extractOpeningBalanceFromCSV.
+func scanOpeningBalanceFromRows(rows [][]string) *float64 {
+	labels := []string{
+		"openingbalance", "openbal", "op.bal", "op bal",
+		"openingavailable", "openingavailablebalance", "openingledger",
+		"openingledgerbalance", "ledgerbalance",
+	}
+	replacer := strings.NewReplacer(" ", "", "\t", "", ".", "")
+	for _, row := range rows {
+		for i, cell := range row {
+			norm := strings.ToLower(replacer.Replace(cell))
+			for _, lbl := range labels {
+				if !strings.Contains(norm, lbl) {
+					continue
+				}
+				for j := i + 1; j < len(row); j++ {
+					if val, err := parseAmount(cleanAmount(row[j])); err == nil {
+						v := val
+						return &v
+					}
+				}
+				if idx := strings.Index(cell, ":"); idx >= 0 {
+					if val, err := parseAmount(cleanAmount(cell[idx+1:])); err == nil {
+						v := val
+						return &v
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // IsStatementOpeningCarryRow identifies narration that marks opening/closing carry-over

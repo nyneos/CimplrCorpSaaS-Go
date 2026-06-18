@@ -100,7 +100,22 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 		bankIDs := scopeValues(scope.Banks, "bank_id")
 		currencyCodes := scopeValues(scope.Currencies, "currency_code")
 		rows, err := pool.Query(ctx, `
-										WITH prioritized_audit AS (
+										WITH scoped_statements AS (
+											SELECT s.bank_statement_id, e.entity_name, s.account_number, s.statement_period_start, s.statement_period_end, s.opening_balance, s.closing_balance, s.uploaded_at,
+														COALESCE(mb.bank_name, '') AS bank_name,
+														mba.account_nickname AS account_nickname,
+														s.upload_s3_key
+											FROM cimplrcorpsaas.bank_statements s
+											JOIN public.masterentitycash e ON s.entity_id = e.entity_id
+											LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.is_deleted = false
+											LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+											WHERE s.entity_id = ANY($1)
+											  AND (cardinality($2::text[]) = 0 OR s.account_number = ANY($2::text[]))
+											  AND (cardinality($3::text[]) = 0 OR mba.bank_id = ANY($3::text[]))
+											  AND (cardinality($4::text[]) = 0 OR mba.currency = ANY($4::text[]))
+											  AND COALESCE(s.is_deleted, false) = false
+										),
+										prioritized_audit AS (
 											SELECT a.*,
 												ROW_NUMBER() OVER(PARTITION BY a.bankstatementid ORDER BY
 													CASE WHEN a.actiontype = 'DELETE' AND a.processing_status = 'PENDING_DELETE_APPROVAL' THEN 1
@@ -111,27 +126,20 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 													a.action_id DESC
 												) as rn
 											FROM cimplrcorpsaas.auditactionbankstatement a
+											JOIN scoped_statements ss ON a.bankstatementid = ss.bank_statement_id
 											WHERE COALESCE(a.actiontype, '') NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 										),
 										latest_audit AS (
 											SELECT * FROM prioritized_audit WHERE rn = 1
 										)
-										SELECT s.bank_statement_id, e.entity_name, s.account_number, s.statement_period_start, s.statement_period_end, s.opening_balance, s.closing_balance, s.uploaded_at,
+										SELECT ss.bank_statement_id, ss.entity_name, ss.account_number, ss.statement_period_start, ss.statement_period_end, ss.opening_balance, ss.closing_balance, ss.uploaded_at,
 													 la.actiontype, la.processing_status, la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason,
-														COALESCE(mb.bank_name, '') AS bank_name,
-														mba.account_nickname AS account_nickname,
-														s.upload_s3_key
-										FROM cimplrcorpsaas.bank_statements s
-										JOIN public.masterentitycash e ON s.entity_id = e.entity_id
-										LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.is_deleted = false
-										LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-										LEFT JOIN latest_audit la ON la.bankstatementid = s.bank_statement_id
-										WHERE s.entity_id = ANY($1)
-										  AND (cardinality($2::text[]) = 0 OR s.account_number = ANY($2::text[]))
-										  AND (cardinality($3::text[]) = 0 OR mba.bank_id = ANY($3::text[]))
-										  AND (cardinality($4::text[]) = 0 OR mba.currency = ANY($4::text[]))
-										  AND COALESCE(s.is_deleted, false) = false
-										ORDER BY s.uploaded_at DESC
+														ss.bank_name,
+														ss.account_nickname,
+														ss.upload_s3_key
+										FROM scoped_statements ss
+										LEFT JOIN latest_audit la ON la.bankstatementid = ss.bank_statement_id
+										ORDER BY GREATEST(COALESCE(la.requested_at, ss.uploaded_at), COALESCE(la.checker_at, ss.uploaded_at)) DESC
 						`, entityIDs, accountNumbers, bankIDs, currencyCodes)
 		if err != nil {
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
@@ -227,7 +235,23 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 				t.description,
 				t.withdrawal_amount,
 				t.deposit_amount,
-				t.balance,
+				-- Use stored balance when non-zero; otherwise compute running balance
+				-- from opening_balance + cumulative (deposits - withdrawals) ordered
+				-- by value_date. This fixes statements committed before the running-
+				-- balance write was added to CommitHandler.
+				CASE
+					WHEN COALESCE(t.balance, 0) <> 0 THEN t.balance
+					ELSE ROUND(
+						COALESCE(s.opening_balance, 0)
+						+ SUM(COALESCE(t.deposit_amount, 0) - COALESCE(t.withdrawal_amount, 0))
+							OVER (
+								PARTITION BY t.bank_statement_id
+								ORDER BY t.value_date, t.transaction_id
+								ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+							),
+						2
+					)
+				END AS balance,
 				c.category_name,
 				t.category_id,
 				COALESCE(t.misclassified_flag, false)            AS misclassified_flag,
@@ -274,7 +298,7 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 			  AND (cardinality($3::text[]) = 0 OR s.account_number = ANY($3::text[]))
 			  AND (cardinality($4::text[]) = 0 OR mba.bank_id = ANY($4::text[]))
 			  AND (cardinality($5::text[]) = 0 OR mba.currency = ANY($5::text[]))
-			ORDER BY t.value_date
+			ORDER BY t.value_date, t.transaction_id
 		`, body.BankStatementID, entityIDs, accountNumbers, bankIDs, currencyCodes)
 
 		if err != nil {
@@ -287,28 +311,28 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 
 		for rows.Next() {
 			var (
-				tid                  int64
-				entityName           string
-				tranID               sql.NullString
-				desc                 string
-				category             sql.NullString
-				categoryID           sql.NullString
-				vdate                time.Time
-				tdate                time.Time
-				withdrawal           sql.NullFloat64
-				deposit              sql.NullFloat64
-				balance              sql.NullFloat64
-				misclassified        bool
-				narrationClean       string
-				narrationRef         string
-				paymentChannel       string
-				confidenceScore      sql.NullFloat64
-				classificationStep   string
-				classificationBasis  string
-				aiReasoning          string
-				reviewStatus         string
-				suggestedCatID       string
-				suggestedCatName     string
+				tid                 int64
+				entityName          string
+				tranID              sql.NullString
+				desc                string
+				category            sql.NullString
+				categoryID          sql.NullString
+				vdate               time.Time
+				tdate               time.Time
+				withdrawal          sql.NullFloat64
+				deposit             sql.NullFloat64
+				balance             sql.NullFloat64
+				misclassified       bool
+				narrationClean      string
+				narrationRef        string
+				paymentChannel      string
+				confidenceScore     sql.NullFloat64
+				classificationStep  string
+				classificationBasis string
+				aiReasoning         string
+				reviewStatus        string
+				suggestedCatID      string
+				suggestedCatName    string
 			)
 
 			if err := rows.Scan(
@@ -373,18 +397,23 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 				"description":        desc,
 				"withdrawal_amount":  withdrawal.Float64,
 				"deposit_amount":     deposit.Float64,
-				"balance":            balance.Float64,
+				"balance": func() interface{} {
+					if balance.Valid {
+						return balance.Float64
+					}
+					return nil
+				}(),
 				"category_name":      categoryName,
 				"category_id":        categoryID.String,
 				"misclassified_flag": misclassified,
 				// Smart categorization fields
-				"narration_clean":       narrationClean,
-				"narration_ref":         narrationRef,
-				"payment_channel":       paymentChannel,
-				"confidence_score":      confScore,
-				"classification_step":   classificationStep,
-				"classification_basis":  classificationBasis,
-				"ai_reasoning":          aiReasoning,
+				"narration_clean":      narrationClean,
+				"narration_ref":        narrationRef,
+				"payment_channel":      paymentChannel,
+				"confidence_score":     confScore,
+				"classification_step":  classificationStep,
+				"classification_basis": classificationBasis,
+				"ai_reasoning":         aiReasoning,
 				// Review / status fields
 				"categorization_status": categorizationStatus,
 				"review_suggested":      reviewSuggested,

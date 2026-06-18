@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -82,6 +83,10 @@ func bankCodeFromName(ctx context.Context, name string) (string, bool) {
 func getUserFriendlyPenaltyError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 
 	// Unwrap pgconn.PgError first â€” most specific handler

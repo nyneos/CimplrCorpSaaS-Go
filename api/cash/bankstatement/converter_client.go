@@ -11,13 +11,13 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
+	"CimplrCorpSaas/internal/bindref"
 )
 
 // convertSvcResponse mirrors the JSON returned by the conversion service.
@@ -59,7 +59,7 @@ func callConvertXLSX(ctx context.Context, docBytes []byte, filename, password st
 func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, password, path string) ([]byte, error) {
 	target := r0() + path
 
-	tok := strings.TrimSpace(os.Getenv("CONVERT_SVC_KEY"))
+	tok := strings.TrimSpace(bindref.BrE1())
 	tokMasked := ""
 	if len(tok) >= 6 {
 		tokMasked = tok[:6] + "***"
@@ -147,6 +147,19 @@ func previewLogString(s string, limit int) string {
 	return s[:limit] + "...(truncated)"
 }
 
+// BuildPreviewResponseFromFileBytes parses xls/xlsx/csv bytes and returns a
+// staging-shaped preview map (clean + status). No data is written to the database.
+func BuildPreviewResponseFromFileBytes(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings, accountOverride string) (map[string]interface{}, error) {
+	txns, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, filename, useMapping, mappings, accountOverride)
+	if err != nil {
+		return nil, fmt.Errorf("parse: %w", err)
+	}
+	if len(txns) == 0 {
+		return nil, fmt.Errorf("no transactions found in file")
+	}
+	return buildPreviewResponseFromTxnMaps(txns, fileBytes, accountOverride), nil
+}
+
 // BuildPreviewResponseFromCSVBytes parses csvBytes (a spreadsheet output from
 // a converted document) and returns a preview response map containing a "clean"
 // key with Metadata, OpeningBalance, and Transactions shaped for
@@ -229,14 +242,24 @@ func buildPreviewResponseFromTxnMaps(txns []map[string]interface{}, csvBytes []b
 
 	periodStart, periodEnd := extractPeriodFromTxnMaps(txns)
 	labelledOpeningBalance := extractOpeningBalanceFromCSV(csvBytes)
-	openingBalance := deriveOpeningBalanceFromTxnMaps(txns)
-	closingBalance := extractClosingBalanceFromCSV(csvBytes)
+	var parserOpening *float64
+	if len(txns) > 0 {
+		if v, ok := txns[0]["_parser_opening_balance"].(float64); ok {
+			parserOpening = &v
+			delete(txns[0], "_parser_opening_balance")
+		}
+	}
+	openingBalance := parserOpening
+	if openingBalance == nil {
+		openingBalance = deriveOpeningBalanceFromTxnMaps(txns)
+	}
 	if openingBalance == nil {
 		openingBalance = labelledOpeningBalance
 	} else if labelledOpeningBalance != nil && math.Abs(*openingBalance-*labelledOpeningBalance) > 0.01 {
-		logger.LogInfo("[PREVIEW] opening balance label mismatch: labelled=%.2f derived_from_first_txn=%.2f; using derived value",
+		logger.LogInfo("[PREVIEW] opening balance label mismatch: labelled=%.2f parser=%.2f; using parser value",
 			*labelledOpeningBalance, *openingBalance)
 	}
+	closingBalance := extractClosingBalanceFromCSV(csvBytes)
 	if closingBalance == nil {
 		closingBalance = deriveClosingBalanceFromTxnMaps(txns)
 	}
@@ -342,7 +365,10 @@ func extractPeriodFromTxnMaps(txns []map[string]interface{}) (start, end time.Ti
 }
 
 func extractOpeningBalanceFromCSV(data []byte) *float64 {
-	return extractLabelledBalance(data, []string{"openingbalance", "openbal", "op.bal", "op bal"})
+	return extractLabelledBalance(data, []string{
+		"openingbalance", "openbal", "op.bal", "op bal",
+		"openingavailable", "openingavailablebalance", "openingledger",
+	})
 }
 
 func extractClosingBalanceFromCSV(data []byte) *float64 {
@@ -382,13 +408,14 @@ func strPtr(s string) *string {
 
 // deriveOpeningBalanceFromTxnMaps mirrors the V2 principle:
 // opening = firstRowBalance + firstRowWithdrawal - firstRowDeposit.
+// Balance 0 is treated as missing (PDF/CSV without a balance column).
 func deriveOpeningBalanceFromTxnMaps(txns []map[string]interface{}) *float64 {
 	if len(txns) == 0 {
 		return nil
 	}
 	for _, t := range txns {
 		b, bok := t["balance"].(float64)
-		if !bok {
+		if !bok || b == 0 {
 			continue
 		}
 		w, wok := t["withdrawal_amount"].(float64)

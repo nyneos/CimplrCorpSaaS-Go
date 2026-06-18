@@ -3,6 +3,7 @@ package allMaster
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -30,6 +31,10 @@ func getUserFriendlyBankError(err error, context string) (string, int) {
 		return "", http.StatusOK
 	}
 
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
+	}
+
 	errStr := err.Error()
 
 	// Duplicate bank name - Known error, return 200 for frontend to show message
@@ -38,8 +43,8 @@ func getUserFriendlyBankError(err error, context string) (string, int) {
 	}
 
 	// Generic duplicate key - Known error, return 200
-	if strings.Contains(errStr, constants.ErrDuplicateKey) || strings.Contains(errStr, "unique") {
-		return "This bank already exists in the system.", http.StatusOK
+	if strings.Contains(errStr, constants.ErrDuplicateKey) {
+		return "Duplicate entry — this value already exists.", http.StatusOK
 	}
 
 	// Foreign key violations - Known error, return 200

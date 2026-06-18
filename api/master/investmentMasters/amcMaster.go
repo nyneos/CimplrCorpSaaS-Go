@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -35,26 +36,27 @@ func getUserFriendlyAMCError(err error, context string) (string, int) {
 		return "", http.StatusOK
 	}
 
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
+	}
+
 	errStr := err.Error()
 
-	// Duplicate AMC name - Known error, return 200 for frontend to show message
+	// Legacy string fallbacks (non-pgconn wrapped errors)
 	if strings.Contains(errStr, "unique_amc_name_not_deleted") || strings.Contains(errStr, "masteramc_amc_name_key") {
 		return "AMC name already exists. Please use a different name.", http.StatusOK
 	}
-
-	// Duplicate AMC code - Known error, return 200
-	if strings.Contains(errStr, "unique_amc_code_not_deleted") || strings.Contains(errStr, "masteramc_internal_amc_code_key") {
-		return "AMC code already exists. Please use a different code.", http.StatusOK
+	if strings.Contains(errStr, "unique_internal_amc_code_not_deleted") ||
+		strings.Contains(errStr, "unique_amc_code_not_deleted") ||
+		strings.Contains(errStr, "masteramc_internal_amc_code_key") {
+		return "Internal AMC code already exists. Please use a different code.", http.StatusOK
 	}
-
-	// Duplicate AMC SEBI registration - Known error, return 200
 	if strings.Contains(errStr, "unique_sebi_registration_not_deleted") || strings.Contains(errStr, "masteramc_sebi_registration_number_key") {
 		return "SEBI registration number already exists.", http.StatusOK
 	}
 
-	// Generic duplicate key - Known error, return 200
-	if strings.Contains(errStr, constants.ErrDuplicateKey) || strings.Contains(errStr, "unique") {
-		return "This AMC already exists in the system.", http.StatusOK
+	if strings.Contains(errStr, constants.ErrDuplicateKey) {
+		return "Duplicate entry — this value already exists.", http.StatusOK
 	}
 
 	// Foreign key violations - Known error, return 200

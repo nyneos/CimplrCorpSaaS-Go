@@ -23,13 +23,22 @@ import (
 
 // insertStagingBatch creates a new batch row and returns its ID.
 func insertStagingBatch(ctx context.Context, pool *pgxpool.Pool, userID, sourceFilename string, totalFiles int) (string, error) {
+	return insertZipStagingBatch(ctx, pool, userID, sourceFilename, totalFiles, nil)
+}
+
+// insertZipStagingBatch creates a batch row for async ZIP or PDF staging.
+func insertZipStagingBatch(ctx context.Context, pool *pgxpool.Pool, userID, sourceFilename string, totalFiles int, uploadParams []byte) (string, error) {
 	var batchID string
+	batchType := "pdf"
+	if uploadParams != nil {
+		batchType = "zip"
+	}
 	err := pool.QueryRow(ctx, `
 		INSERT INTO cimplrcorpsaas.pdf_staging_batch
-		    (user_id, source_filename, status, total_files)
-		VALUES ($1, $2, 'processing', $3)
+		    (user_id, source_filename, status, total_files, batch_type, upload_params)
+		VALUES ($1, $2, 'processing', $3, $4, $5)
 		RETURNING batch_id
-	`, userID, sourceFilename, totalFiles).Scan(&batchID)
+	`, userID, sourceFilename, totalFiles, batchType, uploadParams).Scan(&batchID)
 	return batchID, err
 }
 
@@ -42,6 +51,13 @@ type insertStagingStatementParams struct {
 	RawStatement interface{}
 	Status       string
 	ErrMsg       string
+	FileIndex    int
+	UploadS3Key  string
+	ContentHash  string
+	ContentType  string
+	FileSize     int64
+	UploadedBy   string
+	UploadedAt   time.Time
 }
 
 // insertStagingStatement creates a statement row inside a batch.
@@ -55,21 +71,102 @@ func insertStagingStatement(ctx context.Context, pool *pgxpool.Pool, p insertSta
 	if p.ErrMsg != "" {
 		errMsgParam = p.ErrMsg
 	}
+	var uploadedAt interface{}
+	if !p.UploadedAt.IsZero() {
+		uploadedAt = p.UploadedAt.UTC()
+	}
+	var fileSize interface{}
+	if p.FileSize > 0 {
+		fileSize = p.FileSize
+	}
 	err = pool.QueryRow(ctx, `
 		INSERT INTO cimplrcorpsaas.pdf_staging_statement
-		    (batch_id, original_filename, csv_url, raw_statement, status, error_message)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		    (batch_id, original_filename, csv_url, raw_statement, status, error_message, file_index,
+		     upload_s3_key, content_hash, content_type, file_size, uploaded_by, uploaded_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8,''), NULLIF($9,''), NULLIF($10,''), $11, NULLIF($12,''), $13)
 		RETURNING staging_id
-	`, p.BatchID, p.Filename, p.CSVURL, raw, p.Status, errMsgParam).Scan(&stagingID)
+	`, p.BatchID, p.Filename, p.CSVURL, raw, p.Status, errMsgParam, p.FileIndex,
+		p.UploadS3Key, p.ContentHash, p.ContentType, fileSize, p.UploadedBy, uploadedAt).Scan(&stagingID)
 	return stagingID, err
+}
+
+func updateStagingStatementStatus(ctx context.Context, pool *pgxpool.Pool, stagingID, status, errMsg string) error {
+	var errParam interface{}
+	if strings.TrimSpace(errMsg) != "" {
+		errParam = errMsg
+	}
+	_, err := pool.Exec(ctx, `
+		UPDATE cimplrcorpsaas.pdf_staging_statement
+		   SET status = $1, error_message = $2, updated_at = now()
+		 WHERE staging_id = $3
+	`, status, errParam, stagingID)
+	return err
+}
+
+// updateStagingStatementPreviewData stores parsed preview in raw_statement (and optional preview_result).
+func updateStagingStatementPreviewData(ctx context.Context, pool *pgxpool.Pool, stagingID string, rawPreview, previewResult map[string]interface{}) error {
+	rawJSON, err := json.Marshal(rawPreview)
+	if err != nil {
+		return fmt.Errorf("marshal raw_statement: %w", err)
+	}
+	var previewJSON []byte
+	if previewResult != nil {
+		previewJSON, err = json.Marshal(previewResult)
+		if err != nil {
+			return fmt.Errorf("marshal preview_result: %w", err)
+		}
+	}
+	_, err = pool.Exec(ctx, `
+		UPDATE cimplrcorpsaas.pdf_staging_statement
+		   SET raw_statement = $1,
+		       preview_result = COALESCE($2, preview_result),
+		       status = 'parsed',
+		       updated_at = now()
+		 WHERE staging_id = $3
+	`, rawJSON, previewJSON, stagingID)
+	return err
+}
+
+func incrementStagingBatchProgress(ctx context.Context, pool *pgxpool.Pool, batchID string, succeeded bool) {
+	if pool == nil || batchID == "" {
+		return
+	}
+	if succeeded {
+		_, _ = pool.Exec(ctx, `
+			UPDATE cimplrcorpsaas.pdf_staging_batch
+			   SET processed_files = processed_files + 1, updated_at = now()
+			 WHERE batch_id = $1
+		`, batchID)
+		return
+	}
+	_, _ = pool.Exec(ctx, `
+		UPDATE cimplrcorpsaas.pdf_staging_batch
+		   SET failed_files = failed_files + 1, updated_at = now()
+		 WHERE batch_id = $1
+	`, batchID)
+}
+
+func updateStagingStatementV2Result(ctx context.Context, pool *pgxpool.Pool, stagingID string, resp map[string]interface{}, bankStatementID string) error {
+	previewJSON, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	var bsParam interface{}
+	if strings.TrimSpace(bankStatementID) != "" {
+		bsParam = bankStatementID
+	}
+	_, err = pool.Exec(ctx, `
+		UPDATE cimplrcorpsaas.pdf_staging_statement
+		   SET preview_result = $1, status = 'parsed', bank_statement_id = $2, updated_at = now()
+		 WHERE staging_id = $3
+	`, previewJSON, bsParam, stagingID)
+	return err
 }
 
 // finaliseStagingBatch updates processed/failed counts and resolves the batch status.
 func finaliseStagingBatch(ctx context.Context, pool *pgxpool.Pool, batchID string, processed, failed int) error {
 	status := "ready"
-	if failed > 0 && processed == 0 {
-		status = "processing" // all failed — leave as processing so front-end shows error
-	} else if failed > 0 {
+	if failed > 0 {
 		status = "partial_ready"
 	}
 	_, err := pool.Exec(ctx, `
@@ -148,12 +245,13 @@ func GetStagingBatchHandler(pool *pgxpool.Pool) http.Handler {
 
 		rows, err := pool.Query(ctx, `
 			SELECT staging_id, original_filename, csv_url, status, error_message,
-			       committed_bs_id, created_at
+			       committed_bs_id, created_at, COALESCE(file_index, 0),
+			       upload_s3_key, content_type, file_size, uploaded_by, uploaded_at
 			FROM cimplrcorpsaas.pdf_staging_statement
 			WHERE batch_id = $1
 			  AND (committed_bs_id IS NULL OR trim(committed_bs_id::text) = '')
 			  AND lower(coalesce(status, '')) <> 'committed'
-			ORDER BY created_at
+			ORDER BY COALESCE(file_index, 0), created_at
 		`, batchID)
 		if err != nil {
 			respondWithError(w, err, "failed to fetch statements", http.StatusInternalServerError)
@@ -168,14 +266,19 @@ func GetStagingBatchHandler(pool *pgxpool.Pool) http.Handler {
 			Status       string `json:"status"`
 			ErrorMessage string `json:"error_message,omitempty"`
 			CommittedID  string `json:"committed_bs_id,omitempty"`
+			HasFile      bool   `json:"has_file"`
 		}
 		var stmts []stmtSummary
 		for rows.Next() {
 			var s stmtSummary
 			var errMsg, committedID sql.NullString
-			var csvURL sql.NullString
+			var csvURL, uploadS3Key, contentType, uploadedBy sql.NullString
+			var fileSize sql.NullInt64
+			var uploadedAt sql.NullTime
 			var stmtCreatedAt time.Time
-			if err := rows.Scan(&s.StagingID, &s.Filename, &csvURL, &s.Status, &errMsg, &committedID, &stmtCreatedAt); err != nil {
+			var fileIndex int
+			if err := rows.Scan(&s.StagingID, &s.Filename, &csvURL, &s.Status, &errMsg, &committedID, &stmtCreatedAt, &fileIndex,
+				&uploadS3Key, &contentType, &fileSize, &uploadedBy, &uploadedAt); err != nil {
 				_ = stmtCreatedAt
 				continue
 			}
@@ -189,6 +292,7 @@ func GetStagingBatchHandler(pool *pgxpool.Pool) http.Handler {
 				s.CommittedID = committedID.String
 			}
 			s.Status = stagingStatementDisplayStatus(s.Status, committedID)
+			s.HasFile = uploadS3Key.Valid && strings.TrimSpace(uploadS3Key.String) != ""
 			stmts = append(stmts, s)
 		}
 
@@ -239,17 +343,24 @@ func GetStagingStatementHandler(pool *pgxpool.Pool) http.Handler {
 			errMsg      sql.NullString
 			committedID sql.NullString
 			createdAt   time.Time
+			uploadS3Key sql.NullString
+			contentType sql.NullString
+			fileSize    sql.NullInt64
+			uploadedBy  sql.NullString
+			uploadedAt  sql.NullTime
 		)
 		err := pool.QueryRow(ctx, `
 			SELECT s.staging_id, s.batch_id, s.original_filename, s.csv_url,
-			       s.raw_statement, s.status, s.error_message, s.committed_bs_id, s.created_at
+			       s.raw_statement, s.status, s.error_message, s.committed_bs_id, s.created_at,
+			       s.upload_s3_key, s.content_type, s.file_size, s.uploaded_by, s.uploaded_at
 			FROM cimplrcorpsaas.pdf_staging_statement s
 			INNER JOIN cimplrcorpsaas.pdf_staging_batch b ON b.batch_id = s.batch_id
 			WHERE s.staging_id = $1 AND b.user_id = $2
 			  AND (s.committed_bs_id IS NULL OR trim(s.committed_bs_id::text) = '')
 			  AND lower(coalesce(s.status, '')) <> 'committed'
 		`, body.StagingID, sessionUID).Scan(&stagingID, &batchID, &filename, &csvURL,
-			&rawStmt, &status, &errMsg, &committedID, &createdAt)
+			&rawStmt, &status, &errMsg, &committedID, &createdAt,
+			&uploadS3Key, &contentType, &fileSize, &uploadedBy, &uploadedAt)
 		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 			respondWithError(w, nil, constants.ErrStatementNotFound, http.StatusNotFound)
 			return
@@ -269,20 +380,23 @@ func GetStagingStatementHandler(pool *pgxpool.Pool) http.Handler {
 
 		displayStatus := stagingStatementDisplayStatus(status, committedID)
 
+		respData := map[string]interface{}{
+			"staging_id":        stagingID,
+			"batch_id":          batchID.String,
+			"original_filename": filename,
+			"csv_url":           csvURL.String,
+			"raw_statement":     rawStatementParsed,
+			"status":            displayStatus,
+			"error_message":     errMsg.String,
+			"committed_bs_id":   committedID.String,
+			"created_at":        createdAt,
+		}
+		mergeStagingFileJSON(respData, uploadS3Key, contentType, fileSize, uploadedBy, uploadedAt)
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"data": map[string]interface{}{
-				"staging_id":        stagingID,
-				"batch_id":          batchID.String,
-				"original_filename": filename,
-				"csv_url":           csvURL.String,
-				"raw_statement":     rawStatementParsed,
-				"status":            displayStatus,
-				"error_message":     errMsg.String,
-				"committed_bs_id":   committedID.String,
-				"created_at":        createdAt,
-			},
+			"data":    respData,
 		})
 	})
 }
@@ -303,7 +417,8 @@ func ListStagingByUserHandler(pool *pgxpool.Pool) http.Handler {
 			SELECT b.batch_id, b.source_filename, b.status,
 			       b.total_files, b.processed_files, b.failed_files, b.created_at,
 			       s.staging_id, s.original_filename, s.csv_url, s.status,
-			       s.error_message, s.committed_bs_id, s.created_at
+			       s.error_message, s.committed_bs_id, s.created_at,
+			       s.upload_s3_key, s.content_type, s.file_size, s.uploaded_by, s.uploaded_at
 			FROM cimplrcorpsaas.pdf_staging_batch b
 			INNER JOIN cimplrcorpsaas.pdf_staging_statement s ON s.batch_id = b.batch_id
 			  AND (s.committed_bs_id IS NULL OR trim(s.committed_bs_id::text) = '')
@@ -325,6 +440,7 @@ func ListStagingByUserHandler(pool *pgxpool.Pool) http.Handler {
 			ErrorMsg    string `json:"error_message,omitempty"`
 			CommittedID string `json:"committed_bs_id,omitempty"`
 			CreatedAt   string `json:"created_at"`
+			HasFile     bool   `json:"has_file"`
 		}
 		type batchRow struct {
 			BatchID        string    `json:"batch_id"`
@@ -342,18 +458,22 @@ func ListStagingByUserHandler(pool *pgxpool.Pool) http.Handler {
 
 		for rows.Next() {
 			var (
-				batchID, srcFile, batchStatus       string
-				total, processed, failed            int
-				batchCreatedAt                      time.Time
-				stagingID, stmtFilename, stmtStatus sql.NullString
-				csvURL, errMsg, committedID         sql.NullString
-				stmtCreatedAt                       sql.NullTime
+				batchID, srcFile, batchStatus        string
+				total, processed, failed             int
+				batchCreatedAt                       time.Time
+				stagingID, stmtFilename, stmtStatus  sql.NullString
+				csvURL, errMsg, committedID          sql.NullString
+				uploadS3Key, contentType, uploadedBy sql.NullString
+				fileSize                             sql.NullInt64
+				uploadedAt                           sql.NullTime
+				stmtCreatedAt                        sql.NullTime
 			)
 			if err := rows.Scan(
 				&batchID, &srcFile, &batchStatus,
 				&total, &processed, &failed, &batchCreatedAt,
 				&stagingID, &stmtFilename, &csvURL, &stmtStatus,
 				&errMsg, &committedID, &stmtCreatedAt,
+				&uploadS3Key, &contentType, &fileSize, &uploadedBy, &uploadedAt,
 			); err != nil {
 				continue
 			}
@@ -375,6 +495,7 @@ func ListStagingByUserHandler(pool *pgxpool.Pool) http.Handler {
 					StagingID: stagingID.String,
 					Filename:  stmtFilename.String,
 					Status:    stagingStatementDisplayStatus(stmtStatus.String, committedID),
+					HasFile:   uploadS3Key.Valid && strings.TrimSpace(uploadS3Key.String) != "",
 				}
 				if csvURL.Valid {
 					s.CSVUrl = csvURL.String
@@ -494,6 +615,12 @@ func DeleteStagingStatementHandler(pool *pgxpool.Pool) http.Handler {
 			return
 		}
 
+		s3Keys, err := collectStagingS3KeysForDelete(ctx, pool, []string{sid})
+		if err != nil {
+			respondWithError(w, err, constants.ErrFailedToResolveStagingFiles, http.StatusInternalServerError)
+			return
+		}
+
 		res, err := pool.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1`, sid)
 		if err != nil {
 			respondWithError(w, err, "failed to delete staging statement", http.StatusInternalServerError)
@@ -517,6 +644,8 @@ func DeleteStagingStatementHandler(pool *pgxpool.Pool) http.Handler {
 				batchDeleted = true
 			}
 		}
+
+		deleteStagingS3KeysBestEffort(ctx, pool, s3Keys)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -582,6 +711,13 @@ func deleteStagingBatchGET(w http.ResponseWriter, r *http.Request, pool *pgxpool
 		return
 	}
 
+	s3Keys, err := collectStagingS3KeysForBatchDelete(ctx, pool, bid)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		respondWithError(w, err, constants.ErrFailedToResolveStagingFiles, http.StatusInternalServerError)
+		return
+	}
+
 	resSt, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE batch_id = $1`, bid)
 	if err != nil {
 		_ = tx.Rollback(ctx)
@@ -600,6 +736,8 @@ func deleteStagingBatchGET(w http.ResponseWriter, r *http.Request, pool *pgxpool
 		respondWithError(w, err, "failed to commit delete", http.StatusInternalServerError)
 		return
 	}
+
+	deleteStagingS3KeysBestEffort(ctx, pool, s3Keys)
 
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -640,6 +778,12 @@ func deleteStagingBatchPOST(w http.ResponseWriter, r *http.Request, pool *pgxpoo
 	}
 	if len(ids) == 0 {
 		respondWithError(w, nil, "staging_ids must contain at least one non-empty id", http.StatusBadRequest)
+		return
+	}
+
+	s3Keys, err := collectStagingS3KeysForDelete(ctx, pool, ids)
+	if err != nil {
+		respondWithError(w, err, constants.ErrFailedToResolveStagingFiles, http.StatusInternalServerError)
 		return
 	}
 
@@ -718,6 +862,8 @@ func deleteStagingBatchPOST(w http.ResponseWriter, r *http.Request, pool *pgxpoo
 		respondWithError(w, err, "failed to commit delete", http.StatusInternalServerError)
 		return
 	}
+
+	deleteStagingS3KeysBestEffort(ctx, pool, s3Keys)
 
 	if body.Reason != "" || len(deletedStagingIDs) > 0 {
 		log.Printf("pdf staging delete by ids: session_user=%s reason=%q deleted=%d batches_emptied=%d",

@@ -46,6 +46,7 @@ const (
 	ErrDateInterval                  = "'::date + INTERVAL '1 day'"
 	ErrParentLookupFailed            = "parent lookup failed: "
 	ErruploadMetaFail                = "file upload metadata failed: "
+	ErrFailedToResolveStagingFiles   = "failed to resolve staging files"
 )
 
 // General internal/server/upload error messages

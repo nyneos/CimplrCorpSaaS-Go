@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -27,6 +28,10 @@ import (
 func getUserFriendlySchemeError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 
 	errMsg := err.Error()

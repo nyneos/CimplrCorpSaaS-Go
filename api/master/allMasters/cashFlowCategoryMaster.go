@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -39,6 +40,10 @@ func getUserFriendlyCashFlowCategoryError(err error, context string) (string, in
 		return "", http.StatusOK
 	}
 
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
+	}
+
 	errStr := err.Error()
 
 	// Duplicate category name - Known error, return 200 for frontend to show message
@@ -52,8 +57,8 @@ func getUserFriendlyCashFlowCategoryError(err error, context string) (string, in
 	}
 
 	// Generic duplicate key - Known error, return 200
-	if strings.Contains(errStr, constants.ErrDuplicateKey) || strings.Contains(errStr, "unique") {
-		return "This cash flow category already exists in the system.", http.StatusOK
+	if strings.Contains(errStr, constants.ErrDuplicateKey) {
+		return "Duplicate entry — this value already exists.", http.StatusOK
 	}
 
 	// Foreign key violations - Known error, return 200

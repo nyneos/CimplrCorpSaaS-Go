@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -40,6 +41,10 @@ const (
 func getUserFriendlyCurrencyError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 
 	var pgErr *pgconn.PgError

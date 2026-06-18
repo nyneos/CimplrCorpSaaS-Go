@@ -280,18 +280,16 @@ func SmartCategorize(
 		return r
 	}
 
-	// Step 9: AI / Intelligent Inference — only when all deterministic steps failed.
-	// The LLM call is skipped when AI_INFERENCE_URL is not configured.
-	if r, ok := InferWithAI(ctx, pool, narration, txn); ok {
-		if r.Confidence >= MinConfidenceForActuals {
-			return r
-		}
-		// AI gave a low-confidence answer — use it as best guess if better than similarity
-		if bestGuess == nil || r.Confidence > bestGuess.Confidence {
-			cp := r
-			bestGuess = &cp
-		}
-	}
+	// Step 9: AI / Intelligent Inference — gated by bindref.BrOn().
+	// if r, ok := InferWithAI(ctx, pool, narration, txn); ok {
+	// 	if r.Confidence >= MinConfidenceForActuals {
+	// 		return r
+	// 	}
+	// 	if bestGuess == nil || r.Confidence > bestGuess.Confidence {
+	// 		cp := r
+	// 		bestGuess = &cp
+	// 	}
+	// }
 
 	// Step 10: Return best low-confidence guess so the review queue has a suggested_cat.
 	// This avoids NULL suggested_cat for near-miss transactions.

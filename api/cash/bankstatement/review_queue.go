@@ -42,10 +42,6 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 		if req.Status == "" {
 			req.Status = "PENDING"
 		}
-		if req.Limit <= 0 {
-			req.Limit = 100
-		}
-
 		ctx := r.Context()
 		qStr := `
 			SELECT
@@ -81,8 +77,16 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			args = append(args, req.EntityID)
 			n++
 		}
-		qStr += ` ORDER BY q.created_at DESC LIMIT $` + strconv.Itoa(n) + ` OFFSET $` + strconv.Itoa(n+1)
-		args = append(args, req.Limit, req.Offset)
+		if req.Limit > 0 {
+			qStr += ` ORDER BY q.created_at DESC LIMIT $` + strconv.Itoa(n) + ` OFFSET $` + strconv.Itoa(n+1)
+			args = append(args, req.Limit, req.Offset)
+		} else {
+			qStr += ` ORDER BY q.created_at DESC`
+			if req.Offset > 0 {
+				qStr += ` OFFSET $` + strconv.Itoa(n)
+				args = append(args, req.Offset)
+			}
+		}
 
 		rows, err := pool.Query(ctx, qStr, args...)
 		if err != nil {

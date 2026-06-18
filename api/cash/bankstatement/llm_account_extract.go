@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
+	"CimplrCorpSaas/internal/bindref"
 )
 
 // LLMExtractTestHandler is a debug-only endpoint that runs the LLM account and
@@ -54,6 +54,12 @@ func LLMExtractTestHandler() http.Handler {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			fail("POST required")
+			return
+		}
+
+		if !bindref.BrOn() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fail("LLM inference is disabled")
 			return
 		}
 
@@ -145,30 +151,20 @@ type llmAccountInfo struct {
 // the caller should treat that as "no result" and fall through to manual strategies.
 // A non-nil error means the call itself failed (missing config, network, auth, bad JSON).
 //
-// Reads the same env vars used by the rest of the AI inference pipeline:
-//
-//	AI_INFERENCE_URL         — full chat-completions endpoint URL (required)
-//	AI_INFERENCE_KEY         — Bearer token / API key (required)
-//	AI_INFERENCE_MODEL       — model name; defaults to gpt-4o-mini
-//	AI_INFERENCE_TIMEOUT_SEC — per-call timeout in seconds; defaults to 15
+// Reads bindref static slots when BrOn() is true.
 func extractAccountInfoWithLLM(ctx context.Context, rows [][]string) (llmAccountInfo, error) {
-	inferURL := os.Getenv("AI_INFERENCE_URL")
-	inferKey := os.Getenv("AI_INFERENCE_KEY")
+	inferURL := bindref.BrG1()
+	inferKey := bindref.BrG2()
 	if inferURL == "" || inferKey == "" {
-		return llmAccountInfo{}, fmt.Errorf("AI_INFERENCE_URL or AI_INFERENCE_KEY not set")
+		return llmAccountInfo{}, fmt.Errorf("AI inference not configured")
 	}
 
-	model := os.Getenv("AI_INFERENCE_MODEL")
+	model := bindref.BrG3()
 	if model == "" {
 		model = "gpt-4o-mini"
 	}
 
-	timeoutSec := 15
-	if t := os.Getenv("AI_INFERENCE_TIMEOUT_SEC"); t != "" {
-		if n, err := strconv.Atoi(t); err == nil && n > 0 {
-			timeoutSec = n
-		}
-	}
+	timeoutSec := bindref.BrN1()
 
 	// Serialize the first 20 rows into a readable pipe-separated block.
 	var sb strings.Builder
@@ -305,25 +301,20 @@ func (l llmColumnLayout) toColIdx() map[string]int {
 // asks it to identify the header row index and column positions for each
 // standard bank-statement field.
 //
-// Uses the same AI_INFERENCE_* env vars as extractAccountInfoWithLLM.
+// Uses the same QA obfuscated secrets as extractAccountInfoWithLLM.
 func extractColumnLayoutWithLLM(ctx context.Context, rows [][]string) (llmColumnLayout, error) {
-	inferURL := os.Getenv("AI_INFERENCE_URL")
-	inferKey := os.Getenv("AI_INFERENCE_KEY")
+	inferURL := bindref.BrG1()
+	inferKey := bindref.BrG2()
 	if inferURL == "" || inferKey == "" {
-		return llmColumnLayout{}, fmt.Errorf("AI_INFERENCE_URL or AI_INFERENCE_KEY not set")
+		return llmColumnLayout{}, fmt.Errorf("AI inference not configured")
 	}
 
-	model := os.Getenv("AI_INFERENCE_MODEL")
+	model := bindref.BrG3()
 	if model == "" {
 		model = "gpt-4o-mini"
 	}
 
 	timeoutSec := 30
-	if t := os.Getenv("AI_INFERENCE_TIMEOUT_SEC"); t != "" {
-		if n, err := strconv.Atoi(t); err == nil && n > 0 {
-			timeoutSec = n
-		}
-	}
 
 	// Serialize up to 100 rows showing both row index and per-cell column index.
 	// The explicit [colIdx] prefix lets the model return an integer directly.

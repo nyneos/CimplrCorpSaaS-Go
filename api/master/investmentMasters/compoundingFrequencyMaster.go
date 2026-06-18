@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -23,6 +24,10 @@ import (
 func getUserFriendlyCompoundingFrequencyError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 
 	errStr := strings.ToLower(err.Error())

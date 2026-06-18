@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -33,6 +34,10 @@ import (
 func getUserFriendlyEntityCashError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 
 	errMsg := err.Error()

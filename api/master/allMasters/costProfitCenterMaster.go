@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -30,6 +31,10 @@ import (
 func getUserFriendlyCostProfitCenterError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 
 	errStr := err.Error()
@@ -50,8 +55,8 @@ func getUserFriendlyCostProfitCenterError(err error, context string) (string, in
 	}
 
 	// Generic duplicate key - Known error, return 200
-	if strings.Contains(errStr, constants.ErrDuplicateKey) || strings.Contains(errStr, "unique") {
-		return "This cost/profit centre already exists in the system.", http.StatusOK
+	if strings.Contains(errStr, constants.ErrDuplicateKey) {
+		return "Duplicate entry — this value already exists.", http.StatusOK
 	}
 
 	// Foreign key violations - Known error, return 200
