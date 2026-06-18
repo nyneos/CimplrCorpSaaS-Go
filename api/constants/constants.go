@@ -161,6 +161,14 @@ const (
 	ErrMasterGLAccount                    = "master-gl-account"
 )
 
+// Master unique violation messages (PostgreSQL 23505).
+const (
+	ErrAMCNameAlreadyExists          = "AMC name already exists. Please use a different name."
+	ErrInternalAMCCodeAlreadyExists  = "Internal AMC code already exists. Please use a different code."
+	ErrSEBIRegistrationAlreadyExists = "SEBI registration number already exists."
+	ErrEntityNameAlreadyExists       = "Entity name already exists. Please use a different name."
+)
+
 // DB / SQL error templates
 const (
 	// ErrTxStartFailed  = "failed to start transaction: "

@@ -3,8 +3,8 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
-	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
+	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -54,7 +54,7 @@ func getUserFriendlyEntityCashError(err error, context string) (string, int) {
 		return "Unique identifier already exists and is not deleted. Please use a different value.", http.StatusOK
 	}
 	if strings.Contains(errLower, "idx_masterentitycash_name") {
-		return "Entity name already exists. Please use a different name.", http.StatusOK
+		return constants.ErrEntityNameAlreadyExists, http.StatusOK
 	}
 	if strings.Contains(errLower, "uq_parent_child") {
 		return "This parent-child entity relationship already exists.", http.StatusOK

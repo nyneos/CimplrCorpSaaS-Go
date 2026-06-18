@@ -44,15 +44,15 @@ func getUserFriendlyAMCError(err error, context string) (string, int) {
 
 	// Legacy string fallbacks (non-pgconn wrapped errors)
 	if strings.Contains(errStr, "unique_amc_name_not_deleted") || strings.Contains(errStr, "masteramc_amc_name_key") {
-		return "AMC name already exists. Please use a different name.", http.StatusOK
+		return constants.ErrAMCNameAlreadyExists, http.StatusOK
 	}
 	if strings.Contains(errStr, "unique_internal_amc_code_not_deleted") ||
 		strings.Contains(errStr, "unique_amc_code_not_deleted") ||
 		strings.Contains(errStr, "masteramc_internal_amc_code_key") {
-		return "Internal AMC code already exists. Please use a different code.", http.StatusOK
+		return constants.ErrInternalAMCCodeAlreadyExists, http.StatusOK
 	}
 	if strings.Contains(errStr, "unique_sebi_registration_not_deleted") || strings.Contains(errStr, "masteramc_sebi_registration_number_key") {
-		return "SEBI registration number already exists.", http.StatusOK
+		return constants.ErrSEBIRegistrationAlreadyExists, http.StatusOK
 	}
 
 	if strings.Contains(errStr, constants.ErrDuplicateKey) {
