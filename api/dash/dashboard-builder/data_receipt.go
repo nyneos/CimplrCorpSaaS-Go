@@ -79,7 +79,8 @@ func queryFDTDSRegister(ctx context.Context, pool *pgxpool.Pool, entityIDs []str
 			ORDER BY GREATEST(requested_at, checker_at) DESC NULLS LAST
 			LIMIT 1
 		) a ON true
-		WHERE COALESCE(t.is_deleted, false) = false %s
+		WHERE COALESCE(t.is_deleted, false) = false
+		  AND t.ingestion_source = 'TDS_WORKBENCH' %s
 		ORDER BY t.deduction_date DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
 	`, ef)
