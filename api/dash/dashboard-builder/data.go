@@ -884,7 +884,13 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(ci.net_expected_amount,        0)  AS net_expected_amount,
 			ci.requested_closure_date,
 			COALESCE(ci.has_variance,            FALSE) AS has_variance,
-			COALESCE(l.processing_status,          '')  AS processing_status
+			COALESCE(
+				CASE WHEN UPPER(l.processing_status) IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL','APPROVED','REJECTED')
+				     THEN l.processing_status
+				END,
+				ci.closure_status,
+				''
+			) AS processing_status
 		FROM cimplr.fd_closure_initiate ci
 		LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
 		LEFT JOIN investment.fd_booking_request br ON br.booking_id = m.booking_id
