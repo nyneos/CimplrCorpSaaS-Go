@@ -453,6 +453,7 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			WHERE c.confirmation_id = $1`, bookingTenorCol), confirmationID).Scan(&v)
 		rec.TenureType = v
 	}
+	rec.TenureType = deriveTenureType(rec.TenureType, rec.TenureYears, rec.TenorMonths, rec.TenorDays)
 	// Derive TenorDays from maturity/start dates when tenure was stored only in months or years.
 	if rec.TenorDays == 0 && !rec.MaturityDate.IsZero() && !rec.ValueDate.IsZero() &&
 		(rec.TenorMonths > 0 || rec.TenureYears > 0) {
@@ -552,6 +553,7 @@ func loadFDRecordByFDID(ctx context.Context, exec queryExecutor, fdID string) (*
 			rec.TenureType = v
 		}
 	}
+	rec.TenureType = deriveTenureType(rec.TenureType, rec.TenureYears, rec.TenorMonths, rec.TenorDays)
 	// Derive TenorDays from maturity/start dates when tenure was stored only in months or years.
 	if rec.TenorDays == 0 && !rec.MaturityDate.IsZero() && !rec.ValueDate.IsZero() &&
 		(rec.TenorMonths > 0 || rec.TenureYears > 0) {

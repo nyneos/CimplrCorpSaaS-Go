@@ -3691,6 +3691,9 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 		prematureJoins = `
 		LEFT JOIN cimplr.fd_closure_premature_confirm pc
 			ON pc.closure_confirm_id = t.closure_confirm_id AND COALESCE(pc.is_deleted, false) = false
+		LEFT JOIN investment.fd_confirmation conf
+			ON conf.confirmation_id = COALESCE(NULLIF(t.confirmation_id, ''), m.confirmation_id, '')
+			AND COALESCE(conf.is_deleted, false) = false
 		LEFT JOIN LATERAL (
 			SELECT accrued_days, penalty_amount, accrued_interest, tds_amount, net_payout, expected_maturity_value
 			FROM cimplr.fd_closure_calculation c
@@ -3698,6 +3701,13 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 			ORDER BY c.calculation_date DESC NULLS LAST
 			LIMIT 1
 		) calc ON true`
+	}
+	confirmExtraSelect := ""
+	if stage == "confirm" {
+		confirmExtraSelect = `,
+		       COALESCE(NULLIF(TRIM(COALESCE(m.created_by, '')), ''), COALESCE(a.requested_by, '')) AS export_created_by,
+		       COALESCE(TO_CHAR(m.receipt_date, 'YYYY-MM-DD'), '') AS receipt_date,
+		       COALESCE(conf.premature_closure_terms, '') AS premature_closure_terms`
 	}
 	interestRateExpr := `COALESCE(t.interest_rate, m.interest_rate, 0)`
 	maturityDateExpr := `COALESCE(m.maturity_date::text, '')`
@@ -3726,7 +3736,7 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 		       COALESCE(a.requested_by,'') AS latest_requested_by,
 		       a.requested_at AS latest_requested_at,
 		       COALESCE(a.checker_by,'') AS latest_checker_by,
-		       a.checker_at AS latest_checker_at
+		       a.checker_at AS latest_checker_at%s
 		FROM %s t
 		LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id
 		%s
@@ -3736,7 +3746,7 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 		WHERE %s
 		ORDER BY t.%s DESC
 		LIMIT $%d OFFSET $%d`,
-		tenureExpr, interestRateExpr, maturityDateExpr, penaltyExpr, latestStatusExpr, latestActionExpr, table, prematureJoins, auditTable, idCol, idCol, auditOrderExpr, whereSQL, idCol, len(args)-1, len(args),
+		tenureExpr, interestRateExpr, maturityDateExpr, penaltyExpr, latestStatusExpr, latestActionExpr, confirmExtraSelect, table, prematureJoins, auditTable, idCol, idCol, auditOrderExpr, whereSQL, idCol, len(args)-1, len(args),
 	)
 	rows, err := pool.Query(ctx, listSQL, args...)
 	if err != nil {

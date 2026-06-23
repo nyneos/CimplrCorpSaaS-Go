@@ -20,7 +20,13 @@ func queryFDMaturitySummary(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 			COALESCE(m.bank_id, '') AS bank_id,
 			COALESCE(m.bank_name, '') AS bank_name,
 			COALESCE(m.bank_fd_ref_no, '') AS bank_fd_ref_no,
-			COALESCE(m.tenure_type, '') AS tenure_type,
+			COALESCE(NULLIF(m.tenure_type, ''),
+				CASE
+					WHEN COALESCE(m.tenure_years,  0) > 0 THEN 'YEARS'
+					WHEN COALESCE(m.tenure_months, 0) > 0 THEN 'MONTHS'
+					WHEN COALESCE(m.tenure_days,   0) > 0 THEN 'DAYS'
+					ELSE ''
+				END) AS tenure_type,
 			COALESCE(m.principal_amount, 0) AS principal_amount,
 			COALESCE(m.interest_rate, 0) AS interest_rate,
 			m.start_date,
