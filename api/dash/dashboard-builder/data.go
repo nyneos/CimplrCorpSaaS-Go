@@ -851,56 +851,68 @@ func queryFDCashflows(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 
 func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
 	args := []any{limit}
-	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
+	ef, efArgs := entityFilter(entityIDs, "ci", len(args)+1)
 	args = append(args, efArgs...)
-	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	bf, bfArgs := bankNameFilter(ctx, "ci", len(args)+1)
 	args = append(args, bfArgs...)
 	df, dfArgs := dateRangeFilter(ctx, "ci", "requested_closure_date", len(args)+1)
 	args = append(args, dfArgs...)
 
+	// latest_processing_status mirrors listCimplrRecords:
+	// - PAYOUT/ROLLOVER: fd_closure_initiate_audit
+	// - PREMATURE: approval audit lives on linked fd_closure_confirm (initiate audit is empty)
 	q := fmt.Sprintf(`
-		WITH latest_audit AS (
-			SELECT DISTINCT ON (a.closure_initiate_id)
-				a.closure_initiate_id,
-				a.processing_status,
-				a.requested_at,
-				a.checker_at
-			FROM cimplr.fd_closure_initiate_audit a
-			ORDER BY a.closure_initiate_id,
-			         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),
-			                  COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
-		)
 		SELECT
-			COALESCE(ci.closure_initiate_id::text, '')  AS closure_initiate_id,
-			COALESCE(ci.fd_id::text,               '')  AS fd_id,
-			COALESCE(m.entity_id,                  '')  AS entity_id,
-			COALESCE(br.entity_name,               '')  AS entity_name,
-			COALESCE(br.bank_name,                 '')  AS bank_name,
-			COALESCE(ci.closure_type,              '')  AS closure_type,
-			COALESCE(ci.closure_status,            '')  AS closure_status,
-			COALESCE(ci.principal_amount,           0)  AS principal_amount,
-			COALESCE(ci.accrued_interest_till_date, 0)  AS accrued_interest_till_date,
-			COALESCE(ci.tds_expected,               0)  AS tds_expected,
-			COALESCE(ci.net_expected_amount,        0)  AS net_expected_amount,
+			COALESCE(ci.closure_initiate_id::text, '') AS closure_initiate_id,
+			COALESCE(ci.fd_id::text,               '') AS fd_id,
+			COALESCE(ci.entity_id,                 '') AS entity_id,
+			COALESCE(ci.entity_name,               '') AS entity_name,
+			COALESCE(ci.bank_name,                 '') AS bank_name,
+			COALESCE(ci.closure_type,              '') AS closure_type,
+			COALESCE(ci.closure_status,            '') AS closure_status,
+			COALESCE(ci.principal_amount,           0) AS principal_amount,
+			COALESCE(ci.accrued_interest_till_date, 0) AS accrued_interest_till_date,
+			COALESCE(ci.tds_expected,               0) AS tds_expected,
+			COALESCE(ci.net_expected_amount,        0) AS net_expected_amount,
 			ci.requested_closure_date,
 			COALESCE(ci.has_variance,            FALSE) AS has_variance,
 			COALESCE(
-				CASE WHEN UPPER(l.processing_status) IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL','APPROVED','REJECTED')
-				     THEN l.processing_status
+				NULLIF(ia.processing_status, ''),
+				CASE WHEN UPPER(COALESCE(ci.closure_type, '')) = 'PREMATURE' THEN
+					COALESCE(
+						CASE WHEN UPPER(COALESCE(prem_cc.closure_status, '')) = 'POSTED' THEN 'POSTED' END,
+						ca.processing_status,
+						''
+					)
 				END,
-				ci.closure_status,
 				''
-			) AS processing_status
+			) AS latest_processing_status
 		FROM cimplr.fd_closure_initiate ci
-		LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
-		LEFT JOIN investment.fd_booking_request br ON br.booking_id = m.booking_id
-		LEFT JOIN latest_audit l ON l.closure_initiate_id = ci.closure_initiate_id
+		LEFT JOIN LATERAL (
+			SELECT a.processing_status
+			FROM cimplr.fd_closure_initiate_audit a
+			WHERE a.closure_initiate_id = ci.closure_initiate_id
+			ORDER BY a.requested_at DESC NULLS LAST, a.audit_id DESC
+			LIMIT 1
+		) ia ON true
+		LEFT JOIN LATERAL (
+			SELECT cc.closure_confirm_id, cc.closure_status
+			FROM cimplr.fd_closure_confirm cc
+			WHERE cc.closure_initiate_id = ci.closure_initiate_id
+			  AND COALESCE(cc.is_deleted, false) = false
+			ORDER BY cc.closure_confirm_id DESC
+			LIMIT 1
+		) prem_cc ON true
+		LEFT JOIN LATERAL (
+			SELECT a.processing_status
+			FROM cimplr.fd_closure_confirm_audit a
+			WHERE a.closure_confirm_id = prem_cc.closure_confirm_id
+			ORDER BY CASE WHEN a.action_type = 'POST' AND a.processing_status = 'POSTED' THEN 0 ELSE 1 END,
+			         a.requested_at DESC NULLS LAST, a.audit_id DESC
+			LIMIT 1
+		) ca ON true
 		WHERE COALESCE(ci.is_deleted, false) = false %s %s %s
-		ORDER BY GREATEST(
-			COALESCE(l.requested_at,'1970-01-01'::timestamp),
-			COALESCE(l.checker_at,'1970-01-01'::timestamp),
-			COALESCE(ci.requested_closure_date::timestamp,'1970-01-01'::timestamp)
-		) DESC
+		ORDER BY ci.closure_initiate_id DESC
 		LIMIT NULLIF($1, 0)
 	`, ef, bf, df)
 
@@ -908,7 +920,44 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 	if err != nil {
 		return nil, err
 	}
-	return scanRows(r)
+	rows, err := scanRows(r)
+	if err != nil {
+		return nil, err
+	}
+	return enrichFDClosureInitiateApprovalFields(rows), nil
+}
+
+func enrichFDClosureInitiateApprovalFields(rows []map[string]any) []map[string]any {
+	for _, row := range rows {
+		latest := dashboardStr(row["latest_processing_status"])
+		closureStatus := dashboardStr(row["closure_status"])
+		effective := effectiveClosureApprovalStatus(latest, closureStatus)
+		row["approval_status"] = latest
+		row["processing_status"] = effective
+	}
+	return rows
+}
+
+func effectiveClosureApprovalStatus(latest, closureStatus string) string {
+	switch strings.ToUpper(strings.TrimSpace(latest)) {
+	case "PENDING_APPROVAL", "PENDING_EDIT_APPROVAL", "PENDING_DELETE_APPROVAL", "APPROVED", "REJECTED", "POSTED":
+		return strings.ToUpper(strings.TrimSpace(latest))
+	}
+	return strings.ToUpper(strings.TrimSpace(closureStatus))
+}
+
+func dashboardStr(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	case time.Time:
+		return t.Format("2006-01-02")
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
 }
 
 // ─── fdClosureConfirmAll ──────────────────────────────────────────────────────

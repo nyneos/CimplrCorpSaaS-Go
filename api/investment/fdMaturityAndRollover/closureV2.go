@@ -259,7 +259,7 @@ type cimplrClosureIDsRequest struct {
 	Comment            string   `json:"comment"`
 }
 
-type cimplrClosureListRequest struct {
+type CimplrClosureListRequest struct {
 	Page        int    `json:"page"`
 	PageSize    int    `json:"page_size"`
 	Status      string `json:"status"`
@@ -806,7 +806,7 @@ func CimplrInitiateReject(pool *pgxpool.Pool) http.HandlerFunc {
 
 func CimplrInitiateAll(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req cimplrClosureListRequest
+		var req CimplrClosureListRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		rows, total, err := listCimplrRecords(r.Context(), pool, "initiate", req, false)
 		if err != nil {
@@ -819,7 +819,7 @@ func CimplrInitiateAll(pool *pgxpool.Pool) http.HandlerFunc {
 
 func CimplrInitiateApprovedActive(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req cimplrClosureListRequest
+		var req CimplrClosureListRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		rows, total, err := listCimplrRecords(r.Context(), pool, "initiate", req, true)
 		if err != nil {
@@ -1561,7 +1561,7 @@ func CimplrConfirmReject(pool *pgxpool.Pool) http.HandlerFunc {
 
 func CimplrConfirmAll(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req cimplrClosureListRequest
+		var req CimplrClosureListRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		rows, total, err := listCimplrRecords(r.Context(), pool, "confirm", req, false)
 		if err != nil {
@@ -1574,7 +1574,7 @@ func CimplrConfirmAll(pool *pgxpool.Pool) http.HandlerFunc {
 
 func CimplrPrematureAll(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req cimplrClosureListRequest
+		var req CimplrClosureListRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		req.ClosureType = "PREMATURE"
 		rows, total, err := listCimplrRecords(r.Context(), pool, "confirm", req, false)
@@ -1766,7 +1766,7 @@ func CimplrMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 
 func CimplrConfirmApprovedActive(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req cimplrClosureListRequest
+		var req CimplrClosureListRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		rows, total, err := listCimplrRecords(r.Context(), pool, "confirm", req, true)
 		if err != nil {
@@ -3621,7 +3621,7 @@ func loadCimplrConfirmOld(ctx context.Context, pool *pgxpool.Pool, id string) (m
 	return vals, err
 }
 
-func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, req cimplrClosureListRequest, approvedActive bool) ([]map[string]interface{}, int, error) {
+func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, req CimplrClosureListRequest, approvedActive bool) ([]map[string]interface{}, int, error) {
 	if req.Page <= 0 {
 		req.Page = 1
 	}
@@ -3715,15 +3715,43 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 		interestRateExpr = `COALESCE(m.interest_rate, 0)`
 		maturityDateExpr = `COALESCE(m.maturity_date::text, '')`
 	}
-	latestStatusExpr := `COALESCE(a.processing_status,'')`
+	latestStatusExpr := `COALESCE(
+		NULLIF(a.processing_status,''),
+		CASE WHEN UPPER(COALESCE(t.closure_type,''))='PREMATURE' THEN
+			COALESCE(
+				CASE WHEN UPPER(COALESCE(prem_cc.closure_status,''))='POSTED' THEN 'POSTED' END,
+				prem_ca.processing_status,
+				''
+			)
+		END,
+		''
+	)`
 	latestActionExpr := `COALESCE(a.action_type,'')`
 	auditOrderExpr := `requested_at DESC NULLS LAST, audit_id DESC`
+	prematureInitiateAuditJoins := `
+		LEFT JOIN LATERAL (
+			SELECT cc.closure_confirm_id, cc.closure_status
+			FROM cimplr.fd_closure_confirm cc
+			WHERE cc.closure_initiate_id = t.closure_initiate_id
+			  AND COALESCE(cc.is_deleted, false) = false
+			ORDER BY cc.closure_confirm_id DESC
+			LIMIT 1
+		) prem_cc ON true
+		LEFT JOIN LATERAL (
+			SELECT processing_status, action_type
+			FROM cimplr.fd_closure_confirm_audit ca
+			WHERE ca.closure_confirm_id = prem_cc.closure_confirm_id
+			ORDER BY CASE WHEN ca.action_type='POST' AND ca.processing_status='POSTED' THEN 0 ELSE 1 END,
+			         ca.requested_at DESC NULLS LAST, ca.audit_id DESC
+			LIMIT 1
+		) prem_ca ON true`
 	if stage == "confirm" {
 		// Posted confirms must show POSTED in approval_status regardless of audit
 		// tie-break (auto-maturity approve+post runs in one tx → same requested_at).
 		latestStatusExpr = `COALESCE(CASE WHEN UPPER(t.closure_status)='POSTED' THEN 'POSTED' END, a.processing_status, '')`
 		latestActionExpr = `COALESCE(CASE WHEN UPPER(t.closure_status)='POSTED' THEN 'POST' END, a.action_type, '')`
 		auditOrderExpr = `CASE WHEN action_type='POST' AND processing_status='POSTED' THEN 0 ELSE 1 END, requested_at DESC NULLS LAST, audit_id DESC`
+		prematureInitiateAuditJoins = ""
 	}
 	listSQL := fmt.Sprintf(`
 		SELECT t.*,
@@ -3743,10 +3771,11 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 		LEFT JOIN LATERAL (
 			SELECT * FROM %s a WHERE a.%s=t.%s ORDER BY %s LIMIT 1
 		) a ON true
+		%s
 		WHERE %s
 		ORDER BY t.%s DESC
 		LIMIT $%d OFFSET $%d`,
-		tenureExpr, interestRateExpr, maturityDateExpr, penaltyExpr, latestStatusExpr, latestActionExpr, confirmExtraSelect, table, prematureJoins, auditTable, idCol, idCol, auditOrderExpr, whereSQL, idCol, len(args)-1, len(args),
+		tenureExpr, interestRateExpr, maturityDateExpr, penaltyExpr, latestStatusExpr, latestActionExpr, confirmExtraSelect, table, prematureJoins, auditTable, idCol, idCol, auditOrderExpr, prematureInitiateAuditJoins, whereSQL, idCol, len(args)-1, len(args),
 	)
 	rows, err := pool.Query(ctx, listSQL, args...)
 	if err != nil {
@@ -3755,6 +3784,18 @@ func listCimplrRecords(ctx context.Context, pool *pgxpool.Pool, stage string, re
 	defer rows.Close()
 	out, err := pgx.CollectRows(rows, pgx.RowToMap)
 	return out, total, err
+}
+
+// ListCimplrInitiateRecords returns initiate rows using the same query as
+// POST /investment/fd/closure/initiate/all, including latest_processing_status.
+func ListCimplrInitiateRecords(ctx context.Context, pool *pgxpool.Pool, req CimplrClosureListRequest, approvedActive bool) ([]map[string]interface{}, int, error) {
+	return listCimplrRecords(ctx, pool, "initiate", req, approvedActive)
+}
+
+// ListCimplrConfirmRecords returns confirm/premature rows using the same query as
+// POST /investment/fd/closure/confirm/all and /premature/all.
+func ListCimplrConfirmRecords(ctx context.Context, pool *pgxpool.Pool, req CimplrClosureListRequest, approvedActive bool) ([]map[string]interface{}, int, error) {
+	return listCimplrRecords(ctx, pool, "confirm", req, approvedActive)
 }
 
 func previewCimplrInitiateVariance(recordID string, req cimplrClosureInitiateRequest, src cimplrFDSource, calc cimplrClosureCalc) map[string]interface{} {
@@ -4694,7 +4735,7 @@ func cimplrBuildEmbeddedPostedPreview(ctx context.Context, pool *pgxpool.Pool, j
 	return preview
 }
 
-func cimplrAccountingApprovedActiveRecords(ctx context.Context, pool *pgxpool.Pool, req cimplrClosureListRequest) ([]map[string]interface{}, error) {
+func cimplrAccountingApprovedActiveRecords(ctx context.Context, pool *pgxpool.Pool, req CimplrClosureListRequest) ([]map[string]interface{}, error) {
 	if req.PageSize <= 0 || req.PageSize > 200 {
 		req.PageSize = 100
 	}
@@ -4774,7 +4815,7 @@ func cimplrAccountingApprovedActiveRecords(ctx context.Context, pool *pgxpool.Po
 
 func CimplrExecutionLogsAll(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req cimplrClosureListRequest
+		var req CimplrClosureListRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req.PageSize <= 0 || req.PageSize > 200 {
 			req.PageSize = 50
@@ -4825,7 +4866,7 @@ func CimplrExecutionLogsAll(pool *pgxpool.Pool) http.HandlerFunc {
 
 func CimplrAccountingApprovedActive(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req cimplrClosureListRequest
+		var req CimplrClosureListRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		records, err := cimplrAccountingApprovedActiveRecords(r.Context(), pool, req)
 		if err != nil {
