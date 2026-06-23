@@ -3,6 +3,7 @@ package portfolio
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/schemejoin"
 	"CimplrCorpSaas/internal/ctxutil"
 	"encoding/json"
 	"fmt"
@@ -138,10 +139,11 @@ func GetPortfolioTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// entityCol / amcCol / schemeCol / statusCol / dateCol differ per leg.
 		buildWhere := func(entityCol, amcCol, schemeCol, statusCol, dateCol string, skipStatus bool) string {
 			var parts []string
+			trimmedEntity := "LOWER(TRIM(COALESCE(" + entityCol + ",'')))"
 			if ps.entityIdx > 0 {
-				parts = append(parts, entityCol+"="+ph(ps.entityIdx))
+				parts = append(parts, trimmedEntity+"=LOWER(TRIM("+ph(ps.entityIdx)+"))")
 			} else if ps.scopeIdx > 0 {
-				parts = append(parts, entityCol+"=ANY("+ph(ps.scopeIdx)+"::text[])")
+				parts = append(parts, trimmedEntity+"=ANY(SELECT LOWER(TRIM(x)) FROM unnest("+ph(ps.scopeIdx)+"::text[]) AS x)")
 			}
 			if ps.amcIdx > 0 {
 				parts = append(parts, "LOWER(COALESCE("+amcCol+",'')) LIKE "+ph(ps.amcIdx))
@@ -168,18 +170,28 @@ func GetPortfolioTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return " AND " + strings.Join(parts, " AND ")
 		}
 
-		schemeJoin := `LEFT JOIN investment.masterscheme s ON (
-				s.scheme_id::text = i.scheme_id OR s.scheme_name = i.scheme_id OR
-				s.internal_scheme_code = i.scheme_id OR s.isin = i.scheme_id)`
+		schemeJoin := `LEFT JOIN LATERAL (
+			SELECT ` + schemejoin.LateralSelectCols + `
+			FROM investment.masterscheme
+			WHERE ` + schemejoin.LateralWhereInitiationRef + `
+			LIMIT 1
+		) s ON true`
 		folioJoin := `LEFT JOIN investment.masterfolio mf ON (mf.folio_id::text = i.folio_id OR mf.folio_number = i.folio_id)`
 		dematJoin := `LEFT JOIN investment.masterdemataccount md ON (md.demat_id::text = i.demat_id OR md.demat_account_number = i.demat_id)`
+
+		schemeNameInvest := `COALESCE(s.scheme_name,i.scheme_id,'')`
+		schemeNameRedempt := `COALESCE(s.scheme_name,i.scheme_id,'')`
+		schemeNameOnboard := `COALESCE(s.scheme_name,ot.scheme_internal_code,'')`
+		amfiInvest := schemejoin.ResolveAMFICodeExpr("s", schemeNameInvest)
+		amfiRedempt := schemejoin.ResolveAMFICodeExpr("s", schemeNameRedempt)
+		amfiOnboard := schemejoin.ResolveAMFICodeExpr("s", schemeNameOnboard)
 
 		investSQL := fmt.Sprintf(`
 			SELECT
 				'Investment'::text                                                            AS tx_type,
-				COALESCE(i.entity_name,'')                                                    AS entity_name,
-				COALESCE(s.scheme_name,i.scheme_id,'')                                        AS scheme_name,
-				COALESCE(s.amfi_scheme_code,'')                                               AS amfi_scheme_code,
+				TRIM(COALESCE(i.entity_name,''))                                              AS entity_name,
+				%s                                                                            AS scheme_name,
+				%s                                                                            AS amfi_scheme_code,
 				COALESCE(i.amount,0)::numeric                                                 AS amount,
 				COALESCE(c.status,'')                                                         AS status,
 				COALESCE(la.processing_status,'')                                             AS processing_status,
@@ -213,15 +225,15 @@ func GetPortfolioTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE confirmation_id = c.confirmation_id ORDER BY requested_at DESC LIMIT 1
 			) la ON true
 			WHERE COALESCE(c.is_deleted,false)=false%s`,
-			schemeJoin, folioJoin, dematJoin,
+			schemeNameInvest, amfiInvest, schemeJoin, folioJoin, dematJoin,
 			buildWhere("i.entity_name", constants.AMCName, constants.SchemeName, "c.status", "i.transaction_date", false))
 
 		redemptSQL := fmt.Sprintf(`
 			SELECT
 				'Redemption'::text                                                            AS tx_type,
-				COALESCE(i.entity_name,'')                                                    AS entity_name,
-				COALESCE(s.scheme_name,i.scheme_id,'')                                        AS scheme_name,
-				COALESCE(s.amfi_scheme_code,'')                                               AS amfi_scheme_code,
+				TRIM(COALESCE(i.entity_name,''))                                              AS entity_name,
+				%s                                                                            AS scheme_name,
+				%s                                                                            AS amfi_scheme_code,
 				COALESCE(c.gross_proceeds,0)::numeric                                         AS amount,
 				COALESCE(c.status,'')                                                         AS status,
 				COALESCE(la.processing_status,'')                                             AS processing_status,
@@ -254,50 +266,67 @@ func GetPortfolioTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status FROM investment.auditactionredemptionconfirmation
 				WHERE redemption_confirm_id = c.redemption_confirm_id ORDER BY requested_at DESC LIMIT 1
 			) la ON true
-			WHERE COALESCE(c.is_deleted,false)=false%s`,
-			schemeJoin, folioJoin, dematJoin,
+			WHERE COALESCE(c.is_deleted,false)=false
+			  AND NOT EXISTS (
+			    SELECT 1
+			    FROM investment.approved_onboard_transaction aot
+			    WHERE LOWER(TRIM(COALESCE(aot.entity_name,''))) = LOWER(TRIM(COALESCE(i.entity_name,'')))
+			      AND COALESCE(aot.transaction_date::date, aot.transaction_date) = COALESCE(i.requested_date::date, i.requested_date)
+			      AND ABS(COALESCE(aot.amount,0) - COALESCE(c.gross_proceeds,0)) < 0.01
+			      AND ABS(COALESCE(aot.units,0) - COALESCE(c.actual_units,0)) < 0.01
+			      AND (
+			        (NULLIF(TRIM(COALESCE(aot.scheme_id,'')), '') IS NOT NULL AND NULLIF(TRIM(COALESCE(i.scheme_id,'')), '') IS NOT NULL AND TRIM(aot.scheme_id) = TRIM(i.scheme_id))
+			        OR (NULLIF(TRIM(COALESCE(aot.scheme_internal_code,'')), '') IS NOT NULL AND TRIM(aot.scheme_internal_code) = TRIM(COALESCE(s.internal_scheme_code, i.scheme_id, '')))
+			      )
+			  )%s`,
+			schemeNameRedempt, amfiRedempt, schemeJoin, folioJoin, dematJoin,
 			buildWhere("i.entity_name", constants.AMCName, constants.SchemeName, "c.status", "i.requested_date", false))
 
-		onboardSchemeJoin := `LEFT JOIN investment.masterscheme s ON (s.scheme_id::text = ot.scheme_id OR s.internal_scheme_code = ot.scheme_internal_code)`
+		onboardSchemeJoin := `LEFT JOIN LATERAL (
+			SELECT ` + schemejoin.LateralSelectCols + `
+			FROM investment.masterscheme
+			WHERE ` + schemejoin.LateralWhereOnboardTx + `
+			LIMIT 1
+		) s ON true`
 		onboardFolioJoin := `LEFT JOIN investment.masterfolio mf ON mf.folio_id = ot.folio_id`
 		onboardDematJoin := `LEFT JOIN investment.masterdemataccount md ON md.demat_id = ot.demat_id`
 
 		onboardSQL := fmt.Sprintf(`
 			SELECT
 				'Onboard'::text                                                               AS tx_type,
-				COALESCE(ot.entity_name, mf.entity_name, md.entity_name, '')                  AS entity_name,
-				COALESCE(s.scheme_name,ot.scheme_internal_code,'')                            AS scheme_name,
-				COALESCE(s.amfi_scheme_code,'')                                               AS amfi_scheme_code,
+				TRIM(COALESCE(ot.entity_name, mf.entity_name, md.entity_name, ''))            AS entity_name,
+				%s                                                                            AS scheme_name,
+				%s                                                                            AS amfi_scheme_code,
 				COALESCE(ot.amount,0)::numeric                                                AS amount,
 				'ONBOARDED'::text                                                             AS status,
-				COALESCE(ob.status,'')                                                        AS processing_status,
+				COALESCE(ob.status, ot.approval_status, 'APPROVED')                          AS processing_status,
 				COALESCE(s.amc_name,'')                                                       AS amc_name,
 				COALESCE(s.internal_scheme_code,ot.scheme_internal_code,'')                   AS scheme_code,
 				COALESCE(s.isin,'')                                                           AS isin,
 				COALESCE(ot.folio_number,'')                                                  AS folio_number,
 				COALESCE(ot.demat_acc_number,'')                                              AS demat_number,
 				COALESCE(TO_CHAR(ot.transaction_date,'YYYY-MM-DD'),'')                        AS transaction_date,
-				COALESCE(ot.transaction_type,'')                                              AS transaction_type,
+				` + strings.Replace(SQLNormalizeTransactionType, "transaction_type", "ot.transaction_type", -1) + ` AS transaction_type,
 				COALESCE(ot.units,0)::numeric                                                 AS units,
 				COALESCE(ot.nav,0)::numeric                                                   AS nav,
 				''::text                                                                       AS nav_date,
-				0::numeric                                                                     AS net_amount,
+				COALESCE(ot.amount,0)::numeric                                                AS net_amount,
 				0::numeric                                                                     AS stamp_duty,
 				0::numeric                                                                     AS exit_load,
 				0::numeric                                                                     AS tds,
 				COALESCE(TO_CHAR(ob.completed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD HH24:MI:SS'),'') AS confirmed_at,
-				COALESCE(ob.source,'Manual')                                                  AS source,
+				COALESCE(NULLIF(TRIM(ob.source), ''), 'Workbench')                          AS source,
 				''::text                                                                       AS initiation_id,
 				''::text                                                                       AS confirmation_id,
 				ot.batch_id::text                                                             AS batch_id,
 				COALESCE(s.scheme_id::text,ot.scheme_id,'')                                   AS scheme_id,
 				COALESCE(mf.folio_id::text,ot.folio_id,'')                                    AS folio_id,
 				COALESCE(md.demat_id::text,ot.demat_id,'')                                    AS demat_id
-			FROM investment.onboard_transaction ot
-			JOIN investment.onboard_batch ob ON ob.batch_id = ot.batch_id
+			FROM investment.approved_onboard_transaction ot
+			LEFT JOIN investment.onboard_batch ob ON ob.batch_id = ot.batch_id
 			%s %s %s
 			WHERE 1=1%s`,
-			onboardSchemeJoin, onboardFolioJoin, onboardDematJoin,
+			schemeNameOnboard, amfiOnboard, onboardSchemeJoin, onboardFolioJoin, onboardDematJoin,
 			// skipStatus=true because onboard rows have fixed 'ONBOARDED' status
 			buildWhere("COALESCE(ot.entity_name, mf.entity_name, md.entity_name)", constants.AMCName, constants.SchemeName, "ob.status", "ot.transaction_date", ps.statusIdx > 0))
 
@@ -343,6 +372,10 @@ func GetPortfolioTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			results = append(results, row)
+		}
+		for i := range results {
+			results[i].EntityName = strings.TrimSpace(results[i].EntityName)
+			results[i].TransactionType = NormalizeTransactionType(results[i].TransactionType)
 		}
 		if results == nil {
 			results = []PortfolioTxRow{}

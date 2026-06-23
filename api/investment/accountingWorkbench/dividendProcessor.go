@@ -2,6 +2,8 @@ package accountingworkbench
 
 import (
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/portfolio"
+	"CimplrCorpSaas/api/investment/schemejoin"
 	"context"
 	"fmt"
 	"time"
@@ -285,15 +287,20 @@ func RefreshPortfolioAfterCorporateAction(ctx context.Context, tx DBExecutor, af
 				ot.demat_acc_number,
 				ot.folio_id,
 				ot.demat_id,
-				COALESCE(ot.scheme_id, fsm.scheme_id, ms2.scheme_id, ms.scheme_id) AS scheme_id,
-				COALESCE(ms2.scheme_name, ms.scheme_name) AS scheme_name,
-				COALESCE(ms2.isin, ms.isin) AS isin
+				COALESCE(ot.scheme_id, resolved_scheme.scheme_id::text) AS scheme_id,
+				resolved_scheme.scheme_name,
+				resolved_scheme.isin
 			FROM investment.onboard_transaction ot
 			LEFT JOIN investment.masterfolio mf ON mf.folio_id = ot.folio_id
 			LEFT JOIN investment.masterdemataccount md ON md.demat_id = ot.demat_id
-			LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = ot.folio_id
-			LEFT JOIN investment.masterscheme ms ON ms.scheme_id = fsm.scheme_id
-			LEFT JOIN investment.masterscheme ms2 ON (ms2.scheme_id::text = ot.scheme_id OR ms2.internal_scheme_code = ot.scheme_internal_code)
+			LEFT JOIN LATERAL (
+				SELECT scheme_id, scheme_name, isin
+				FROM investment.masterscheme
+				WHERE scheme_id::text = ot.scheme_id 
+				   OR internal_scheme_code = ot.scheme_internal_code
+				ORDER BY created_at DESC
+				LIMIT 1
+			) AS resolved_scheme ON true
 			WHERE ($2::text IS NULL OR COALESCE(mf.entity_name, md.entity_name, ot.entity_name) = $2)
 		),
 		transaction_summary AS (
@@ -306,26 +313,10 @@ func RefreshPortfolioAfterCorporateAction(ctx context.Context, tx DBExecutor, af
 				scheme_id,
 				scheme_name,
 				isin,
-				SUM(CASE WHEN LOWER(transaction_type) IN ('purchase','buy','subscription','bonus') THEN units
-						 WHEN LOWER(transaction_type) IN ('sell','redemption') THEN -units
-						 ELSE units END) AS total_units,
-				SUM(CASE WHEN LOWER(transaction_type) IN ('purchase','buy','subscription') THEN amount ELSE 0 END) AS total_invested_amount,
-				CASE WHEN SUM(CASE WHEN LOWER(transaction_type) IN ('purchase','buy','subscription') THEN units ELSE 0 END) = 0 THEN 0
-					 ELSE SUM(CASE WHEN LOWER(transaction_type) IN ('purchase','buy','subscription') THEN nav * units ELSE 0 END) /
-						  SUM(CASE WHEN LOWER(transaction_type) IN ('purchase','buy','subscription') THEN units ELSE 0 END)
-				END AS avg_nav
+` + portfolio.TransactionSummaryMetrics + `
 			FROM scheme_resolved
 			WHERE scheme_id = ANY($1)
 			GROUP BY entity_name, folio_number, demat_acc_number, folio_id, demat_id, scheme_id, scheme_name, isin
-		),
-		latest_nav AS (
-			SELECT DISTINCT ON (scheme_name)
-				scheme_name,
-				isin_div_payout_growth as isin,
-				nav_value,
-				nav_date
-			FROM investment.amfi_nav_staging
-			ORDER BY scheme_name, nav_date DESC
 		)
 		INSERT INTO investment.portfolio_snapshot (
 			batch_id, entity_name, folio_number, demat_acc_number, folio_id, demat_id,
@@ -351,7 +342,7 @@ func RefreshPortfolioAfterCorporateAction(ctx context.Context, tx DBExecutor, af
 			CASE WHEN ts.total_invested_amount = 0 THEN 0 ELSE (((ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount) / ts.total_invested_amount) * 100 END AS gain_losss_percent,
 			NOW()
 		FROM transaction_summary ts
-		LEFT JOIN latest_nav ln ON (ln.scheme_name = ts.scheme_name OR ln.isin = ts.isin)
+		` + schemejoin.NavLateralJoin("ts", "") + `
 		WHERE ts.total_units > 0
 	`, affectedSchemeIDs, nullIfEmptyString(entityName), existingBatchID)
 

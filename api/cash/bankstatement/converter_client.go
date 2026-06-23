@@ -444,3 +444,7 @@ func deriveClosingBalanceFromTxnMaps(txns []map[string]interface{}) *float64 {
 	}
 	return nil
 }
+
+func CallConvertCSVForTesting(ctx context.Context, docBytes []byte, filename, password string) ([]byte, error) {
+	return callConvertCSV(ctx, docBytes, filename, password)
+}

@@ -781,11 +781,15 @@ func parseMinAmount(input string) *string {
 	return &result
 }
 
-// RunAMFIDataDownloaderOnce runs the AMFI data downloader job once without scheduling
+// RunAMFIDataDownloaderOnce runs the AMFI data downloader job once without scheduling.
+// It downloads both scheme master data AND NAV data (matching the scheduled job behaviour).
 func RunAMFIDataDownloaderOnce(cfg *Config, db *pgxpool.Pool) error {
 	// Set default values if not provided
 	if cfg.DefaultSchemeURL == "" {
 		cfg.DefaultSchemeURL = config.DefaultSchemeURL
+	}
+	if cfg.DefaultNavURL == "" {
+		cfg.DefaultNavURL = config.DefaultNavURL
 	}
 	if cfg.BatchSize == 0 {
 		cfg.BatchSize = 1000
@@ -797,14 +801,25 @@ func RunAMFIDataDownloaderOnce(cfg *Config, db *pgxpool.Pool) error {
 		cfg.RetryDelay = 2 * time.Second
 	}
 
-	// Create circuit breakers for HTTP and DB operations
+	// Shared circuit breakers for both scheme and NAV downloads
 	httpCircuitBreaker := NewCircuitBreaker(5, 30*time.Second)
 	dbCircuitBreaker := NewCircuitBreaker(3, 60*time.Second)
 
-	// Process scheme data with retry logic
-	return RetryWithBackoff(cfg.MaxRetries, cfg.RetryDelay, func() error {
+	// Download scheme master first so NAV inserts can join against it
+	if err := RetryWithBackoff(cfg.MaxRetries, cfg.RetryDelay, func() error {
 		return processSchemeDataWithCircuitBreaker(cfg.DefaultSchemeURL, db, cfg.BatchSize, httpCircuitBreaker, dbCircuitBreaker)
-	})
+	}); err != nil {
+		return fmt.Errorf("scheme sync failed: %w", err)
+	}
+
+	// Then download NAV data
+	if err := RetryWithBackoff(cfg.MaxRetries, cfg.RetryDelay, func() error {
+		return processNAVDataWithCircuitBreaker(cfg.DefaultNavURL, db, cfg.BatchSize, httpCircuitBreaker, dbCircuitBreaker)
+	}); err != nil {
+		return fmt.Errorf("NAV sync failed: %w", err)
+	}
+
+	return nil
 }
 
 // RunAMFINAVSyncOnce runs the AMFI NAV synchronization job once without scheduling

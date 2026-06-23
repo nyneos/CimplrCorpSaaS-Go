@@ -177,21 +177,23 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 			pagePermissions := map[string]interface{}{}
 			tabs := map[string]map[string]interface{}{}
 			for permRows.Next() {
-				var pageName, tabName, action string
+				var pageName, action string
+				var tabName sql.NullString
 				var allowed interface{}
 				if err := permRows.Scan(&pageName, &tabName, &action, &allowed); err != nil {
 					log.Printf("role.go GetRolesPageData: scan permission row failed: %v", err)
+					continue
 				}
 				if pageName != "roles" {
 					continue
 				}
-				if tabName == "" {
+				if !tabName.Valid || tabName.String == "" {
 					pagePermissions[action] = allowed
 				} else {
-					if _, ok := tabs[tabName]; !ok {
-						tabs[tabName] = map[string]interface{}{}
+					if _, ok := tabs[tabName.String]; !ok {
+						tabs[tabName.String] = map[string]interface{}{}
 					}
-					tabs[tabName][action] = allowed
+					tabs[tabName.String][action] = allowed
 				}
 			}
 			rolesPerms["pagePermissions"] = pagePermissions
@@ -629,21 +631,23 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 			pagePermissions := map[string]interface{}{}
 			tabs := map[string]map[string]interface{}{}
 			for permRows.Next() {
-				var pageName, tabName, action string
+				var pageName, action string
+				var tabName sql.NullString
 				var allowed interface{}
 				if err := permRows.Scan(&pageName, &tabName, &action, &allowed); err != nil {
 					log.Printf("role.go GetPendingRoles: scan permission row failed: %v", err)
+					continue
 				}
 				if pageName != "roles" {
 					continue
 				}
-				if tabName == "" {
+				if !tabName.Valid || tabName.String == "" {
 					pagePermissions[action] = allowed
 				} else {
-					if _, ok := tabs[tabName]; !ok {
-						tabs[tabName] = map[string]interface{}{}
+					if _, ok := tabs[tabName.String]; !ok {
+						tabs[tabName.String] = map[string]interface{}{}
 					}
-					tabs[tabName][action] = allowed
+					tabs[tabName.String][action] = allowed
 				}
 			}
 			rolesPerms["pagePermissions"] = pagePermissions

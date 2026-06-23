@@ -3031,7 +3031,15 @@ func UploadMultiAccountBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				}
 			}
 		}
-		header := rows[headerRowIdx]
+		header := make([]string, len(rows[headerRowIdx]))
+		copy(header, rows[headerRowIdx])
+		if headerRowIdx+1 < len(rows) {
+			for j := 0; j < len(header) && j < len(rows[headerRowIdx+1]); j++ {
+				if strings.TrimSpace(rows[headerRowIdx+1][j]) != "" {
+					header[j] = strings.TrimSpace(header[j]) + " " + strings.TrimSpace(rows[headerRowIdx+1][j])
+				}
+			}
+		}
 		// Data rows are everything after the detected header row.
 		dataRows := rows[headerRowIdx+1:]
 
@@ -3096,8 +3104,8 @@ func UploadMultiAccountBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 
 		// Debit / credit: search for explicit column names first to avoid matching
 		// "Closing ledger balance" etc. that happen to contain "credit"/"debit".
-		debitIdx := findIdx("debit amount", "debit_amount", "withdrawal amount", "withdrawal_amount", "debit")
-		creditIdx := findIdx("credit amount", "credit_amount", "deposit amount", "deposit_amount")
+		debitIdx := findIdx("debit amount", "debit_amount", "withdrawal amount", "withdrawal_amount", "debit", "amount subtracted")
+		creditIdx := findIdx("credit amount", "credit_amount", "deposit amount", "deposit_amount", "amount added")
 		if creditIdx == -1 {
 			// Only fall back to "credit" / "deposit" when no explicit column found
 			creditIdx = findIdxExclude([]string{"ledger", "available", "brought", "closing", "opening", "current"}, "credit", "deposit")

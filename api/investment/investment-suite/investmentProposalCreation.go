@@ -1327,7 +1327,12 @@ all_schemes AS (
 		COALESCE(s.current_holding, 0) AS current_holding
 	FROM snapshot_agg s
 	FULL OUTER JOIN investment.masterscheme ms
-		ON ms.scheme_id::text = s.scheme_id OR ms.scheme_name = s.scheme_name
+		ON COALESCE(ms.is_deleted, false) = false
+		AND (
+			(NULLIF(TRIM(s.scheme_id::text), '') IS NOT NULL AND ms.scheme_id::text = TRIM(s.scheme_id::text))
+			OR (NULLIF(TRIM(s.internal_scheme_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(s.internal_scheme_code))
+			OR (NULLIF(TRIM(s.amfi_scheme_code), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(s.amfi_scheme_code))
+		)
 	JOIN latest_scheme_audit lsa ON lsa.scheme_id = ms.scheme_id::text
 	LEFT JOIN investment.masteramc ma ON ma.amc_name = ms.amc_name
 	LEFT JOIN latest_amc_audit laa ON laa.amc_id = ma.amc_id::text

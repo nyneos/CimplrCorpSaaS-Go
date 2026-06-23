@@ -268,7 +268,7 @@ var (
 
 		// More variants
 		"debit (inr)", "withdrawal (inr)",
-		"amount debited", "amount withdrawn",
+		"amount debited", "amount withdrawn", "amount subtracted",
 		"payment", "payments",
 		"sent", "transfer out",
 		"expense", "expenses",
@@ -284,7 +284,7 @@ var (
 
 		// More variants
 		"credit (inr)", "deposit (inr)",
-		"amount credited", "amount deposited",
+		"amount credited", "amount deposited", "amount added",
 		"received", "received amount",
 		"incoming", "inward",
 		"transfer in",

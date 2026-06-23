@@ -347,6 +347,7 @@ RULE 2 — Withdrawal / Deposit columns:
   If a column labeled "Deposits" contains large values that change like a running total across ALL rows
   (including rows that are obviously ATM withdrawals or fee charges), that column is the BALANCE column, not deposits.
   A genuine deposit column will be EMPTY (or zero) in rows that are clearly debits.
+  NOTE: "Amount Subtracted" means Withdrawal/Debit. "Amount Added" means Deposit/Credit.
 
 RULE 3 — Value Date:
   A value_date column must contain dates. If that column has numeric amounts in data rows, it is not the value date.
@@ -354,6 +355,10 @@ RULE 3 — Value Date:
 RULE 4 — Single combined amount column:
   If there is only ONE column for transaction amounts (both credits and debits share the same column),
   set both "withdrawal" and "deposit" to that same column index.
+
+RULE 5 — Split Headers:
+  If the header is split across two consecutive rows (e.g., Row 1: "Transaction", "Value"; Row 2: "Date", "Date"),
+  return the row index of the FIRST row of the split header as the header_row_index.
 
 Fields to identify:
    - date        : primary transaction date column

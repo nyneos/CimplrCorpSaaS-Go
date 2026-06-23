@@ -3,6 +3,7 @@ package redemption
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/portfolio"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/validation"
@@ -155,14 +156,12 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT COALESCE(ot.folio_id, ''), COALESCE(ot.demat_id, '')
 				FROM investment.onboard_transaction ot
 				LEFT JOIN investment.masterscheme ms ON (
-					ms.scheme_id = ot.scheme_id OR
-					ms.internal_scheme_code = ot.scheme_internal_code OR
-					ms.isin = ot.scheme_id
+					COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))
 				)
 				WHERE LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
 				  AND (
-					ms.scheme_id = $1 OR ms.scheme_name = $1 OR
-					ms.internal_scheme_code = $1 OR ms.isin = $1 OR
+					ms.scheme_id::text = $1 OR
+					ms.internal_scheme_code = $1 OR ms.amfi_scheme_code = $1 OR
 					ot.scheme_id = $1 OR ot.scheme_internal_code = $1
 				  )
 				  AND ($2::text IS NULL OR ot.entity_name = $2)
@@ -198,16 +197,11 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			navQuery := `
 				SELECT ans.nav_value
 				FROM investment.amfi_nav_staging ans
-				LEFT JOIN investment.masterscheme ms ON (
-					ms.internal_scheme_code = ans.scheme_code OR
-					ms.isin = ans.isin_div_payout_growth OR
-					ms.scheme_name = ans.scheme_name
-				)
+				LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ms.amfi_scheme_code = ans.scheme_code::text)
 				WHERE (
 					ms.scheme_id = $1 OR
-					ms.scheme_name = $1 OR
-					ms.internal_scheme_code = $1 OR
-					ms.isin = $1
+										ms.internal_scheme_code = $1 OR
+					ms.amfi_scheme_code = $1
 				)
 				ORDER BY ans.nav_date DESC, ans.file_date DESC
 				LIMIT 1
@@ -237,18 +231,14 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						) AS row_num
 					FROM investment.onboard_transaction ot
 					LEFT JOIN investment.masterscheme ms ON (
-						ms.scheme_id = ot.scheme_id OR
-						ms.internal_scheme_code = ot.scheme_internal_code OR
-						ms.isin = ot.scheme_id
+						COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))
 					)
 					WHERE 
 						LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
 						AND (
 							ms.scheme_id = $1 OR
-							ms.scheme_name = $1 OR
-							ms.internal_scheme_code = $1 OR
-							ms.isin = $1 OR
-							ot.scheme_id = $1 OR
+														ms.internal_scheme_code = $1 OR
+														ot.scheme_id = $1 OR
 							ot.scheme_internal_code = $1
 						)
 						AND (
@@ -420,14 +410,12 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					SELECT COALESCE(ot.folio_id, ''), COALESCE(ot.demat_id, '')
 					FROM investment.onboard_transaction ot
 					LEFT JOIN investment.masterscheme ms ON (
-						ms.scheme_id = ot.scheme_id OR
-						ms.internal_scheme_code = ot.scheme_internal_code OR
-						ms.isin = ot.scheme_id
+						COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))
 					)
 					WHERE LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
 					  AND (
-						ms.scheme_id = $1 OR ms.scheme_name = $1 OR
-						ms.internal_scheme_code = $1 OR ms.isin = $1 OR
+						ms.scheme_id::text = $1 OR
+						ms.internal_scheme_code = $1 OR ms.amfi_scheme_code = $1 OR
 						ot.scheme_id = $1 OR ot.scheme_internal_code = $1
 					  )
 					  AND ($2::text IS NULL OR ot.entity_name = $2)
@@ -461,16 +449,11 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				navQuery := `
 					SELECT ans.nav_value
 					FROM investment.amfi_nav_staging ans
-					LEFT JOIN investment.masterscheme ms ON (
-						ms.internal_scheme_code = ans.scheme_code OR
-						ms.isin = ans.isin_div_payout_growth OR
-						ms.scheme_name = ans.scheme_name
-					)
+					LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ms.amfi_scheme_code = ans.scheme_code::text)
 					WHERE (
 						ms.scheme_id = $1 OR
-						ms.scheme_name = $1 OR
-						ms.internal_scheme_code = $1 OR
-						ms.isin = $1
+												ms.internal_scheme_code = $1 OR
+						ms.amfi_scheme_code = $1
 					)
 					ORDER BY ans.nav_date DESC, ans.file_date DESC
 					LIMIT 1
@@ -499,18 +482,14 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							) AS row_num
 						FROM investment.onboard_transaction ot
 						LEFT JOIN investment.masterscheme ms ON (
-							ms.scheme_id = ot.scheme_id OR
-							ms.internal_scheme_code = ot.scheme_internal_code OR
-							ms.isin = ot.scheme_id
+							COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))
 						)
 						WHERE 
 							LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
 							AND (
 								ms.scheme_id = $1 OR
-								ms.scheme_name = $1 OR
-								ms.internal_scheme_code = $1 OR
-								ms.isin = $1 OR
-								ot.scheme_id = $1 OR
+																ms.internal_scheme_code = $1 OR
+																ot.scheme_id = $1 OR
 								ot.scheme_internal_code = $1
 							)
 							AND (
@@ -1024,7 +1003,7 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					LEFT JOIN investment.masterscheme ms ON (
 						ms.scheme_id = ri.scheme_id OR
 						ms.internal_scheme_code = ri.scheme_id OR
-						ms.isin = ri.scheme_id
+						ms.amfi_scheme_code = ri.scheme_id
 					)
 					WHERE ri.redemption_id = $1
 				`, rid).Scan(&folioID, &dematID, &schemeID, &byUnits, &method, &entityName); err != nil {
@@ -1050,18 +1029,14 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							) AS row_num
 						FROM investment.onboard_transaction ot
 						LEFT JOIN investment.masterscheme ms ON (
-							ms.scheme_id = ot.scheme_id OR
-							ms.internal_scheme_code = ot.scheme_internal_code OR
-							ms.isin = ot.scheme_id
+							COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))
 						)
 						WHERE 
 							LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
 							AND (
 								ms.scheme_id = $1 OR
-								ms.scheme_name = $1 OR
-								ms.internal_scheme_code = $1 OR
-								ms.isin = $1 OR
-								ot.scheme_id = $1 OR
+																ms.internal_scheme_code = $1 OR
+																ot.scheme_id = $1 OR
 								ot.scheme_internal_code = $1
 							)
 							AND (
@@ -1246,7 +1221,7 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.masterscheme ms ON (
 					ms.scheme_id = ri.scheme_id OR
 					ms.internal_scheme_code = ri.scheme_id OR
-					ms.isin = ri.scheme_id
+					ms.amfi_scheme_code = ri.scheme_id
 				)
 				WHERE ri.redemption_id = $1
 			`, rid).Scan(&folioID, &dematID, &schemeID, &byUnits, &method, &entityName); err != nil {
@@ -1265,18 +1240,14 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						ot.transaction_date
 					FROM investment.onboard_transaction ot
 					LEFT JOIN investment.masterscheme ms ON (
-						ms.scheme_id = ot.scheme_id OR
-						ms.internal_scheme_code = ot.scheme_internal_code OR
-						ms.isin = ot.scheme_id
+						COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))
 					)
 					WHERE 
 						LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
 						AND (
 							ms.scheme_id = $1 OR
-							ms.scheme_name = $1 OR
-							ms.internal_scheme_code = $1 OR
-							ms.isin = $1 OR
-							ot.scheme_id = $1 OR
+														ms.internal_scheme_code = $1 OR
+														ot.scheme_id = $1 OR
 							ot.scheme_internal_code = $1
 						)
 						AND (
@@ -1479,9 +1450,9 @@ func fetchRedemptionInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, i
 		LEFT JOIN history h ON h.redemption_id = m.redemption_id
 		LEFT JOIN investment.masterscheme s ON (
 		    s.scheme_id::text = m.scheme_id
-		 OR s.scheme_name = m.scheme_id
+		
 		 OR s.internal_scheme_code = m.scheme_id
-		 OR s.isin = m.scheme_id
+		
 		)
 		LEFT JOIN resolved_folio rf ON rf.redemption_id = m.redemption_id
 		LEFT JOIN resolved_demat rd ON rd.redemption_id = m.redemption_id
@@ -1607,9 +1578,9 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		JOIN latest l ON l.redemption_id = m.redemption_id
 		LEFT JOIN investment.masterscheme s ON (
 		    s.scheme_id::text = m.scheme_id
-		 OR s.scheme_name = m.scheme_id
+		
 		 OR s.internal_scheme_code = m.scheme_id
-		 OR s.isin = m.scheme_id
+		
 		)
 		LEFT JOIN resolved_folio rf ON rf.redemption_id = m.redemption_id
 		LEFT JOIN resolved_demat rd ON rd.redemption_id = m.redemption_id
@@ -1782,9 +1753,9 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l ON l.redemption_id = m.redemption_id
 			LEFT JOIN investment.masterscheme s ON (
 				s.scheme_id::text = m.scheme_id
-			 OR s.scheme_name = m.scheme_id
+			
 			 OR s.internal_scheme_code = m.scheme_id
-			 OR s.isin = m.scheme_id
+			
 			)
 			LEFT JOIN resolved_folio rf ON rf.redemption_id = m.redemption_id
 			LEFT JOIN resolved_demat rd ON rd.redemption_id = m.redemption_id
@@ -2192,12 +2163,11 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(ot.entity_name,'') AS entity_name,
 				TO_CHAR(ot.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
 			FROM investment.onboard_transaction ot
-			LEFT JOIN investment.portfolio_snapshot ps ON ps.batch_id = ot.batch_id
-			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
-			WHERE (COALESCE(ot.entity_name,'') = $1 OR ps.entity_name = $1)
+			LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id))))
+			WHERE COALESCE(ot.entity_name,'') = $1
 				AND LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption')
 				AND (( $2::text IS NOT NULL AND ot.folio_number = $2) OR ($3::text IS NOT NULL AND ot.demat_acc_number = $3))
-				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $5 OR ms.isin = $6 OR ms.scheme_name = $7 )
+				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $5 OR ms.scheme_id::text = $4 OR ms.internal_scheme_code = $5 OR ms.amfi_scheme_code = $6 )
 			ORDER BY ot.transaction_date ASC, ot.id ASC
 		`
 		rows2, err := pgxPool.Query(ctx, sellQ, entityNameScoped, nullIfEmptyString(folioNumber), nullIfEmptyString(dematAccountNumber), resolvedSchemeID, resolvedSchemeID, isin, schemeName)
@@ -2313,9 +2283,14 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fmt.Printf("[DEBUG] Total confirmations found: %d, confirmedUnits=%f\n", len(confirmations), confirmedUnits)
 		}
 
-		// Compose holding numbers (prefer snapshot, but always compute blocked/available from lots)
-		// For correctness/consistency, treat holding_total_units as (buys - sells) from transactions.
+		// Compose holding numbers from portfolio engine (live NAV + cost basis), with lot-level blocked units.
+		portfolioRows, _ := portfolio.QueryEntityHoldings(ctx, pgxPool, entityNameScoped)
+		matched := portfolio.MatchHoldingRow(portfolioRows, resolvedSchemeID, folioNumber, dematAccountNumber)
+
 		holdingTotalUnits := totalBuyUnits - totalSellUnits
+		if matched != nil {
+			holdingTotalUnits = matched.TotalUnits
+		}
 		if holdingTotalUnits < 0 {
 			holdingTotalUnits = 0
 		}
@@ -2324,25 +2299,35 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			availableUnits = 0
 		}
 		holdingAvgNav := snapAvgNav
-		if totalBuyUnits > 0 {
-			holdingAvgNav = totalBuyNavUnits / totalBuyUnits
-		}
 		holdingTotalInvested := snapTotalInvested
-		if totalBuyAmount > 0 {
-			holdingTotalInvested = totalBuyAmount
-		}
 		holdingCurrentNav := snapCurrentNav
-		if holdingCurrentNav == 0 {
-			holdingCurrentNav = holdingAvgNav
-		}
 		holdingCurrentValue := snapCurrentValue
-		if holdingCurrentNav > 0 {
-			holdingCurrentValue = holdingTotalUnits * holdingCurrentNav
-		}
-		holdingGainLoss := holdingCurrentValue - holdingTotalInvested
+		holdingGainLoss := snapGainLoss
 		holdingGainLossPct := snapGainLossPct
-		if holdingTotalInvested != 0 {
-			holdingGainLossPct = (holdingGainLoss / holdingTotalInvested) * 100.0
+		if matched != nil {
+			holdingAvgNav = matched.AvgNav
+			holdingTotalInvested = matched.TotalInvestedAmount
+			holdingCurrentNav = matched.CurrentNav
+			holdingCurrentValue = matched.CurrentValue
+			holdingGainLoss = matched.GainLoss
+			holdingGainLossPct = matched.GainLossPercent
+		} else {
+			if totalBuyUnits > 0 {
+				holdingAvgNav = totalBuyNavUnits / totalBuyUnits
+			}
+			if holdingCurrentNav == 0 {
+				holdingCurrentNav = holdingAvgNav
+			}
+			if holdingCurrentNav > 0 {
+				holdingCurrentValue = holdingTotalUnits * holdingCurrentNav
+			}
+			if totalBuyAmount > 0 && holdingTotalUnits > 0 && totalBuyUnits > 0 {
+				holdingTotalInvested = holdingTotalUnits * (totalBuyNavUnits / totalBuyUnits)
+			}
+			holdingGainLoss = holdingCurrentValue - holdingTotalInvested
+			if holdingTotalInvested != 0 {
+				holdingGainLossPct = (holdingGainLoss / holdingTotalInvested) * 100.0
+			}
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]any{
@@ -2400,6 +2385,18 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"total_invested_amount": holdingTotalInvested,
 				"gain_loss":             holdingGainLoss,
 				"gain_loss_percent":     holdingGainLossPct,
+				"realized_gain_loss": func() float64 {
+					if matched != nil {
+						return matched.RealizedGainLoss
+					}
+					return 0
+				}(),
+				"total_gain_loss": func() float64 {
+					if matched != nil {
+						return matched.TotalGainLoss
+					}
+					return holdingGainLoss
+				}(),
 			},
 			"buy_lots":      buyLots,
 			"sell_txs":      sellTxs,

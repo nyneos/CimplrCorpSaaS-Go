@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/dependency"
 	"encoding/json"
 	"fmt"
@@ -512,55 +513,42 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		scope := ctxutil.FromContext(ctx)
 
-		// Validate entity access
-		approvedEntities := api.GetEntityNamesFromCtx(ctx)
-		entityFound := false
-		for _, e := range approvedEntities {
-			if strings.EqualFold(e, req.EntityName) {
-				entityFound = true
-				break
-			}
-		}
-		if !entityFound {
+		// Entity check — admin override bypasses entity scoping
+		if !scope.HasEntityNameAccess(req.EntityName) {
 			api.RespondWithError(w, http.StatusForbidden, "Access denied. Entity not in accessible entities")
 			return
 		}
 
-		// Validate DP
+		// DP check — skipped when context has no restrictions (admin)
 		approvedDPs, _ := ctx.Value("ApprovedDPs").([]map[string]string)
-		dpFound := false
-		for _, dp := range approvedDPs {
-			if dp["dp_id"] == req.DPID || strings.EqualFold(dp["dp_name"], req.DPID) || dp["dp_code"] == req.DPID ||
-				(req.DepositoryParticipant != "" && (dp["dp_id"] == req.DepositoryParticipant || strings.EqualFold(dp["dp_name"], req.DepositoryParticipant) || dp["dp_code"] == req.DepositoryParticipant)) {
-				dpFound = true
-				break
+		if len(approvedDPs) > 0 {
+			dpFound := false
+			for _, dp := range approvedDPs {
+				if dp["dp_id"] == req.DPID || strings.EqualFold(dp["dp_name"], req.DPID) || dp["dp_code"] == req.DPID ||
+					(req.DepositoryParticipant != "" && (dp["dp_id"] == req.DepositoryParticipant || strings.EqualFold(dp["dp_name"], req.DepositoryParticipant) || dp["dp_code"] == req.DepositoryParticipant)) {
+					dpFound = true
+					break
+				}
 			}
-		}
-		if !dpFound {
-			api.RespondWithError(w, http.StatusBadRequest, "DP not in approved DPs")
-			return
+			if !dpFound {
+				api.RespondWithError(w, http.StatusBadRequest, "DP not in approved DPs")
+				return
+			}
 		}
 
-		// Validate bank account
-		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
-		accountFound := false
-		for _, acc := range approvedBankAccounts {
-			if acc["account_number"] == req.DefaultSettlementAccount || acc["account_id"] == req.DefaultSettlementAccount {
-				accountFound = true
-				break
-			}
-		}
-		if !accountFound {
+		// Bank account check — admin override bypasses
+		if !scope.HasApprovedBankAccount(req.DefaultSettlementAccount) {
 			api.RespondWithError(w, http.StatusBadRequest, "Settlement account not in approved bank accounts")
 			return
 		}
 
-		// uniqueness: entity_name + demat_account_number
+		// uniqueness: demat_account_number
 		var tmp int
-		err := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterdemataccount WHERE entity_name=$1 AND demat_account_number=$2 AND COALESCE(is_deleted,false)=false LIMIT 1`, req.EntityName, req.DematAccountNumber).Scan(&tmp)
+		err := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterdemataccount WHERE demat_account_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, req.DematAccountNumber).Scan(&tmp)
 		if err == nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Demat account (entity_name + demat_account_number) already exists")
+			api.RespondWithError(w, http.StatusBadRequest, "Demat account number already exists")
 			return
 		}
 
@@ -715,11 +703,11 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// uniqueness check
 			var exists int
 			err = tx.QueryRow(ctx, `
-				SELECT 1 FROM investment.masterdemataccount
-				WHERE entity_name=$1 AND demat_account_number=$2 AND COALESCE(is_deleted,false)=false LIMIT 1
-			`, name, dacc).Scan(&exists)
+				SELECT 1 FROM investment.masterdemataccount 
+				WHERE demat_account_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1
+			`, dacc).Scan(&exists)
 			if err == nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "entity": name, constants.ValueError: "Duplicate demat (entity+demat_account_number)"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "entity": name, constants.ValueError: "Demat account number already exists"})
 				continue
 			}
 
@@ -917,6 +905,10 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "demat_id missing"})
 				continue
 			}
+			if strings.TrimSpace(row.Reason) == "" {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: "Reason for edit is required"})
+				continue
+			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
@@ -1024,6 +1016,10 @@ func DeleteDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(req.DematIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "demat_ids required")
+			return
+		}
+		if strings.TrimSpace(req.Reason) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "Reason for deletion is required")
 			return
 		}
 
@@ -1396,17 +1392,29 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ba.account_id,
 				ba.account_number,
 				ba.account_nickname,
-				b.bank_name,
-				COALESCE(e.entity_name, ec.entity_name) AS account_entity_name,
-				cl.clearing_codes
+				ba.bank_name,
+				ba.account_entity_name,
+				ba.clearing_codes
 			FROM investment.masterdemataccount m
 			LEFT JOIN latest_audit l ON l.demat_id = m.demat_id
 			LEFT JOIN history h ON h.demat_id = m.demat_id
-			LEFT JOIN public.masterbankaccount ba ON ba.account_number = m.default_settlement_account
-			LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
-			LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
-			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
-			LEFT JOIN clearing cl ON cl.account_id = ba.account_id
+			LEFT JOIN LATERAL (
+				SELECT 
+					bacc.account_id,
+					bacc.account_number,
+					bacc.account_nickname,
+					bk.bank_name,
+					COALESCE(e.entity_name, ec.entity_name) AS account_entity_name,
+					cl.clearing_codes
+				FROM public.masterbankaccount bacc
+				LEFT JOIN public.masterbank bk ON bk.bank_id = bacc.bank_id
+				LEFT JOIN public.masterentity e ON e.entity_id::text = bacc.entity_id
+				LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = bacc.entity_id
+				LEFT JOIN clearing cl ON cl.account_id = bacc.account_id
+				WHERE (bacc.account_number = m.default_settlement_account OR bacc.account_id = m.default_settlement_account)
+				  AND COALESCE(e.entity_name, ec.entity_name) = m.entity_name
+				LIMIT 1
+			) ba ON true
 			WHERE COALESCE(m.is_deleted,false)=false
 			  AND m.entity_name = ANY($1)
 			  AND (m.dp_id = ANY($2) OR m.depository_participant = ANY($2))

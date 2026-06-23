@@ -1183,9 +1183,12 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					ms.internal_scheme_code AS ms_internal_code
 				FROM investment.onboard_transaction t
 				LEFT JOIN investment.masterscheme ms ON (
-					ms.scheme_id = t.scheme_id 
-					OR ms.internal_scheme_code = t.scheme_internal_code 
-					OR ms.isin = t.scheme_id
+					COALESCE(ms.is_deleted, false) = false
+					AND (
+						(NULLIF(TRIM(t.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(t.scheme_id))
+						OR (NULLIF(TRIM(t.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(t.scheme_internal_code))
+						OR (NULLIF(TRIM(t.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(t.scheme_id))
+					)
 				)
 				WHERE t.transaction_date <= $1::date
 				  AND LOWER(COALESCE(t.transaction_type,'')) IN ('buy','purchase','subscription','sell','redemption')

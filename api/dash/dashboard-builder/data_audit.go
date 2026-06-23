@@ -261,11 +261,11 @@ func queryInvestmentOnboardBatchInfo(ctx context.Context, pool *pgxpool.Pool, en
 			COALESCE(ob.remarks,           '') AS remarks,
 			ob.created_at,
 			ob.completed_at,
-			(SELECT COUNT(*) FROM investment.masteramc                WHERE batch_id::text = ob.batch_id::text) AS amc_count,
-			(SELECT COUNT(*) FROM investment.masterscheme              WHERE batch_id::text = ob.batch_id::text) AS scheme_count,
-			(SELECT COUNT(*) FROM investment.masterdepositoryparticipant WHERE batch_id::text = ob.batch_id::text) AS dp_count,
-			(SELECT COUNT(*) FROM investment.masterdemataccount        WHERE batch_id::text = ob.batch_id::text) AS demat_count,
-			(SELECT COUNT(*) FROM investment.masterfolio               WHERE batch_id::text = ob.batch_id::text) AS folio_count
+			(SELECT COUNT(DISTINCT pom.amc_id)    FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND COALESCE(pom.amc_id, '') <> '') AS amc_count,
+			(SELECT COUNT(DISTINCT pom.scheme_id) FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND COALESCE(pom.scheme_id, '') <> '') AS scheme_count,
+			(SELECT COUNT(DISTINCT m.dp_id)      FROM investment.portfolio_onboarding_map pom JOIN investment.masterdepositoryparticipant m ON m.dp_name = pom.entity_name WHERE pom.batch_id::text = ob.batch_id::text AND pom.folio_id IS NULL AND pom.demat_id IS NULL AND pom.amc_id IS NULL AND pom.scheme_id IS NULL AND COALESCE(m.dp_id, '') <> '') AS dp_count,
+			(SELECT COUNT(DISTINCT pom.demat_id)  FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND COALESCE(pom.demat_id, '') <> '') AS demat_count,
+			(SELECT COUNT(DISTINCT pom.folio_id)  FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND COALESCE(pom.folio_id, '') <> '') AS folio_count
 		FROM investment.onboard_batch ob
 		%s
 		ORDER BY ob.created_at DESC NULLS LAST

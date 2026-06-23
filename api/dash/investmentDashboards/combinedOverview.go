@@ -78,8 +78,8 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			COALESCE(asm.scheme_category, 'Other') AS scheme_category,
 			COALESCE(asm.scheme_sub_category, 'Other') AS scheme_sub_category,
 			COALESCE(asm.scheme_type, 'Other') AS scheme_type
-		FROM investment.onboard_transaction ot
-		LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
+		FROM investment.approved_onboard_transaction ot
+		LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id))))
 		LEFT JOIN investment.amfi_scheme_master_staging asm ON asm.scheme_code::text = ms.amfi_scheme_code::text
 		LEFT JOIN latest_nav ln ON ln.scheme_code = COALESCE(ms.amfi_scheme_code::text, asm.scheme_code::text)
 		, params p
@@ -136,7 +136,7 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Query B: YTD flows (simple inflows/outflows)
 		fyStart := getFinancialYearStart(time.Now().UTC()).Format(constants.DateFormat)
-		flowsQ := `SELECT COALESCE(SUM(CASE WHEN LOWER(transaction_type) IN ('buy','purchase','subscription','sip','switch_in') THEN amount ELSE 0 END),0)::float8 AS inflows, COALESCE(SUM(CASE WHEN LOWER(transaction_type) IN ('sell','redemption','switch_out') THEN amount ELSE 0 END),0)::float8 AS outflows FROM investment.onboard_transaction WHERE transaction_date >= $1 AND ($2::text IS NULL OR COALESCE(entity_name,'') = $2) AND ($3::text[] IS NULL OR COALESCE(entity_name,'') = ANY($3))`
+		flowsQ := `SELECT COALESCE(SUM(CASE WHEN LOWER(transaction_type) IN ('buy','purchase','subscription','sip','switch_in') THEN amount ELSE 0 END),0)::float8 AS inflows, COALESCE(SUM(CASE WHEN LOWER(transaction_type) IN ('sell','redemption','switch_out') THEN amount ELSE 0 END),0)::float8 AS outflows FROM investment.approved_onboard_transaction WHERE transaction_date >= $1 AND ($2::text IS NULL OR COALESCE(entity_name,'') = $2) AND ($3::text[] IS NULL OR COALESCE(entity_name,'') = ANY($3))`
 
 		var inflows, outflows float64
 		if err := pgxPool.QueryRow(ctx, flowsQ, fyStart, nullIfEmpty(entityFilter), allowedEntities).Scan(&inflows, &outflows); err != nil {
