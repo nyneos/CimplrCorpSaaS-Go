@@ -104,6 +104,82 @@ func enrichTenureFields(row map[string]interface{}) {
 	}
 }
 
+func mapRowString(row map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		raw, ok := row[key]
+		if !ok || raw == nil {
+			continue
+		}
+		if s := strings.TrimSpace(fmt.Sprintf("%v", raw)); s != "" && s != "<nil>" {
+			return s
+		}
+	}
+	return ""
+}
+
+// enrichBankReferenceFields fills bank_reference_number from fd_confirmation when
+// the master row does not already carry a value (older activations).
+func enrichBankReferenceFields(ctx context.Context, pool *pgxpool.Pool, rows []map[string]interface{}) {
+	if len(rows) == 0 {
+		return
+	}
+
+	confCols, err := loadTableColumns(ctx, pool, "investment", "fd_confirmation")
+	if err != nil || !confCols["bank_reference_number"] {
+		return
+	}
+
+	confirmationIDs := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, row := range rows {
+		if mapRowString(row, "bank_reference_number") != "" {
+			continue
+		}
+		cid := mapRowString(row, "confirmation_id")
+		if cid == "" {
+			continue
+		}
+		if _, ok := seen[cid]; ok {
+			continue
+		}
+		seen[cid] = struct{}{}
+		confirmationIDs = append(confirmationIDs, cid)
+	}
+	if len(confirmationIDs) == 0 {
+		return
+	}
+
+	lookup := make(map[string]string, len(confirmationIDs))
+	qRows, qErr := pool.Query(ctx, `
+		SELECT
+			confirmation_id::text,
+			COALESCE(NULLIF(BTRIM(bank_reference_number::text), ''), bank_fd_ref_no, '') AS bank_reference_number
+		FROM investment.fd_confirmation
+		WHERE confirmation_id = ANY($1::text[])
+		  AND COALESCE(is_deleted, false) = false`, confirmationIDs)
+	if qErr != nil {
+		return
+	}
+	defer qRows.Close()
+	for qRows.Next() {
+		var cid, ref string
+		if scanErr := qRows.Scan(&cid, &ref); scanErr != nil {
+			continue
+		}
+		lookup[strings.TrimSpace(cid)] = strings.TrimSpace(ref)
+	}
+
+	for _, row := range rows {
+		if mapRowString(row, "bank_reference_number") != "" {
+			continue
+		}
+		cid := mapRowString(row, "confirmation_id")
+		if ref, ok := lookup[cid]; ok && ref != "" {
+			row["bank_reference_number"] = ref
+		}
+	}
+}
+
 func backfillEmptyTenureTypes(ctx context.Context, pool *pgxpool.Pool) {
 	tenureTypeBackfillOnce.Do(func() {
 		_, _ = pool.Exec(ctx, `
@@ -1696,6 +1772,7 @@ func GetFDMasterWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for i := range payload {
 			enrichTenureFields(payload[i])
 		}
+		enrichBankReferenceFields(ctx, pgxPool, payload)
 
 		// ── Enrich each FD row with its latest activation audit processing_status ──
 		if auditTable != "" && auditRefCol != "" {

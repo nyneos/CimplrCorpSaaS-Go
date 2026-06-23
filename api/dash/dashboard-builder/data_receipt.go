@@ -29,6 +29,7 @@ func queryFDMaturitySummary(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 				END) AS tenure_type,
 			COALESCE(m.principal_amount, 0) AS principal_amount,
 			COALESCE(m.interest_rate, 0) AS interest_rate,
+			COALESCE(m.interest_type_code, '') AS interest_type_code,
 			m.start_date,
 			m.maturity_date,
 			COALESCE(m.fd_status, '') AS fd_status,
