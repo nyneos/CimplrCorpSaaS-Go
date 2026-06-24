@@ -166,6 +166,14 @@ func cleanAmount(s string) string {
 	// For balance columns: "Dr" means overdraft (caller handles sign if needed).
 	// For debit/credit amount columns: the indicator is redundant — value is already positive.
 	lc := strings.ToLower(s)
+	// PNB and some other banks emit "7307.23 Cr." with a trailing period — strip it first.
+	if strings.HasSuffix(lc, " cr.") || strings.HasSuffix(lc, " dr.") {
+		s = strings.TrimSpace(s[:len(s)-1])
+		lc = strings.ToLower(s)
+	} else if len(s) > 3 && (strings.HasSuffix(lc, "cr.") || strings.HasSuffix(lc, "dr.")) && (lc[len(lc)-4] >= '0' && lc[len(lc)-4] <= '9') {
+		s = strings.TrimSpace(s[:len(s)-1])
+		lc = strings.ToLower(s)
+	}
 	switch {
 	case strings.HasSuffix(lc, " cr"):
 		s = strings.TrimSpace(s[:len(s)-3])
@@ -203,6 +211,17 @@ func parseStrictAmount(raw string) (float64, bool) {
 
 func isFiniteNumber(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+// isBalanceDrOverdraft returns true when the raw balance cell string ends with
+// a "Dr" / "DR" suffix (with or without a preceding space or trailing period),
+// indicating an overdrawn (negative) balance. Must be called on the raw cell
+// value BEFORE cleanAmount strips the suffix.
+func isBalanceDrOverdraft(raw string) bool {
+	lc := strings.ToLower(strings.TrimSpace(raw))
+	return strings.HasSuffix(lc, " dr") ||
+		strings.HasSuffix(lc, " dr.") ||
+		(len(lc) > 2 && strings.HasSuffix(lc, "dr") && lc[len(lc)-3] >= '0' && lc[len(lc)-3] <= '9')
 }
 
 // buildTxnKey creates a stable key used to detect whether a transaction from
@@ -444,6 +463,14 @@ var nonTxnKeywords = []string{
 	"team icici", "sincerely",
 	"customers are requested", "notify the bank of any discrepancy",
 	"miv/st/bank", "banking &financial services",
+
+	// PNB-specific footer / notice rows
+	"generated through pnb one",
+	"please ensure that all the cheques",
+	"branded with your 16 digits account number",
+	"please maintain minimum average balance",
+	"penal interest charges",
+	"please note penal interest",
 }
 
 // nonTxnKeywordMatches returns true when kw appears in cell as a phrase, not a
@@ -733,6 +760,9 @@ func userFriendlyUploadError(err error) string {
 	}
 	if errors.Is(err, ErrAllTransactionsDuplicate) {
 		return "This statement has already been uploaded. All transactions in this statement already exist in the system."
+	}
+	if errors.Is(err, ErrEmptyStatement) {
+		return "No transactions were found in the uploaded statement. Please upload a statement that contains at least one transaction."
 	}
 
 	msg := err.Error()

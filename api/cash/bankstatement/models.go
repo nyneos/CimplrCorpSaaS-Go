@@ -18,6 +18,7 @@ var (
 	ErrAccountNumberMissing     = errors.New("account number not found in file header")
 	ErrStatementPeriodExists    = errors.New("a statement for this period already exists for this account")
 	ErrAllTransactionsDuplicate = errors.New("all transactions in this statement already exist")
+	ErrEmptyStatement           = errors.New("no transactions found in the uploaded statement")
 )
 
 var (
