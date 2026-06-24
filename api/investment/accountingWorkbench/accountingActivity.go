@@ -4,7 +4,6 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
-	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1313,6 +1312,13 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if dematRefs := accountingMFDematRefs(ctx); len(dematRefs) > 0 {
 			dematParam = pos
 			args = append(args, dematRefs)
+			pos++
+		}
+		entityParam := 0
+		if entityNames := accountingEntityNamesForScope(ctx); len(entityNames) > 0 {
+			entityParam = pos
+			args = append(args, entityNames)
+			pos++
 		}
 
 		mtmScope, dividendScope, fvoScope, corporateActionScope := "", "", "", ""
@@ -1329,6 +1335,11 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if dematParam > 0 {
 			mtmScope += fmt.Sprintf(" AND (COALESCE(mt.demat_id::text,'') = '' OR mt.demat_id::text = ANY($%d::text[]))", dematParam)
+		}
+		if entityParam > 0 {
+			entityFilter := fmt.Sprintf(" AND LOWER(TRIM(COALESCE(fol.entity_name,''))) = ANY(SELECT LOWER(TRIM(x)) FROM unnest($%d::text[]) AS x)", entityParam)
+			mtmScope += entityFilter
+			dividendScope += entityFilter
 		}
 
 		finalScope := ""
@@ -1680,13 +1691,18 @@ func GetJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		scope := ctxutil.FromContext(ctx)
 
 		if req.EntityName != "" {
-			if errMsg := validation.ValidateMFMasterReferences(ctx, map[string]interface{}{"entity_name": req.EntityName}); errMsg != "" {
-				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			entityName, scopeErr := accountingResolveEntityName(ctx, pgxPool, req.EntityName)
+			if scopeErr != "" {
+				status := http.StatusBadRequest
+				if strings.Contains(scopeErr, "authorized access scope") {
+					status = http.StatusForbidden
+				}
+				api.RespondWithError(w, status, scopeErr)
 				return
 			}
 			whereClause += " AND je.entity_name = $1"
-			args = append(args, req.EntityName)
-		} else if len(scope.EntityNames) > 0 {
+			args = append(args, entityName)
+		} else if len(scope.EntityNames) > 0 && !scope.IsAdminOverride {
 			whereClause += " AND je.entity_name = ANY($1::text[])"
 			args = append(args, scope.EntityNames)
 		}

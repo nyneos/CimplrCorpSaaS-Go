@@ -3,6 +3,7 @@ package accountingworkbench
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/portfolio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -275,98 +276,6 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Single transaction for entire batch
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			logger.LogError("CreateMTMBulk: failed to begin transaction: %v", err)
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
-			return
-		}
-		defer tx.Rollback(ctx)
-
-		// STEP 1: Aggregate holdings from onboard_transaction (similar to redemption.go pattern)
-		// Calculate net units and avg_nav based on transaction history up to accounting period
-		holdingsQuery := `
-			WITH ot AS (
-				SELECT
-					t.*,
-					ms.scheme_name AS ms_scheme_name, 
-					ms.isin AS ms_isin, 
-					ms.scheme_id AS ms_scheme_id, 
-					ms.internal_scheme_code AS ms_internal_code
-				FROM investment.onboard_transaction t
-				LEFT JOIN investment.masterscheme ms ON (
-  (t.scheme_id IS NOT NULL AND ms.scheme_id = t.scheme_id)
-  OR (t.scheme_internal_code IS NOT NULL AND ms.internal_scheme_code = t.scheme_internal_code)
-)
-				WHERE t.transaction_date <= $1::date  -- Only transactions up to start of accounting period
-				  AND LOWER(COALESCE(t.transaction_type,'')) IN ('buy','purchase','subscription','sell','redemption')
-			)
-			SELECT
-				COALESCE(ot.folio_number,'') AS folio_number,
-				COALESCE(ot.demat_acc_number,'') AS demat_acc_number,
-				COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id) AS scheme_id,
-				COALESCE(ot.ms_scheme_name, ot.scheme_internal_code) AS scheme_name,
-				COALESCE(ot.ms_isin,'') AS isin,
-				COALESCE(ot.ms_internal_code,'') AS internal_code,
-				-- net units: buys (positive) minus sells (absolute)
-				SUM(CASE 
-					WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
-					THEN COALESCE(ot.units,0) 
-					ELSE 0 
-				END) - SUM(CASE 
-					WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') 
-					THEN ABS(COALESCE(ot.units,0)) 
-					ELSE 0 
-				END) AS total_units,
-				-- avg_nav based only on buy transactions (weighted average cost basis)
-				CASE 
-					WHEN SUM(CASE 
-						WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
-						THEN COALESCE(ot.units,0) 
-						ELSE 0 
-					END) = 0 THEN 0
-					ELSE SUM(CASE 
-						WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
-						THEN COALESCE(ot.nav,0) * COALESCE(ot.units,0) 
-						ELSE 0 
-					END) / SUM(CASE 
-						WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
-						THEN COALESCE(ot.units,0) 
-						ELSE 0 
-					END)
-				END AS avg_nav
-			FROM ot
-			GROUP BY 
-				COALESCE(ot.folio_number,''), 
-				COALESCE(ot.demat_acc_number,''), 
-				COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id), 
-				COALESCE(ot.ms_scheme_name, ot.scheme_internal_code), 
-				COALESCE(ot.ms_isin,''),
-				COALESCE(ot.ms_internal_code,'')
-			HAVING (
-				SUM(CASE 
-					WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
-					THEN COALESCE(ot.units,0) 
-					ELSE 0 
-				END) - SUM(CASE 
-					WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') 
-					THEN ABS(COALESCE(ot.units,0)) 
-					ELSE 0 
-				END)
-			) > 0
-			ORDER BY COALESCE(ot.folio_number,''), COALESCE(ot.demat_acc_number,''), COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id)
-		`
-
-		holdingsRows, err := tx.Query(ctx, holdingsQuery, startDate)
-		if err != nil {
-			logger.LogError("CreateMTMBulk: holdings query failed: %v", err)
-			api.RespondWithError(w, http.StatusInternalServerError, "Holdings fetch failed: "+err.Error())
-			return
-		}
-		defer holdingsRows.Close()
-
-		// Collect holdings
 		type HoldingData struct {
 			FolioNumber    string
 			DematAccNumber string
@@ -375,34 +284,53 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ISIN           string
 			InternalCode   string
 			Units          float64
-			AvgNAV         float64 // Weighted average cost basis from buy transactions
+			AvgNAV         float64
 		}
 
-		holdings := []HoldingData{}
-		for holdingsRows.Next() {
-			var h HoldingData
-			if err := holdingsRows.Scan(&h.FolioNumber, &h.DematAccNumber, &h.SchemeID, &h.SchemeName, &h.ISIN, &h.InternalCode, &h.Units, &h.AvgNAV); err != nil {
-				logger.LogError("CreateMTMBulk: holdings scan failed: %v", err)
-				api.RespondWithError(w, http.StatusInternalServerError, "Holdings scan failed: "+err.Error())
+		entities, err := accountingEntitiesForQuery(ctx, pgxPool)
+		if err != nil {
+			logger.LogError("CreateMTMBulk: entity list failed: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, "Holdings fetch failed: "+err.Error())
+			return
+		}
+
+		holdings := make([]HoldingData, 0)
+		for _, entity := range entities {
+			rows, err := portfolio.QueryEntityHoldings(ctx, pgxPool, entity)
+			if err != nil {
+				logger.LogError("CreateMTMBulk: holdings query failed for entity %s: %v", entity, err)
+				api.RespondWithError(w, http.StatusInternalServerError, "Holdings fetch failed: "+err.Error())
 				return
 			}
-			holdings = append(holdings, h)
+			for _, row := range rows {
+				if row.TotalUnits <= 0 {
+					continue
+				}
+				holdings = append(holdings, HoldingData{
+					FolioNumber:    row.FolioNumber,
+					DematAccNumber: row.DematAccountNumber,
+					SchemeID:       row.SchemeID,
+					SchemeName:     row.SchemeName,
+					ISIN:           row.ISIN,
+					Units:          row.TotalUnits,
+					AvgNAV:         row.AvgNav,
+				})
+			}
 		}
 
 		if len(holdings) == 0 {
-			// Check if onboard_transaction table has any data at all
-			var txCount int
-			if err := tx.QueryRow(ctx, "SELECT COUNT(*) FROM investment.onboard_transaction WHERE LOWER(COALESCE(transaction_type,'')) IN ('buy','purchase','subscription')").Scan(&txCount); err != nil {
-				logger.LogError("mtmActivity: count onboard transactions query row failed: %v", err)
-			}
-
-			if txCount == 0 {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No investment transactions found. Please upload transaction data before running MTM for %s", req.AccountingPeriod))
-			} else {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No active holdings found for accounting period %s (start date: %s). Found %d total buy transactions but all were after this date or fully redeemed.", req.AccountingPeriod, startDate, txCount))
-			}
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No active holdings found for accounting period %s (start date: %s). Upload and approve onboarding transactions first.", req.AccountingPeriod, startDate))
 			return
 		}
+
+		// Single transaction for entire batch
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			logger.LogError("CreateMTMBulk: failed to begin transaction: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
 
 		// Create main activity
 		activityType := "MTM"
@@ -974,6 +902,12 @@ func GetMTMWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if dematRefs := accountingMFDematRefs(ctx); len(dematRefs) > 0 {
 			q += fmt.Sprintf(" AND (COALESCE(m.demat_id::text,'') = '' OR m.demat_id::text = ANY($%d::text[]))", pos)
 			args = append(args, dematRefs)
+			pos++
+		}
+		if frag, fragArgs, newPos := accountingFolioEntityScopeClause(ctx, "f", pos); frag != "" {
+			q += frag
+			args = append(args, fragArgs...)
+			pos = newPos
 		}
 		q += " ORDER BY m.updated_at DESC, m.mtm_id"
 

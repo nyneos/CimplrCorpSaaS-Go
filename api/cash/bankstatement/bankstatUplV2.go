@@ -2541,6 +2541,24 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 	logger.LogInfo("[BANK-UPLOAD-DEBUG] Parse summary: rows_after_header=%d kept=%d skipped_empty=%d skipped_non_txn=%d skipped_missing_dates=%d skipped_opening_balance=%d skipped_closing_balance=%d",
 		totalRows, keptRows, skippedEmptyRows, skippedNonTxnRows, skippedMissingDateRows, skippedOpeningBalanceRows, skippedClosingBalanceRows)
 
+	if len(transactions) == 0 {
+		var sumErr error
+		openingBalance, closingBalance, statementPeriodStart, statementPeriodEnd, sumErr = resolveEmptyUploadFromSummary(
+			rows, txnHeaderIdx, uploadFileName, openingBalance, closingBalance, statementPeriodStart, statementPeriodEnd,
+		)
+		if sumErr != nil {
+			if sumErr == ErrStatementSummaryOnly {
+				return nil, ErrNoTransactionsInFile
+			}
+			return nil, sumErr
+		}
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] Summary-only statement: balance=%.2f period=%s→%s",
+			closingBalance,
+			statementPeriodStart.Format(constants.DateFormat),
+			statementPeriodEnd.Format(constants.DateFormat),
+		)
+	}
+
 	// If opening balance was detected but first transaction has balance 0, recalculate all balances starting from opening balance
 	if openingBalance != 0 && len(transactions) > 0 && (!transactions[0].Balance.Valid || transactions[0].Balance.Float64 == 0) {
 		cumulative = openingBalance

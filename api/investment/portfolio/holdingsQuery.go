@@ -58,55 +58,7 @@ func buildHoldingsQueryArgs(f HoldingsFilter, dumpAll bool, entityNames []string
 }
 
 func queryHoldingsFromSnapshot(ctx context.Context, pgxPool *pgxpool.Pool, f HoldingsFilter, dumpAll bool, entityNames []string) ([]PortfolioHoldingsRow, error) {
-	qArgs := buildHoldingsQueryArgs(f, dumpAll, entityNames)
-
-	sqlArgs := []interface{}{qArgs.entityScope}
-	whereClauses := []string{"1=1"}
-	addArg := func(val interface{}) string {
-		sqlArgs = append(sqlArgs, val)
-		return fmt.Sprintf("$%d", len(sqlArgs))
-	}
-
-	if f.EntityName != "" {
-		whereClauses = append(whereClauses, "ps.entity_name = "+addArg(f.EntityName))
-	} else if !dumpAll && len(entityNames) > 0 {
-		whereClauses = append(whereClauses, "ps.entity_name = ANY("+addArg(entityNames)+"::text[])")
-	}
-	if f.AmcName != "" {
-		whereClauses = append(whereClauses, "LOWER(COALESCE(s.amc_name,'')) LIKE "+addArg("%"+qArgs.amcLike+"%"))
-	}
-	if f.SchemeName != "" {
-		whereClauses = append(whereClauses, "LOWER(COALESCE(ps.scheme_name,'')) LIKE "+addArg("%"+qArgs.schemeLike+"%"))
-	}
-
-	query := fmt.Sprintf(`
-		WITH %s
-		SELECT
-			COALESCE(ps.entity_name, '') as entity_name,
-			COALESCE(ps.folio_number, '') as folio_number,
-			COALESCE(ps.demat_acc_number, '') as demat_account_number,
-			COALESCE(ps.scheme_id, '') as scheme_id,
-			COALESCE(ps.scheme_name, '') as scheme_name,
-			COALESCE(ps.isin, '') as isin,
-			COALESCE(s.amc_name, '') as amc_name,
-			COALESCE(ts.total_units, 0) as total_units,
-			`+holdingsCostSelectCols+`,
-			COALESCE(TO_CHAR(ps.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD HH24:MI:SS'),'') as updated_at
-		FROM (
-			SELECT DISTINCT ON (entity_name, folio_number, COALESCE(demat_acc_number, ''), scheme_id)
-				ps.*
-			FROM investment.portfolio_snapshot ps
-			ORDER BY entity_name, folio_number, COALESCE(demat_acc_number, ''), scheme_id, created_at DESC, id DESC
-		) ps
-		`+holdingsJoinTransactionSummary+`
-		`+masterschemeLookupJoinPS+`
-		`+schemejoin.NavLateralJoin("ts", "ts.amfi_scheme_code")+`
-		WHERE %s
-		  AND COALESCE(ts.total_units, 0) > 0
-		ORDER BY ps.entity_name, ps.scheme_name
-	`, portfolioSchemeResolvedCTE, strings.Join(whereClauses, " AND "))
-
-	return scanHoldingsRows(ctx, pgxPool, query, sqlArgs...)
+	return queryHoldingsFromTransactions(ctx, pgxPool, f, dumpAll, entityNames)
 }
 
 func queryHoldingsFromTransactions(ctx context.Context, pgxPool *pgxpool.Pool, f HoldingsFilter, dumpAll bool, entityNames []string) ([]PortfolioHoldingsRow, error) {
@@ -140,6 +92,7 @@ func queryHoldingsFromTransactions(ctx context.Context, pgxPool *pgxpool.Pool, f
 			COALESCE(ts.scheme_id, '') AS scheme_id,
 			COALESCE(ts.scheme_name, '') AS scheme_name,
 			COALESCE(ts.isin, '') AS isin,
+			COALESCE(ts.amfi_scheme_code, '') AS amfi_scheme_code,
 			COALESCE(s.amc_name, '') AS amc_name,
 			ts.total_units,
 			`+holdingsCostSelectCols+`,
@@ -166,7 +119,7 @@ func scanHoldingsRows(ctx context.Context, pgxPool *pgxpool.Pool, query string, 
 		var row PortfolioHoldingsRow
 		if err := rows.Scan(
 			&row.EntityName, &row.FolioNumber, &row.DematAccountNumber,
-			&row.SchemeID, &row.SchemeName, &row.ISIN, &row.AmcName,
+			&row.SchemeID, &row.SchemeName, &row.ISIN, &row.AmfiSchemeCode, &row.AmcName,
 			&row.TotalUnits, &row.AvgNav, &row.CurrentNav, &row.CurrentValue,
 			&row.GainLoss, &row.GainLossPercent, &row.RealizedGainLoss, &row.TotalGainLoss,
 			&row.TotalInvestedAmount, &row.UpdatedAt,
@@ -182,6 +135,52 @@ func scanHoldingsRows(ctx context.Context, pgxPool *pgxpool.Pool, query string, 
 	return results, rows.Err()
 }
 
+// QueryScopedHoldings returns live holdings for an optional entity filter and allowed scope.
+func QueryScopedHoldings(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter string, allowedEntities []string) ([]PortfolioHoldingsRow, error) {
+	entityFilter = strings.TrimSpace(entityFilter)
+	f := HoldingsFilter{EntityName: entityFilter}
+	dumpAll := entityFilter == "" && len(allowedEntities) == 0
+
+	rows, err := queryHoldingsFromTransactions(ctx, pgxPool, f, dumpAll, allowedEntities)
+	if err != nil {
+		return nil, err
+	}
+	return dedupeHoldingsRows(rows), nil
+}
+
+// QueryLiveAUMByAMC returns current live AUM grouped by AMC using the shared holdings engine.
+func QueryLiveAUMByAMC(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter string, allowedEntities []string) (map[string]float64, error) {
+	query := fmt.Sprintf(`
+		WITH %s
+		SELECT
+			COALESCE(s.amc_name, 'Unknown') AS amc_name,
+			COALESCE(SUM(COALESCE(ts.total_units, 0) * COALESCE(ln.nav_value, 0)), 0)::float8 AS aum_value
+		FROM transaction_summary ts
+		LEFT JOIN investment.masterscheme s ON (`+schemejoin.JoinOnSchemeIDAlias("s", "ts.scheme_id")+`)
+		`+schemejoin.NavLateralJoin("ts", "ts.amfi_scheme_code")+`
+		WHERE COALESCE(ts.total_units, 0) > 0
+		GROUP BY COALESCE(s.amc_name, 'Unknown')
+		ORDER BY amc_name`,
+		portfolioSchemeResolvedCTE)
+
+	rows, err := pgxPool.Query(ctx, query, holdingsEntityScopeArg(entityFilter, allowedEntities))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]float64)
+	for rows.Next() {
+		var amc string
+		var aum float64
+		if err := rows.Scan(&amc, &aum); err != nil {
+			return nil, err
+		}
+		out[amc] = aum
+	}
+	return out, rows.Err()
+}
+
 // QueryEntityHoldings returns holdings for one entity using live cost basis and AMFI NAV.
 func QueryEntityHoldings(ctx context.Context, pgxPool *pgxpool.Pool, entityName string) ([]PortfolioHoldingsRow, error) {
 	entityName = strings.TrimSpace(entityName)
@@ -189,12 +188,12 @@ func QueryEntityHoldings(ctx context.Context, pgxPool *pgxpool.Pool, entityName 
 		return []PortfolioHoldingsRow{}, nil
 	}
 	f := HoldingsFilter{EntityName: entityName}
-	results, err := queryHoldingsFromSnapshot(ctx, pgxPool, f, false, nil)
+	results, err := queryHoldingsFromTransactions(ctx, pgxPool, f, false, nil)
 	if err != nil {
 		return nil, err
 	}
 	if len(results) == 0 {
-		return queryHoldingsFromTransactions(ctx, pgxPool, f, false, nil)
+		return queryHoldingsFromSnapshot(ctx, pgxPool, f, false, nil)
 	}
 	return results, nil
 }

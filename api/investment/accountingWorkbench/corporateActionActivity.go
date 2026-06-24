@@ -480,6 +480,16 @@ func GetCorporateActionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pos++
 			q += fmt.Sprintf(" AND (COALESCE(ca.target_scheme_id,'') = '' OR ca.target_scheme_id = ANY($%d::text[]))", pos)
 			args = append(args, schemeRefs)
+			pos++
+		}
+		if entityNames := accountingEntityNamesForScope(ctx); len(entityNames) > 0 {
+			q += fmt.Sprintf(` AND EXISTS (
+				SELECT 1 FROM investment.masterfolio mf
+				JOIN investment.folioschememapping fsm ON fsm.folio_id = mf.folio_id
+				WHERE fsm.scheme_id::text = ca.source_scheme_id
+				  AND LOWER(TRIM(COALESCE(mf.entity_name,''))) = ANY(SELECT LOWER(TRIM(x)) FROM unnest($%d::text[]) AS x)
+			)`, pos)
+			args = append(args, entityNames)
 		}
 		q += " ORDER BY ca.updated_at DESC, ca.ca_id"
 

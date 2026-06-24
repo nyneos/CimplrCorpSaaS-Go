@@ -734,6 +734,12 @@ func userFriendlyUploadError(err error) string {
 	if errors.Is(err, ErrAllTransactionsDuplicate) {
 		return "This statement has already been uploaded. All transactions in this statement already exist in the system."
 	}
+	if errors.Is(err, ErrNoTransactionsInFile) {
+		return "The uploaded statement does not contain any transactions."
+	}
+	if errors.Is(err, ErrStatementSummaryOnly) {
+		return "This statement has no transaction rows — only a balance summary (e.g. available/closing balance). Upload the full transaction export from your bank, or a file that includes the balance summary row with amount and date."
+	}
 
 	msg := err.Error()
 

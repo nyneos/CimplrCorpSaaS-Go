@@ -36,7 +36,7 @@ func NewInvestmentServer(pool *pgxpool.Pool, db *sql.DB, port string) *http.Serv
 	mux.Handle("/investment/metrics", observability.MetricsHandler(serviceName))
 
 	mfMid := func(h http.Handler) http.Handler {
-		return middlewares.SessionMiddleware(pool)(
+		return middlewares.PreValidationMiddleware(pool)(
 			middlewares.GlobalIndependentMiddleware(pool)(
 				middlewares.GlobalDependentMiddleware(pool)(
 					middlewares.InvestmentMFMiddleware(pool)(h),
@@ -46,7 +46,7 @@ func NewInvestmentServer(pool *pgxpool.Pool, db *sql.DB, port string) *http.Serv
 	}
 
 	fdMid := func(h http.Handler) http.Handler {
-		return middlewares.SessionMiddleware(pool)(
+		return middlewares.PreValidationMiddleware(pool)(
 			middlewares.GlobalIndependentMiddleware(pool)(
 				middlewares.GlobalDependentMiddleware(pool)(
 					middlewares.InvestmentFDMiddleware(pool)(h),

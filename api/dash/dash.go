@@ -70,6 +70,16 @@ func NewDashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 			),
 		)
 	}
+	// Read-only investment dashboards: prevalidation v2 entity scope + light path (no FD/MF master preload).
+	midDashInvestRead := func(h http.Handler) http.Handler {
+		return investmentdashboards.CacheDashboardHandler(
+			middlewares.PreValidationMiddleware(pgxPool)(
+				middlewares.GlobalIndependentMiddleware(pgxPool)(
+					middlewares.GlobalDependentMiddleware(pgxPool)(h),
+				),
+			),
+		)
+	}
 	// Statement Status Dashboard
 	mux.Handle("/dash/statement-status", midDashFull(statementstatus.GetStatementStatusHandler(pgxPool)))
 	mux.Handle("/dash/transaction-pool", midDashFull(commonpool.GetTransactionPoolHandler(pgxPool)))
@@ -135,9 +145,8 @@ func NewDashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	mux.Handle("/dash/landingpage/home", midDashFull(landingpage.GetHomePageDashboard(pgxPool)))
 	mux.Handle("/dash/landingpage/cash", midDashFull(landingpage.GetLandingCashDashboard(pgxPool)))
 	// Combined investment overview (aggregates multiple investment endpoints sequentially)
-	mux.Handle("/dash/investment/overview/combined", midDashFull(investmentdashboards.GetCombinedInvestmentOverview(pgxPool)))
-	// Full portfolio dashboard — all 14 sub-computations concurrently via sync.WaitGroup goroutines
-	// mux.Handle("/dash/investment/portfolio/dashboard", midDashFull(investmentdashboards.PortfolioDashboardHandler(pgxPool)))
+	mux.Handle("/dash/investment/overview/combined", midDashInvestRead(investmentdashboards.GetCombinedInvestmentOverview(pgxPool)))
+	mux.Handle("/dash/investment/portfolio/dashboard", midDashInvestRead(investmentdashboards.PortfolioDashboardHandler(pgxPool)))
 	// FD CFO Dashboard — KPIs, charts, governance, FD list (all FD tables, concurrent)
 	mux.Handle("/dash/investment/fd/cfo-dashboard", midDashFull(investmentdashboards.GetFDCfoDashboard(pgxPool)))
 	// FD Treasury Manager Dashboard — surplus deployment, negotiations, maturity ladder, rate heatmap
@@ -167,33 +176,22 @@ func NewDashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	mux.Handle("/dash/liquidity/daily", midDashFull(liqsnap.DetailedDailyCashFlowHandler(pgxPool)))
 
 	// Investment Overview KPIs
-	mux.Handle("/dash/investment/overview/kpis", midDashFull(investmentdashboards.GetInvestmentOverviewKPIs(pgxPool)))
-	// Investment: Entity Performance (YTD P&L per scheme)
-	mux.Handle("/dash/investment/overview/entity", midDashFull(investmentdashboards.GetEntityPerformance(pgxPool)))
-	// Investment: AMC Performance (start-of-FY vs now AUM + P&L)
-	mux.Handle("/dash/investment/overview/amc-performance", midDashFull(investmentdashboards.GetAMCPerformance(pgxPool)))
-	// Investment: Contribution to AUM Change (AMC-wise waterfall)
-	mux.Handle("/dash/investment/overview/waterfall", midDashFull(investmentdashboards.GetAMCWaterfall(pgxPool)))
-	// Investment: AUM Movement Waterfall (Bridge Chart)
-	mux.Handle("/dash/investment/portfolio/aum-movement", midDashFull(investmentdashboards.GetAUMMovementWaterfall(pgxPool)))
-	// Investment: AUM Breakdown (Dynamic Donut - by AMC/Scheme/Entity)
-	mux.Handle("/dash/investment/portfolio/aum-breakdown", midDashFull(investmentdashboards.GetAUMBreakdown(pgxPool)))
-	// Investment: Performance Attribution (Brinson-Fachler Waterfall)
-	mux.Handle("/dash/investment/performance/performance-attribution", midDashFull(investmentdashboards.GetPerformanceAttribution(pgxPool)))
-	// Investment: Daily P&L Heatmap (Entity × AMC/Scheme Matrix)
-	mux.Handle("/dash/investment/performance/pnl-heatmap", midDashFull(investmentdashboards.GetDailyPnLHeatmap(pgxPool)))
-	// Investment: Portfolio vs Benchmark (Indexed Performance Comparison)
-	mux.Handle("/dash/investment/performance/portfolio-vs-benchmark", midDashFull(investmentdashboards.GetPortfolioVsBenchmark(pgxPool)))
-	// Investment: Market Rates Ticker (Mutual Funds with NAV, Change, MTM)
-	mux.Handle("/dash/investment/overview/market-rates-ticker", midDashFull(investmentdashboards.GetMarketRatesTicker(pgxPool)))
-	// Investment: Market Rates Ticker (Lite) - approved schemes with NAV and change
-	mux.Handle("/dash/investment/ticker", midDashFull(investmentdashboards.GetMarketRatesTickerLite(pgxPool)))
-	// Investment: Top performing assets (YTD)
-	mux.Handle("/dash/investment/overview/top-performing", midDashFull(investmentdashboards.GetTopPerformingAssets(pgxPool)))
-	// Investment: AUM Composition & Trend (stacked area by AMC)
-	mux.Handle("/dash/investment/overview/aum-composition", midDashFull(investmentdashboards.GetAUMCompositionTrend(pgxPool)))
+	mux.Handle("/dash/investment/overview/kpis", midDashInvestRead(investmentdashboards.GetInvestmentOverviewKPIs(pgxPool)))
+	mux.Handle("/dash/investment/overview/entity", midDashInvestRead(investmentdashboards.GetEntityPerformance(pgxPool)))
+	mux.Handle("/dash/investment/overview/amc-performance", midDashInvestRead(investmentdashboards.GetAMCPerformance(pgxPool)))
+	mux.Handle("/dash/investment/overview/waterfall", midDashInvestRead(investmentdashboards.GetAMCWaterfall(pgxPool)))
+	mux.Handle("/dash/investment/portfolio/aum-movement", midDashInvestRead(investmentdashboards.GetAUMMovementWaterfall(pgxPool)))
+	mux.Handle("/dash/investment/portfolio/aum-breakdown", midDashInvestRead(investmentdashboards.GetAUMBreakdown(pgxPool)))
+	mux.Handle("/dash/investment/performance/performance-attribution", midDashInvestRead(investmentdashboards.GetPerformanceAttribution(pgxPool)))
+	mux.Handle("/dash/investment/performance/pnl-heatmap", midDashInvestRead(investmentdashboards.GetDailyPnLHeatmap(pgxPool)))
+	mux.Handle("/dash/investment/performance/portfolio-vs-benchmark", midDashInvestRead(investmentdashboards.GetPortfolioVsBenchmark(pgxPool)))
+	mux.Handle("/dash/investment/overview/market-rates-ticker", midDashInvestRead(investmentdashboards.GetMarketRatesTicker(pgxPool)))
+	mux.Handle("/dash/investment/ticker", midDashInvestRead(investmentdashboards.GetMarketRatesTickerLite(pgxPool)))
+	mux.Handle("/dash/investment/overview/top-performing", midDashInvestRead(investmentdashboards.GetTopPerformingAssets(pgxPool)))
+	mux.Handle("/dash/investment/overview/aum-composition", midDashInvestRead(investmentdashboards.GetAUMCompositionTrend(pgxPool)))
 	// Benchmarks: NSE live data feeds (index list, graph series, market data)
 	mux.Handle("/dash/benchmarks/index-list", midDashFull(benchmarks.GetIndexList()))
+	mux.Handle("/dash/benchmarks/catalog", midDashFull(benchmarks.GetBenchmarkCatalog()))
 	mux.Handle("/dash/benchmarks/index-series", midDashFull(benchmarks.GetIndexSeries()))
 	mux.Handle("/dash/benchmarks/index-snapshot", midDashFull(benchmarks.GetIndexSnapshot()))
 	mux.Handle("/dash/benchmarks/index-constituents", midDashFull(benchmarks.GetIndexConstituents()))
@@ -205,7 +203,7 @@ func NewDashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	mux.Handle("/dash/benchmarks/52-week-hl", midDashFull(benchmarks.Get52WeekHighLow()))
 	mux.Handle("/dash/benchmarks/market-turnover", midDashFull(benchmarks.GetMarketTurnover()))
 	// Investment: Consolidated Risk Gauge (entity-level)
-	mux.Handle("/dash/investment/overview/consolidated", midDashFull(investmentdashboards.GetConsolidatedRisk(pgxPool)))
+	mux.Handle("/dash/investment/overview/consolidated", midDashInvestRead(investmentdashboards.GetConsolidatedRisk(pgxPool)))
 	// Cashflow Forecast (monthly aggregated projections + KPIs)
 	mux.Handle("/dash/cash/forecast/monthly", midDashFull(cashflowforecast.GetCashflowForecastHandler(pgxPool)))
 	mux.Handle("/dash/cash/forecast/kpi", midDashFull(cashflowforecast.GetForecastKPIsHandler(pgxPool)))

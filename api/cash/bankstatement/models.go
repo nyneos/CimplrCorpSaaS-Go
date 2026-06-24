@@ -18,6 +18,8 @@ var (
 	ErrAccountNumberMissing     = errors.New("account number could not be found anywhere in the file name or file contents")
 	ErrStatementPeriodExists    = errors.New("a statement for this period already exists for this account")
 	ErrAllTransactionsDuplicate = errors.New("all transactions in this statement already exist")
+	ErrNoTransactionsInFile     = errors.New("no transactions found in file")
+	ErrStatementSummaryOnly   = errors.New("statement file contains only balance summary rows")
 )
 
 var (

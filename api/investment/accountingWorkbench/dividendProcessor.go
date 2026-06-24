@@ -3,10 +3,12 @@ package accountingworkbench
 import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/portfolio"
-	"CimplrCorpSaas/api/investment/schemejoin"
 	"context"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"CimplrCorpSaas/internal/logger"
 )
@@ -236,119 +238,78 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 	return nil
 }
 
-// RefreshPortfolioAfterCorporateAction recalculates portfolio_snapshot after transaction changes
-// This is critical because onboard_transaction is the source of truth
-// NOTE: This is a simplified version that rebuilds affected schemes only
+// RefreshPortfolioAfterCorporateAction rebuilds portfolio_snapshot for entities
+// holding the affected schemes, using the shared portfolio refresh SQL.
 func RefreshPortfolioAfterCorporateAction(ctx context.Context, tx DBExecutor, affectedSchemeIDs []string, entityName string) error {
 	if len(affectedSchemeIDs) == 0 {
 		return nil
 	}
 
-	// Capture existing batch_id before deletion (to preserve batch tracking)
-	var existingBatchID string
-	err := tx.QueryRow(ctx, `
-		SELECT COALESCE(batch_id::text, gen_random_uuid()::text)
+	entityNames, err := resolveEntitiesForPortfolioRefresh(ctx, tx, affectedSchemeIDs, entityName)
+	if err != nil {
+		return err
+	}
+
+	batchID := uuid.New().String()
+
+	if len(entityNames) > 0 {
+		if _, err = tx.Exec(ctx, `DELETE FROM investment.portfolio_snapshot WHERE entity_name = ANY($1::text[])`, entityNames); err != nil {
+			return fmt.Errorf("delete snapshots: %w", err)
+		}
+		if _, err = tx.Exec(ctx, portfolio.PortfolioSnapshotInsertSQL, entityNames, batchID); err != nil {
+			return fmt.Errorf("rebuild portfolio snapshots: %w", err)
+		}
+		return nil
+	}
+
+	if _, err = tx.Exec(ctx, `DELETE FROM investment.portfolio_snapshot`); err != nil {
+		return fmt.Errorf("delete snapshots: %w", err)
+	}
+	if _, err = tx.Exec(ctx, portfolio.PortfolioSnapshotInsertSQL, nil, batchID); err != nil {
+		return fmt.Errorf("rebuild portfolio snapshots: %w", err)
+	}
+	return nil
+}
+
+func resolveEntitiesForPortfolioRefresh(ctx context.Context, tx DBExecutor, affectedSchemeIDs []string, entityName string) ([]string, error) {
+	if trimmed := strings.TrimSpace(entityName); trimmed != "" {
+		return []string{trimmed}, nil
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT TRIM(entity_name)
 		FROM investment.portfolio_snapshot
 		WHERE scheme_id = ANY($1)
-		  AND ($2::text IS NULL OR entity_name = $2)
-		LIMIT 1
-	`, affectedSchemeIDs, nullIfEmptyString(entityName)).Scan(&existingBatchID)
+		  AND NULLIF(TRIM(entity_name), '') IS NOT NULL
+		UNION
+		SELECT DISTINCT TRIM(mf.entity_name)
+		FROM investment.masterfolio mf
+		JOIN investment.folioschememapping fsm ON fsm.folio_id = mf.folio_id
+		WHERE fsm.scheme_id::text = ANY($1)
+		  AND NULLIF(TRIM(mf.entity_name), '') IS NOT NULL
+	`, affectedSchemeIDs)
+	if err != nil {
+		return nil, fmt.Errorf("resolve entities for refresh: %w", err)
+	}
+	defer rows.Close()
 
-	// If no existing batch_id found, generate a new one
-	if err != nil || existingBatchID == "" {
-		err = tx.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&existingBatchID)
-		if err != nil {
-			return fmt.Errorf("failed to generate batch_id: %w", err)
+	seen := make(map[string]struct{})
+	names := make([]string, 0)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			continue
 		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		key := strings.ToUpper(name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		names = append(names, name)
 	}
-
-	// Delete existing portfolio snapshots for affected schemes
-	_, err = tx.Exec(ctx, `
-		DELETE FROM investment.portfolio_snapshot
-		WHERE scheme_id = ANY($1)
-		  AND ($2::text IS NULL OR entity_name = $2)
-	`, affectedSchemeIDs, nullIfEmptyString(entityName))
-	if err != nil {
-		return fmt.Errorf("failed to delete old portfolio snapshots: %w", err)
-	}
-
-	// Rebuild portfolio snapshots from onboard_transaction using EXACT same logic as RefreshPortfolioSnapshots
-	_, err = tx.Exec(ctx, `
-		WITH scheme_resolved AS (
-			SELECT
-				ot.transaction_date,
-				ot.transaction_type,
-				ot.amount,
-				ot.units,
-				ot.nav,
-				ot.batch_id,
-				COALESCE(mf.entity_name, md.entity_name, ot.entity_name) AS entity_name,
-				ot.folio_number,
-				ot.demat_acc_number,
-				ot.folio_id,
-				ot.demat_id,
-				COALESCE(ot.scheme_id, resolved_scheme.scheme_id::text) AS scheme_id,
-				resolved_scheme.scheme_name,
-				resolved_scheme.isin
-			FROM investment.onboard_transaction ot
-			LEFT JOIN investment.masterfolio mf ON mf.folio_id = ot.folio_id
-			LEFT JOIN investment.masterdemataccount md ON md.demat_id = ot.demat_id
-			LEFT JOIN LATERAL (
-				SELECT scheme_id, scheme_name, isin
-				FROM investment.masterscheme
-				WHERE scheme_id::text = ot.scheme_id 
-				   OR internal_scheme_code = ot.scheme_internal_code
-				ORDER BY created_at DESC
-				LIMIT 1
-			) AS resolved_scheme ON true
-			WHERE ($2::text IS NULL OR COALESCE(mf.entity_name, md.entity_name, ot.entity_name) = $2)
-		),
-		transaction_summary AS (
-			SELECT
-				entity_name,
-				folio_number,
-				demat_acc_number,
-				folio_id,
-				demat_id,
-				scheme_id,
-				scheme_name,
-				isin,
-` + portfolio.TransactionSummaryMetrics + `
-			FROM scheme_resolved
-			WHERE scheme_id = ANY($1)
-			GROUP BY entity_name, folio_number, demat_acc_number, folio_id, demat_id, scheme_id, scheme_name, isin
-		)
-		INSERT INTO investment.portfolio_snapshot (
-			batch_id, entity_name, folio_number, demat_acc_number, folio_id, demat_id,
-			scheme_id, scheme_name, isin, total_units, avg_nav, current_nav, current_value,
-			total_invested_amount, gain_loss, gain_losss_percent, created_at
-		)
-		SELECT
-			$3::uuid,
-			ts.entity_name,
-			ts.folio_number,
-			ts.demat_acc_number,
-			ts.folio_id,
-			ts.demat_id,
-			ts.scheme_id,
-			ts.scheme_name,
-			ts.isin,
-			ts.total_units,
-			ts.avg_nav,
-			COALESCE(ln.nav_value, 0) AS current_nav,
-			ts.total_units * COALESCE(ln.nav_value, 0) AS current_value,
-			ts.total_invested_amount,
-			(ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount AS gain_loss,
-			CASE WHEN ts.total_invested_amount = 0 THEN 0 ELSE (((ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount) / ts.total_invested_amount) * 100 END AS gain_losss_percent,
-			NOW()
-		FROM transaction_summary ts
-		` + schemejoin.NavLateralJoin("ts", "") + `
-		WHERE ts.total_units > 0
-	`, affectedSchemeIDs, nullIfEmptyString(entityName), existingBatchID)
-
-	if err != nil {
-		return fmt.Errorf("failed to rebuild portfolio snapshots: %w", err)
-	}
-
-	return nil
+	return names, rows.Err()
 }

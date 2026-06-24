@@ -282,10 +282,12 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			// backward-compat single values (first mapped entity)
 			ctx = context.WithValue(ctx, "root_entity_id", validationResult.RootEntityID)
 			ctx = context.WithValue(ctx, "root_entity_name", validationResult.RootEntityName)
-			// full multi-entity lists
+			// full multi-entity lists (match prevalidatioV2 SessionMiddleware keys)
 			ctx = context.WithValue(ctx, "root_entity_ids", validationResult.RootEntityIDs)
 			ctx = context.WithValue(ctx, api.BusinessUnitsKey, entityNames)
 			ctx = context.WithValue(ctx, api.EntityIDsKey, entityIDs)
+			ctx = context.WithValue(ctx, "entity_ids", entityIDs)
+			ctx = context.WithValue(ctx, "entity_names", entityNames)
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
 
 			if prevalidationDebugEnabled() {

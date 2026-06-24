@@ -99,7 +99,7 @@ func CacheDashboardHandler(next http.Handler) http.Handler {
 func investmentDashboardCacheTTL() time.Duration {
 	raw := strings.TrimSpace(os.Getenv("INVESTMENT_DASHBOARD_CACHE_TTL_SECONDS"))
 	if raw == "" {
-		return 15 * time.Second
+		return 60 * time.Second
 	}
 	seconds, err := strconv.Atoi(raw)
 	if err != nil || seconds < 0 {

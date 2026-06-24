@@ -11,6 +11,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/validation"
 
@@ -190,6 +191,8 @@ func InvestmentMFMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				}
 			}()
 			wg.Wait()
+
+			folios, demats, schemes = filterMFMastersByEntityScope(ctx, folios, demats, schemes)
 
 			ctx = context.WithValue(ctx, "ApprovedAMCs", amcs)
 			ctx = context.WithValue(ctx, "ApprovedSchemes", schemes)
@@ -859,4 +862,56 @@ func SessionMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// filterMFMastersByEntityScope limits folios, demats, and schemes to the user's entity scope.
+func filterMFMastersByEntityScope(ctx context.Context, folios, demats, schemes []map[string]string) ([]map[string]string, []map[string]string, []map[string]string) {
+	scope := ctxutil.FromContext(ctx)
+	if scope.IsAdminOverride || len(scope.EntityNames) == 0 {
+		return folios, demats, schemes
+	}
+
+	allowed := make(map[string]struct{}, len(scope.EntityNames))
+	for _, name := range scope.EntityNames {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			allowed[strings.ToUpper(trimmed)] = struct{}{}
+		}
+	}
+
+	filterByEntity := func(rows []map[string]string) []map[string]string {
+		out := make([]map[string]string, 0, len(rows))
+		for _, row := range rows {
+			entityName := strings.TrimSpace(row["entity_name"])
+			if entityName == "" {
+				continue
+			}
+			if _, ok := allowed[strings.ToUpper(entityName)]; ok {
+				out = append(out, row)
+			}
+		}
+		return out
+	}
+
+	filteredFolios := filterByEntity(folios)
+	filteredDemats := filterByEntity(demats)
+
+	allowedSchemeIDs := make(map[string]struct{})
+	for _, folio := range filteredFolios {
+		for _, id := range strings.Split(folio["scheme_id"], ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				allowedSchemeIDs[id] = struct{}{}
+			}
+		}
+	}
+
+	filteredSchemes := make([]map[string]string, 0, len(schemes))
+	for _, sch := range schemes {
+		if sid := strings.TrimSpace(sch["scheme_id"]); sid != "" {
+			if _, ok := allowedSchemeIDs[sid]; ok {
+				filteredSchemes = append(filteredSchemes, sch)
+			}
+		}
+	}
+
+	return filteredFolios, filteredDemats, filteredSchemes
 }

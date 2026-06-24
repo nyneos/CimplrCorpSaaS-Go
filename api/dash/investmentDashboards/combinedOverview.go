@@ -12,6 +12,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+		portfoliopkg "CimplrCorpSaas/api/investment/portfolio"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -118,50 +119,45 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SchemeType        string
 		}
 
-		portfolio := make([]holdingRow, 0)
+		holdings := make([]holdingRow, 0)
 		var totalAUM float64
 		for rows.Next() {
 			var h holdingRow
 			if err := rows.Scan(&h.EntityName, &h.AmcName, &h.SchemeName, &h.SchemeID, &h.Units, &h.Nav, &h.CurrentValue, &h.AmfiNav, &h.AmfiSchemeCode, &h.FolioNumber, &h.GainLoss, &h.GainLossPct, &h.RiskRating, &h.InternalRiskScore, &h.InvestedAmount, &h.Isin, &h.PurchaseNav, &h.SchemeCategory, &h.SchemeSubCategory, &h.SchemeType); err != nil {
 				continue
 			}
-			portfolio = append(portfolio, h)
+			holdings = append(holdings, h)
 			totalAUM += h.CurrentValue
 		}
 
 		// Use the shared helper (same as individual handler) to fetch recent transactions
 		// We keep the same fromDate as FY start to be consistent with KPIs
 		fromDate := getFinancialYearStart(time.Now().UTC())
-		transactionDetail := fetchRawTransactionDetails(ctx, pgxPool, entityFilter, allowed, fromDate)
-
-		// Query B: YTD flows (simple inflows/outflows)
-		fyStart := getFinancialYearStart(time.Now().UTC()).Format(constants.DateFormat)
-		flowsQ := `SELECT COALESCE(SUM(CASE WHEN LOWER(transaction_type) IN ('buy','purchase','subscription','sip','switch_in') THEN amount ELSE 0 END),0)::float8 AS inflows, COALESCE(SUM(CASE WHEN LOWER(transaction_type) IN ('sell','redemption','switch_out') THEN amount ELSE 0 END),0)::float8 AS outflows FROM investment.approved_onboard_transaction WHERE transaction_date >= $1 AND ($2::text IS NULL OR COALESCE(entity_name,'') = $2) AND ($3::text[] IS NULL OR COALESCE(entity_name,'') = ANY($3))`
-
-		var inflows, outflows float64
-		if err := pgxPool.QueryRow(ctx, flowsQ, fyStart, nullIfEmpty(entityFilter), allowedEntities).Scan(&inflows, &outflows); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "flows query failed: "+err.Error())
+		toDate := time.Now().UTC()
+		txRows, txErr := portfoliopkg.QueryPortfolioTransactions(ctx, pgxPool, portfoliopkg.TxFilter{
+			EntityName:      entityFilter,
+			AllowedEntities: allowed,
+			DateFrom:        fromDate.Format(constants.DateFormat),
+			DateTo:          toDate.Format(constants.DateFormat),
+		})
+		if txErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "transactions query failed: "+txErr.Error())
 			return
 		}
+		ytdBuys, ytdSells := portfoliopkg.SummarizeYTDFlows(txRows)
 
 		// Additional KPI computations to mirror individual endpoint
 		allowedSlice := allowed
 		today := time.Now().UTC()
 		fyStartTime := getFinancialYearStart(today)
+		allTransactions := fetchRawTransactionDetails(ctx, pgxPool, entityFilter, allowed, fyStartTime)
+		ytdTransactions, transactionGroups := transactionDetailPayload(allTransactions, fyStartTime)
 		prevFYStart := fyStartTime.AddDate(-1, 0, 0)
 		lastMonthEnd := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
 
-		// Get AUM at key dates
 		lastMonthAUM := getAUMAtDate(ctx, pgxPool, entityFilter, allowedSlice, lastMonthEnd)
 		prevFyAUM := getAUMAtDate(ctx, pgxPool, entityFilter, allowedSlice, prevFYStart)
 		fyStartAUM := getAUMAtDate(ctx, pgxPool, entityFilter, allowedSlice, fyStartTime)
-
-		// YTD buys/sells (amount sums)
-		// NOTE: this used to run a second identical query (ytdQ). To avoid an extra DB round-trip,
-		// reuse the results from `flowsQ` above which computes the same inflows/outflows over the FY.
-		var ytdBuys, ytdSells float64
-		ytdBuys = inflows
-		ytdSells = outflows
 
 		// YTD P&L (same formula as individual endpoint)
 		openingAUM := fyStartAUM
@@ -222,7 +218,7 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		riskBuckets := map[int]float64{1: 15, 2: 50, 3: 85}
 		var weighted float64
 		var lowValue, mediumValue, highValue float64
-		for _, h := range portfolio {
+		for _, h := range holdings {
 			score := riskBuckets[h.InternalRiskScore]
 			weighted += h.CurrentValue * score
 			if h.InternalRiskScore == 1 {
@@ -246,7 +242,7 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			weightedPct float64 // sum of (pct * value)
 		}
 		agg := map[string]*aggRow{}
-		for _, p := range portfolio {
+		for _, p := range holdings {
 			key := p.SchemeName + "||" + p.AmcName
 			a, ok := agg[key]
 			if !ok {
@@ -275,7 +271,7 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// AUM composition by AMC
 		aumByAMC := map[string]float64{}
-		for _, h := range portfolio {
+		for _, h := range holdings {
 			aumByAMC[h.AmcName] += h.CurrentValue
 		}
 		aumRows := make([]map[string]interface{}, 0, len(aumByAMC))
@@ -286,14 +282,14 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Market ticker (use portfolio rows as mutual fund rows)
-		ticker := make([]MutualFundTickerRow, 0, len(portfolio))
-		for _, h := range portfolio {
+		ticker := make([]MutualFundTickerRow, 0, len(holdings))
+		for _, h := range holdings {
 			ticker = append(ticker, MutualFundTickerRow{SchemeName: h.SchemeName, AMC: h.AmcName, AMFICode: h.AmfiSchemeCode, InternalCode: h.SchemeID, ISIN: h.Isin, NAV: h.Nav, PrevNAV: 0, Change1D: 0, MTM: 0, Units: h.Units, Value: h.CurrentValue})
 		}
 
 		// portfolio_detail: map holdings into InvestmentDetail
-		portfolioDetail := make([]InvestmentDetail, 0, len(portfolio))
-		for _, h := range portfolio {
+		portfolioDetail := make([]InvestmentDetail, 0, len(holdings))
+		for _, h := range holdings {
 			portfolioDetail = append(portfolioDetail, InvestmentDetail{
 				EntityName:        h.EntityName,
 				AMCName:           h.AmcName,
@@ -341,7 +337,8 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"cards":              cards,
 				"details":            detailsMap,
 				"aum_detail":         portfolioDetail,
-				"transaction_detail": transactionDetail,
+				"transaction_detail": ytdTransactions,
+				"transaction_groups": transactionGroups,
 			},
 			"consolidated": map[string]interface{}{
 				"generated_at":     time.Now().UTC().Format(time.RFC3339),

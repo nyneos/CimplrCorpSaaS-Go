@@ -36,7 +36,7 @@ func RefreshPortfolioSnapshots(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var entityNames []string
 		if req.EntityName != nil && strings.TrimSpace(*req.EntityName) != "" {
 			entityName := strings.TrimSpace(*req.EntityName)
-			if !scope.HasEntityNameAccess(entityName) {
+			if !scope.HasEntityNameAccess(entityName) && !scope.HasEntityAccess(entityName) {
 				api.RespondWithError(w, http.StatusForbidden, "entity_name is not within your authorized access scope")
 				return
 			}

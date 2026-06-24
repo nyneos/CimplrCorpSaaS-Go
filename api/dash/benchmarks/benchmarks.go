@@ -69,12 +69,12 @@ func ensureNSECookies(ctx context.Context) error {
 }
 
 // nseRequest performs an authenticated request to NSE API
-func nseRequest(ctx context.Context, endpoint string, params url.Values) ([]byte, error) {
+func nseRequest(ctx context.Context, pathSuffix string, params url.Values) ([]byte, error) {
 	if err := ensureNSECookies(ctx); err != nil {
 		return nil, err
 	}
 
-	u := nseAPIBase
+	u := nseAPIBase + pathSuffix
 	if params != nil {
 		u += "?" + params.Encode()
 	}
@@ -149,7 +149,7 @@ func nseGetGraphChart(ctx context.Context, index, flag string) ([]byte, error) {
 	if flag != "" {
 		p.Set("flag", flag)
 	}
-	return nseRequest(ctx, "", p)
+	return nseRequest(ctx, "/historicalGraph", p)
 }
 
 func nseGetAnalysisChart(ctx context.Context, symbol string) ([]byte, error) {
@@ -216,6 +216,24 @@ func nseGetHomePageNavBarData(ctx context.Context, key string) ([]byte, error) {
 // ─────────────────────────────────────────────────────────────────────────────
 // HTTP HANDLERS
 // ─────────────────────────────────────────────────────────────────────────────
+
+// GetBenchmarkCatalog returns curated NSE/BSE benchmarks for portfolio comparison dropdowns.
+func GetBenchmarkCatalog() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		catalog := GetCuratedBenchmarks()
+		options := make([]map[string]string, 0, len(catalog))
+		for _, def := range catalog {
+			options = append(options, map[string]string{
+				"value": def.ID, "label": def.Name, "provider": def.Provider,
+			})
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"benchmarks": catalog,
+			"options":    options,
+			"providers":  []string{"nse", "bse"},
+		})
+	}
+}
 
 // GetIndexList returns all available indices for dropdown
 func GetIndexList() http.HandlerFunc {
@@ -287,13 +305,35 @@ func GetIndexSeries() http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
+			points, parseErr := parseNSEGraphPoints(body)
 			normalized := normalizeNSEGraphData(body)
+			if parseErr == nil && len(points) > 0 {
+				normalized = indexPointsToNormalized(points)
+			}
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
 				"provider":   "nse",
 				"index":      req.Index,
 				"flag":       req.Flag,
 				"normalized": normalized,
 				"raw":        json.RawMessage(body),
+			})
+		case "bse":
+			def, ok := ResolveBenchmark(req.Index)
+			if !ok || def.BSEIndex == 0 {
+				api.RespondWithError(w, http.StatusBadRequest, "unknown BSE benchmark index")
+				return
+			}
+			points, err := FetchIndexSeries(ctx, def, req.Flag)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			api.RespondWithPayload(w, true, "", map[string]interface{}{
+				"provider":   "bse",
+				"index":      req.Index,
+				"bse_index":  def.BSEIndex,
+				"flag":       req.Flag,
+				"normalized": indexPointsToNormalized(points),
 			})
 		default:
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
@@ -611,94 +651,38 @@ type NormalizedPoint struct {
 }
 
 func normalizeNSEGraphData(body []byte) interface{} {
-	var parsed map[string]interface{}
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	points, err := parseNSEGraphPoints(body)
+	if err != nil || len(points) == 0 {
+		var parsed map[string]interface{}
+		if json.Unmarshal(body, &parsed) == nil {
+			return parsed
+		}
 		return nil
 	}
+	return indexPointsToNormalized(points)
+}
 
-	var dataArr []interface{}
-	if d, ok := parsed["data"].([]interface{}); ok {
-		dataArr = d
-	} else if d, ok := parsed["chartData"].([]interface{}); ok {
-		dataArr = d
-	} else if d, ok := parsed["series"].([]interface{}); ok {
-		dataArr = d
-	}
-
-	if len(dataArr) == 0 {
-		return parsed
-	}
-
-	points := make([]NormalizedPoint, 0, len(dataArr))
+func indexPointsToNormalized(points []IndexPoint) []NormalizedPoint {
+	out := make([]NormalizedPoint, 0, len(points))
 	var baseValue float64
-
-	for i, item := range dataArr {
-		pt := NormalizedPoint{}
-
-		switch v := item.(type) {
-		case []interface{}:
-			if len(v) >= 2 {
-				if ts, ok := v[0].(float64); ok {
-					pt.Timestamp = int64(ts)
-					pt.Date = time.UnixMilli(int64(ts)).Format(constants.DateFormat)
-					pt.Label = time.UnixMilli(int64(ts)).Format("Jan")
-				}
-				if val, ok := v[1].(float64); ok {
-					pt.Value = val
-				} else if len(v) >= 5 {
-					if close, ok := v[4].(float64); ok {
-						pt.Value = close
-					}
-				}
-			}
-		case map[string]interface{}:
-			// Accept either "timestamp" or "time" (both are float64 representing millis)
-			var tsVal float64
-			var tsOk bool
-			if t1, ok := v["timestamp"].(float64); ok {
-				tsVal = t1
-				tsOk = true
-			} else if t2, ok := v["time"].(float64); ok {
-				tsVal = t2
-				tsOk = true
-			}
-			if tsOk {
-				pt.Timestamp = int64(tsVal)
-				pt.Date = time.UnixMilli(int64(tsVal)).Format(constants.DateFormat)
-				pt.Label = time.UnixMilli(int64(tsVal)).Format("Jan")
-			} else if dateStr, ok := v["date"].(string); ok {
-				pt.Date = dateStr
-				if t, err := time.Parse(constants.DateFormatDash, dateStr); err == nil {
-					pt.Timestamp = t.UnixMilli()
-					pt.Label = t.Format("Jan")
-				}
-			}
-
-			if val, ok := v["value"].(float64); ok {
-				pt.Value = val
-			} else if val, ok := v["close"].(float64); ok {
-				pt.Value = val
-			} else if val, ok := v["indexCloseOnline"].(float64); ok {
-				pt.Value = val
-			} else if val, ok := v["CLOSE"].(float64); ok {
-				pt.Value = val
+	for i, p := range points {
+		np := NormalizedPoint{
+			Timestamp: p.Timestamp,
+			Value:     p.Value,
+			Date:      p.Date,
+		}
+		if p.Date != "" {
+			if t, err := time.Parse(constants.DateFormat, p.Date); err == nil {
+				np.Label = t.Format("Jan")
 			}
 		}
-
-		if pt.Value > 0 {
-			if i == 0 {
-				baseValue = pt.Value
-			}
-			if baseValue > 0 {
-				pt.Indexed = (pt.Value / baseValue) * 100
-			}
-			points = append(points, pt)
+		if i == 0 {
+			baseValue = p.Value
 		}
+		if baseValue > 0 {
+			np.Indexed = (p.Value / baseValue) * 100
+		}
+		out = append(out, np)
 	}
-
-	if len(points) == 0 {
-		return parsed
-	}
-
-	return points
+	return out
 }

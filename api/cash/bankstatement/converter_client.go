@@ -155,7 +155,12 @@ func BuildPreviewResponseFromFileBytes(ctx context.Context, pool *pgxpool.Pool, 
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 	if len(txns) == 0 {
-		return nil, fmt.Errorf("no transactions found in file")
+		if preview, ok, sumErr := tryBuildSummaryOnlyPreview(fileBytes, filename, accountOverride); ok {
+			return preview, nil
+		} else if sumErr != nil {
+			return nil, fmt.Errorf("parse: %w", sumErr)
+		}
+		return nil, ErrStatementSummaryOnly
 	}
 	return buildPreviewResponseFromTxnMaps(txns, fileBytes, accountOverride), nil
 }
@@ -177,6 +182,11 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, pool *pgxpool.Pool, c
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 	if len(txns) == 0 {
+		if preview, ok, sumErr := tryBuildSummaryOnlyPreview(csvBytes, csvFilename, accountOverride); ok {
+			return preview, nil
+		} else if sumErr != nil {
+			return nil, fmt.Errorf("parse: %w", sumErr)
+		}
 		return nil, fmt.Errorf("no transactions found in converted output")
 	}
 	return buildPreviewResponseFromTxnMaps(txns, csvBytes, accountOverride), nil

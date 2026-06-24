@@ -7,6 +7,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 )
 
 func normalizeEntityNameList(names []string) []string {
@@ -38,15 +39,27 @@ AND (p.allowed_entities IS NULL OR LOWER(TRIM(COALESCE(` + entityCol + `, ''))) 
 ))`
 }
 
+// SQLAndParamsEntityScope is the same predicate prefixed with AND for WHERE clauses.
+func SQLAndParamsEntityScope(entityCol string) string {
+	return `AND ` + SQLParamsEntityScope(entityCol)
+}
+
 func investmentDashboardEntityScope(ctx context.Context, requestedEntityName string) (string, []string, string) {
 	requestedEntityName = strings.TrimSpace(requestedEntityName)
-	allowed := normalizeEntityNameList(api.GetEntityNamesFromCtx(ctx))
-	if len(allowed) == 0 {
+	scope := ctxutil.FromContext(ctx)
+	allowed := normalizeEntityNameList(ctxutil.AllowedEntityNames(ctx))
+	allowedIDs := api.GetEntityIDsFromCtx(ctx)
+	if len(allowed) == 0 && !scope.IsAdminOverride {
 		return "", nil, constants.ErrNoAccessibleBusinessUnit
 	}
 	if requestedEntityName != "" {
 		for _, entityName := range allowed {
 			if strings.EqualFold(strings.TrimSpace(entityName), requestedEntityName) {
+				return requestedEntityName, allowed, ""
+			}
+		}
+		for _, entityID := range allowedIDs {
+			if strings.EqualFold(strings.TrimSpace(entityID), requestedEntityName) {
 				return requestedEntityName, allowed, ""
 			}
 		}
@@ -56,8 +69,8 @@ func investmentDashboardEntityScope(ctx context.Context, requestedEntityName str
 }
 
 func investmentDashboardAllowedEntities(ctx context.Context) ([]string, string) {
-	allowed := api.GetEntityNamesFromCtx(ctx)
-	if len(allowed) == 0 {
+	allowed := ctxutil.AllowedEntityNames(ctx)
+	if len(allowed) == 0 && !ctxutil.FromContext(ctx).IsAdminOverride {
 		return nil, constants.ErrNoAccessibleBusinessUnit
 	}
 	return allowed, ""
