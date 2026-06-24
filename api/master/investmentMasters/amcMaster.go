@@ -14,6 +14,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -72,11 +73,11 @@ func getUserFriendlyAMCError(err error, context string) (string, int) {
 
 	// Check constraint violations - Known error, return 200
 	if strings.Contains(errStr, constants.CheckConstraint) {
-		if strings.Contains(errStr, "status_check") || strings.Contains(errStr, "masteramc_status_check") {
-			return "Invalid status. Must be 'Active' or 'Inactive'.", http.StatusOK
+		if strings.Contains(errStr, "masteramc_status_ck") {
+			return "Invalid status. Must be 'Active', 'Inactive', or 'Suspended'.", http.StatusOK
 		}
-		if strings.Contains(errStr, "source_check") || strings.Contains(errStr, "masteramc_source_check") {
-			return "Invalid source. Must be 'AMFI', 'Manual', or 'Upload'.", http.StatusOK
+		if strings.Contains(errStr, "masteramc_source_ck") {
+			return "Invalid source. Must be 'Manual', 'Upload', or 'ERP'.", http.StatusOK
 		}
 		if strings.Contains(errStr, "actiontype_check") {
 			return "Invalid action type. Must be CREATE, EDIT, or DELETE.", http.StatusOK
@@ -101,16 +102,63 @@ func getUserFriendlyAMCError(err error, context string) (string, int) {
 		return "Required field is missing.", http.StatusOK
 	}
 
+	// Value too long — field-specific messages
+	if strings.Contains(errStr, "value too long") || strings.Contains(errStr, "character varying") {
+		if strings.Contains(errStr, "amc_name") {
+			return "AMC name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errStr, "internal_amc_code") {
+			return "Internal AMC code is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errStr, "cams_amc_code") {
+			return "CAMS AMC code is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errStr, "mfu_amc_code") {
+			return "MFU AMC code is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errStr, "erp_vendor_code") {
+			return "ERP vendor code is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errStr, "sebi_registration_no") {
+			return "SEBI registration number is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errStr, "primary_contact_email") {
+			return "Primary contact email is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errStr, "primary_contact_name") {
+			return "Primary contact name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errStr, "amc_bank_ifsc") {
+			return "AMC bank IFSC code is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errStr, "amc_bank_account_no") {
+			return "AMC bank account number is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errStr, "amc_bank_name") {
+			return "AMC bank name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errStr, "amc_beneficiary_name") {
+			return "AMC beneficiary name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errStr, "status") {
+			return "Status value is too long.", http.StatusBadRequest
+		}
+		return "A field value is too long. Please check your data.", http.StatusBadRequest
+	}
+
 	// Connection errors - SERVER ERROR (503 Service Unavailable)
 	if strings.Contains(errStr, "connection") || strings.Contains(errStr, "timeout") {
 		return "Database connection error. Please try again.", http.StatusServiceUnavailable
 	}
 
-	// Return original error with context - SERVER ERROR (500)
-	if context != "" {
-		return context + ": " + errStr, http.StatusInternalServerError
+	// Unknown error — expose details only in dev mode
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("DEVEL_MODE")), "true") {
+		if context != "" {
+			return context + " (dev): " + errStr, http.StatusInternalServerError
+		}
+		return errStr, http.StatusInternalServerError
 	}
-	return errStr, http.StatusInternalServerError
+	return "Failed to process AMC request. Please try again.", http.StatusInternalServerError
 }
 
 // local helpers (kept local so this file is self-contained)
@@ -246,6 +294,31 @@ func isAlphaSpace(s string) bool {
 	for _, c := range s {
 		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == ' ') {
 			return false
+		}
+	}
+	return true
+}
+
+// isValidISIN returns true if s is a valid ISIN:
+// 2 uppercase letters (country code) + 9 uppercase alphanumeric (NSIN) + 1 digit (check digit) = 12 chars.
+func isValidISIN(s string) bool {
+	if len(s) != 12 {
+		return false
+	}
+	for i, c := range s {
+		switch {
+		case i < 2: // country code — letters only
+			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+				return false
+			}
+		case i < 11: // NSIN — alphanumeric
+			if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+				return false
+			}
+		default: // check digit — single digit
+			if c < '0' || c > '9' {
+				return false
+			}
 		}
 	}
 	return true

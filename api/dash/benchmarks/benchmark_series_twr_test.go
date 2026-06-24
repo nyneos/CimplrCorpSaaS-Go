@@ -26,7 +26,7 @@ func TestBuildPortfolioIndexedSeriesTWR(t *testing.T) {
 	}
 }
 
-func TestBuildPortfolioIndexedSeriesTWR_NoHoldingsUntilJune(t *testing.T) {
+func TestBuildPortfolioIndexedSeriesTWRNoHoldingsUntilJune(t *testing.T) {
 	aum := map[int]float64{1: 0, 2: 0, 3: 500_000}
 	cf := map[int]float64{3: 500_000}
 	out := BuildPortfolioIndexedSeriesTWR(aum, cf, 3)

@@ -584,7 +584,7 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
 		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
-			logger.LogError("Failed to run global portfolio refresh after investment confirmation approval: %v", err)
+			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
 		}
 
 		go func(cID, uID, uEmail string) {
@@ -797,7 +797,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
 		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
-			logger.LogError("Failed to run global portfolio refresh after investment confirmation approval: %v", err)
+			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
 		}
 
 		go func(ids []string, uID, uEmail string) {
@@ -937,7 +937,7 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
 		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
-			logger.LogError("Failed to run global portfolio refresh after investment confirmation approval: %v", err)
+			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
 		}
 
 		// Automatically process confirmed investments (create BUY transactions and refresh snapshots)
@@ -1097,7 +1097,7 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
 		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
-			logger.LogError("Failed to run global portfolio refresh after investment confirmation approval: %v", err)
+			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
 		}
 
 		go func(ids []string, uID, uEmail string) {

@@ -30,9 +30,9 @@ type BenchmarkDefinition struct {
 
 var curatedBenchmarks = []BenchmarkDefinition{
 	{ID: constants.Nifty50, Name: constants.Nifty50, Provider: "nse", NSEType: constants.Nifty50},
-	{ID: "NIFTY 100", Name: "NIFTY 100", Provider: "nse", NSEType: "NIFTY 100"},
-	{ID: "NIFTY BANK", Name: "NIFTY BANK", Provider: "nse", NSEType: "NIFTY BANK"},
-	{ID: "NIFTY IT", Name: "NIFTY IT", Provider: "nse", NSEType: "NIFTY IT"},
+	{ID: constants.Nifty100, Name: constants.Nifty100, Provider: "nse", NSEType: constants.Nifty100},
+	{ID: constants.NiftyBank, Name: constants.NiftyBank, Provider: "nse", NSEType: constants.NiftyBank},
+	{ID: constants.NiftyIT, Name: constants.NiftyIT, Provider: "nse", NSEType: constants.NiftyIT},
 	{ID: "SENSEX", Name: "BSE SENSEX", Provider: "bse", BSEIndex: 16},
 	{ID: "BSE BANKEX", Name: "BSE BANKEX", Provider: "bse", BSEIndex: 53},
 	{ID: "BSE FOCUSED IT", Name: "BSE Focused IT", Provider: "bse", BSEIndex: 134},
@@ -294,10 +294,11 @@ func indexPointFromNSEItem(item interface{}) IndexPoint {
 			}
 		}
 	case map[string]interface{}:
-		if ts, ok := v["timestamp"].(float64); ok {
-			pt.Timestamp = int64(ts)
-			pt.Date = time.UnixMilli(int64(ts)).UTC().Format(constants.DateFormat)
-		} else if ts, ok := v["time"].(float64); ok {
+		ts, tsOK := v["timestamp"].(float64)
+		if !tsOK {
+			ts, tsOK = v["time"].(float64)
+		}
+		if tsOK {
 			pt.Timestamp = int64(ts)
 			pt.Date = time.UnixMilli(int64(ts)).UTC().Format(constants.DateFormat)
 		} else if dateStr, ok := v["date"].(string); ok {

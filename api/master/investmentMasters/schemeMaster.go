@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -98,6 +99,35 @@ func getUserFriendlySchemeError(err error, context string) (string, int) {
 		return "Required field is missing.", http.StatusOK
 	}
 
+	// Value too long — field-specific messages
+	if strings.Contains(errMsg, "value too long") || strings.Contains(errMsg, "character varying") {
+		if strings.Contains(errMsg, "isin") {
+			return "ISIN is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "internal_scheme_code") {
+			return "Internal scheme code is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "internal_risk_rating") {
+			return "Internal risk rating is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "erp_gl_account") {
+			return "ERP GL account is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "amfi_scheme_code") {
+			return "AMFI scheme code is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "scheme_name") {
+			return "Scheme name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "amc_name") {
+			return "AMC name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "status") {
+			return "Status value is too long.", http.StatusBadRequest
+		}
+		return "A field value is too long. Please check your data.", http.StatusBadRequest
+	}
+
 	// Connection/timeout errors (HTTP 503 - server errors, retry-able)
 	if strings.Contains(errMsg, "connection refused") ||
 		strings.Contains(errMsg, "connection reset") ||
@@ -106,8 +136,11 @@ func getUserFriendlySchemeError(err error, context string) (string, int) {
 		return "Database connection error. Please try again.", http.StatusServiceUnavailable
 	}
 
-	// Unknown errors (HTTP 500 - server errors)
-	return context + ": " + errMsg, http.StatusInternalServerError
+	// Unknown errors — in dev mode surface the raw error; in production sanitize
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("DEVEL_MODE")), "true") {
+		return "COPY failed (dev): " + errMsg, http.StatusInternalServerError
+	}
+	return "Failed to import schemes. Please check your file and try again.", http.StatusInternalServerError
 }
 
 // ---------------------------
@@ -139,6 +172,91 @@ type UploadSchemeResult struct {
 	Success bool   `json:"success"`
 	BatchID string `json:"batch_id,omitempty"`
 	Error   string `json:"error,omitempty"`
+}
+
+type amfiMasterRecord struct {
+	SchemeCode string
+	ISIN1      string // isin_div_payout_growth
+	ISIN2      string // isin_div_reinvestment
+	AMCName    string
+	SchemeName string
+}
+
+// validateAgainstAMFI looks up amfiCode in amfi_scheme_master_staging and cross-checks
+// scheme name, ISIN, and AMC name. Returns an error message or "" if all checks pass.
+func validateAgainstAMFI(ctx context.Context, pgxPool *pgxpool.Pool, amfiCode, schemeName, isin, amcName string) string {
+	var isin1, isin2, dbAMC, dbSchemeName string
+	err := pgxPool.QueryRow(ctx, `
+		SELECT COALESCE(isin_div_payout_growth,''), COALESCE(isin_div_reinvestment,''),
+		       COALESCE(amc_name,''), COALESCE(scheme_name,'')
+		FROM investment.amfi_scheme_master_staging
+		WHERE scheme_code::text = $1
+		LIMIT 1
+	`, strings.TrimSpace(amfiCode)).Scan(&isin1, &isin2, &dbAMC, &dbSchemeName)
+	if err != nil {
+		return fmt.Sprintf("AMFI scheme code '%s' not found in the AMFI master. Please verify the code.", amfiCode)
+	}
+
+	// Check scheme name — AMFI scheme_name is the base name (e.g. "360 ONE Dynamic Bond Fund").
+	// The user typically enters the full plan name which should contain the base name.
+	schemeName = strings.TrimSpace(schemeName)
+	if schemeName != "" && dbSchemeName != "" {
+		sl := strings.ToLower(schemeName)
+		dl := strings.ToLower(dbSchemeName)
+		if !strings.Contains(sl, dl) && !strings.Contains(dl, sl) {
+			return fmt.Sprintf("Scheme name '%s' does not match the AMFI record for scheme code '%s' (AMFI scheme: '%s').", schemeName, amfiCode, dbSchemeName)
+		}
+	}
+
+	// Check ISIN if provided and AMFI has at least one ISIN
+	isin = strings.TrimSpace(isin)
+	if isin != "" && (isin1 != "" || isin2 != "") {
+		if !strings.EqualFold(isin, isin1) && !strings.EqualFold(isin, isin2) {
+			hint := isin1
+			if isin2 != "" && isin2 != isin1 {
+				hint += " / " + isin2
+			}
+			return fmt.Sprintf("ISIN '%s' does not match the AMFI record for scheme code '%s' (AMFI ISIN: %s).", isin, amfiCode, hint)
+		}
+	}
+
+	// Check AMC name — AMFI stores long official names; use contains in either direction
+	amcName = strings.TrimSpace(amcName)
+	if amcName != "" && dbAMC != "" {
+		al := strings.ToLower(amcName)
+		dl := strings.ToLower(dbAMC)
+		if !strings.Contains(dl, al) && !strings.Contains(al, dl) {
+			return fmt.Sprintf("AMC name '%s' does not match the AMFI record for scheme code '%s' (AMFI AMC: '%s').", amcName, amfiCode, dbAMC)
+		}
+	}
+
+	return ""
+}
+
+// batchFetchAMFI returns a map of amfiCode (string) → amfiMasterRecord for the given codes.
+func batchFetchAMFI(ctx context.Context, pgxPool *pgxpool.Pool, codes []string) map[string]amfiMasterRecord {
+	result := make(map[string]amfiMasterRecord, len(codes))
+	if len(codes) == 0 {
+		return result
+	}
+	rows, err := pgxPool.Query(ctx, `
+		SELECT scheme_code::text,
+		       COALESCE(isin_div_payout_growth,''), COALESCE(isin_div_reinvestment,''),
+		       COALESCE(amc_name,''), COALESCE(scheme_name,'')
+		FROM investment.amfi_scheme_master_staging
+		WHERE scheme_code::text = ANY($1)
+	`, codes)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var rec amfiMasterRecord
+		if scanErr := rows.Scan(&rec.SchemeCode, &rec.ISIN1, &rec.ISIN2, &rec.AMCName, &rec.SchemeName); scanErr == nil {
+			result[rec.SchemeCode] = rec
+		}
+	}
+	return result
 }
 
 // ---------------------------
@@ -228,6 +346,7 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"amfi_scheme_code":     true,
 			constants.KeyStatus:    true,
 			"source":               true,
+			"method":               true,
 		}
 
 		results := make([]UploadSchemeResult, 0, len(files))
@@ -265,12 +384,16 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// require mandatory columns
-			mandatories := []string{"scheme_name", "isin", "amc_name", "internal_scheme_code", "internal_risk_rating", "erp_gl_account"}
+			mandatories := []string{"scheme_name", "amc_name", "internal_scheme_code", "internal_risk_rating", "erp_gl_account", "amfi_scheme_code"}
 			for _, m := range mandatories {
 				if !slices.Contains(validCols, m) {
 					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("CSV must include column: %s", m))
 					return
 				}
+			}
+			// isin is optional — always include it in validCols so auto-fill from AMFI can populate it
+			if !slices.Contains(validCols, "isin") {
+				validCols = append(validCols, "isin")
 			}
 
 			// collect referenced AMC names to validate they exist & are approved
@@ -364,10 +487,15 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 
-				// Validate ISIN uniqueness per row if provided
+				// Validate ISIN format and uniqueness per row if provided
 				if pos, ok := headerPos["isin"]; ok && pos < len(row) {
 					isin := strings.TrimSpace(row[pos])
 					if isin != "" {
+						if !isValidISIN(isin) {
+							api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+								"Row %d: ISIN '%s' is invalid — must be 12 characters: 2-letter country code + 9 alphanumeric + 1 check digit (e.g. INF179K01WT6)", rowNum, isin))
+							return
+						}
 						var exists int
 						dbErr := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, isin).Scan(&exists)
 						if dbErr == nil {
@@ -386,6 +514,99 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Scheme with internal_scheme_code '%s' already exists", rowNum, code))
 							return
 						}
+					}
+				}
+
+				// Validate amfi_scheme_code uniqueness per row
+				if pos, ok := headerPos["amfi_scheme_code"]; ok && pos < len(row) {
+					code := strings.TrimSpace(row[pos])
+					if code != "" {
+						var exists int
+						dbErr := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE amfi_scheme_code=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, code).Scan(&exists)
+						if dbErr == nil {
+							api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Scheme with AMFI code '%s' already exists", rowNum, code))
+							return
+						}
+					}
+				}
+			}
+
+			// Batch validate all amfi_scheme_codes against AMFI master
+			amfiCodes := make([]string, 0, len(dataRows))
+			for _, row := range dataRows {
+				if pos, ok := headerPos["amfi_scheme_code"]; ok && pos < len(row) {
+					if code := strings.TrimSpace(row[pos]); code != "" {
+						amfiCodes = append(amfiCodes, code)
+					}
+				}
+			}
+			amfiMap := batchFetchAMFI(ctx, pgxPool, amfiCodes)
+			for i, row := range dataRows {
+				rowNum := i + 2
+				amfiCode := ""
+				if pos, ok := headerPos["amfi_scheme_code"]; ok && pos < len(row) {
+					amfiCode = strings.TrimSpace(row[pos])
+				}
+				if amfiCode == "" {
+					continue
+				}
+				rec, found := amfiMap[amfiCode]
+				if !found {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+						"Row %d: AMFI scheme code '%s' not found in the AMFI master. Please verify the code.", rowNum, amfiCode))
+					return
+				}
+				// Validate scheme name
+				schemeName := ""
+				if pos, ok := headerPos["scheme_name"]; ok && pos < len(row) {
+					schemeName = strings.TrimSpace(row[pos])
+				}
+				if schemeName != "" && rec.SchemeName != "" {
+					sl := strings.ToLower(schemeName)
+					dl := strings.ToLower(rec.SchemeName)
+					if !strings.Contains(sl, dl) && !strings.Contains(dl, sl) {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+							"Row %d: Scheme name '%s' does not match the AMFI record for scheme code '%s' (AMFI scheme: '%s').", rowNum, schemeName, amfiCode, rec.SchemeName))
+						return
+					}
+				}
+				// Validate ISIN (optional — if not provided, auto-filled from AMFI below)
+				isin := ""
+				if pos, ok := headerPos["isin"]; ok && pos < len(row) {
+					isin = strings.TrimSpace(row[pos])
+				}
+				if isin != "" && (rec.ISIN1 != "" || rec.ISIN2 != "") {
+					if !strings.EqualFold(isin, rec.ISIN1) && !strings.EqualFold(isin, rec.ISIN2) {
+						hint := rec.ISIN1
+						if rec.ISIN2 != "" && rec.ISIN2 != rec.ISIN1 {
+							hint += " / " + rec.ISIN2
+						}
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+							"Row %d: ISIN '%s' does not match the AMFI record for scheme code '%s' (AMFI ISIN: %s).", rowNum, isin, amfiCode, hint))
+						return
+					}
+				}
+				// If ISIN not provided and AMFI has one, check it doesn't already exist
+				if isin == "" && rec.ISIN1 != "" {
+					var exists int
+					if dbErr := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, rec.ISIN1).Scan(&exists); dbErr == nil {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+							"Row %d: Scheme with ISIN '%s' (auto-fetched from AMFI for code '%s') already exists", rowNum, rec.ISIN1, amfiCode))
+						return
+					}
+				}
+				// Validate AMC name
+				amcName := ""
+				if pos, ok := headerPos["amc_name"]; ok && pos < len(row) {
+					amcName = strings.TrimSpace(row[pos])
+				}
+				if amcName != "" && rec.AMCName != "" {
+					al := strings.ToLower(amcName)
+					dl := strings.ToLower(rec.AMCName)
+					if !strings.Contains(dl, al) && !strings.Contains(al, dl) {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+							"Row %d: AMC name '%s' does not match the AMFI record for scheme code '%s' (AMFI AMC: '%s').", rowNum, amcName, amfiCode, rec.AMCName))
+						return
 					}
 				}
 			}
@@ -407,32 +628,45 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			isinList := make([]string, 0, len(dataRows))
 			for i, row := range dataRows {
 				vals := make([]interface{}, len(validCols))
+				// get AMFI record for this row to auto-fill ISIN if not provided
+				amfiCodeForRow := ""
+				if pos, ok := headerPos["amfi_scheme_code"]; ok && pos < len(row) {
+					amfiCodeForRow = strings.TrimSpace(row[pos])
+				}
+				amfiRec := amfiMap[amfiCodeForRow]
 				for j, c := range validCols {
 					if pos, ok := headerPos[c]; ok && pos < len(row) {
 						cell := strings.TrimSpace(row[pos])
 						if cell == "" {
-							vals[j] = nil
+							if c == "isin" && amfiRec.ISIN1 != "" {
+								vals[j] = amfiRec.ISIN1
+							} else {
+								vals[j] = nil
+							}
 						} else {
 							vals[j] = cell
 						}
 					} else {
-						vals[j] = nil
+						// column not in CSV — auto-fill isin from AMFI if possible
+						if c == "isin" && amfiRec.ISIN1 != "" {
+							vals[j] = amfiRec.ISIN1
+						} else {
+							vals[j] = nil
+						}
 					}
 				}
-				// capture isin for audit commit step
+				// capture isin for audit/source update (provided or auto-filled from AMFI)
+				isin := ""
 				if pos, ok := headerPos["isin"]; ok && pos < len(row) {
-					code := strings.TrimSpace(row[pos])
-					if code != "" {
-						isinList = append(isinList, code)
-					}
+					isin = strings.TrimSpace(row[pos])
+				}
+				if isin == "" {
+					isin = amfiRec.ISIN1
+				}
+				if isin != "" {
+					isinList = append(isinList, isin)
 				}
 				copyRows[i] = vals
-			}
-
-			// Append s3Key as last column for CopyFrom
-			validCols = append(validCols, "upload_s3_key")
-			for i := range copyRows {
-				copyRows[i] = append(copyRows[i], s3Key)
 			}
 
 			// transaction: COPY -> set source -> audit insert
@@ -531,8 +765,9 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			strings.TrimSpace(req.AmcName) == "" ||
 			strings.TrimSpace(req.InternalSchemeCode) == "" ||
 			strings.TrimSpace(req.InternalRiskRating) == "" ||
-			strings.TrimSpace(req.ErpGlAccount) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Missing required scheme fields")
+			strings.TrimSpace(req.ErpGlAccount) == "" ||
+			strings.TrimSpace(req.AmfiSchemeCode) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "Missing required scheme fields (scheme_name, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, amfi_scheme_code are all required)")
 			return
 		}
 
@@ -565,12 +800,17 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// check ISIN uniqueness (non-deleted) only if ISIN is provided
+		// validate and check ISIN uniqueness if provided
 		if strings.TrimSpace(req.ISIN) != "" {
+			if !isValidISIN(req.ISIN) {
+				api.RespondWithError(w, http.StatusBadRequest,
+					"ISIN '"+req.ISIN+"' is invalid — must be 12 characters: 2-letter country code + 9 alphanumeric + 1 check digit (e.g. INF179K01WT6)")
+				return
+			}
 			var tmp int
 			err := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, req.ISIN).Scan(&tmp)
 			if err == nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Scheme with ISIN already exists")
+				api.RespondWithError(w, http.StatusBadRequest, "Scheme with ISIN '"+req.ISIN+"' already exists")
 				return
 			}
 		}
@@ -583,6 +823,22 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, "Internal scheme code already exists. Please use a different code.")
 				return
 			}
+		}
+
+		// check AmfiSchemeCode uniqueness (non-deleted)
+		if strings.TrimSpace(req.AmfiSchemeCode) != "" {
+			var tmp int
+			err := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE amfi_scheme_code=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, req.AmfiSchemeCode).Scan(&tmp)
+			if err == nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Scheme with AMFI code '"+req.AmfiSchemeCode+"' already exists.")
+				return
+			}
+		}
+
+		// Validate amfi_scheme_code against AMFI master, cross-check scheme name, ISIN, and AMC name
+		if msg := validateAgainstAMFI(ctx, pgxPool, req.AmfiSchemeCode, req.SchemeName, req.ISIN, req.AmcName); msg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, msg)
+			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)

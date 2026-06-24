@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"CimplrCorpSaas/api/constants"
 )
 
 type monthlySchemeUnits struct {
@@ -38,8 +40,8 @@ func ComputeMonthlyPortfolioAUMForChart(
 	}
 
 	schemeCodes := uniqueSchemeCodes(schemeUnits)
-	firstDate, _ := time.Parse("2006-01-02", monthDates[0])
-	lastDate, _ := time.Parse("2006-01-02", monthDates[len(monthDates)-1])
+	firstDate, _ := time.Parse(constants.DateFormat, monthDates[0])
+	lastDate, _ := time.Parse(constants.DateFormat, monthDates[len(monthDates)-1])
 	// Load NAV history from 1 year before first month for month-end lookback.
 	navFrom := firstDate.AddDate(-1, 0, 0)
 
@@ -54,7 +56,7 @@ func ComputeMonthlyPortfolioAUMForChart(
 
 	aumByMonth = make(map[int]float64, len(monthDates))
 	for _, su := range schemeUnits {
-		monthEnd, parseErr := time.Parse("2006-01-02", monthDates[su.MonthIdx-1])
+		monthEnd, parseErr := time.Parse(constants.DateFormat, monthDates[su.MonthIdx-1])
 		if parseErr != nil {
 			continue
 		}
@@ -181,7 +183,7 @@ func queryStagingNAVHistory(ctx context.Context, pool *pgxpool.Pool, schemeCode 
 		WHERE scheme_code::text = $1
 		  AND nav_date >= $2::date AND nav_date <= $3::date
 		ORDER BY nav_date`,
-		schemeCode, from.Format("2006-01-02"), to.Format("2006-01-02"))
+		schemeCode, from.Format(constants.DateFormat), to.Format(constants.DateFormat))
 	if err != nil {
 		return map[string]float64{}
 	}
@@ -214,7 +216,7 @@ func queryLatestTxnNAV(ctx context.Context, pool *pgxpool.Pool, entityFilter str
 		LIMIT 1`, portfolioSchemeResolvedCTE)
 
 	var nav float64
-	_ = pool.QueryRow(ctx, query, holdingsEntityScopeArg(entityFilter, allowedEntities), schemeCode, asOf.Format("2006-01-02")).Scan(&nav)
+	_ = pool.QueryRow(ctx, query, holdingsEntityScopeArg(entityFilter, allowedEntities), schemeCode, asOf.Format(constants.DateFormat)).Scan(&nav)
 	return nav
 }
 

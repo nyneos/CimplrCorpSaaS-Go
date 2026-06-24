@@ -162,6 +162,31 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Pre-fetch all active bank accounts for this entity so we can fall back to them
+		// when masterfolio.default_redemption_account is not set.
+		var entityBankAccounts []string
+		{
+			acctRows, acctErr := pgxPool.Query(ctx, `
+				SELECT ba.account_number
+				FROM public.masterbankaccount ba
+				LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
+				LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
+				WHERE COALESCE(ba.is_deleted,false)=false
+				  AND COALESCE(ba.status,'') = 'Active'
+				  AND LOWER(TRIM(COALESCE(e.entity_name, ec.entity_name))) = LOWER(TRIM($1))
+				ORDER BY ba.account_id
+			`, req.EntityName)
+			if acctErr == nil {
+				for acctRows.Next() {
+					var acct string
+					if err := acctRows.Scan(&acct); err == nil && strings.TrimSpace(acct) != "" {
+						entityBankAccounts = append(entityBankAccounts, strings.TrimSpace(acct))
+					}
+				}
+				acctRows.Close()
+			}
+		}
+
 		holdings := []PortfolioHolding{}
 		for _, pr := range portfolioRows {
 			entityName := pr.EntityName
@@ -282,6 +307,11 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				h.CreditBankAccount = h.DefaultRedemptionAccount
 			} else {
 				h.CreditBankAccount = h.DefaultSettlementAccount
+			}
+			// Fallback: if masterfolio/demat master has no default account, use the first
+			// active bank account for this entity so the UI dropdown is never empty.
+			if h.CreditBankAccount == "" && len(entityBankAccounts) > 0 {
+				h.CreditBankAccount = entityBankAccounts[0]
 			}
 			// Resolve bank name from credit bank account number
 			if h.CreditBankAccount != "" {
@@ -467,10 +497,14 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			holdings = append(holdings, h)
 		}
 
+		if entityBankAccounts == nil {
+			entityBankAccounts = []string{}
+		}
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"entity_name":    req.EntityName,
 			"holdings":       holdings,
 			"total_holdings": len(holdings),
+			"bank_accounts":  entityBankAccounts,
 		})
 	}
 }

@@ -131,7 +131,8 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				CASE
 					WHEN m.scheme_id IS NOT NULL AND COALESCE(m.is_deleted, false) = false THEN true
 					ELSE false
-				END AS enriched
+				END AS enriched,
+				COALESCE(m.scheme_id::text, '') AS scheme_id
 			FROM investment.amfi_scheme_master_staging s
 			JOIN target_amcs a
 				ON LOWER(TRIM(s.amc_name)) = LOWER(TRIM(a.amc_name))
@@ -153,10 +154,10 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := []map[string]interface{}{}
 		for rows.Next() {
-			var amcName, schemeName, internalSchemeCode, isin, isinReinvest, method, risk, erpGl, status string
+			var amcName, schemeName, internalSchemeCode, isin, isinReinvest, method, risk, erpGl, status, schemeID string
 			var schemeCode int64
 			var enriched bool
-			_ = rows.Scan(&amcName, &schemeName, &internalSchemeCode, &isin, &isinReinvest, &schemeCode, &method, &risk, &erpGl, &status, &enriched)
+			_ = rows.Scan(&amcName, &schemeName, &internalSchemeCode, &isin, &isinReinvest, &schemeCode, &method, &risk, &erpGl, &status, &enriched, &schemeID)
 			out = append(out, map[string]interface{}{
 				"amc_name":             amcName,
 				"scheme_name":          schemeName,
@@ -165,6 +166,7 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"scheme_code":          schemeCode,
 				"enriched":             enriched,
 				"internal_scheme_code": internalSchemeCode,
+				"scheme_id":            schemeID,
 				"method":               method,
 				"internal_risk_rating": risk,
 				"erp_gl_account":       erpGl,

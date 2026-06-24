@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -85,16 +86,36 @@ func getUserFriendlyDPError(err error, context string) (string, int) {
 		return "Required field is missing.", http.StatusOK
 	}
 
+	// Value too long — field-specific messages
+	if strings.Contains(errMsg, "value too long") || strings.Contains(errMsg, "character varying") {
+		if strings.Contains(errMsg, "dp_name") {
+			return "DP name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "dp_code") {
+			return "DP code is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "depository") {
+			return "Depository value is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "status") {
+			return "Status value is too long.", http.StatusBadRequest
+		}
+		return "A field value is too long. Please check your data.", http.StatusBadRequest
+	}
+
 	// Connection errors (HTTP 503 Service Unavailable)
 	if strings.Contains(errMsg, "connection") || strings.Contains(errMsg, "timeout") {
 		return "Database connection error. Please try again.", http.StatusServiceUnavailable
 	}
 
-	// Return original error with context (HTTP 500)
-	if context != "" {
-		return context + ": " + errMsg, http.StatusInternalServerError
+	// Unknown error — expose details only in dev mode
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("DEVEL_MODE")), "true") {
+		if context != "" {
+			return context + " (dev): " + errMsg, http.StatusInternalServerError
+		}
+		return errMsg, http.StatusInternalServerError
 	}
-	return errMsg, http.StatusInternalServerError
+	return "Failed to process DP request. Please try again.", http.StatusInternalServerError
 }
 
 type CreateDPRequestSingle struct {
