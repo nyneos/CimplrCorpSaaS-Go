@@ -791,6 +791,19 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 			colIdx[constants.DepositAmountINR] = idx
 		}
 	}
+	// Single-amount column fallback: when neither debit nor credit columns were found via
+	// aliases, look for any column whose header contains "amount" (e.g. PNB "Amount(INR)").
+	// Map it to both withdrawal and deposit so the singleAmtIdx path triggers; direction
+	// is then determined by the CrDr column (if detected below) or balance-direction flip.
+	if _, okW := colIdx[constants.WithdrawalAmountINR]; !okW {
+		if _, okD := colIdx[constants.DepositAmountINR]; !okD {
+			if idx := findColContaining("amount"); idx >= 0 {
+				colIdx[constants.WithdrawalAmountINR] = idx
+				colIdx[constants.DepositAmountINR] = idx
+				logger.LogInfo("[PREVIEW-DEBUG] single-amount fallback: col=%d header=%q mapped to both withdrawal/deposit", idx, headerRow[idx])
+			}
+		}
+	}
 	if _, ok := colIdx[constants.BalanceINR]; !ok {
 		if idx := findColByAliases(bankStmtBalanceHeaderAliases); idx >= 0 {
 			colIdx[constants.BalanceINR] = idx
@@ -827,6 +840,33 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 				strings.Contains(lc, "dr/cr") || lc == "cr" || lc == "dr" ||
 				strings.Contains(lc, "credit/debit") || strings.Contains(lc, "debit/credit") {
 				colIdx["CrDr"] = idx
+				break
+			}
+		}
+	}
+	// Data-sampling fallback: detect "Type" or "Indicator" columns that hold DR/CR values
+	// (e.g. PNB statements converted from PDF use a "Type" column with "DR"/"CR" entries).
+	if _, ok := colIdx["CrDr"]; !ok {
+		for idx, colName := range headerRow {
+			lc := strings.ToLower(strings.TrimSpace(colName))
+			if lc != "type" && !strings.Contains(lc, "indicator") {
+				continue
+			}
+			drCrCount, sampleCount := 0, 0
+			for ri := txnHeaderIdx + 1; ri < len(rows) && sampleCount < 20; ri++ {
+				if idx < len(rows[ri]) {
+					v := strings.ToUpper(strings.TrimSpace(rows[ri][idx]))
+					if v == "DR" || v == "CR" {
+						drCrCount++
+					}
+					if v != "" {
+						sampleCount++
+					}
+				}
+			}
+			if sampleCount > 0 && drCrCount*2 >= sampleCount {
+				colIdx["CrDr"] = idx
+				logger.LogInfo("[PREVIEW-DEBUG] data-sampled CrDr: col=%d header=%q (dr_cr=%d/%d)", idx, colName, drCrCount, sampleCount)
 				break
 			}
 		}
