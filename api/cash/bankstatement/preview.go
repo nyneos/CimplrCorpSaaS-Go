@@ -678,6 +678,21 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 	// LLM column layout — only when enabled and manual mapping is incomplete (or completely missing).
 	txnHeaderIdx, colIdx = applyLLMColumnLayoutIfNeeded(ctx, rows, txnHeaderIdx, colIdx)
 
+	// Post-LLM sanity: if the LLM mapped withdrawal to the same column as CrDr, it
+	// confused the Type/indicator column ("DR"/"CR" strings) for a withdrawal amount column.
+	// Treat it as a single-amount format where both sides share the deposit column.
+	if idxCrDr, hasCrDr := colIdx["CrDr"]; hasCrDr {
+		if idxW, hasW := colIdx[constants.WithdrawalAmountINR]; hasW && idxW == idxCrDr {
+			if idxD, hasD := colIdx[constants.DepositAmountINR]; hasD && idxD != idxCrDr {
+				colIdx[constants.WithdrawalAmountINR] = idxD
+				logger.LogInfo("[PREVIEW-DEBUG] LLM withdrawal=%d == crdr=%d; remapped withdrawal to deposit=%d (single-amount+CrDr mode)", idxW, idxCrDr, idxD)
+			} else {
+				delete(colIdx, constants.WithdrawalAmountINR)
+				logger.LogInfo("[PREVIEW-DEBUG] LLM withdrawal=%d == crdr=%d; cleared withdrawal mapping", idxW, idxCrDr)
+			}
+		}
+	}
+
 	if txnHeaderIdx == -1 {
 		return nil, fmt.Errorf("transaction header row not found even after LLM fallback")
 	}
@@ -871,6 +886,21 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 			}
 		}
 	}
+	// Final sanity: if withdrawal maps to the same column as CrDr (e.g. LLM confused a
+	// "Type"/"DR"/"CR" column for a withdrawal amount column), remap withdrawal to deposit
+	// so the single-amount+CrDr path triggers correctly. This must run after all heuristics.
+	if idxCrDr, hasCrDr := colIdx["CrDr"]; hasCrDr {
+		if idxW, hasW := colIdx[constants.WithdrawalAmountINR]; hasW && idxW == idxCrDr {
+			if idxD, hasD := colIdx[constants.DepositAmountINR]; hasD && idxD != idxCrDr {
+				colIdx[constants.WithdrawalAmountINR] = idxD
+				logger.LogInfo("[PREVIEW-DEBUG] withdrawal=%d == crdr=%d; remapped withdrawal to deposit=%d (single-amount+CrDr mode)", idxW, idxCrDr, idxD)
+			} else {
+				delete(colIdx, constants.WithdrawalAmountINR)
+				logger.LogInfo("[PREVIEW-DEBUG] withdrawal=%d == crdr=%d; cleared withdrawal mapping", idxW, idxCrDr)
+			}
+		}
+	}
+
 	// Parse transactions
 	transactions := []map[string]interface{}{}
 	previewRowNum := txnHeaderIdx
@@ -1957,9 +1987,10 @@ func applyLLMColumnLayoutIfNeeded(ctx context.Context, rows [][]string, txnHeade
 	if !bindref.BrOn() {
 		return txnHeaderIdx, colIdx
 	}
-	if txnHeaderIdx >= 0 && previewHasCoreColumns(colIdx) {
-		return txnHeaderIdx, colIdx
-	}
+	// LLM is the preferred column detector — always run it when inference is enabled.
+	// Manual heuristics above provide a base; LLM overrides with semantic understanding
+	// (handles unusual headers like "Type" for CrDr, "Amount(INR)" for single-amount, etc.)
+	// Heuristic fallbacks below still apply if LLM fails or returns -1 for a field.
 	layout, llmErr := extractColumnLayoutWithLLM(ctx, rows)
 	if llmErr != nil {
 		logger.LogInfo("[PREVIEW-DEBUG] LLM column layout skipped or failed: %v", llmErr)

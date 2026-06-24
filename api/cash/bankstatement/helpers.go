@@ -630,16 +630,20 @@ func MergeMultiLineDescriptions(rows [][]string, dateColIdx, descColIdx int) [][
 			}
 
 			if hasText && !IsSeparatorRow(row) && !isNonTxn && !IsPageBreakRow(row) {
-				// Merge each column into the corresponding parent column
+				// Merge each column into the corresponding parent column.
+				// Never expand the parent beyond its original width — continuation rows
+				// from PDF pages with extra trailing columns (e.g. 7-col pages vs 6-col header)
+				// would otherwise inflate parent rows and cause false shift detection.
+				parentLen := len(result[lastTxnIdx])
 				for ci := 0; ci < len(row); ci++ {
 					if ci == dateColIdx {
 						continue // never merge into the date column
 					}
+					if ci >= parentLen {
+						continue // don't expand parent beyond its original column count
+					}
 					extra := strings.TrimSpace(row[ci])
 					if extra != "" && extra != "-" {
-						for len(result[lastTxnIdx]) <= ci {
-							result[lastTxnIdx] = append(result[lastTxnIdx], "")
-						}
 						existing := strings.TrimSpace(result[lastTxnIdx][ci])
 						// Don't append label text onto a cell that already holds a numeric
 						// value — that would corrupt financial columns (e.g. "5.90 Code").
