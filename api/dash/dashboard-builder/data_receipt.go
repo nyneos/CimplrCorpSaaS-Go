@@ -20,27 +20,24 @@ func queryFDMaturitySummary(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 			COALESCE(m.bank_id, '') AS bank_id,
 			COALESCE(m.bank_name, '') AS bank_name,
 			COALESCE(m.bank_fd_ref_no, '') AS bank_fd_ref_no,
-			COALESCE(m.bank_reference_number, '') AS bank_reference_number,
-			COALESCE(m.interest_type_code, '') AS interest_type_code,
-			COALESCE(m.tenure_type, '') AS tenure_type,
+			COALESCE(NULLIF(m.tenure_type, ''),
+				CASE
+					WHEN COALESCE(m.tenure_years,  0) > 0 THEN 'YEARS'
+					WHEN COALESCE(m.tenure_months, 0) > 0 THEN 'MONTHS'
+					WHEN COALESCE(m.tenure_days,   0) > 0 THEN 'DAYS'
+					ELSE ''
+				END) AS tenure_type,
 			COALESCE(m.principal_amount, 0) AS principal_amount,
 			COALESCE(m.interest_rate, 0) AS interest_rate,
+			COALESCE(m.interest_type_code, '') AS interest_type_code,
 			m.start_date,
 			m.maturity_date,
 			COALESCE(m.fd_status, '') AS fd_status,
 			COALESCE(m.auto_renewal, false) AS auto_renewal,
 			COALESCE(m.tenure_days, 0) AS tenure_days,
 			COALESCE(m.tenure_months, 0) AS tenure_months,
-			COALESCE(m.tenure_years, 0) AS tenure_years,
-			COALESCE(a.processing_status, '') AS processing_status
+			COALESCE(m.tenure_years, 0) AS tenure_years
 		FROM investment.fd_master m
-		LEFT JOIN LATERAL (
-			SELECT processing_status 
-			FROM investment.fd_audit_master 
-			WHERE fd_id = m.fd_id::text
-			ORDER BY GREATEST(requested_at, checker_at) DESC NULLS LAST
-			LIMIT 1
-		) a ON true
 		WHERE COALESCE(m.is_deleted, false) = false %s
 		ORDER BY m.maturity_date DESC NULLS LAST
 		LIMIT NULLIF($1, 0)

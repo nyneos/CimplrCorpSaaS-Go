@@ -5,9 +5,9 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -19,20 +19,25 @@ type HoldingsFilter struct {
 }
 
 type PortfolioHoldingsRow struct {
-	EntityName          string  `json:"entity_name"`
-	FolioNumber         string  `json:"folio_number"`
-	DematAccountNumber  string  `json:"demat_account_number"`
-	SchemeName          string  `json:"scheme_name"`
-	ISIN                string  `json:"isin"`
-	AmcName             string  `json:"amc_name"`
-	TotalUnits          float64 `json:"total_units"`
-	AvgNav              float64 `json:"avg_nav"`
-	CurrentNav          float64 `json:"current_nav"`
-	CurrentValue        float64 `json:"current_value"`
-	GainLoss            float64 `json:"gain_loss"`
-	GainLossPercent     float64 `json:"gain_loss_percent"`
-	TotalInvestedAmount float64 `json:"total_invested_amount"`
-	UpdatedAt           string  `json:"updated_at"`
+	EntityName          string                   `json:"entity_name"`
+	FolioNumber         string                   `json:"folio_number"`
+	DematAccountNumber  string                   `json:"demat_account_number"`
+	SchemeID            string                   `json:"scheme_id"`
+	SchemeName          string                   `json:"scheme_name"`
+	ISIN                string                   `json:"isin"`
+	AmcName             string                   `json:"amc_name"`
+	AmfiSchemeCode      string                   `json:"amfi_scheme_code"`
+	TotalUnits          float64                  `json:"total_units"`
+	AvgNav              float64                  `json:"avg_nav"`
+	CurrentNav          float64                  `json:"current_nav"`
+	CurrentValue        float64                  `json:"current_value"`
+	GainLoss            float64                  `json:"gain_loss"` // unrealized on remaining units
+	GainLossPercent     float64                  `json:"gain_loss_percent"`
+	RealizedGainLoss    float64                  `json:"realized_gain_loss"`    // profit/loss from redemptions
+	TotalGainLoss       float64                  `json:"total_gain_loss"`       // realized + unrealized
+	TotalInvestedAmount float64                  `json:"total_invested_amount"` // remaining cost basis
+	UpdatedAt           string                   `json:"updated_at"`
+	Transactions        []map[string]interface{} `json:"transactions"`
 }
 
 func GetPortfolioHoldings(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -49,85 +54,37 @@ func GetPortfolioHoldings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		f.AmcName = strings.TrimSpace(f.AmcName)
 		f.SchemeName = strings.TrimSpace(f.SchemeName)
 
-		if f.EntityName != "" && !scope.HasEntityNameAccess(f.EntityName) {
+		if f.EntityName != "" && !scope.HasEntityNameAccess(f.EntityName) && !scope.HasEntityAccess(f.EntityName) {
 			api.RespondWithError(w, http.StatusForbidden, "entity_name is not within your authorized access scope")
 			return
 		}
 
-		var args []interface{}
-		whereClauses := []string{"1=1"}
-		addArg := func(val interface{}) string {
-			args = append(args, val)
-			return fmt.Sprintf("$%d", len(args))
-		}
+		dumpAll := f.EntityName == "" && f.AmcName == "" && f.SchemeName == ""
 
-		if f.EntityName != "" {
-			whereClauses = append(whereClauses, "ps.entity_name = "+addArg(f.EntityName))
-		} else if len(scope.EntityNames) > 0 {
-			whereClauses = append(whereClauses, "ps.entity_name = ANY("+addArg(scope.EntityNames)+"::text[])")
-		}
-
-		if f.AmcName != "" {
-			whereClauses = append(whereClauses, "LOWER(COALESCE(s.amc_name,'')) LIKE "+addArg("%"+strings.ToLower(f.AmcName)+"%"))
-		}
-		if f.SchemeName != "" {
-			whereClauses = append(whereClauses, "LOWER(COALESCE(ps.scheme_name,'')) LIKE "+addArg("%"+strings.ToLower(f.SchemeName)+"%"))
-		}
-
-		whereStr := strings.Join(whereClauses, " AND ")
-
-		// Query aggregates the snapshot across batches if there are multiple, though typically snapshot is unique per scheme/folio.
-		query := fmt.Sprintf(`
-			SELECT
-				COALESCE(ps.entity_name, '') as entity_name,
-				COALESCE(ps.folio_number, '') as folio_number,
-				COALESCE(ps.demat_acc_number, '') as demat_account_number,
-				COALESCE(ps.scheme_name, '') as scheme_name,
-				COALESCE(ps.isin, '') as isin,
-				COALESCE(s.amc_name, '') as amc_name,
-				SUM(COALESCE(ps.total_units, 0)) as total_units,
-				CASE WHEN SUM(COALESCE(ps.total_units, 0)) > 0 
-					 THEN SUM(COALESCE(ps.total_invested_amount, 0)) / SUM(COALESCE(ps.total_units, 0)) 
-					 ELSE 0 END as avg_nav,
-				MAX(COALESCE(ps.current_nav, 0)) as current_nav,
-				SUM(COALESCE(ps.total_units, 0)) * MAX(COALESCE(ps.current_nav, 0)) as current_value,
-				(SUM(COALESCE(ps.total_units, 0)) * MAX(COALESCE(ps.current_nav, 0))) - SUM(COALESCE(ps.total_invested_amount, 0)) as gain_loss,
-				CASE WHEN SUM(COALESCE(ps.total_invested_amount, 0)) > 0 
-					 THEN (((SUM(COALESCE(ps.total_units, 0)) * MAX(COALESCE(ps.current_nav, 0))) - SUM(COALESCE(ps.total_invested_amount, 0))) / SUM(COALESCE(ps.total_invested_amount, 0))) * 100 
-					 ELSE 0 END as gain_loss_percent,
-				SUM(COALESCE(ps.total_invested_amount, 0)) as total_invested_amount,
-				MAX(COALESCE(TO_CHAR(ps.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD HH24:MI:SS'),'')) as updated_at
-			FROM investment.portfolio_snapshot ps
-			LEFT JOIN investment.masterscheme s ON (s.scheme_id::text = ps.scheme_id OR s.isin = ps.isin OR s.scheme_name = ps.scheme_name)
-			WHERE %s
-			GROUP BY ps.entity_name, ps.folio_number, ps.demat_acc_number, ps.scheme_name, ps.isin, s.amc_name
-			HAVING SUM(COALESCE(ps.total_units, 0)) > 0
-			ORDER BY ps.entity_name, ps.scheme_name
-		`, whereStr)
-
-		rows, err := pgxPool.Query(ctx, query, args...)
+		results, err := queryHoldingsFromTransactions(ctx, pgxPool, f, dumpAll, scope.EntityNames)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "live holdings query failed: "+err.Error())
 			return
 		}
-		defer rows.Close()
+		results = dedupeHoldingsRows(results)
 
-		var results []PortfolioHoldingsRow
-		for rows.Next() {
-			var row PortfolioHoldingsRow
-			if err := rows.Scan(
-				&row.EntityName, &row.FolioNumber, &row.DematAccountNumber,
-				&row.SchemeName, &row.ISIN, &row.AmcName,
-				&row.TotalUnits, &row.AvgNav, &row.CurrentNav, &row.CurrentValue,
-				&row.GainLoss, &row.GainLossPercent, &row.TotalInvestedAmount, &row.UpdatedAt,
-			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "scan failed: "+err.Error())
+		if len(results) > 0 {
+			txFilter := TxFilter{AllowedEntities: scope.EntityNames}
+			if f.EntityName != "" {
+				txFilter.EntityName = f.EntityName
+			}
+			from := time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
+			allTx, txErr := QueryPortfolioTransactions(ctx, pgxPool, TxFilter{
+				EntityName:      txFilter.EntityName,
+				AllowedEntities: txFilter.AllowedEntities,
+				DateFrom:        from.Format("2006-01-02"),
+				DateTo:          time.Now().UTC().Format("2006-01-02"),
+			})
+			if txErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "transactions query failed: "+txErr.Error())
 				return
 			}
-			results = append(results, row)
-		}
-		if results == nil {
-			results = []PortfolioHoldingsRow{}
+			attachTransactionsToHoldings(results, allTx)
 		}
 
 		api.RespondWithPayload(w, true, "", results)

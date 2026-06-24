@@ -575,6 +575,16 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		// check InternalSchemeCode uniqueness (non-deleted)
+		if strings.TrimSpace(req.InternalSchemeCode) != "" {
+			var tmp int
+			err := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE internal_scheme_code=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, req.InternalSchemeCode).Scan(&tmp)
+			if err == nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Internal scheme code already exists. Please use a different code.")
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailed)
@@ -1608,6 +1618,19 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							if err == nil {
 								results = append(results, map[string]interface{}{
 									constants.ValueSuccess: false, constants.ValueError: "ISIN already exists: " + newIsin,
+								})
+								continue
+							}
+						}
+					}
+					if lk == "internal_scheme_code" {
+						newCode := strings.TrimSpace(fmt.Sprint(v))
+						if newCode != "" && newCode != ifaceToString(oldVals[3]) {
+							var exists int
+							err := tx.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE internal_scheme_code=$1 AND COALESCE(is_deleted,false)=false AND scheme_id <> $2 LIMIT 1`, newCode, row.SchemeID).Scan(&exists)
+							if err == nil {
+								results = append(results, map[string]interface{}{
+									constants.ValueSuccess: false, constants.ValueError: "Internal scheme code already exists: " + newCode,
 								})
 								continue
 							}

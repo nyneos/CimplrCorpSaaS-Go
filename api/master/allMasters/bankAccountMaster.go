@@ -2050,10 +2050,9 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
                         'optional_code_value', COALESCE(c.optional_code_value, ''),
                         'old_code_type', COALESCE(c.old_code_type, ''),
                         'old_code_value', COALESCE(c.old_code_value, '')
-                    ))
+                    ) ORDER BY c.clearing_id)
                     FROM masterclearingcode c
                     WHERE c.account_id = a.account_id AND COALESCE(c.is_deleted, false) = false
-                    ORDER BY c.clearing_id
                 ), '[]'::json
             ) AS clearing_codes,
             b.bank_id,

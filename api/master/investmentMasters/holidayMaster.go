@@ -2443,3 +2443,65 @@ func coalesceStrPtr(v *string) string {
 	}
 	return *v
 }
+
+// DeleteHoliday soft-deletes a single holiday entry (sets is_deleted=true).
+// POST /master/calendar/holiday/delete
+// Body: { "holiday_id": "...", "calendar_id": "..." }
+func DeleteHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID     string `json:"user_id"`
+			HolidayID  string `json:"holiday_id"`
+			CalendarID string `json:"calendar_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, 400, constants.ErrInvalidJSONShort)
+			return
+		}
+		if strings.TrimSpace(req.HolidayID) == "" || strings.TrimSpace(req.CalendarID) == "" {
+			api.RespondWithError(w, 400, "holiday_id and calendar_id are required")
+			return
+		}
+
+		userEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userEmail = s.Name
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithError(w, 401, constants.ErrInvalidSession)
+			return
+		}
+
+		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, 500, constants.ErrTxBeginFailedCapitalized+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		tag, err := tx.Exec(ctx, `
+			UPDATE investment.masterholiday
+			SET is_deleted = true, status = 'Inactive'
+			WHERE holiday_id = $1 AND calendar_id = $2 AND COALESCE(is_deleted, false) = false
+		`, req.HolidayID, req.CalendarID)
+		if err != nil {
+			api.RespondWithError(w, 500, "delete failed: "+err.Error())
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			api.RespondWithError(w, 404, "Holiday not found or already deleted")
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, 500, constants.ErrCommitFailed+err.Error())
+			return
+		}
+
+		api.RespondWithPayload(w, true, "Holiday deleted successfully", nil)
+	}
+}

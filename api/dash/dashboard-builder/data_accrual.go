@@ -238,51 +238,54 @@ func queryFDAccrualScheduleAll(ctx context.Context, pool *pgxpool.Pool, entityID
 }
 
 func queryFDAccrualScheduleExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "r", 2)
+	ef, efArgs := entityFilter(entityIDs, "sc", 2)
 	args := append([]any{limit}, efArgs...)
 
 	parentFilter := ""
 	if parentID != "" {
-		parentFilter = fmt.Sprintf(" AND el.cfg_id = $%d", len(args)+1)
+		parentFilter = fmt.Sprintf(" AND sc.config_id = $%d", len(args)+1)
 		args = append(args, parentID)
 	}
 
-	// Mirrors GetScheduleExecutionLog: returns one flat row per scheduler-triggered
-	// run, joined to its schedule config via the execution_log detail JSON.
+	// Mirrors GetScheduleExecutionLog / loadSchedulerRunsForConfig: anchor on
+	// fd_accrual_schedule_config (active only) and left-join scheduler runs.
 	q := fmt.Sprintf(`
 		SELECT
-			COALESCE(r.run_id::text, '')       AS run_id,
-			COALESCE(r.entity_id, '')           AS entity_id,
-			COALESCE(r.entity_name, '')         AS entity_name,
-			COALESCE(r.run_mode, '')            AS run_mode,
-			COALESCE(r.run_status, '')          AS run_status,
+			COALESCE(r.run_id::text, '')          AS run_id,
+			COALESCE(sc.entity_id, '')            AS entity_id,
+			COALESCE(NULLIF(r.entity_name, ''), sc.entity_name, '') AS entity_name,
+			COALESCE(r.run_mode, sc.default_run_mode, '') AS run_mode,
+			COALESCE(r.run_status, sc.last_run_status, '') AS run_status,
 			r.accrual_period_start,
 			r.accrual_period_end,
-			COALESCE(r.financial_period, '')    AS financial_period,
-			COALESCE(r.accrual_granularity, '') AS accrual_granularity,
-			COALESCE(r.fds_in_scope, 0)         AS fds_in_scope,
-			COALESCE(r.fds_calculated, 0)       AS fds_calculated,
-			COALESCE(r.fds_failed, 0)           AS fds_failed,
+			COALESCE(r.financial_period, '')      AS financial_period,
+			COALESCE(NULLIF(r.accrual_granularity, ''), sc.accrual_granularity, '') AS accrual_granularity,
+			COALESCE(r.fds_in_scope, 0)           AS fds_in_scope,
+			COALESCE(r.fds_calculated, 0)         AS fds_calculated,
+			COALESCE(r.fds_failed, 0)             AS fds_failed,
 			COALESCE(r.total_interest_accrued, 0) AS total_interest_accrued,
-			COALESCE(el.cfg_id, '')             AS schedule_config_id,
-			COALESCE(sc.schedule_frequency, '') AS schedule_frequency,
-			COALESCE(sc.is_active, false)       AS schedule_is_active,
-			r.created_at
-		FROM investment.fd_accrual_run r
-		LEFT JOIN LATERAL (
-			SELECT COALESCE(detail->>'schedule_config_id', '') AS cfg_id
-			FROM investment.fd_accrual_run_execution_log
-			WHERE run_id = r.run_id::text
-			  AND COALESCE(detail->>'schedule_config_id', '') <> ''
-			ORDER BY logged_at ASC
-			LIMIT 1
-		) el ON true
-		LEFT JOIN investment.fd_accrual_schedule_config sc ON sc.config_id = el.cfg_id
-		WHERE COALESCE(r.is_deleted, false) = false
-		  AND r.created_by = 'SCHEDULER'
-		  AND r.run_status = ANY(ARRAY['PENDING_APPROVAL','APPROVED','REJECTED','POSTED','POSTED_TO_GL','LOCKED'])
-		  %s %s
-		ORDER BY r.created_at DESC NULLS LAST
+			COALESCE(sc.config_id::text, '')      AS schedule_config_id,
+			COALESCE(sc.schedule_frequency, '')   AS schedule_frequency,
+			COALESCE(sc.is_active, false)         AS schedule_is_active,
+			COALESCE(r.created_at, sc.created_at)  AS created_at
+		FROM investment.fd_accrual_schedule_config sc
+		LEFT JOIN investment.fd_accrual_run r
+			ON r.created_by = 'SCHEDULER'
+			AND COALESCE(r.is_deleted, false) = false
+			AND (
+				r.run_id::text IN (
+					SELECT DISTINCT el.run_id
+					FROM investment.fd_accrual_run_execution_log el
+					WHERE COALESCE(el.detail->>'schedule_config_id', '') = sc.config_id::text
+				)
+				OR (
+					COALESCE(sc.last_run_id, '') <> ''
+					AND sc.last_run_id = r.run_id::text
+				)
+			)
+		WHERE COALESCE(sc.is_deleted, false) = false
+		  AND COALESCE(sc.is_active, false) = true %s %s
+		ORDER BY COALESCE(r.created_at, sc.created_at) DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
 	`, ef, parentFilter)
 

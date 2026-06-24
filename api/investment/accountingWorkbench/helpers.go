@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/ctxutil"
-	"CimplrCorpSaas/internal/logger"
 )
 
 // Global settings cache
@@ -115,6 +114,125 @@ func accountingScopeValues(rows []map[string]string, keys ...string) []string {
 	return values
 }
 
+// accountingEntityNamesForScope returns scoped entity names for SQL filters.
+// nil = admin / no filter (all entities).
+func accountingEntityNamesForScope(ctx context.Context) []string {
+	scope := ctxutil.FromContext(ctx)
+	if scope.IsAdminOverride {
+		return nil
+	}
+	names := make([]string, 0, len(scope.EntityNames))
+	seen := make(map[string]struct{}, len(scope.EntityNames))
+	for _, name := range scope.EntityNames {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToUpper(trimmed)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		names = append(names, trimmed)
+	}
+	return names
+}
+
+// accountingLookupEntityName resolves entity_id to display name.
+func accountingLookupEntityName(ctx context.Context, pool *pgxpool.Pool, entityRef string) string {
+	entityRef = strings.TrimSpace(entityRef)
+	if entityRef == "" || pool == nil {
+		return ""
+	}
+	var name string
+	_ = pool.QueryRow(ctx, `SELECT entity_name FROM masterentitycash WHERE entity_id::text = $1 LIMIT 1`, entityRef).Scan(&name)
+	if strings.TrimSpace(name) != "" {
+		return strings.TrimSpace(name)
+	}
+	_ = pool.QueryRow(ctx, `SELECT entity_name FROM masterentity WHERE entity_id::text = $1 LIMIT 1`, entityRef).Scan(&name)
+	return strings.TrimSpace(name)
+}
+
+// accountingResolveEntityName maps entity_name or entity_id to a scoped entity name.
+func accountingResolveEntityName(ctx context.Context, pool *pgxpool.Pool, entityRef string) (string, string) {
+	entityRef = strings.TrimSpace(entityRef)
+	if entityRef == "" {
+		return "", "entity_name is required"
+	}
+	scope := ctxutil.FromContext(ctx)
+	if scope.IsAdminOverride {
+		if name := accountingLookupEntityName(ctx, pool, entityRef); name != "" {
+			return name, ""
+		}
+		return entityRef, ""
+	}
+	if scope.HasEntityNameAccess(entityRef) {
+		return entityRef, ""
+	}
+	if scope.HasEntityAccess(entityRef) {
+		if name := accountingLookupEntityName(ctx, pool, entityRef); name != "" {
+			return name, ""
+		}
+		return entityRef, ""
+	}
+	if name := accountingLookupEntityName(ctx, pool, entityRef); name != "" && scope.HasEntityNameAccess(name) {
+		return name, ""
+	}
+	return "", fmt.Sprintf("Entity '%s' is not within your authorized access scope.", entityRef)
+}
+
+// accountingEntityNameSQLFilter appends AND <entityCol> = ANY($n) for scoped users.
+// Returns the SQL fragment and whether a filter arg was added.
+func accountingEntityNameSQLFilter(ctx context.Context, entityCol string, argPos int) (string, []interface{}) {
+	names := accountingEntityNamesForScope(ctx)
+	if len(names) == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf(" AND LOWER(TRIM(COALESCE(%s,''))) = ANY(SELECT LOWER(TRIM(x)) FROM unnest($%d::text[]) AS x)", entityCol, argPos), []interface{}{names}
+}
+
+// accountingFolioEntityScopeClause filters rows by masterfolio.entity_name for scoped users.
+func accountingFolioEntityScopeClause(ctx context.Context, folioAlias string, argPos int) (string, []interface{}, int) {
+	names := accountingEntityNamesForScope(ctx)
+	if len(names) == 0 {
+		return "", nil, argPos
+	}
+	clause := fmt.Sprintf(" AND LOWER(TRIM(COALESCE(%s.entity_name,''))) = ANY(SELECT LOWER(TRIM(x)) FROM unnest($%d::text[]) AS x)", folioAlias, argPos)
+	return clause, []interface{}{names}, argPos + 1
+}
+
+// accountingEntitiesForQuery returns entity names to iterate for portfolio reads.
+// Scoped users get their entities; admin/unrestricted users get all active folio entities.
+func accountingEntitiesForQuery(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	if names := accountingEntityNamesForScope(ctx); len(names) > 0 {
+		return names, nil
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT DISTINCT TRIM(entity_name)
+		FROM investment.masterfolio
+		WHERE UPPER(COALESCE(status,'')) = 'ACTIVE'
+		  AND COALESCE(is_deleted, false) = false
+		  AND NULLIF(TRIM(entity_name), '') IS NOT NULL
+		ORDER BY 1
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list entities: %w", err)
+	}
+	defer rows.Close()
+
+	entities := make([]string, 0)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			continue
+		}
+		if name = strings.TrimSpace(name); name != "" {
+			entities = append(entities, name)
+		}
+	}
+	return entities, rows.Err()
+}
+
 // RoundUnits rounds units based on precision and rounding mode
 func RoundUnits(value float64, precision int, roundingMode string) float64 {
 	multiplier := math.Pow(10, float64(precision))
@@ -142,120 +260,4 @@ func RoundUnits(value float64, precision int, roundingMode string) float64 {
 func RoundAmount(value float64, precision int) float64 {
 	multiplier := math.Pow(10, float64(precision))
 	return math.Round(value*multiplier) / multiplier
-}
-
-// Portfolio Update Structs
-type PortfolioHolding struct {
-	EntityID       string
-	FolioID        string
-	DematID        string
-	SchemeID       string
-	SchemeName     string
-	Units          float64
-	AvgCostPerUnit float64
-	TotalCostBasis float64
-}
-
-// GetHoldingsByScheme fetches current holdings for a scheme
-func GetHoldingsByScheme(ctx context.Context, pool *pgxpool.Pool, schemeID string, entityID string) ([]PortfolioHolding, error) {
-	query := `
-		SELECT 
-			ps.entity_id,
-			ps.folio_id,
-			ps.demat_id,
-			ps.scheme_id,
-			ms.scheme_name,
-			ps.units,
-			ps.avg_cost_per_unit,
-			ps.total_cost_basis
-		FROM investment.portfolio_snapshot ps
-		LEFT JOIN investment.masterscheme ms ON ms.scheme_id = ps.scheme_id
-		WHERE ps.scheme_id = $1
-	`
-	args := []interface{}{schemeID}
-
-	if entityID != "" {
-		query += " AND ps.entity_id = $2"
-		args = append(args, entityID)
-	}
-
-	rows, err := pool.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch holdings: %w", err)
-	}
-	defer rows.Close()
-
-	holdings := []PortfolioHolding{}
-	for rows.Next() {
-		var h PortfolioHolding
-		err := rows.Scan(
-			&h.EntityID,
-			&h.FolioID,
-			&h.DematID,
-			&h.SchemeID,
-			&h.SchemeName,
-			&h.Units,
-			&h.AvgCostPerUnit,
-			&h.TotalCostBasis,
-		)
-		if err != nil {
-			logger.LogError("Error scanning holding: %v", err)
-			continue
-		}
-		holdings = append(holdings, h)
-	}
-
-	return holdings, nil
-}
-
-// UpdatePortfolioHolding updates or inserts a portfolio holding
-func UpdatePortfolioHolding(ctx context.Context, tx interface {
-	Exec(ctx context.Context, sql string, arguments ...interface{}) (interface{}, error)
-}, holding PortfolioHolding) error {
-
-	query := `
-		INSERT INTO investment.portfolio_snapshot 
-		(entity_id, folio_id, demat_id, scheme_id, units, avg_cost_per_unit, total_cost_basis, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-		ON CONFLICT (entity_id, folio_id, demat_id, scheme_id)
-		DO UPDATE SET
-			units = EXCLUDED.units,
-			avg_cost_per_unit = EXCLUDED.avg_cost_per_unit,
-			total_cost_basis = EXCLUDED.total_cost_basis,
-			updated_at = NOW()
-	`
-
-	_, err := tx.Exec(ctx, query,
-		holding.EntityID,
-		holding.FolioID,
-		holding.DematID,
-		holding.SchemeID,
-		holding.Units,
-		holding.AvgCostPerUnit,
-		holding.TotalCostBasis,
-	)
-
-	if err != nil {
-		return fmt.Errorf("failed to update portfolio holding: %w", err)
-	}
-
-	return nil
-}
-
-// DeletePortfolioHolding removes a holding (when units become 0)
-func DeletePortfolioHolding(ctx context.Context, tx interface {
-	Exec(ctx context.Context, sql string, arguments ...interface{}) (interface{}, error)
-}, entityID, folioID, dematID, schemeID string) error {
-
-	query := `
-		DELETE FROM investment.portfolio_snapshot 
-		WHERE entity_id = $1 AND folio_id = $2 AND demat_id = $3 AND scheme_id = $4
-	`
-
-	_, err := tx.Exec(ctx, query, entityID, folioID, dematID, schemeID)
-	if err != nil {
-		return fmt.Errorf("failed to delete portfolio holding: %w", err)
-	}
-
-	return nil
 }

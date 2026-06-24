@@ -10,6 +10,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/schemejoin"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 
@@ -122,18 +123,19 @@ type PortfolioMap struct {
 }
 
 type PortfolioSnapshot struct {
-	ID           int64     `json:"id"`
-	EntityName   string    `json:"entity_name"`
-	FolioNumber  string    `json:"folio_number"`
-	SchemeID     string    `json:"scheme_id,omitempty"`
-	SchemeName   string    `json:"scheme_name,omitempty"`
-	ISIN         string    `json:"isin,omitempty"`
-	TotalUnits   float64   `json:"total_units"`
-	AvgNav       float64   `json:"avg_nav"`
-	CurrentNav   float64   `json:"current_nav"`
-	CurrentValue float64   `json:"current_value"`
-	GainLoss     float64   `json:"gain_loss"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID                 int64     `json:"id"`
+	EntityName         string    `json:"entity_name"`
+	FolioNumber        string    `json:"folio_number"`
+	DematAccountNumber string    `json:"demat_account_number"`
+	SchemeID           string    `json:"scheme_id,omitempty"`
+	SchemeName         string    `json:"scheme_name,omitempty"`
+	ISIN               string    `json:"isin,omitempty"`
+	TotalUnits         float64   `json:"total_units"`
+	AvgNav             float64   `json:"avg_nav"`
+	CurrentNav         float64   `json:"current_nav"`
+	CurrentValue       float64   `json:"current_value"`
+	GainLoss           float64   `json:"gain_loss"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 func filterBatchInfoByScope(ctx context.Context, info *BatchInfo) {
@@ -225,7 +227,9 @@ type TransactionSummary struct {
 	TransactionDate    time.Time `json:"transaction_date"`
 	TransactionType    string    `json:"transaction_type"`
 	SchemeInternalCode string    `json:"scheme_internal_code"`
+	SchemeName         string    `json:"scheme_name,omitempty"`
 	FolioNumber        string    `json:"folio_number"`
+	DematAccountNumber string    `json:"demat_account_number"`
 	Amount             float64   `json:"amount"`
 	Units              float64   `json:"units"`
 	Nav                float64   `json:"nav"`
@@ -402,7 +406,7 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 
 	// Get Portfolio Maps
 	portfolioRows, err := pool.Query(ctx, `
-		SELECT id, entity_name, COALESCE(folio_id,''), COALESCE(folio_number,''), 
+		SELECT id, COALESCE(entity_name,''), COALESCE(folio_id,''), COALESCE(folio_number,''), 
 		       COALESCE(demat_id,''), COALESCE(amc_id,''), COALESCE(scheme_id,''), 
 		       COALESCE(scheme_name,''), created_at
 		FROM investment.portfolio_onboarding_map 
@@ -421,17 +425,23 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 		portfolioRows.Close()
 	}
 
-	// Get Portfolio Snapshots
-	snapshotRows, err := pool.Query(ctx, `
-		SELECT id, entity_name, folio_number, COALESCE(scheme_id,''), COALESCE(scheme_name,''),
-		       COALESCE(isin,''), total_units, avg_nav, current_nav, current_value, gain_loss, created_at
-		FROM investment.portfolio_snapshot 
-		WHERE batch_id::text = $1::text
-		ORDER BY entity_name, folio_number`, batchID)
+	// Get Portfolio Snapshots (live NAV from amfi_nav_staging)
+	snapshotSQL := `
+		SELECT ps.id, COALESCE(ps.entity_name,''), COALESCE(ps.folio_number,''), COALESCE(ps.demat_acc_number,''), COALESCE(ps.scheme_id,''), COALESCE(ps.scheme_name,''),
+		       COALESCE(ps.isin,''), COALESCE(ps.total_units,0), COALESCE(ps.avg_nav,0),
+		       COALESCE(ln.nav_value, 0),
+		       COALESCE(ps.total_units, 0) * COALESCE(ln.nav_value, 0),
+		       (COALESCE(ps.total_units, 0) * COALESCE(ln.nav_value, 0)) - COALESCE(ps.total_invested_amount, 0),
+		       ps.created_at
+		FROM investment.portfolio_snapshot ps
+		` + schemejoin.NavLateralJoin("ps", "") + `
+		WHERE ps.batch_id::text = $1::text
+		ORDER BY ps.entity_name, ps.folio_number`
+	snapshotRows, err := pool.Query(ctx, snapshotSQL, batchID)
 	if err == nil {
 		for snapshotRows.Next() {
 			var snapshot PortfolioSnapshot
-			if err := snapshotRows.Scan(&snapshot.ID, &snapshot.EntityName, &snapshot.FolioNumber,
+			if err := snapshotRows.Scan(&snapshot.ID, &snapshot.EntityName, &snapshot.FolioNumber, &snapshot.DematAccountNumber,
 				&snapshot.SchemeID, &snapshot.SchemeName, &snapshot.ISIN,
 				&snapshot.TotalUnits, &snapshot.AvgNav, &snapshot.CurrentNav,
 				&snapshot.CurrentValue, &snapshot.GainLoss, &snapshot.CreatedAt); err != nil {
@@ -444,16 +454,18 @@ func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*B
 
 	// Get Transactions
 	txRows, err := pool.Query(ctx, `
-		SELECT id, COALESCE(entity_name,''), transaction_date, transaction_type, scheme_internal_code, folio_number,
-		       amount, units, nav, created_at
-		FROM investment.onboard_transaction 
-		WHERE batch_id::text = $1::text
-		ORDER BY transaction_date DESC`, batchID)
+		SELECT ot.id, COALESCE(ot.entity_name,''), ot.transaction_date, ot.transaction_type, 
+		       COALESCE(ot.scheme_internal_code,''), COALESCE(s.scheme_name,''), COALESCE(ot.folio_number,''), COALESCE(ot.demat_acc_number,''),
+		       COALESCE(ot.amount,0), COALESCE(ot.units,0), COALESCE(ot.nav,0), ot.created_at
+		FROM investment.onboard_transaction ot
+		LEFT JOIN investment.masterscheme s ON s.scheme_id = ot.scheme_id
+		WHERE ot.batch_id::text = $1::text
+		ORDER BY ot.transaction_date DESC`, batchID)
 	if err == nil {
 		for txRows.Next() {
 			var tx TransactionSummary
 			if err := txRows.Scan(&tx.ID, &tx.EntityName, &tx.TransactionDate, &tx.TransactionType,
-				&tx.SchemeInternalCode, &tx.FolioNumber, &tx.Amount,
+				&tx.SchemeInternalCode, &tx.SchemeName, &tx.FolioNumber, &tx.DematAccountNumber, &tx.Amount,
 				&tx.Units, &tx.Nav, &tx.CreatedAt); err != nil {
 				logger.LogError("getBatchInfo: scan transaction row failed: %v", err)
 			}
@@ -543,29 +555,29 @@ func GetAllBatches(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT ob.batch_id, ob.user_id, ob.user_email, ob.source, ob.total_records, 
 			       ob.status, ob.approval_status, ob.created_at, ob.completed_at, COALESCE(ob.upload_s3_key, '') AS upload_s3_key,
 			       CASE WHEN $1::boolean THEN
-			         (SELECT COUNT(*) FROM investment.masteramc WHERE batch_id::text = ob.batch_id::text)
+			         (SELECT COUNT(DISTINCT pom.amc_id) FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND COALESCE(pom.amc_id,'') <> '')
 			       ELSE
 			         (SELECT COUNT(DISTINCT pom.amc_id) FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND pom.entity_name = ANY($2::text[]) AND COALESCE(pom.amc_id,'') <> '')
 			       END as amc_count,
 			       CASE WHEN $1::boolean THEN
-			         (SELECT COUNT(*) FROM investment.masterscheme WHERE batch_id::text = ob.batch_id::text)
+			         (SELECT COUNT(DISTINCT pom.scheme_id) FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND COALESCE(pom.scheme_id,'') <> '')
 			       ELSE
 			         (SELECT COUNT(DISTINCT pom.scheme_id) FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND pom.entity_name = ANY($2::text[]) AND COALESCE(pom.scheme_id,'') <> '')
 			       END as scheme_count,
 			       CASE WHEN $1::boolean THEN
-			         (SELECT COUNT(*) FROM investment.masterdepositoryparticipant WHERE batch_id::text = ob.batch_id::text)
+			         (SELECT COUNT(DISTINCT mda.dp_id) FROM investment.portfolio_onboarding_map pom JOIN investment.masterdemataccount mda ON mda.demat_id = pom.demat_id WHERE pom.batch_id::text = ob.batch_id::text AND COALESCE(mda.dp_id,'') <> '')
 			       ELSE
-			         (SELECT COUNT(DISTINCT mda.dp_id) FROM investment.masterdemataccount mda WHERE mda.batch_id::text = ob.batch_id::text AND mda.entity_name = ANY($2::text[]) AND COALESCE(mda.dp_id,'') <> '')
+			         (SELECT COUNT(DISTINCT mda.dp_id) FROM investment.portfolio_onboarding_map pom JOIN investment.masterdemataccount mda ON mda.demat_id = pom.demat_id WHERE pom.batch_id::text = ob.batch_id::text AND pom.entity_name = ANY($2::text[]) AND COALESCE(mda.dp_id,'') <> '')
 			       END as dp_count,
 			       CASE WHEN $1::boolean THEN
-			         (SELECT COUNT(*) FROM investment.masterdemataccount WHERE batch_id::text = ob.batch_id::text)
+			         (SELECT COUNT(DISTINCT pom.demat_id) FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND COALESCE(pom.demat_id,'') <> '')
 			       ELSE
-			         (SELECT COUNT(*) FROM investment.masterdemataccount WHERE batch_id::text = ob.batch_id::text AND entity_name = ANY($2::text[]))
+			         (SELECT COUNT(DISTINCT pom.demat_id) FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND pom.entity_name = ANY($2::text[]) AND COALESCE(pom.demat_id,'') <> '')
 			       END as demat_count,
 			       CASE WHEN $1::boolean THEN
-			         (SELECT COUNT(*) FROM investment.masterfolio WHERE batch_id::text = ob.batch_id::text)
+			         (SELECT COUNT(DISTINCT pom.folio_id) FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND COALESCE(pom.folio_id,'') <> '')
 			       ELSE
-			         (SELECT COUNT(*) FROM investment.masterfolio WHERE batch_id::text = ob.batch_id::text AND entity_name = ANY($2::text[]))
+			         (SELECT COUNT(DISTINCT pom.folio_id) FROM investment.portfolio_onboarding_map pom WHERE pom.batch_id::text = ob.batch_id::text AND pom.entity_name = ANY($2::text[]) AND COALESCE(pom.folio_id,'') <> '')
 			       END as folio_count
 			FROM investment.onboard_batch ob
 			WHERE $1::boolean

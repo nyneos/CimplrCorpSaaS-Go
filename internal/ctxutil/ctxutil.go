@@ -224,6 +224,34 @@ func (s RequestScope) HasEntityNameAccess(name string) bool {
 	return false
 }
 
+// AllowedEntityNames returns scoped business-unit names from the request context.
+// Merges prevalidation v2 keys (businessUnits + entity_names). Admin override may return nil (no filter).
+func AllowedEntityNames(ctx context.Context) []string {
+	scope := FromContext(ctx)
+	if scope.IsAdminOverride {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	add := func(names []string) {
+		for _, name := range names {
+			trimmed := strings.TrimSpace(name)
+			if trimmed == "" {
+				continue
+			}
+			key := strings.ToLower(trimmed)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, trimmed)
+		}
+	}
+	add(api.GetEntityNamesFromCtx(ctx))
+	add(scope.EntityNames)
+	return out
+}
+
 // HasApprovedBankAccount reports whether an account with the given account number
 // is in the approved list loaded by GlobalDependentMiddleware.
 // Always returns true for admin overrides and when BankAccounts is empty.

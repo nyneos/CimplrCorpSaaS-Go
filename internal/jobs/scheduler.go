@@ -114,6 +114,12 @@ func (s *CronService) Start() error {
 	// go investmentjobs.StartAutoRenewalWorker(s.db)
 	go investmentjobs.StartCimplrAutoMaturityWorker(s.db)
 
+	// ---------------- Portfolio Refresh ----------------
+	if err := investmentjobs.RunPortfolioRefreshWorker(s.db); err != nil {
+		return fmt.Errorf("failed to start portfolio refresh worker: %v", err)
+	}
+	logger.GlobalLogger.LogAudit("Portfolio refresh worker started")
+
 	logger.GlobalLogger.LogAudit("All background workers started")
 
 	// ---------------- DB Cleanup Worker ----------------

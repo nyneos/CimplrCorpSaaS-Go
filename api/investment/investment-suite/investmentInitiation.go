@@ -1017,10 +1017,12 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			-- allow flexible matching: the initiation column may contain either the id or the human-friendly value
 			-- LEFT JOIN investment.masterscheme s ON (s.scheme_id::text = m.scheme_id OR s.scheme_name = m.scheme_id)
 			LEFT JOIN investment.masterscheme s ON (
-       s.scheme_id::text = m.scheme_id
-    OR s.scheme_name = m.scheme_id
-    OR s.internal_scheme_code = m.scheme_id
-    OR s.isin = m.scheme_id
+       COALESCE(s.is_deleted, false) = false
+       AND (
+         (NULLIF(TRIM(m.scheme_id), '') IS NOT NULL AND s.scheme_id::text = TRIM(m.scheme_id))
+         OR (NULLIF(TRIM(m.scheme_id), '') IS NOT NULL AND s.internal_scheme_code = TRIM(m.scheme_id))
+         OR (NULLIF(TRIM(m.scheme_id), '') IS NOT NULL AND s.amfi_scheme_code = TRIM(m.scheme_id))
+       )
 )
 
 			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = m.folio_id OR f.folio_number = m.folio_id)
@@ -1246,10 +1248,12 @@ func fetchInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []strin
 		LEFT JOIN latest_audit l ON l.initiation_id = m.initiation_id
 		LEFT JOIN history h ON h.initiation_id = m.initiation_id
 		LEFT JOIN investment.masterscheme s ON (
-		   s.scheme_id::text = m.scheme_id
-		OR s.scheme_name = m.scheme_id
-		OR s.internal_scheme_code = m.scheme_id
-		OR s.isin = m.scheme_id
+		   COALESCE(s.is_deleted, false) = false
+		   AND (
+		     (NULLIF(TRIM(m.scheme_id), '') IS NOT NULL AND s.scheme_id::text = TRIM(m.scheme_id))
+		     OR (NULLIF(TRIM(m.scheme_id), '') IS NOT NULL AND s.internal_scheme_code = TRIM(m.scheme_id))
+		     OR (NULLIF(TRIM(m.scheme_id), '') IS NOT NULL AND s.amfi_scheme_code = TRIM(m.scheme_id))
+		   )
 		)
 		LEFT JOIN investment.masterfolio f ON (f.folio_id::text = m.folio_id OR f.folio_number = m.folio_id)
 		LEFT JOIN investment.masterdemataccount d ON (

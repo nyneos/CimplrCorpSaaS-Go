@@ -2325,6 +2325,10 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if confCols["premature_closure_terms"] {
 			prematureClosureTermsExpr = "COALESCE(c.premature_closure_terms,'') AS premature_closure_terms"
 		}
+		createdByExpr := "COALESCE(NULLIF(h.created_by,''), NULLIF(l.requested_by,''), '') AS created_by"
+		if confCols["created_by"] {
+			createdByExpr = "COALESCE(NULLIF(h.created_by,''), NULLIF(BTRIM(c.created_by::text),''), NULLIF(l.requested_by,''), '') AS created_by"
+		}
 		scopeWhere, scopeArgs := fdBookingScopeWhere(ctx, "b", 1)
 
 		q := fmt.Sprintf(`
@@ -2367,10 +2371,12 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.booking_id,'')                                              AS booking_id,
 				COALESCE(b.entity_id,'')                                               AS entity_id,
 				COALESCE(b.bank_id,'')                                                 AS bank_id,
+				COALESCE(mb.bank_name,'')                                              AS bank_name,
 				%s                                                                     AS bank_account_id,
 				COALESCE(b.booking_status,'')                                          AS booking_status,
 				COALESCE(c.actual_principal,0)                                         AS confirmed_principal_amount,
 				COALESCE(c.confirmed_rate,0)                                           AS confirmed_interest_rate,
+				COALESCE(b.interest_rate,0)                                            AS booking_interest_rate,
 				COALESCE(TO_CHAR(c.actual_start_date,'YYYY-MM-DD'),'')                AS confirmed_value_date,
 				COALESCE(TO_CHAR(c.actual_maturity_date,'YYYY-MM-DD'),'')             AS confirmed_maturity_date,
 				COALESCE(c.bank_fd_ref_no,'')                                          AS bank_fd_reference,
@@ -2378,10 +2384,10 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				         c.bank_fd_ref_no, '')                                        AS bank_reference_number,
 				COALESCE(TO_CHAR(c.confirmation_received_date,'YYYY-MM-DD'),'')       AS receipt_date,
 				%s,
-				COALESCE(c.tenor_type,'')                                              AS confirmed_tenor_type,
-				COALESCE(c.tenor_days,0)                                               AS confirmed_tenor_days,
-				COALESCE(c.tenor_months,0)                                             AS confirmed_tenor_months,
-				COALESCE(c.tenor_years,0)                                              AS confirmed_tenor_years,
+				COALESCE(NULLIF(c.tenor_type,''), b.tenor_type, '')                    AS confirmed_tenor_type,
+				COALESCE(NULLIF(c.tenor_days,0), b.tenure_days, 0)                    AS confirmed_tenor_days,
+				COALESCE(NULLIF(c.tenor_months,0), b.tenure_months, 0)                AS confirmed_tenor_months,
+				COALESCE(NULLIF(c.tenor_years,0), b.tenure_years, 0)                   AS confirmed_tenor_years,
 				COALESCE(c.confirmed_interest_type_code,'')                            AS confirmed_interest_type,
 				COALESCE(c.confirmed_frequency_id,'')                                  AS confirmed_frequency_id,
 				COALESCE(c.variance_flag,false)                                        AS has_variance,
@@ -2394,8 +2400,8 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.penalty_id,'')                                              AS penalty_id,
 				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
 				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')        AS first_capitalization_date,
-				COALESCE(c.accrual_frequency_code,'')                                  AS confirmed_accrual_frequency_code,
-				COALESCE(c.reset_type,'')                                              AS confirmed_reset_type,
+				COALESCE(NULLIF(c.accrual_frequency_code,''), b.accrual_frequency_code, '') AS confirmed_accrual_frequency_code,
+				COALESCE(NULLIF(c.reset_type,''), NULLIF(b.reset_type,''), 'AT_MATURITY') AS confirmed_reset_type,
 				COALESCE(b.principal_amount,0)                                         AS principal_amount,
 				COALESCE(NULLIF(b.value_type,''),'Actual')                             AS booking_value_type,
 				COALESCE(NULLIF(c.value_type,''), NULLIF(b.value_type,''), 'Actual')  AS value_type,
@@ -2458,7 +2464,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.old_bank_fd_ref_no,'')                                      AS old_bank_fd_reference,
 				COALESCE(l.old_penalty_id,'')                                          AS old_penalty_id,
 
-				COALESCE(h.created_by,'')                                              AS created_by,
+				%s,
 				COALESCE(h.created_at,'')                                              AS created_at,
 
 				-- Approval engine columns
@@ -2473,6 +2479,8 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			FROM investment.fd_confirmation c
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			LEFT JOIN masterbank mb
+				ON mb.bank_id = b.bank_id AND COALESCE(mb.is_deleted, false) = false
 			LEFT JOIN investment.fd_bank_config_master bc
 				ON bc.config_id = b.bank_config_id AND COALESCE(bc.is_deleted,false) = false
 			LEFT JOIN latest_audit l ON l.confirmation_id = c.confirmation_id
@@ -2498,7 +2506,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY GREATEST(
 				COALESCE(l.requested_at,'1970-01-01'::timestamp),
 				COALESCE(l.checker_at,'1970-01-01'::timestamp)
-			) DESC`, bookingAccountExpr, prematureClosureTermsExpr, uploadKeyExpr, scopeWhere)
+			) DESC`, bookingAccountExpr, prematureClosureTermsExpr, uploadKeyExpr, createdByExpr, scopeWhere)
 
 		rows, err := pgxPool.Query(ctx, q, scopeArgs...)
 		if err != nil {
@@ -3373,7 +3381,7 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(br.entity_id,'')                                    AS entity_id,
 				COALESCE(br.entity_name,'')                                  AS entity_name,
 				COALESCE(br.bank_id,'')                                      AS bank_id,
-				COALESCE(br.bank_name,'')                                    AS bank_name,
+				COALESCE(mb.bank_name,'')                                    AS bank_name,
 				COALESCE(br.source_account_id,'')                            AS bank_account_id,
 				COALESCE(br.source_account_number,'')                        AS bank_account_number,
 				COALESCE(br.principal_amount,0)                              AS principal_amount,
@@ -3402,6 +3410,8 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(aud.requested_by,'')                                AS sent_to_bank_by,
 				COALESCE(TO_CHAR((aud.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI'),'') AS sent_to_bank_at
 			FROM investment.fd_booking_request br
+			LEFT JOIN masterbank mb
+				ON mb.bank_id = br.bank_id AND COALESCE(mb.is_deleted, false) = false
 			LEFT JOIN investment.fd_bank_config_master bc ON bc.config_id = br.bank_config_id
 			LEFT JOIN investment.fd_bank_rate_card_master rc
 				ON rc.bank_code = br.bank_id AND rc.is_active = true

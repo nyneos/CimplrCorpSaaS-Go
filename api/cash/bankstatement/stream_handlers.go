@@ -767,8 +767,18 @@ func RecalculateHandler(pool *pgxpool.Pool) http.Handler {
 
 		// No top-level metadata pointer in types; validate required metadata fields below
 
-		if len(input.Clean.Transactions) == 0 {
+		if len(input.Clean.Transactions) == 0 && !isSummaryOnlyCleanData(input.Clean) {
 			respondWithError(w, nil, "No transactions found in the statement. Please upload a statement with transaction data.", http.StatusBadRequest)
+			return
+		}
+
+		if isSummaryOnlyCleanData(input.Clean) {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"clean":   input.Clean,
+				"status":  "complete",
+			})
 			return
 		}
 
@@ -1004,7 +1014,7 @@ func CommitHandler(pool *pgxpool.Pool) http.Handler {
 
 		// No top-level metadata pointer in types; validate required metadata fields below
 
-		if len(payload.Clean.Transactions) == 0 {
+		if len(payload.Clean.Transactions) == 0 && !isSummaryOnlyCleanData(payload.Clean) {
 			respondWithError(w, nil, "No transactions found in the statement. Cannot process empty statement.", http.StatusBadRequest)
 			return
 		}

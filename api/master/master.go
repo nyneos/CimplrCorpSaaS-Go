@@ -363,6 +363,7 @@ func NewMasterServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, erro
 	mux.Handle("/master/calendar/bulk-reject", midGlobalIndep(investmentMasters.BulkRejectCalendarActions(pgxPool)))
 	mux.Handle("/master/calendar/update", midGlobalIndep(investmentMasters.UpdateCalendar(pgxPool)))
 	mux.Handle("/master/calendar/holiday/update", midGlobalIndep(investmentMasters.UpdateHoliday(pgxPool)))
+	mux.Handle("/master/calendar/holiday/delete", midGlobalIndep(investmentMasters.DeleteHoliday(pgxPool)))
 	mux.Handle("/master/calendar/update-with-holidays", midGlobalIndep(investmentMasters.UpdateCalendarWithHolidays(pgxPool)))
 	mux.Handle("/master/calendar/years", midGlobalIndep(investmentMasters.GetPastYearsHolidays(pgxPool)))
 	mux.Handle("/master/calendar/audit-history", midGlobalIndep(investmentMasters.GetCalendarAuditHistory(pgxPool)))

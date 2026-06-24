@@ -287,7 +287,7 @@ var (
 
 		// More variants
 		"debit (inr)", "withdrawal (inr)",
-		"amount debited", "amount withdrawn",
+		"amount debited", "amount withdrawn", "amount subtracted",
 		"payment", "payments",
 		"sent", "transfer out",
 		"expense", "expenses",
@@ -303,7 +303,7 @@ var (
 
 		// More variants
 		"credit (inr)", "deposit (inr)",
-		"amount credited", "amount deposited",
+		"amount credited", "amount deposited", "amount added",
 		"received", "received amount",
 		"incoming", "inward",
 		"transfer in",
@@ -763,6 +763,12 @@ func userFriendlyUploadError(err error) string {
 	}
 	if errors.Is(err, ErrEmptyStatement) {
 		return "No transactions were found in the uploaded statement. Please upload a statement that contains at least one transaction."
+	}
+	if errors.Is(err, ErrNoTransactionsInFile) {
+		return "The uploaded statement does not contain any transactions."
+	}
+	if errors.Is(err, ErrStatementSummaryOnly) {
+		return "This statement has no transaction rows — only a balance summary (e.g. available/closing balance). Upload the full transaction export from your bank, or a file that includes the balance summary row with amount and date."
 	}
 
 	msg := err.Error()

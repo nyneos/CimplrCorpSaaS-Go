@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/ctxutil"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -413,9 +414,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		status = COALESCE(t.status, m.status),
 		source = COALESCE(t.source, m.source)
 	FROM tmp_folio t
-	WHERE m.entity_name = t.entity_name
-	  AND m.amc_name = t.amc_name
-	  AND m.folio_number = t.folio_number
+	WHERE m.folio_number = t.folio_number
 	  AND m.is_deleted = false;
 `
 			if _, err := tx.Exec(ctx, updateSQL); err != nil {
@@ -436,9 +435,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	FROM tmp_folio t
 	WHERE NOT EXISTS (
 		SELECT 1 FROM investment.masterfolio m
-		WHERE m.entity_name = t.entity_name
-		  AND m.amc_name = t.amc_name
-		  AND m.folio_number = t.folio_number
+		WHERE m.folio_number = t.folio_number
 		  AND m.is_deleted = false
 	);
 `
@@ -645,34 +642,6 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
 				FROM public.masterclearingcode c
 				GROUP BY c.account_id
-			),
-			sub_ac AS (
-				SELECT 
-					ba.account_number,
-					ba.account_nickname,
-					ba.account_id,
-					b.bank_name,
-					COALESCE(e.entity_name, ec.entity_name) AS entity_name,
-					cl.clearing_codes
-				FROM public.masterbankaccount ba
-				LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
-				LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
-				LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
-				LEFT JOIN clearing cl ON cl.account_id = ba.account_id
-			),
-			red_ac AS (
-				SELECT 
-					ba.account_number,
-					ba.account_nickname,
-					ba.account_id,
-					b.bank_name,
-					COALESCE(e.entity_name, ec.entity_name) AS entity_name,
-					cl.clearing_codes
-				FROM public.masterbankaccount ba
-				LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
-				LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
-				LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
-				LEFT JOIN clearing cl ON cl.account_id = ba.account_id
 			)
 			SELECT
 				m.folio_id,
@@ -728,8 +697,40 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		FROM investment.masterfolio m
 		LEFT JOIN latest_audit l ON l.folio_id = m.folio_id
 		LEFT JOIN history h ON h.folio_id = m.folio_id
-		LEFT JOIN sub_ac sub ON (sub.account_number = m.default_subscription_account OR sub.account_id = m.default_subscription_account)
-		LEFT JOIN red_ac red ON (red.account_number = m.default_redemption_account OR red.account_id = m.default_redemption_account)
+		LEFT JOIN LATERAL (
+			SELECT 
+				ba.account_number,
+				ba.account_nickname,
+				ba.account_id,
+				b.bank_name,
+				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
+				cl.clearing_codes
+			FROM public.masterbankaccount ba
+			LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
+			LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
+			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
+			LEFT JOIN clearing cl ON cl.account_id = ba.account_id
+			WHERE (ba.account_number = m.default_subscription_account OR ba.account_id = m.default_subscription_account)
+			  AND COALESCE(e.entity_name, ec.entity_name) = m.entity_name
+			LIMIT 1
+		) sub ON true
+		LEFT JOIN LATERAL (
+			SELECT 
+				ba.account_number,
+				ba.account_nickname,
+				ba.account_id,
+				b.bank_name,
+				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
+				cl.clearing_codes
+			FROM public.masterbankaccount ba
+			LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
+			LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
+			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
+			LEFT JOIN clearing cl ON cl.account_id = ba.account_id
+			WHERE (ba.account_number = m.default_redemption_account OR ba.account_id = m.default_redemption_account)
+			  AND COALESCE(e.entity_name, ec.entity_name) = m.entity_name
+			LIMIT 1
+		) red ON true
 		LEFT JOIN schemes sch ON sch.folio_id = m.folio_id
 		WHERE COALESCE(m.is_deleted,false)=false
 		  AND m.entity_name = ANY($1)
@@ -913,65 +914,36 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		scope := ctxutil.FromContext(ctx)
 
-		// Validate entity access
-		approvedEntities := api.GetEntityNamesFromCtx(ctx)
-		if len(approvedEntities) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, "No accessible entities found in context")
-			return
-		}
-		entityFound := false
-		for _, e := range approvedEntities {
-			if strings.EqualFold(e, req.EntityName) {
-				entityFound = true
-				break
-			}
-		}
-		if !entityFound {
-			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Access denied. Entity '%s' not in your accessible entities: %v", req.EntityName, approvedEntities))
+		// Entity check — admin override bypasses entity scoping
+		if !scope.HasEntityNameAccess(req.EntityName) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Access denied. Entity '%s' not in your accessible entities", req.EntityName))
 			return
 		}
 
-		// Validate AMC
+		// AMC check — skipped when context has no restrictions (admin)
 		approvedAMCs, _ := ctx.Value("ApprovedAMCs").([]map[string]string)
-		amcFound := false
-		for _, amc := range approvedAMCs {
-			if strings.EqualFold(amc["amc_name"], req.AMCName) {
-				amcFound = true
-				break
+		if len(approvedAMCs) > 0 {
+			amcFound := false
+			for _, amc := range approvedAMCs {
+				if strings.EqualFold(amc["amc_name"], req.AMCName) {
+					amcFound = true
+					break
+				}
 			}
-		}
-		if !amcFound {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+req.AMCName)
-			return
+			if !amcFound {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+req.AMCName)
+				return
+			}
 		}
 
-		// Validate bank accounts
-		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
-		if len(approvedBankAccounts) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, "No approved bank accounts found in context")
+		// Bank account checks — admin override bypasses
+		if !scope.HasApprovedBankAccount(req.DefaultSubscriptionAcct) {
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Subscription account '%s' not found or not approved/active", req.DefaultSubscriptionAcct))
 			return
 		}
-		subAcctFound := false
-		for _, acc := range approvedBankAccounts {
-			if acc["account_number"] == req.DefaultSubscriptionAcct || acc["account_id"] == req.DefaultSubscriptionAcct {
-				subAcctFound = true
-				break
-			}
-		}
-		if !subAcctFound {
-			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Subscription account '%s' not found or not approved/active. Available accounts: %d", req.DefaultSubscriptionAcct, len(approvedBankAccounts)))
-			return
-		}
-
-		redAcctFound := false
-		for _, acc := range approvedBankAccounts {
-			if acc["account_number"] == req.DefaultRedemptionAcct || acc["account_id"] == req.DefaultRedemptionAcct {
-				redAcctFound = true
-				break
-			}
-		}
-		if !redAcctFound {
+		if !scope.HasApprovedBankAccount(req.DefaultRedemptionAcct) {
 			api.RespondWithError(w, http.StatusBadRequest, "Redemption account not found or not approved/active: "+req.DefaultRedemptionAcct)
 			return
 		}
@@ -986,8 +958,8 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// uniqueness check
 		var existing string
-		err = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE entity_name=$1 AND amc_name=$2 AND folio_number=$3 AND COALESCE(is_deleted,false)=false LIMIT 1`,
-			req.EntityName, req.AMCName, req.FolioNumber).Scan(&existing)
+		err = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
+			req.FolioNumber).Scan(&existing)
 		if err == nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFolioAlreadyExistsUser)
 			return
@@ -1116,8 +1088,8 @@ func CreateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// uniqueness
 			var exists string
-			err = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE entity_name=$1 AND amc_name=$2 AND folio_number=$3 AND COALESCE(is_deleted,false)=false LIMIT 1`,
-				row.EntityName, row.AMCName, row.FolioNumber).Scan(&exists)
+			err = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
+				row.FolioNumber).Scan(&exists)
 			if err == nil {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "entity": row.EntityName, "folio_number": row.FolioNumber, constants.ValueError: "duplicate"})
 				continue
@@ -1263,10 +1235,10 @@ func UpdateFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					newVal := strings.TrimSpace(fmt.Sprint(v))
 					if newVal != "" && newVal != ifaceToString(oldVals[2]) {
 						var exists string
-						err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND entity_name=$2 AND amc_name=$3 AND COALESCE(is_deleted,false)=false LIMIT 1`,
-							newVal, ifaceToString(oldVals[0]), ifaceToString(oldVals[1])).Scan(&exists)
+						err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
+							newVal).Scan(&exists)
 						if err == nil {
-							api.RespondWithError(w, http.StatusBadRequest, "folio_number already exists for this entity+amc")
+							api.RespondWithError(w, http.StatusBadRequest, "folio_number already exists")
 							return
 						}
 					}
@@ -1383,8 +1355,8 @@ func UpdateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						newVal := strings.TrimSpace(fmt.Sprint(v))
 						if newVal != "" && newVal != ifaceToString(oldVals[2]) {
 							var exists string
-							err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND entity_name=$2 AND amc_name=$3 AND COALESCE(is_deleted,false)=false LIMIT 1`,
-								newVal, ifaceToString(oldVals[0]), ifaceToString(oldVals[1])).Scan(&exists)
+							err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
+								newVal).Scan(&exists)
 							if err == nil {
 								results = append(results, map[string]interface{}{constants.ValueSuccess: false, "folio_id": row.FolioID, constants.ValueError: "folio_number already exists"})
 								continue

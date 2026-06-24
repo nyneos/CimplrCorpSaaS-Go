@@ -2662,8 +2662,21 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 		totalRows, keptRows, skippedEmptyRows, skippedNonTxnRows, skippedMissingDateRows, skippedOpeningBalanceRows, skippedClosingBalanceRows)
 
 	if len(transactions) == 0 {
-		logger.LogInfo("[BANK-UPLOAD-DEBUG] No transactions parsed from statement — rejecting empty upload (total_rows=%d skipped=%d)", totalRows, skippedEmptyRows+skippedNonTxnRows+skippedMissingDateRows+skippedOpeningBalanceRows+skippedClosingBalanceRows)
-		return nil, ErrEmptyStatement
+		var sumErr error
+		openingBalance, closingBalance, statementPeriodStart, statementPeriodEnd, sumErr = resolveEmptyUploadFromSummary(
+			rows, txnHeaderIdx, uploadFileName, openingBalance, closingBalance, statementPeriodStart, statementPeriodEnd,
+		)
+		if sumErr != nil {
+			if sumErr == ErrStatementSummaryOnly {
+				return nil, ErrNoTransactionsInFile
+			}
+			return nil, sumErr
+		}
+		logger.LogInfo("[BANK-UPLOAD-DEBUG] Summary-only statement: balance=%.2f period=%s→%s",
+			closingBalance,
+			statementPeriodStart.Format(constants.DateFormat),
+			statementPeriodEnd.Format(constants.DateFormat),
+		)
 	}
 
 	// Normalize to chronological (oldest-first) order. Some banks export newest-first;
@@ -3196,7 +3209,15 @@ func UploadMultiAccountBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				}
 			}
 		}
-		header := rows[headerRowIdx]
+		header := make([]string, len(rows[headerRowIdx]))
+		copy(header, rows[headerRowIdx])
+		if headerRowIdx+1 < len(rows) {
+			for j := 0; j < len(header) && j < len(rows[headerRowIdx+1]); j++ {
+				if strings.TrimSpace(rows[headerRowIdx+1][j]) != "" {
+					header[j] = strings.TrimSpace(header[j]) + " " + strings.TrimSpace(rows[headerRowIdx+1][j])
+				}
+			}
+		}
 		// Data rows are everything after the detected header row.
 		dataRows := rows[headerRowIdx+1:]
 
@@ -3261,8 +3282,8 @@ func UploadMultiAccountBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 
 		// Debit / credit: search for explicit column names first to avoid matching
 		// "Closing ledger balance" etc. that happen to contain "credit"/"debit".
-		debitIdx := findIdx("debit amount", "debit_amount", "withdrawal amount", "withdrawal_amount", "dr amount", "dr amt", "debit")
-		creditIdx := findIdx("credit amount", "credit_amount", "deposit amount", "deposit_amount", "cr amount", "cr amt")
+		debitIdx := findIdx("debit amount", "debit_amount", "withdrawal amount", "withdrawal_amount", "dr amount", "dr amt", "debit", "amount subtracted")
+		creditIdx := findIdx("credit amount", "credit_amount", "deposit amount", "deposit_amount", "cr amount", "cr amt", "amount added")
 		if creditIdx == -1 {
 			// Only fall back to "credit" / "deposit" when no explicit column found
 			creditIdx = findIdxExclude([]string{"ledger", "available", "brought", "closing", "opening", "current"}, "credit", "deposit")

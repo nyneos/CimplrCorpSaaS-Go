@@ -1482,6 +1482,7 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		query := `
 			SELECT
 				r.run_id,
+				r.run_date,
 				r.run_type,
 				r.run_mode,
 				r.run_status,
@@ -1490,6 +1491,14 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				r.accrual_period_start,
 				r.accrual_period_end,
 				COALESCE(r.financial_period,'')     AS financial_period,
+				COALESCE(r.accrual_granularity,'') AS accrual_granularity,
+				COALESCE(r.day_count_convention,'') AS day_count_convention,
+				COALESCE(r.fd_status_filter,'')   AS fd_status_filter,
+				COALESCE(r.fd_inclusion_method,'') AS fd_inclusion_method,
+				COALESCE(r.precision_decimals, 2) AS precision_decimals,
+				COALESCE(r.rounding_rule,'')      AS rounding_rule,
+				COALESCE(r.engine_version,'')     AS engine_version,
+				COALESCE(r.error_count, 0)        AS error_count,
 				COALESCE(r.fds_in_scope,0)          AS fds_in_scope,
 				COALESCE(r.fds_calculated,0)        AS fds_calculated,
 				COALESCE(r.fds_failed,0)            AS fds_failed,

@@ -208,7 +208,7 @@ func processZipPreviewFlat(ctx context.Context, pool *pgxpool.Pool, zipBytes []b
 func resolveMasterBankAccountForPreview(ctx context.Context, pool *pgxpool.Pool, primary string, uploadFileName string, rows [][]string) (matchedAccount string, entityID string, bankName string, currency string, err error) {
 	primary = strings.TrimSpace(primary)
 	if primary == "" {
-		return "", "", "", "", fmt.Errorf("account number not found in file header")
+		return "", "", "", "", fmt.Errorf("account number could not be found anywhere in the file name or file contents")
 	}
 
 	candidates := []string{}
@@ -515,14 +515,20 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 	}
 
 	if accountNumber == "" {
-		return nil, fmt.Errorf("account number not found in file header")
+		return nil, fmt.Errorf("account number could not be found anywhere in the file name or file contents")
 	}
 
 	// DB READ ONLY: Lookup account metadata (same candidate expansion as upload V2).
 	// If manual account is wrong (not in master), retry with LLM before failing.
 	matchedAcct, entityID, bankName, currency, err := resolveAccountForPreviewWithLLMFallback(ctx, pool, accountNumber, filename, rows, accountOverride)
 	if err != nil {
-		return nil, err
+		// Log error but DO NOT fail if this is a staging/preview operation
+		// This saves conversion credits for PDFs by allowing them to stage even if unmapped.
+		logger.LogInfo("[PREVIEW-DEBUG] Account not found in master data: %v. Proceeding with staging unmapped.", err)
+		matchedAcct = accountNumber // Keep the raw parsed number
+		entityID = ""
+		bankName = ""
+		currency = ""
 	}
 	accountNumber = matchedAcct
 
@@ -553,20 +559,34 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 				hasDate := false
 				hasDesc := false
 				hasAmount := false
-				for _, cell := range row {
+
+				// Create a combined row using current row and next row (if exists)
+				// to handle split headers commonly found in bank statements (e.g. BOB)
+				combinedRow := make([]string, len(row))
+				copy(combinedRow, row)
+				if i+1 < len(rows) {
+					for j := 0; j < len(combinedRow) && j < len(rows[i+1]); j++ {
+						if strings.TrimSpace(rows[i+1][j]) != "" {
+							combinedRow[j] = strings.TrimSpace(combinedRow[j]) + " " + strings.TrimSpace(rows[i+1][j])
+						}
+					}
+				}
+
+				for _, cell := range combinedRow {
 					lc := strings.ToLower(strings.TrimSpace(cell))
 					if strings.Contains(lc, "date") {
 						hasDate = true
 					}
-					if strings.Contains(lc, "description") || strings.Contains(lc, "remarks") || strings.Contains(lc, "narration") {
+					if strings.Contains(lc, "description") || strings.Contains(lc, "remarks") || strings.Contains(lc, "narration") || strings.Contains(lc, "particulars") {
 						hasDesc = true
 					}
-					if strings.Contains(lc, "withdrawal") || strings.Contains(lc, "deposit") || strings.Contains(lc, "debit") || strings.Contains(lc, "credit") || strings.Contains(lc, "amount") {
+					if strings.Contains(lc, "withdrawal") || strings.Contains(lc, "deposit") || strings.Contains(lc, "debit") || strings.Contains(lc, "credit") || strings.Contains(lc, "amount") || strings.Contains(lc, "amount subtracted") || strings.Contains(lc, "amount added") || strings.EqualFold(lc, "dr") || strings.EqualFold(lc, "cr") {
 						hasAmount = true
 					}
 				}
 				if hasDate && (hasDesc || hasAmount) {
 					txnHeaderIdx = i
+					rows[i] = combinedRow // use combined row for column mapping
 					break
 				}
 			}
@@ -646,20 +666,23 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 		}
 	}
 
+	// Build column mapping from heuristic if found
+	colIdx := make(map[string]int)
+	if txnHeaderIdx != -1 {
+		headerRow := rows[txnHeaderIdx]
+		for idx, col := range headerRow {
+			colIdx[strings.TrimSpace(col)] = idx
+		}
+	}
+
+	// LLM column layout — only when enabled and manual mapping is incomplete (or completely missing).
+	txnHeaderIdx, colIdx = applyLLMColumnLayoutIfNeeded(ctx, rows, txnHeaderIdx, colIdx)
+
 	if txnHeaderIdx == -1 {
-		return nil, fmt.Errorf("transaction header row not found")
+		return nil, fmt.Errorf("transaction header row not found even after LLM fallback")
 	}
 
 	headerRow := rows[txnHeaderIdx]
-
-	// Build column mapping (simplified from upload)
-	colIdx := make(map[string]int)
-	for idx, col := range headerRow {
-		colIdx[strings.TrimSpace(col)] = idx
-	}
-
-	// LLM column layout — only when enabled and manual mapping is incomplete.
-	txnHeaderIdx, colIdx = applyLLMColumnLayoutIfNeeded(ctx, rows, txnHeaderIdx, colIdx)
 	logger.LogInfo("[PREVIEW-DEBUG] txnHeaderIdx=%d total_rows=%d data_rows_to_parse=%d", txnHeaderIdx, len(rows), len(rows)-txnHeaderIdx-1)
 
 	// Apply custom mappings if provided
@@ -1441,8 +1464,8 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, pool *pgxpool.Pool, 
 	dateIdx := findIdx("transaction date", "date", "txn date", "statement date")
 	valDateIdx := findIdx("value date", "val date")
 	descIdx := findIdx("description", "transaction description", "remarks", "narration", "particulars")
-	debitIdx := findIdx("debit", "withdrawal", "debit amount", "withdrawal amount")
-	creditIdx := findIdx("credit", "deposit", "credit amount", "deposit amount")
+	debitIdx := findIdx("debit", "withdrawal", "debit amount", "withdrawal amount", "amount subtracted")
+	creditIdx := findIdx("credit", "deposit", "credit amount", "deposit amount", "amount added")
 	balanceIdx := findIdx("balance", constants.QuerryAvailableBalance, "closing balance", "current / closing")
 	tranIDIdx := findIdx("transaction id", "tran id", "txn id", "reference", "ref no", "bank reference")
 

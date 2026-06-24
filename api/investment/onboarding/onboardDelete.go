@@ -56,86 +56,10 @@ func DeleteOnboardBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		deleted := map[string]int64{}
 
-		// ── 1. Delete audit records FIRST (subqueries reference master tables) ───
-		auditSteps := []struct {
-			auditTable  string
-			masterTable string
-			idCol       string
-		}{
-			{"investment.auditactionamc", "investment.masteramc", "amc_id"},
-			{"investment.auditactionscheme", "investment.masterscheme", "scheme_id"},
-			{"investment.auditactionfolio", "investment.masterfolio", "folio_id"},
-			{"investment.auditactiondp", "investment.masterdepositoryparticipant", "dp_id"},
-			{"investment.auditactiondemat", "investment.masterdemataccount", "demat_id"},
-		}
-		for _, s := range auditSteps {
-			tag, err := tx.Exec(ctx,
-				fmt.Sprintf(`DELETE FROM %s WHERE %s IN (
-					SELECT %s FROM %s WHERE batch_id=$1::uuid
-				)`, s.auditTable, s.idCol, s.idCol, s.masterTable),
-				req.BatchID,
-			)
-			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError,
-					fmt.Sprintf(constants.ErrFailedToDeleteItem, s.auditTable, err.Error()))
-				return
-			}
-			deleted[s.auditTable] = tag.RowsAffected()
-		}
+		// ── 1. Master records are no longer deleted here since batch_id is dropped ───
+		// The onboarding batch now only acts as a container for transactions and snapshots.
 
-		// ── 2. Remove folio–scheme mappings (subquery on masterfolio, still exists) ──
-		tag, err := tx.Exec(ctx,
-			`DELETE FROM investment.folioschememapping
-			 WHERE folio_id IN (
-				SELECT folio_id FROM investment.masterfolio
-				WHERE batch_id=$1::uuid
-			 )`,
-			req.BatchID,
-		)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "delete folioschememapping failed: "+err.Error())
-			return
-		}
-		deleted["folio_scheme_mapping"] = tag.RowsAffected()
-
-		// ── 3. Hard-delete master records created by this batch ─────────────────
-		// Safety: only remove a master record if NO other batch still references it
-		// in portfolio_onboarding_map (i.e. reference-count safe). Enriched records
-		// never have batch_id=$1 so they are untouched regardless.
-
-		masterSteps := []struct {
-			table  string
-			idCol  string
-			mapCol string // column name in portfolio_onboarding_map
-			key    string
-		}{
-			{"investment.masterdemataccount", "demat_id", "demat_id", "demat_id"},
-			{"investment.masterdepositoryparticipant", "dp_id", "dp_id", "dp_id"},
-			{"investment.masterfolio", "folio_id", "folio_id", "folio_id"},
-			{"investment.masterscheme", "scheme_id", "scheme_id", "scheme_id"},
-			{"investment.masteramc", "amc_id", "amc_id", "amc_id"},
-		}
-		for _, step := range masterSteps {
-			// Delete only if: (a) created by this batch AND (b) no other batch references it
-			q := fmt.Sprintf(`
-				DELETE FROM %s
-				WHERE batch_id = $1::uuid
-				  AND %s NOT IN (
-					SELECT %s FROM investment.portfolio_onboarding_map
-					WHERE %s IS NOT NULL AND batch_id::uuid != $1::uuid
-				  )`,
-				step.table, step.idCol, step.mapCol, step.mapCol)
-			tag, err := tx.Exec(ctx, q, req.BatchID)
-			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError,
-					fmt.Sprintf(constants.ErrFailedToDeleteItem, step.table, err.Error()))
-				return
-			}
-			deleted[step.key] = tag.RowsAffected()
-			logger.LogInfo("[batch-delete] %s deleted %d rows for batch %s", step.table, tag.RowsAffected(), req.BatchID)
-		}
-
-		// ── 4. Delete batch-level rows ───────────────────────────────────────────
+		// ── 2. Delete batch-level rows ───────────────────────────────────────────
 		for _, tbl := range []string{
 			"investment.onboard_transaction",
 			"investment.portfolio_onboarding_map",
@@ -154,7 +78,7 @@ func DeleteOnboardBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			deleted[tbl] = tag.RowsAffected()
 		}
 
-		// ── 5. Delete the batch record itself ────────────────────────────────────
+		// ── 3. Delete the batch record itself ────────────────────────────────────
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM investment.onboard_batch WHERE batch_id=$1::uuid`,
 			req.BatchID,
