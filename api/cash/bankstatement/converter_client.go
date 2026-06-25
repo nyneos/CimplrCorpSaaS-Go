@@ -260,14 +260,23 @@ func buildPreviewResponseFromTxnMaps(txns []map[string]interface{}, csvBytes []b
 		}
 	}
 	openingBalance := parserOpening
+	// A parser opening of exactly 0 is almost always "unknown" (no opening row, or an empty cell next
+	// to an "Opening Balance" label), not a genuine zero — fall through to derivation / the labelled
+	// summary-box figure rather than locking in 0.
+	if openingBalance != nil && *openingBalance == 0 {
+		openingBalance = nil
+	}
 	if openingBalance == nil {
 		openingBalance = deriveOpeningBalanceFromTxnMaps(txns)
 	}
-	if openingBalance == nil {
-		openingBalance = labelledOpeningBalance
+	if openingBalance == nil || *openingBalance == 0 {
+		if labelledOpeningBalance != nil {
+			openingBalance = labelledOpeningBalance
+		}
 	} else if labelledOpeningBalance != nil && math.Abs(*openingBalance-*labelledOpeningBalance) > 0.01 {
-		logger.LogInfo("[PREVIEW] opening balance label mismatch: labelled=%.2f parser=%.2f; using parser value",
+		logger.LogInfo("[PREVIEW] opening balance label mismatch: labelled=%.2f parser=%.2f; using labelled value (bank's declared figure)",
 			*labelledOpeningBalance, *openingBalance)
+		openingBalance = labelledOpeningBalance
 	}
 	closingBalance := extractClosingBalanceFromCSV(csvBytes)
 	if closingBalance == nil {
@@ -391,17 +400,33 @@ func extractLabelledBalance(data []byte, labels []string) *float64 {
 		return nil
 	}
 	replacer := strings.NewReplacer(" ", "", "\t", "")
-	for _, row := range rows {
+	for r, row := range rows {
 		for i, cell := range row {
 			norm := strings.ToLower(replacer.Replace(cell))
+			matched := false
 			for _, lbl := range labels {
 				if strings.Contains(norm, lbl) {
-					for j := i + 1; j < len(row); j++ {
-						if val, err := parseAmount(cleanAmount(row[j])); err == nil {
-							v := val
-							return &v
-						}
-					}
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+			// Same-row layout: value sits to the right of the label (e.g. "Opening Balance: 17.91").
+			for j := i + 1; j < len(row); j++ {
+				if val, err := parseAmount(cleanAmount(row[j])); err == nil && val != 0 {
+					v := val
+					return &v
+				}
+			}
+			// Header/value table layout (summary box): the figure sits directly below the label cell,
+			// e.g. "Opening Balance | Total Debit | Total Credit | Closing Balance" followed by
+			// "17.91 CR | 1,47,103.00 | 1,47,090.00 | 4.91 CR".
+			if r+1 < len(rows) && i < len(rows[r+1]) {
+				if val, err := parseAmount(cleanAmount(rows[r+1][i])); err == nil && val != 0 {
+					v := val
+					return &v
 				}
 			}
 		}

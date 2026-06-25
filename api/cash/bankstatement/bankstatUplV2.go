@@ -863,16 +863,24 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 		}
 
 		// Sanity-check LLM balance mapping: if balance maps to the same column as
-		// withdrawal or deposit the LLM confused them. Drop the wrong balance keys
-		// so the alias fallback below can locate the real Balance column.
+		// withdrawal or deposit, the LLM double-mapped a column. Keep the balance
+		// assignment (it is backed by RULE 1 running-total verification) and drop
+		// the colliding withdrawal/deposit so alias expansion can find the real one
+		// from the header row.
 		if bIdx, hasBal := colIdx[balanceHeader]; hasBal {
 			wIdx, hasW := colIdx[withdrawalAmtHeader]
 			dIdx, hasD := colIdx[depositAmtHeader]
-			if (hasW && bIdx == wIdx) || (hasD && bIdx == dIdx) {
-				logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM balance index %d collides with withdrawal(%v=%d)/deposit(%v=%d) — discarding LLM balance mapping",
-					bIdx, hasW, wIdx, hasD, dIdx)
-				delete(colIdx, balanceHeader)
-				delete(colIdx, "Balance")
+			if hasW && bIdx == wIdx {
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM balance index %d collides with withdrawal(%d) — discarding LLM withdrawal mapping; balance kept",
+					bIdx, wIdx)
+				delete(colIdx, withdrawalAmtHeader)
+				delete(colIdx, "Withdrawal")
+			}
+			if hasD && bIdx == dIdx {
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM balance index %d collides with deposit(%d) — discarding LLM deposit mapping; balance kept",
+					bIdx, dIdx)
+				delete(colIdx, depositAmtHeader)
+				delete(colIdx, "Deposit")
 			}
 		}
 
@@ -1299,16 +1307,22 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			logger.LogInfo("[BANK-UPLOAD-DEBUG] Custom mapping overrides applied for Excel: %v", colIdx)
 		}
 
-		// Sanity-check LLM balance mapping: same as CSV path — if LLM placed balance
-		// at the same index as withdrawal or deposit, discard it so alias fallback wins.
+		// Sanity-check LLM balance mapping: same as CSV path — keep balance and drop
+		// the colliding withdrawal/deposit mapping so alias expansion finds the real column.
 		if bIdx, hasBal := colIdx[balanceHeader]; hasBal {
 			wIdx, hasW := colIdx[withdrawalAmtHeader]
 			dIdx, hasD := colIdx[depositAmtHeader]
-			if (hasW && bIdx == wIdx) || (hasD && bIdx == dIdx) {
-				logger.LogInfo("[BANK-UPLOAD-DEBUG] Excel: LLM balance index %d collides with withdrawal(%v=%d)/deposit(%v=%d) — discarding LLM balance mapping",
-					bIdx, hasW, wIdx, hasD, dIdx)
-				delete(colIdx, balanceHeader)
-				delete(colIdx, "Balance")
+			if hasW && bIdx == wIdx {
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Excel: LLM balance index %d collides with withdrawal(%d) — discarding LLM withdrawal mapping; balance kept",
+					bIdx, wIdx)
+				delete(colIdx, withdrawalAmtHeader)
+				delete(colIdx, "Withdrawal")
+			}
+			if hasD && bIdx == dIdx {
+				logger.LogInfo("[BANK-UPLOAD-DEBUG] Excel: LLM balance index %d collides with deposit(%d) — discarding LLM deposit mapping; balance kept",
+					bIdx, dIdx)
+				delete(colIdx, depositAmtHeader)
+				delete(colIdx, "Deposit")
 			}
 		}
 

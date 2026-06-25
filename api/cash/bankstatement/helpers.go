@@ -690,13 +690,16 @@ func scanOpeningBalanceFromRows(rows [][]string) *float64 {
 					continue
 				}
 				for j := i + 1; j < len(row); j++ {
-					if val, err := parseAmount(cleanAmount(row[j])); err == nil {
+					// Require a non-zero value: an empty cell parses as (0, nil) and would otherwise
+					// lock in a spurious opening balance of 0, suppressing the correct first-row
+					// derivation (e.g. a summary "Opening Balance" header with no figure beside it).
+					if val, err := parseAmount(cleanAmount(row[j])); err == nil && val != 0 {
 						v := val
 						return &v
 					}
 				}
 				if idx := strings.Index(cell, ":"); idx >= 0 {
-					if val, err := parseAmount(cleanAmount(cell[idx+1:])); err == nil {
+					if val, err := parseAmount(cleanAmount(cell[idx+1:])); err == nil && val != 0 {
 						v := val
 						return &v
 					}
@@ -705,6 +708,23 @@ func scanOpeningBalanceFromRows(rows [][]string) *float64 {
 		}
 	}
 	return nil
+}
+
+// summaryRowBalance pulls the balance figure from a summary/non-transaction row such as
+// "Opening Balance ... 17.91 CR". It prefers the mapped Balance column and falls back to the
+// rightmost parseable non-zero cell, since summary rows carry the figure in the balance column.
+func summaryRowBalance(row []string, balIdx int) (float64, bool) {
+	if balIdx >= 0 && balIdx < len(row) {
+		if v, err := parseAmount(cleanAmount(row[balIdx])); err == nil && v != 0 {
+			return v, true
+		}
+	}
+	for j := len(row) - 1; j >= 0; j-- {
+		if v, err := parseAmount(cleanAmount(row[j])); err == nil && v != 0 {
+			return v, true
+		}
+	}
+	return 0, false
 }
 
 // IsStatementOpeningCarryRow identifies narration that marks opening/closing carry-over

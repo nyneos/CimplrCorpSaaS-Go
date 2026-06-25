@@ -538,6 +538,28 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 		return nil, fmt.Errorf("failed to load category rules: %w", err)
 	}
 
+	// LLM-first extraction: the model reads the converted CSV semantically (a running total is a
+	// balance, a debit lowers it), which is far more robust to the converter scrambling columns or
+	// splitting one transaction across rows than position-based parsing. The result is validated
+	// against the running-balance identity; on low confidence (or when AI is disabled / fails) we
+	// fall through to the deterministic parser below.
+	if bindref.BrOn() {
+		if resp, lerr := extractTransactionsWithLLM(ctx, rows); lerr != nil {
+			logger.LogInfo("[LLM-TXN] extraction unavailable (%v) — using deterministic parser", lerr)
+		} else if maps, ok := buildTxnMapsFromLLM(resp, llmTxnContext{
+			accountNumber: accountNumber,
+			entityID:      entityID,
+			bankName:      bankName,
+			currency:      currency,
+			rules:         rules,
+			batchID:       generateBatchID(),
+			sourceRows:    rows,
+		}); ok {
+			logger.LogInfo("[LLM-TXN] using LLM-extracted transactions as primary path (count=%d)", len(maps))
+			return maps, nil
+		}
+	}
+
 	// Find transaction header row (EXACT upload logic)
 	var txnHeaderIdx int = -1
 	if isCSV {
@@ -1028,6 +1050,25 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 		}
 		candidateCells = append(candidateCells, strings.TrimSpace(strings.Join(row, " ")))
 		if IsNonTransactionRow(candidateCells...) {
+			// An "Opening Balance" summary line is a non-transaction row, but it still carries the
+			// statement's opening balance in its Balance column (e.g. IDFC: "Opening Balance ... 17.91 CR").
+			// Seed it before skipping — otherwise the ledger starts from 0, every running balance is off
+			// by the opening amount, and the derived opening/closing balances come out as 0.
+			if !openingBalanceKnown {
+				joined := strings.ToLower(strings.Join(candidateCells, " "))
+				if strings.Contains(joined, "opening balance") || strings.Contains(joined, "opening bal") {
+					balIdx := -1
+					if idx, ok := colIdx[constants.BalanceINR]; ok {
+						balIdx = idx
+					}
+					if v, ok := summaryRowBalance(row, balIdx); ok {
+						openingBalance = v
+						openingBalanceKnown = true
+						cumulative = v
+						logger.LogInfo("[PREVIEW] opening balance summary row: opening_balance=%.2f", v)
+					}
+				}
+			}
 			continue
 		}
 
