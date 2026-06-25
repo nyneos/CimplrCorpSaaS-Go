@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -235,12 +236,10 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 				t.description,
 				t.withdrawal_amount,
 				t.deposit_amount,
-				-- Use stored balance when non-zero; otherwise compute running balance
-				-- from opening_balance + cumulative (deposits - withdrawals) ordered
-				-- by value_date. This fixes statements committed before the running-
-				-- balance write was added to CommitHandler.
+				-- Use stored balance when available (including legitimate zero balance);
+				-- fall back to running computation only when balance was never stored (NULL).
 				CASE
-					WHEN COALESCE(t.balance, 0) <> 0 THEN t.balance
+					WHEN t.balance IS NOT NULL THEN t.balance
 					ELSE ROUND(
 						COALESCE(s.opening_balance, 0)
 						+ SUM(COALESCE(t.deposit_amount, 0) - COALESCE(t.withdrawal_amount, 0))
@@ -1999,6 +1998,10 @@ func isLikelyMultiAccountStatement(filename string, fileBytes []byte) bool {
 		return false
 	}
 
+	// Only count values that look like real account numbers (pure digits, length >= 6).
+	// This prevents metadata rows like "Branch Details", "City:", or transaction IDs
+	// like "T66643504" from triggering a false multi-account detection.
+	acctNumRe := regexp.MustCompile(`^\d{6,}$`)
 	uniq := map[string]struct{}{}
 	for i := 1; i < len(rows); i++ {
 		row := rows[i]
@@ -2006,7 +2009,7 @@ func isLikelyMultiAccountStatement(filename string, fileBytes []byte) bool {
 			continue
 		}
 		acc := strings.TrimSpace(row[accIdx])
-		if acc == "" {
+		if acc == "" || !acctNumRe.MatchString(acc) {
 			continue
 		}
 		uniq[acc] = struct{}{}
