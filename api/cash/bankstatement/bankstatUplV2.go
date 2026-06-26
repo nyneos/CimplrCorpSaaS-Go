@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/bindref"
 	"CimplrCorpSaas/internal/ctxutil"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	"CimplrCorpSaas/internal/logger"
@@ -65,6 +66,56 @@ func tryExtractNumbersAsXLSX(data []byte) []byte {
 		}
 	}
 	return nil
+}
+
+// synthesizeStatementRowsFromLLM turns LLM-extracted transaction maps (the same shape preview
+// produces) into a clean, perfectly-aligned tabular statement: a header row followed by one row per
+// transaction with SEPARATE Withdrawal and Deposit columns (the inactive side left blank). Feeding
+// these rows back through the existing detection + parse + categorize pipeline gives the V2
+// ingestion the LLM's amounts without any positional ambiguity — in particular it cannot duplicate a
+// single amount into both withdrawal and deposit. Dates are emitted as DD-MM-YYYY (universally
+// parsed by parseDate) and balances are always written (including 0.00) so the running balance ties.
+func synthesizeStatementRowsFromLLM(maps []map[string]interface{}) [][]string {
+	dateCell := func(v interface{}) string {
+		s, _ := v.(string)
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return ""
+		}
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			return t.Format("02-01-2006")
+		}
+		if len(s) >= 10 {
+			return s[:10]
+		}
+		return s
+	}
+	amtCell := func(v interface{}, blankWhenZero bool) string {
+		f, _ := v.(float64)
+		if blankWhenZero && f == 0 {
+			return ""
+		}
+		return strconv.FormatFloat(f, 'f', 2, 64)
+	}
+	str := func(v interface{}) string {
+		s, _ := v.(string)
+		return s
+	}
+
+	out := make([][]string, 0, len(maps)+1)
+	out = append(out, []string{"Transaction Date", "Value Date", "Description", "Tran Id", "Withdrawal", "Deposit", "Balance"})
+	for _, m := range maps {
+		out = append(out, []string{
+			dateCell(m["transaction_date"]),
+			dateCell(m["value_date"]),
+			str(m["description"]),
+			str(m["tran_id"]),
+			amtCell(m["withdrawal_amount"], true),
+			amtCell(m["deposit_amount"], true),
+			amtCell(m["balance"], false),
+		})
+	}
+	return out
 }
 
 // UploadBankStatementV2WithCategorization wraps UploadBankStatementV2 and adds category intelligence and KPIs to the response.
@@ -682,6 +733,33 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 		return nil, fmt.Errorf("failed to fetch category rules: %w", err)
 	}
 
+	// LLM-first ingestion — the SAME extractor the preview uses, so committed data matches what the
+	// user previewed and inherits its column-scramble / split-row robustness. On success we REPLACE
+	// the raw rows with clean, perfectly-aligned synthetic rows (separate Withdrawal/Deposit columns,
+	// one amount per row) and let the existing detection + parse + categorize pipeline run on them
+	// unchanged. This also removes the single-amount-column ambiguity that otherwise duplicates an
+	// amount into both withdrawal and deposit. Falls through to positional parsing when AI is
+	// disabled, errors, or fails its own validation guards (count + closing-balance + reconcile).
+	llmSynth := false
+	if bindref.BrOn() {
+		if resp, lerr := extractTransactionsWithLLM(ctx, rows); lerr != nil {
+			logger.LogInfo("[BANK-UPLOAD] LLM ingestion unavailable (%v) — using positional parser", lerr)
+		} else if llmMaps, ok := buildTxnMapsFromLLM(resp, llmTxnContext{
+			accountNumber: accountNumber,
+			entityID:      entityID,
+			bankName:      bankName,
+			currency:      currencyCode,
+			rules:         rules,
+			batchID:       generateBatchID(),
+			sourceRows:    rows,
+		}); ok && len(llmMaps) > 0 {
+			logger.LogInfo("[BANK-UPLOAD] using LLM-extracted transactions for ingestion (count=%d)", len(llmMaps))
+			rows = synthesizeStatementRowsFromLLM(llmMaps)
+			isCSV = true
+			llmSynth = true
+		}
+	}
+
 	// 5. Parse transactions, categorize, and collect KPIs
 	// Find the header row for transactions
 	var txnHeaderIdx int = -1
@@ -696,12 +774,16 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 	// Manual detection below runs only when LLM fails or is not configured.
 	llmHeaderIdx := -1
 	llmColMap := map[string]int{}
-	if layout, llmErr := extractColumnLayoutWithLLM(ctx, rows); llmErr == nil {
-		llmHeaderIdx = layout.HeaderRowIndex
-		llmColMap = layout.toColIdx()
-		logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM column layout: header_row=%d cols=%v", llmHeaderIdx, llmColMap)
-	} else {
-		logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM column layout skipped or failed: %v", llmErr)
+	// Skip the column-layout LLM call when rows are already LLM-synthesized: they have a clean,
+	// known header, so a second model call is wasted work (and could mis-map the synthetic columns).
+	if !llmSynth {
+		if layout, llmErr := extractColumnLayoutWithLLM(ctx, rows); llmErr == nil {
+			llmHeaderIdx = layout.HeaderRowIndex
+			llmColMap = layout.toColIdx()
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM column layout: header_row=%d cols=%v", llmHeaderIdx, llmColMap)
+		} else {
+			logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM column layout skipped or failed: %v", llmErr)
+		}
 	}
 
 	if isCSV {
@@ -2060,10 +2142,18 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			if idx, ok := colIdx["PostedDate"]; ok && idx < len(row) {
 				postedDateStr = row[idx]
 			}
-			// Pre-read description text so we can use it for closing-balance detection even if we need to fill dates.
+			// Pre-read description text so we can use it for B/F and closing-balance detection even if
+			// we need to fill dates. Fall back to the "Description" column when transactionRemarksHeader
+			// is unmapped (the CSV detection branch — and thus the LLM-synthesized rows — only set
+			// "Description"); otherwise tempDescLower stays empty and B/F / carry rows slip through.
 			tempDescLower := ""
-			if descIdx, ok := colIdx[transactionRemarksHeader]; ok && descIdx < len(row) {
+			if descIdx, ok := colIdx[transactionRemarksHeader]; ok && descIdx >= 0 && descIdx < len(row) {
 				tempDescLower = strings.ToLower(strings.TrimSpace(row[descIdx]))
+			}
+			if tempDescLower == "" {
+				if descIdx, ok := colIdx["Description"]; ok && descIdx >= 0 && descIdx < len(row) {
+					tempDescLower = strings.ToLower(strings.TrimSpace(row[descIdx]))
+				}
 			}
 			sanitizeDateStr := func(s string) string {
 				s = strings.ReplaceAll(s, "\x00", "")
@@ -2323,6 +2413,40 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 						} else {
 							deposit.Valid = true
 							deposit.Float64 = amt
+						}
+					}
+				}
+			} else if okW && okD && idxW == idxD {
+				// Single amount column with NO Cr/Dr indicator. Reading idxW and idxD separately
+				// here would copy the SAME cell into both withdrawal and deposit (they map to one
+				// column — e.g. the LLM column-layout fix's single-amount mode). Parse the amount
+				// once and decide direction from the running-balance movement: balance up => deposit,
+				// balance down => withdrawal. Mirrors the preview parser's balance-direction flip;
+				// falls back to withdrawal when the balance is unavailable (e.g. the first row).
+				amtStr := cleanAmount(row[idxW])
+				if amtStr != "" {
+					var amt float64
+					if n, err := fmt.Sscanf(amtStr, "%f", &amt); n == 1 && err == nil && isFiniteNumber(amt) {
+						if amt < 0 {
+							amt = -amt
+						}
+						isDeposit := false
+						if bIdx, ok := colIdx[balanceHeader]; ok && bIdx >= 0 && bIdx < len(row) && !firstValidRow && isFiniteNumber(cumulative) {
+							if bStr := cleanAmount(row[bIdx]); bStr != "" {
+								var curBal float64
+								if n2, e2 := fmt.Sscanf(bStr, "%f", &curBal); n2 == 1 && e2 == nil && isFiniteNumber(curBal) {
+									if curBal > cumulative+0.005 {
+										isDeposit = true
+									}
+								}
+							}
+						}
+						if isDeposit {
+							deposit = sql.NullFloat64{Valid: true, Float64: amt}
+							withdrawal = sql.NullFloat64{Valid: false}
+						} else {
+							withdrawal = sql.NullFloat64{Valid: true, Float64: amt}
+							deposit = sql.NullFloat64{Valid: false}
 						}
 					}
 				}

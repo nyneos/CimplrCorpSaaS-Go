@@ -64,21 +64,27 @@ type llmTxnResponse struct {
 	Transactions   []llmExtractedTxn `json:"transactions"`
 }
 
-// llmSingleCallRowLimit is the largest statement (in CSV rows) we send to the model in a single
-// call. Below this we send the WHOLE statement at once so the model sees the column headers and
-// the complete running-balance sequence — both of which it needs to tell a balance column from a
-// withdrawal column. Above it the call is both too slow (an 832-row statement timed out at 180s
-// against gpt-4o-mini) and risks overflowing the JSON output budget, so we fall back to chunking.
-const llmSingleCallRowLimit = 350
+// llmTxnChunkSize bounds how many CSV rows are sent per LLM call. We ALWAYS chunk (rather than
+// sending the whole statement) because a single large call is where transactions silently go
+// missing: the JSON output overruns the model's token budget and is truncated, or the model
+// "compresses" long repetitive runs. 150 rows keeps each call's structured output comfortably
+// within the budget. The header rows are repeated and the running balance is threaded into each
+// chunk so column meaning and the balance chain survive the boundaries; transactions are
+// concatenated across chunks.
+const llmTxnChunkSize = 150
 
-// llmTxnChunkSize bounds how many CSV rows are sent per LLM call in the chunked fallback path so
-// very large multi-page statements stay within a sane token+latency budget. Transactions are
-// concatenated across chunks; the header rows are repeated and the running balance is threaded
-// into each chunk so column meaning and the balance chain survive the boundaries.
-const llmTxnChunkSize = 250
+// llmMinAdaptiveChunk is the floor for truncation-driven splitting: when a chunk still reports a
+// truncated (finish_reason="length") response, it is halved and retried down to this size. Below it
+// we accept whatever came back (the count backstop in buildTxnMapsFromLLM then routes a genuine
+// shortfall to the deterministic parser).
+const llmMinAdaptiveChunk = 25
+
+// llmTxnMaxTokens caps the model's output per call. Set high enough that a full llmTxnChunkSize
+// chunk fits, so finish_reason="length" reliably signals a real overflow rather than a stingy cap.
+const llmTxnMaxTokens = 16384
 
 // llmHeaderRowSpan is how many leading rows (column headers, opening-balance line, page banner) we
-// repeat at the top of every chunk in the fallback path so the model keeps column context.
+// repeat at the top of every chunk so the model keeps column context.
 const llmHeaderRowSpan = 12
 
 // extractTransactionsWithLLM is the LLM-first extractor: it sends the converter CSV rows to
@@ -110,34 +116,22 @@ func extractTransactionsWithLLM(ctx context.Context, rows [][]string) (*llmTxnRe
 	}
 	model := resolveLLMTxnModel()
 
-	// Single-call path: send the ENTIRE statement at once. The model can only reliably tell the
-	// balance column from the withdrawal column when it sees the column headers and the full
-	// running-balance sequence together, so chunking is the last resort, not the default.
-	if len(rows) <= llmSingleCallRowLimit {
-		resp, err := callLLMTxnChunk(ctx, inferURL, inferKey, model, rows, nil, true, nil)
-		if err != nil {
-			return nil, fmt.Errorf("llm-txn: single call: %w", err)
-		}
-		logger.LogInfo("[LLM-TXN] model=%s extracted %d transactions from %d rows (single call)",
-			model, len(resp.Transactions), len(rows))
-		return resp, nil
-	}
-
-	// Chunked fallback for very large statements. Repeat the header rows so column meaning
-	// survives, and thread the previous chunk's closing balance forward so the running-balance
-	// chain — and the debit/balance disambiguation that depends on it — does not reset.
+	// Always chunk. Sending the whole statement in one call is exactly where transactions go missing
+	// — the structured-JSON output overruns the token budget and is truncated, or the model collapses
+	// long repetitive runs. Each chunk repeats the header rows so column meaning survives, and the
+	// previous chunk's closing balance is threaded forward so the running-balance chain (and the
+	// debit/balance disambiguation that depends on it) does not reset across boundaries.
 	out := &llmTxnResponse{}
 	headerRows := rows[:min(llmHeaderRowSpan, len(rows))]
 	var prevBalance *float64
 	for start := 0; start < len(rows); start += llmTxnChunkSize {
 		end := min(start+llmTxnChunkSize, len(rows))
-		chunk := rows[start:end]
 		isFirst := start == 0
 		var hdr [][]string
 		if !isFirst {
 			hdr = headerRows
 		}
-		resp, err := callLLMTxnChunk(ctx, inferURL, inferKey, model, chunk, hdr, isFirst, prevBalance)
+		resp, err := callLLMTxnChunkAdaptive(ctx, inferURL, inferKey, model, rows[start:end], hdr, isFirst, prevBalance)
 		if err != nil {
 			return nil, fmt.Errorf("llm-txn: chunk [%d:%d]: %w", start, end, err)
 		}
@@ -150,12 +144,57 @@ func extractTransactionsWithLLM(ctx context.Context, rows [][]string) (*llmTxnRe
 			prevBalance = &b
 		}
 	}
-	logger.LogInfo("[LLM-TXN] model=%s extracted %d transactions from %d rows (%d chunks)",
-		model, len(out.Transactions), len(rows), (len(rows)+llmTxnChunkSize-1)/llmTxnChunkSize)
+	logger.LogInfo("[LLM-TXN] model=%s extracted %d transactions from %d rows (%d-row chunks)",
+		model, len(out.Transactions), len(rows), llmTxnChunkSize)
 	return out, nil
 }
 
-func callLLMTxnChunk(ctx context.Context, inferURL, inferKey, model string, chunk, headerRows [][]string, isFirst bool, prevBalance *float64) (*llmTxnResponse, error) {
+// callLLMTxnChunkAdaptive calls the model for one chunk and, if the response was truncated
+// (finish_reason="length") — meaning some transactions were cut off — halves the chunk and retries
+// each half, threading the running balance and repeating the header context, until the pieces fit or
+// the floor (llmMinAdaptiveChunk) is reached. This is what guarantees every row is returned on large
+// multi-page statements instead of silently losing the rows that overran the output budget.
+func callLLMTxnChunkAdaptive(ctx context.Context, inferURL, inferKey, model string, chunk, headerRows [][]string, isFirst bool, prevBalance *float64) (*llmTxnResponse, error) {
+	resp, truncated, err := callLLMTxnChunk(ctx, inferURL, inferKey, model, chunk, headerRows, isFirst, prevBalance)
+	if err != nil {
+		return nil, err
+	}
+	if !truncated || len(chunk) <= llmMinAdaptiveChunk {
+		return resp, nil
+	}
+
+	logger.LogInfo("[LLM-TXN] chunk of %d rows truncated (finish_reason=length) — splitting and retrying", len(chunk))
+	mid := len(chunk) / 2
+	left, lerr := callLLMTxnChunkAdaptive(ctx, inferURL, inferKey, model, chunk[:mid], headerRows, isFirst, prevBalance)
+	if lerr != nil {
+		return nil, lerr
+	}
+	// Thread the left half's closing balance into the right half so the chain continues; on the right
+	// half the header rows are always supplied as context (it is never the statement's first chunk).
+	nextPrev := prevBalance
+	if n := len(left.Transactions); n > 0 {
+		b := float64(left.Transactions[n-1].Balance)
+		nextPrev = &b
+	}
+	rightHeader := headerRows
+	if rightHeader == nil {
+		rightHeader = chunk[:min(llmHeaderRowSpan, len(chunk))]
+	}
+	right, rerr := callLLMTxnChunkAdaptive(ctx, inferURL, inferKey, model, chunk[mid:], rightHeader, false, nextPrev)
+	if rerr != nil {
+		return nil, rerr
+	}
+	merged := &llmTxnResponse{OpeningBalance: left.OpeningBalance}
+	merged.Transactions = append(merged.Transactions, left.Transactions...)
+	merged.Transactions = append(merged.Transactions, right.Transactions...)
+	return merged, nil
+}
+
+// callLLMTxnChunk issues a single extraction request. It returns truncated=true when the model
+// stopped because it hit the output-token cap (finish_reason="length") — the signal that some
+// transactions were cut off — so the caller can split the chunk and retry instead of silently
+// accepting a short result.
+func callLLMTxnChunk(ctx context.Context, inferURL, inferKey, model string, chunk, headerRows [][]string, isFirst bool, prevBalance *float64) (*llmTxnResponse, bool, error) {
 	var sb strings.Builder
 	if len(headerRows) > 0 {
 		sb.WriteString("Header/context rows (for column meaning only — do NOT extract transactions from these):\n")
@@ -206,6 +245,15 @@ Use MEANING, not column position, to extract each transaction:
 - SKIP non-transactions: column headers, opening/closing-balance summary lines, page headers/footers,
   "brought forward" labels, totals, and marketing text.
 
+COMPLETENESS IS MANDATORY:
+- Return EVERY transaction row in the input. Do NOT skip, omit, summarize, deduplicate, abbreviate,
+  or collapse rows — even when many consecutive rows look almost identical (repeated charges, GST/CGST/
+  SGST lines, reversals). Each is a distinct transaction and must appear separately.
+- Output exactly one JSON object per transaction, after merging ONLY the wrapped continuation lines of
+  the SAME transaction. Never merge two different transactions into one. When unsure, include the row.
+- Process rows strictly in order; the last transaction you output must correspond to the last
+  transaction row in the input. Do not stop early.
+
 For each transaction output:
   date        : transaction date as DD-MM-YYYY (or the statement's own format if unclear)
   value_date  : value/posting date if present, else same as date
@@ -244,10 +292,11 @@ Rows:
 		},
 		"response_format": map[string]string{"type": "json_object"},
 		"temperature":     0,
+		"max_tokens":      llmTxnMaxTokens,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, false, fmt.Errorf("marshal: %w", err)
 	}
 
 	var apiResp struct {
@@ -255,6 +304,7 @@ Rows:
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 	}
 
@@ -266,7 +316,7 @@ Rows:
 		req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, inferURL, bytes.NewReader(bodyBytes))
 		if err != nil {
 			cancel()
-			return nil, fmt.Errorf("build request: %w", err)
+			return nil, false, fmt.Errorf("build request: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+inferKey)
 		req.Header.Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -274,14 +324,14 @@ Rows:
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			cancel()
-			return nil, fmt.Errorf("http: %w", err)
+			return nil, false, fmt.Errorf("http: %w", err)
 		}
 		if resp.StatusCode == http.StatusOK {
 			decErr := json.NewDecoder(resp.Body).Decode(&apiResp)
 			resp.Body.Close()
 			cancel()
 			if decErr != nil {
-				return nil, fmt.Errorf("decode: %w", decErr)
+				return nil, false, fmt.Errorf("decode: %w", decErr)
 			}
 			break
 		}
@@ -297,7 +347,7 @@ Rows:
 		resp.Body.Close()
 		cancel()
 		if !retryable || attempt >= maxAttempts {
-			return nil, fmt.Errorf("status=%d body=%.200s", statusCode, body)
+			return nil, false, fmt.Errorf("status=%d body=%.200s", statusCode, body)
 		}
 		if wait <= 0 {
 			wait = time.Duration(1<<uint(attempt-1)) * 4 * time.Second // 4s, 8s, 16s, 32s
@@ -307,18 +357,35 @@ Rows:
 		select {
 		case <-time.After(wait):
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, false, ctx.Err()
 		}
 	}
-	if len(apiResp.Choices) == 0 || strings.TrimSpace(apiResp.Choices[0].Message.Content) == "" {
-		return nil, fmt.Errorf("empty response")
+
+	// finish_reason="length" means the model ran out of output budget mid-response — some
+	// transactions were cut off. Signal it so the adaptive caller splits the chunk and retries.
+	truncated := len(apiResp.Choices) > 0 && apiResp.Choices[0].FinishReason == "length"
+
+	content := ""
+	if len(apiResp.Choices) > 0 {
+		content = strings.TrimSpace(apiResp.Choices[0].Message.Content)
+	}
+	if content == "" {
+		if truncated {
+			return &llmTxnResponse{}, true, nil
+		}
+		return nil, false, fmt.Errorf("empty response")
 	}
 
 	var parsed llmTxnResponse
-	if err := json.Unmarshal([]byte(apiResp.Choices[0].Message.Content), &parsed); err != nil {
-		return nil, fmt.Errorf("parse json: %w — raw: %.200s", err, apiResp.Choices[0].Message.Content)
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+		// A truncated response is often invalid JSON (cut mid-array); treat it as a split signal
+		// rather than a hard failure so the caller can retry the chunk in smaller pieces.
+		if truncated {
+			return &llmTxnResponse{}, true, nil
+		}
+		return nil, false, fmt.Errorf("parse json: %w — raw: %.200s", err, content)
 	}
-	return &parsed, nil
+	return &parsed, truncated, nil
 }
 
 // retryAfterBodyRe extracts the "Please try again in 7.5s" / "try again in 200ms" hint OpenAI
@@ -443,6 +510,21 @@ func buildTxnMapsFromLLM(resp *llmTxnResponse, ctx llmTxnContext) ([]map[string]
 		return nil, false
 	}
 
+	// Backstop against the model silently dropping transactions on large / multi-page statements.
+	// Because each amount is reconstructed from the balance DELTA below, a dropped row is invisible
+	// to the running-balance reconciliation: the gap is absorbed into the next row's delta, the chain
+	// still closes, and the opening/closing totals still match — but transactions are lost and the
+	// boundary amounts are merged. The independent signal is COUNT: a cleanly-aligned statement
+	// exposes one complete (date+balance) row per transaction, so the extractor must return roughly
+	// that many. A large shortfall means rows were dropped despite the adaptive chunking — fall back
+	// to the positional parser, which reads every row. (Messy split-row statements have few complete
+	// rows, so this never fires for the case the LLM path exists to handle.)
+	if expected := countCompleteTransactionRows(ctx.sourceRows); expected >= 10 && len(resp.Transactions)*10 < expected*9 {
+		logger.LogInfo("[LLM-TXN] extracted %d transactions but source has %d complete transaction rows — dropped rows; falling back to deterministic parser",
+			len(resp.Transactions), expected)
+		return nil, false
+	}
+
 	// Determine opening balance: explicit from the model, else derived from the first row
 	// (balance + withdrawal - deposit).
 	var opening float64
@@ -485,8 +567,9 @@ func buildTxnMapsFromLLM(resp *llmTxnResponse, ctx llmTxnContext) ([]map[string]
 	// balance). Such a balance never appears in the source CSV, whereas the TRUE balance does — so
 	// we snap each invented balance to the real source number that makes both its incoming and
 	// outgoing transaction amounts match numbers that also appear in the source.
+	var srcNums map[int64]struct{}
 	if len(ctx.sourceRows) > 0 {
-		srcNums := collectSourceNumbers(ctx.sourceRows)
+		srcNums = collectSourceNumbers(ctx.sourceRows)
 		fixed, unfixed := repairGhostBalances(opening, views, srcNums)
 		if fixed > 0 || unfixed > 0 {
 			logger.LogInfo("[LLM-TXN] balance cross-check: repaired %d invented balances, %d unrepairable (of %d)",
@@ -497,6 +580,34 @@ func buildTxnMapsFromLLM(resp *llmTxnResponse, ctx llmTxnContext) ([]map[string]
 		if float64(unfixed)/float64(len(views)) > 0.10 {
 			logger.LogInfo("[LLM-TXN] too many unrecoverable balances — falling back to deterministic parser")
 			return nil, false
+		}
+	}
+
+	// Re-anchor the FINAL balance against the statement's own declared closing (summary / "Page
+	// Total" / "Closing Balance" row). The last transaction has no following row, so neither the
+	// chain reconciliation nor the ghost-balance repair can catch a wrong closing balance — and when
+	// the wrong value happens to equal a balance from earlier in the statement it slips through as
+	// "present in source". A wrong closing then zeroes the final transaction's amount once amounts
+	// are derived from balance deltas below (e.g. a sweep-to-nil debit silently vanishes).
+	//
+	// Guard against a misread declared closing: only re-anchor when the resulting final-row amount
+	// (|declared − previous balance|) is itself an amount that literally appears in the source, or is
+	// zero. That keeps a correct extraction untouched while fixing the genuine miss.
+	if n := len(views); n > 0 && len(ctx.sourceRows) > 0 {
+		if declaredClosing, ok := scanDeclaredClosingBalance(ctx.sourceRows); ok && absf(views[n-1].bal-declaredClosing) > 0.01 {
+			prev := opening
+			if n > 1 {
+				prev = views[n-2].bal
+			}
+			impliedAmt := absf(declaredClosing - prev)
+			if impliedAmt < 0.01 || inSourceSet(srcNums, impliedAmt) {
+				logger.LogInfo("[LLM-TXN] closing cross-check: extracted last balance=%.2f != declared closing=%.2f (implied amount=%.2f) — re-anchoring final row",
+					views[n-1].bal, declaredClosing, impliedAmt)
+				views[n-1].bal = declaredClosing
+			} else {
+				logger.LogInfo("[LLM-TXN] closing cross-check: declared closing=%.2f disagrees with extracted last balance=%.2f but implied amount=%.2f is absent from source — leaving final row unchanged",
+					declaredClosing, views[n-1].bal, impliedAmt)
+			}
 		}
 	}
 

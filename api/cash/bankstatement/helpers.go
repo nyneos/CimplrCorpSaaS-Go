@@ -710,6 +710,138 @@ func scanOpeningBalanceFromRows(rows [][]string) *float64 {
 	return nil
 }
 
+// scanDeclaredClosingBalance extracts the statement's own declared closing balance from a summary,
+// "Closing Balance", or totals ("Page Total" / "Total" / "Grand Total") row. Unlike the running
+// balances on transaction rows, this is an INDEPENDENT anchor for the FINAL balance: the last
+// transaction has no following row, so a wrong closing balance escapes both running-chain
+// reconciliation and the ghost-balance repair — especially when the wrong value coincidentally
+// equals a balance from earlier in the statement and so still "appears in source".
+//
+// Zero is a valid closing balance (an account can be swept to nil), so — unlike
+// scanOpeningBalanceFromRows — a 0.00 figure is accepted. Returns ok=false when no declared
+// closing could be confidently located.
+func scanDeclaredClosingBalance(rows [][]string) (float64, bool) {
+	replacer := strings.NewReplacer(" ", "", "\t", "", ".", "")
+
+	rightmostNumeric := func(row []string) (float64, bool) {
+		for j := len(row) - 1; j >= 0; j-- {
+			if v, ok := parseStrictAmount(row[j]); ok {
+				if isBalanceDrOverdraft(row[j]) {
+					v = -v
+				}
+				return v, true
+			}
+		}
+		return 0, false
+	}
+
+	// A multi-page statement repeats its "Page Total" band (and may repeat a "Closing Balance" line)
+	// once per page, so the FINAL match — not the first — is the statement-level closing. Both passes
+	// therefore keep the last match rather than returning early. An explicit "Closing Balance" label
+	// still wins over a generic totals row when both are present.
+	var closingVal float64
+	var closingFound bool
+	var totalVal float64
+	var totalFound bool
+
+	for _, row := range rows {
+		// Pass 1: explicit "closing balance" label with an adjacent (or packed) value.
+		for i, cell := range row {
+			norm := strings.ToLower(replacer.Replace(cell))
+			if !(strings.Contains(norm, "closingbalance") || strings.Contains(norm, "closingbal") ||
+				strings.Contains(norm, "closingavailable") || strings.Contains(norm, "closingledger")) {
+				continue
+			}
+			matched := false
+			for j := i + 1; j < len(row); j++ {
+				if v, ok := parseStrictAmount(row[j]); ok {
+					if isBalanceDrOverdraft(row[j]) {
+						v = -v
+					}
+					closingVal, closingFound, matched = v, true, true
+					break
+				}
+			}
+			// Label and value packed into one cell ("Closing Balance: 0.00 Cr").
+			if !matched {
+				if idx := strings.Index(cell, ":"); idx >= 0 {
+					if v, ok := parseStrictAmount(cell[idx+1:]); ok {
+						if isBalanceDrOverdraft(cell[idx+1:]) {
+							v = -v
+						}
+						closingVal, closingFound = v, true
+					}
+				}
+			}
+		}
+
+		// Pass 2: a totals row carries the closing balance in its rightmost numeric (the Balance
+		// column sits last in these statements, e.g. ICICI "Page Total: ... 0.00 Cr").
+		for _, cell := range row {
+			norm := strings.ToLower(replacer.Replace(cell))
+			isTotalsLabel := strings.HasPrefix(norm, "pagetotal") ||
+				strings.HasPrefix(norm, "grandtotal") || norm == "total" || norm == "total:"
+			if isTotalsLabel {
+				if v, ok := rightmostNumeric(row); ok {
+					totalVal, totalFound = v, true
+				}
+				break
+			}
+		}
+	}
+
+	if closingFound {
+		return closingVal, true
+	}
+	if totalFound {
+		return totalVal, true
+	}
+	return 0, false
+}
+
+// countCompleteTransactionRows counts source rows that are self-contained transactions: a row that
+// carries BOTH a parseable date and a parseable amount/balance figure (header, separator, summary,
+// total and opening/closing-carry rows excluded). On a cleanly-converted multi-column statement
+// (aligned Date/…/Balance columns) this closely equals the true transaction count, so it is a
+// reliable lower bound on how many transactions any extractor must return. On a messy PDF→CSV where
+// a single transaction is split across several rows (date on one, amount on another) very few rows
+// are "complete", so the count stays low and callers can safely ignore it.
+func countCompleteTransactionRows(rows [][]string) int {
+	count := 0
+	for _, row := range rows {
+		if len(row) == 0 || IsSeparatorRow(row) || IsPageBreakRow(row) {
+			continue
+		}
+		hasDate := false
+		hasAmount := false
+		for _, cell := range row {
+			c := strings.TrimSpace(cell)
+			if c == "" {
+				continue
+			}
+			if !hasDate {
+				if t, err := parseDate(c); err == nil && !t.IsZero() {
+					hasDate = true
+				}
+			}
+			if !hasAmount {
+				if _, ok := parseStrictAmount(c); ok {
+					hasAmount = true
+				}
+			}
+		}
+		if !hasDate || !hasAmount {
+			continue
+		}
+		joined := strings.Join(row, " ")
+		if IsNonTransactionRow(joined) || IsStatementOpeningCarryRow(joined) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
 // summaryRowBalance pulls the balance figure from a summary/non-transaction row such as
 // "Opening Balance ... 17.91 CR". It prefers the mapped Balance column and falls back to the
 // rightmost parseable non-zero cell, since summary rows carry the figure in the balance column.

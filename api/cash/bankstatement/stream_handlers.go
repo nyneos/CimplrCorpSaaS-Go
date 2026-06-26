@@ -567,43 +567,39 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 				return
 			}
 			logger.LogInfo("[BANK-PREVIEW] step=staging_batch ok batch_id=%s", batchID)
-			stagingIDs, pdfErr := processPDFViaPDFCo(ctx, pool, pdfConvertParams{
-				pdfBytes:        fileBytes,
-				filename:        header.Filename,
-				batchID:         batchID,
-				accountOverride: accountOverridePDF,
-				password:        password,
-				uploadedBy:      uploadUserID,
-				fileIndex:       0,
-				fileRec:         nil,
+			// Queue a "pending" staging row so the file shows in Staging immediately, then convert in
+			// the background (detached context) and return 202 — the client redirects to Staging and
+			// sees it as queued instead of blocking on the slow converter. Same staging/review/commit
+			// flow as before; only the conversion is moved off the request path (mirrors async ZIP).
+			stagingID, insErr := insertStagingStatement(ctx, pool, insertStagingStatementParams{
+				BatchID: batchID, Filename: header.Filename, Status: "pending", FileIndex: 0,
 			})
-			if pdfErr != nil {
+			if insErr != nil {
 				_ = finaliseStagingBatch(ctx, pool, batchID, 0, 1)
-				logger.LogError("[BANK-PREVIEW] step=pdfco_pipeline failed batch_id=%s filename=%q err=%v", batchID, header.Filename, pdfErr)
-				// Let userFriendlyUploadError classify converter vs parse vs master-data failures.
-				respondWithError(w, pdfErr, "", http.StatusInternalServerError)
+				logger.LogError("[BANK-PREVIEW] step=staging_pending failed batch_id=%s filename=%q err=%v", batchID, header.Filename, insErr)
+				respondWithError(w, insErr, "Failed to queue statement for processing", http.StatusInternalServerError)
 				return
 			}
-			processedCount := len(stagingIDs)
-			if processedCount == 0 {
-				processedCount = 1
-			}
-			_ = finaliseStagingBatch(ctx, pool, batchID, processedCount, 0)
-			primaryStagingID := ""
-			if len(stagingIDs) > 0 {
-				primaryStagingID = stagingIDs[0]
-			}
-			logger.LogInfo("[BANK-PREVIEW] step=pdfco_pipeline ok batch_id=%s staging_count=%d primary_staging_id=%s",
-				batchID, len(stagingIDs), primaryStagingID)
+			go processSinglePDFAsync(pool, singlePDFJob{
+				batchID:         batchID,
+				stagingID:       stagingID,
+				userID:          uploadUserID,
+				filename:        header.Filename,
+				accountOverride: accountOverridePDF,
+				password:        password,
+				pdfBytes:        fileBytes,
+			})
+			logger.LogInfo("[BANK-PREVIEW] step=pdfco_queued batch_id=%s staging_id=%s — converting in background", batchID, stagingID)
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
-			w.WriteHeader(http.StatusOK)
+			w.WriteHeader(http.StatusAccepted)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success":     true,
-				"status":      "staged",
+				"status":      "accepted",
 				"batch_id":    batchID,
-				"staging_id":  primaryStagingID,
-				"staging_ids": stagingIDs,
+				"staging_id":  stagingID,
+				"total_files": 1,
 				"source":      "converter",
+				"message":     "Processing your statement. It will appear in Staging shortly.",
 			})
 			return
 		}
