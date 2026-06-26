@@ -128,6 +128,48 @@ func defaultIfEmpty(val, def string) string {
 	return val
 }
 
+// Validation helpers (mirrors amcMaster package, kept local to avoid cross-package coupling)
+func isAlphanumericOnboard(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+			return false
+		}
+	}
+	return true
+}
+
+func isValidIFSCOnboard(s string) bool {
+	if len(s) != 11 {
+		return false
+	}
+	for i, c := range s {
+		switch {
+		case i < 4:
+			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+				return false
+			}
+		case i == 4:
+			if c != '0' {
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isValidEmailOnboard(s string) bool {
+	at := strings.Index(s, "@")
+	if at < 1 {
+		return false
+	}
+	domain := s[at+1:]
+	return strings.Contains(domain, ".") && len(domain) > 2
+}
+
 // isBlankRecord returns true when every meaningful string field is empty (UI placeholder rows).
 func isBlankAMC(a AMCInput) bool {
 	return strings.TrimSpace(a.AmcName) == "" && strings.TrimSpace(a.InternalAmcCode) == ""
@@ -182,13 +224,32 @@ func resolveFolioAmcName(f FolioInput, schemes []SchemeInput, amcMap map[string]
 	return "Unknown AMC"
 }
 
-// validateAMCRequired mirrors the AMC master: amc_name + internal_amc_code required for new AMCs.
+// validateAMCRequired mirrors the AMC master create validations for new (non-enriched) AMCs.
 func validateAMCRequired(i int, a AMCInput) string {
 	if strings.TrimSpace(a.AmcName) == "" {
 		return fmt.Sprintf("AMC #%d: amc_name is required", i+1)
 	}
-	if !a.Enriched && strings.TrimSpace(a.InternalAmcCode) == "" {
-		return fmt.Sprintf("AMC #%d '%s': internal_amc_code is required for new AMCs", i+1, a.AmcName)
+	if a.Enriched {
+		return "" // enriched AMCs already exist in the system; skip further validation
+	}
+	code := strings.TrimSpace(a.InternalAmcCode)
+	if code == "" {
+		return fmt.Sprintf("AMC #%d '%s': internal_amc_code is required", i+1, a.AmcName)
+	}
+	if !isAlphanumericOnboard(code) {
+		return fmt.Sprintf("AMC #%d '%s': internal_amc_code must be alphanumeric, got '%s'", i+1, a.AmcName, code)
+	}
+	if mfu := strings.TrimSpace(a.MfuAmcCode); mfu != "" && !isAlphanumericOnboard(mfu) {
+		return fmt.Sprintf("AMC #%d '%s': mfu_amc_code must be alphanumeric, got '%s'", i+1, a.AmcName, mfu)
+	}
+	if cams := strings.TrimSpace(a.CamsAmcCode); cams != "" && !isAlphanumericOnboard(cams) {
+		return fmt.Sprintf("AMC #%d '%s': cams_amc_code must be alphanumeric, got '%s'", i+1, a.AmcName, cams)
+	}
+	if ifsc := strings.ToUpper(strings.TrimSpace(a.AmcBankIfsc)); ifsc != "" && ifsc != "DEFAULT0000" && !isValidIFSCOnboard(ifsc) {
+		return fmt.Sprintf("AMC #%d '%s': amc_bank_ifsc '%s' is not a valid IFSC code (format: 4 letters + 0 + 6 alphanumeric)", i+1, a.AmcName, ifsc)
+	}
+	if email := strings.TrimSpace(a.PrimaryContactEmail); email != "" && !isValidEmailOnboard(email) {
+		return fmt.Sprintf("AMC #%d '%s': primary_contact_email '%s' is not a valid email address", i+1, a.AmcName, email)
 	}
 	return ""
 }
@@ -261,50 +322,30 @@ func validateDematRequired(i int, dm DematInput) string {
 }
 
 func validateOnboardingUploadScope(ctx context.Context, w http.ResponseWriter, amcs []AMCInput, schemes []SchemeInput, demats []DematInput, folios []FolioInput) bool {
-	rows := make([]map[string]interface{}, 0, len(amcs)+len(schemes)+len(demats)+len(folios))
-	for _, a := range amcs {
-		if a.Enriched || strings.TrimSpace(a.AmcID) != "" {
-			rows = append(rows, map[string]interface{}{
-				"amc_id":   a.AmcID,
-				"amc_name": a.AmcName,
-			})
-		}
-	}
-	for _, s := range schemes {
-		if s.Enriched || strings.TrimSpace(s.SchemeID) != "" {
-			rows = append(rows, map[string]interface{}{
-				"scheme_id":            s.SchemeID,
-				"scheme_internal_code": s.InternalSchemeCode,
-				"amc_name":             s.AmcName,
-			})
-		}
-	}
+	// AMC, Scheme, DP: identity is NOT validated against the Approved* context here.
+	//   - enriched=true  → entity exists in system but may be PENDING_APPROVAL; Approved* check would block it
+	//   - enriched=false → being created fresh; not in system yet, Approved* check would always fail
+	//   Field/format validation for these is handled by validateAMCRequired / validateSchemeRequired / validateDPRequired.
+	//
+	// Demat + Folio: always check entity scope (entity_name) so the upload can't reference
+	// entities outside the user's authorized scope.
+	//   - enriched=true  → skip Demat/Folio identity check (may be PENDING_APPROVAL)
+	//   - enriched=false + has ID → also skip; field validation handles it separately
+	//   - scheme_ids on folios: never validated here; schemes may be freshly enriched (PENDING_APPROVAL)
+	rows := make([]map[string]interface{}, 0, len(demats)+len(folios))
 	for _, d := range demats {
-		row := map[string]interface{}{
+		rows = append(rows, map[string]interface{}{
 			"entity_name": d.EntityName,
-		}
-		if d.Enriched || strings.TrimSpace(d.DematID) != "" {
-			row["demat_id"] = d.DematID
-			row["demat_acc_number"] = d.DematAccountNumber
-		}
-		rows = append(rows, row)
+		})
 	}
 	for _, f := range folios {
-		row := map[string]interface{}{
+		rows = append(rows, map[string]interface{}{
 			"entity_name": f.EntityName,
-		}
-		if f.Enriched || strings.TrimSpace(f.FolioID) != "" {
-			row["folio_id"] = f.FolioID
-			row["folio_number"] = f.FolioNumber
-		}
-		if len(f.SchemeRefs) > 0 {
-			row["scheme_ids"] = f.SchemeRefs
-		}
-		rows = append(rows, row)
+		})
 	}
 	for _, row := range rows {
 		if msg := validation.ValidateMFMasterReferences(ctx, row); msg != "" {
-			api.RespondWithError(w, http.StatusForbidden, msg)
+			api.RespondWithError(w, http.StatusBadRequest, msg)
 			return false
 		}
 	}
@@ -1967,7 +2008,7 @@ func PostPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
             COALESCE(SUM(total_investment),0) AS total_investment,
             COALESCE(SUM(total_units * COALESCE(ln.nav_value,0)),0) AS current_value
         FROM tx_agg ta
-        ` + schemejoin.NavLateralJoin("ta", "ta.amfi_scheme_code") + `;
+        ` + schemejoin.NavLateralJoin("ta", constants.ColTAAmfiSchemeCode) + `;
         `
 
 		var totalInv, currVal float64
@@ -2002,7 +2043,7 @@ func PostPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
             COALESCE(ln.raw_category_header, 'Uncategorized') AS category,
             SUM(ta.total_units * COALESCE(ln.nav_value,0)) AS value
         FROM tx_agg ta
-        ` + schemejoin.NavLateralJoin("ta", "ta.amfi_scheme_code") + `
+        ` + schemejoin.NavLateralJoin("ta", constants.ColTAAmfiSchemeCode) + `
         GROUP BY COALESCE(ln.raw_category_header, 'Uncategorized');
         `
 
@@ -2047,7 +2088,7 @@ func PostPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
             COALESCE(ln.nav_value,0) AS current_nav,
             ta.total_units * COALESCE(ln.nav_value,0) AS current_value
         FROM tx_agg ta
-        ` + schemejoin.NavLateralJoin("ta", "ta.amfi_scheme_code") + `
+        ` + schemejoin.NavLateralJoin("ta", constants.ColTAAmfiSchemeCode) + `
         ORDER BY current_value DESC;
         `
 

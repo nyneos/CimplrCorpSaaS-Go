@@ -550,7 +550,25 @@ const (
 )
 
 var (
-	Nifty50 = "NIFTY 50"
+	Nifty50  = "NIFTY 50"
+	Nifty100 = "NIFTY 100"
+	NiftyBank = "NIFTY BANK"
+	NiftyIT  = "NIFTY IT"
+)
+
+// Investment source/suite labels
+const (
+	InvestmentSuite = "Investment Suite"
+	RedemptionSuite = "Redemption Suite"
+)
+
+// Investment workflow error and log format strings
+const (
+	ErrHoldingsFetchFailed                = "Holdings fetch failed: "
+	ErrPortfolioRefreshInvestmentApproval = "Failed to run global portfolio refresh after investment confirmation approval: %v"
+	ErrPortfolioRefreshRedemptionApproval = "Failed to run global portfolio refresh after redemption confirmation approval: %v"
+	ErrParseFmt                           = "parse: %w"
+	ColTAAmfiSchemeCode                   = "ta.amfi_scheme_code"
 )
 
 const (

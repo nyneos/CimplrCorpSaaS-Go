@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"CimplrCorpSaas/api/constants"
 )
 
 // attachTransactionsToHoldings maps transaction rows onto holdings using the same
@@ -178,7 +180,7 @@ func portfolioTxSchemeMatch(a, b PortfolioTxRow) bool {
 func onboardMirrorsSuiteRow(onboard PortfolioTxRow, suites []PortfolioTxRow) bool {
 	onboardInflow := IsPortfolioTxInflow(onboard)
 	for _, suite := range suites {
-		if suite.Source != "Investment Suite" && suite.Source != "Redemption Suite" {
+		if suite.Source != constants.InvestmentSuite && suite.Source != constants.RedemptionSuite {
 			continue
 		}
 		if IsPortfolioTxInflow(suite) != onboardInflow {
@@ -226,7 +228,7 @@ func dedupePortfolioTxRowsPreferSuite(rows []PortfolioTxRow) []PortfolioTxRow {
 	}
 	suiteRows := make([]PortfolioTxRow, 0, len(rows))
 	for _, row := range rows {
-		if row.Source == "Investment Suite" || row.Source == "Redemption Suite" {
+		if row.Source == constants.InvestmentSuite || row.Source == constants.RedemptionSuite {
 			suiteRows = append(suiteRows, row)
 		}
 	}
@@ -270,9 +272,9 @@ func dedupePortfolioTxRows(rows []PortfolioTxRow) []PortfolioTxRow {
 
 func txSourceRank(source string) int {
 	switch strings.TrimSpace(source) {
-	case "Redemption Suite":
+	case constants.RedemptionSuite:
 		return 4
-	case "Investment Suite":
+	case constants.InvestmentSuite:
 		return 3
 	case "Workbench":
 		return 2

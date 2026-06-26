@@ -10,11 +10,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -1716,10 +1719,10 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.entity_name,'') AS entity_name,
 				m.folio_id,
 				m.demat_id,
-				m.scheme_id,
-				m.requested_by,
+				COALESCE(m.scheme_id,'') AS scheme_id,
+				COALESCE(m.requested_by,'') AS requested_by,
 				TO_CHAR(m.requested_date, 'YYYY-MM-DD') AS requested_date,
-				TO_CHAR(m.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+				COALESCE(TO_CHAR(m.transaction_date, 'YYYY-MM-DD'), '') AS transaction_date,
 				COALESCE(m.by_amount, 0) AS by_amount,
 				COALESCE(m.by_units, 0) AS by_units,
 				COALESCE(s.method, 'FIFO') AS method,
@@ -1744,9 +1747,9 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
 				COALESCE(l.requested_by,'') AS audit_requested_by,
-				TO_CHAR((l.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS audit_requested_at,
+				COALESCE(TO_CHAR((l.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS audit_requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR((l.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				COALESCE(TO_CHAR((l.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason
 			FROM investment.redemption_initiation m
@@ -1843,7 +1846,12 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&reason,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "redemption_id not found")
+			if errors.Is(err, pgx.ErrNoRows) {
+				api.RespondWithError(w, http.StatusNotFound, "redemption_id not found")
+			} else {
+				log.Printf("[ERROR] GetRedemptionInitiationDetail scan: redemption_id=%s err=%v", req.RedemptionID, err)
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to load redemption detail")
+			}
 			return
 		}
 		if isDeleted {

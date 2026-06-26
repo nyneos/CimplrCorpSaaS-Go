@@ -13,6 +13,7 @@ import (
 	// "log"
 	"CimplrCorpSaas/internal/dependency"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -103,16 +104,45 @@ func getUserFriendlyFolioError(err error, context string) (string, int) {
 		return "Required field is missing.", http.StatusOK
 	}
 
+	// Value too long — field-specific messages
+	if strings.Contains(errMsg, "value too long") || strings.Contains(errMsg, "character varying") {
+		if strings.Contains(errMsg, "entity_name") {
+			return "Entity name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "amc_name") {
+			return "AMC name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "folio_number") {
+			return "Folio number is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "first_holder_name") {
+			return "First holder name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "default_subscription_account") {
+			return "Subscription account value is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "default_redemption_account") {
+			return "Redemption account value is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "status") {
+			return "Status value is too long.", http.StatusBadRequest
+		}
+		return "A field value is too long. Please check your data.", http.StatusBadRequest
+	}
+
 	// Connection errors (HTTP 503 Service Unavailable)
 	if strings.Contains(errMsg, "connection") || strings.Contains(errMsg, "timeout") {
 		return "Database connection error. Please try again.", http.StatusServiceUnavailable
 	}
 
-	// Return original error with context (HTTP 500)
-	if context != "" {
-		return context + ": " + errMsg, http.StatusInternalServerError
+	// Unknown error — expose details only in dev mode
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("DEVEL_MODE")), "true") {
+		if context != "" {
+			return context + " (dev): " + errMsg, http.StatusInternalServerError
+		}
+		return errMsg, http.StatusInternalServerError
 	}
-	return errMsg, http.StatusInternalServerError
+	return "Failed to process folio request. Please try again.", http.StatusInternalServerError
 }
 
 func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {

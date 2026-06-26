@@ -152,13 +152,13 @@ func previewLogString(s string, limit int) string {
 func BuildPreviewResponseFromFileBytes(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings, accountOverride string) (map[string]interface{}, error) {
 	txns, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, filename, useMapping, mappings, accountOverride)
 	if err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
+		return nil, fmt.Errorf(constants.ErrParseFmt, err)
 	}
 	if len(txns) == 0 {
 		if preview, ok, sumErr := tryBuildSummaryOnlyPreview(fileBytes, filename, accountOverride); ok {
 			return preview, nil
 		} else if sumErr != nil {
-			return nil, fmt.Errorf("parse: %w", sumErr)
+			return nil, fmt.Errorf(constants.ErrParseFmt, sumErr)
 		}
 		return nil, ErrStatementSummaryOnly
 	}
@@ -179,13 +179,13 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, pool *pgxpool.Pool, c
 
 	txns, err := processSingleFilePreviewFlat(ctx, pool, csvBytes, csvFilename, false, nil, accountOverride)
 	if err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
+		return nil, fmt.Errorf(constants.ErrParseFmt, err)
 	}
 	if len(txns) == 0 {
 		if preview, ok, sumErr := tryBuildSummaryOnlyPreview(csvBytes, csvFilename, accountOverride); ok {
 			return preview, nil
 		} else if sumErr != nil {
-			return nil, fmt.Errorf("parse: %w", sumErr)
+			return nil, fmt.Errorf(constants.ErrParseFmt, sumErr)
 		}
 		return nil, fmt.Errorf("no transactions found in converted output")
 	}
