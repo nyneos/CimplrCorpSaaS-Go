@@ -974,8 +974,6 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var sets []string
 		var args []interface{}
 		pos := 1
-		auditOldValues := map[string]interface{}{}
-		auditNewValues := map[string]interface{}{}
 
 		for k, v := range req.Fields {
 			lk := strings.ToLower(k)
@@ -1021,8 +1019,6 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				oldField := "old_" + lk
 				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
 				args = append(args, v, oldVals[idx])
-				auditOldValues[lk] = oldVals[idx]
-				auditNewValues[lk] = v
 				pos += 2
 			}
 		}
@@ -1041,16 +1037,10 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// insert audit
-		oldValuesJSON, newValuesJSON, err := marshalAuditValueSnapshots(auditOldValues, auditNewValues)
-		if err != nil {
-			msg, status := getUserFriendlySchemeError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
-			return
-		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
-			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)
-		`, req.SchemeID, req.Reason, userEmail, oldValuesJSON, newValuesJSON); err != nil {
+			INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, reason, requested_by, requested_at)
+			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
+		`, req.SchemeID, req.Reason, userEmail); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
 			return
@@ -1154,11 +1144,6 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
-			return
-		}
-		req.Comment = strings.TrimSpace(req.Comment)
-		if req.Comment == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "checker comment is required")
 			return
 		}
 
@@ -1313,11 +1298,6 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
-		req.Comment = strings.TrimSpace(req.Comment)
-		if req.Comment == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "checker comment is required")
-			return
-		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
@@ -1329,7 +1309,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		sel := `
-			SELECT DISTINCT ON (scheme_id) action_id, scheme_id, actiontype, processing_status
+			SELECT DISTINCT ON (scheme_id) action_id, scheme_id, processing_status
 			FROM investment.auditactionscheme
 			WHERE scheme_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY scheme_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
@@ -1343,12 +1323,11 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		var actionIDs []string
-		var editSchemeIDs []string
 		var cannotReject []string
 		found := map[string]bool{}
 		for rows.Next() {
-			var aid, sid, actionType, ps string
-			if err := rows.Scan(&aid, &sid, &actionType, &ps); err != nil {
+			var aid, sid, ps string
+			if err := rows.Scan(&aid, &sid, &ps); err != nil {
 				continue
 			}
 			found[sid] = true
@@ -1356,9 +1335,6 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cannotReject = append(cannotReject, sid)
 			} else {
 				actionIDs = append(actionIDs, aid)
-				if strings.EqualFold(actionType, "EDIT") && strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusPendingEditApproval {
-					editSchemeIDs = append(editSchemeIDs, sid)
-				}
 			}
 		}
 
@@ -1388,26 +1364,6 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrUpdateFailed)
 			api.RespondWithError(w, status, msg)
 			return
-		}
-		if len(editSchemeIDs) > 0 {
-			if _, err := tx.Exec(ctx, `
-				UPDATE investment.masterscheme
-				SET
-					scheme_name = CASE WHEN old_scheme_name IS NOT NULL THEN old_scheme_name ELSE scheme_name END,
-					isin = CASE WHEN old_isin IS NOT NULL THEN old_isin ELSE isin END,
-					amc_name = CASE WHEN old_amc_name IS NOT NULL THEN old_amc_name ELSE amc_name END,
-					internal_scheme_code = CASE WHEN old_internal_scheme_code IS NOT NULL THEN old_internal_scheme_code ELSE internal_scheme_code END,
-					internal_risk_rating = CASE WHEN old_internal_risk_rating IS NOT NULL THEN old_internal_risk_rating ELSE internal_risk_rating END,
-					erp_gl_account = CASE WHEN old_erp_gl_account IS NOT NULL THEN old_erp_gl_account ELSE erp_gl_account END,
-					amfi_scheme_code = CASE WHEN old_amfi_scheme_code IS NOT NULL THEN old_amfi_scheme_code ELSE amfi_scheme_code END,
-					status = CASE WHEN old_status IS NOT NULL THEN old_status ELSE status END,
-					method = CASE WHEN old_method IS NOT NULL THEN old_method ELSE method END
-				WHERE scheme_id = ANY($1)
-			`, editSchemeIDs); err != nil {
-				msg, status := getUserFriendlySchemeError(err, "edit revert failed")
-				api.RespondWithError(w, status, msg)
-				return
-			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -1561,11 +1517,10 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.scheme_id)
 					a.scheme_id, a.actiontype, a.processing_status, a.action_id,
-					a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason,
-					a.old_values
+					a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason
 				FROM investment.auditactionscheme a
 				WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
-				ORDER BY a.scheme_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
+				ORDER BY a.scheme_id, a.requested_at DESC
 			),
 			history AS (
 				SELECT 
@@ -1581,15 +1536,6 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 			SELECT
 				m.*,
-				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'scheme_name', m.scheme_name) ELSE m.scheme_name END,'') AS scheme_name,
-				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'isin', m.isin) ELSE m.isin END,'') AS isin,
-				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'amc_name', m.amc_name) ELSE m.amc_name END,'') AS amc_name,
-				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'internal_scheme_code', m.internal_scheme_code) ELSE m.internal_scheme_code END,'') AS internal_scheme_code,
-				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'internal_risk_rating', m.internal_risk_rating) ELSE m.internal_risk_rating END,'') AS internal_risk_rating,
-				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'erp_gl_account', m.erp_gl_account) ELSE m.erp_gl_account END,'') AS erp_gl_account,
-				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'amfi_scheme_code', m.amfi_scheme_code) ELSE m.amfi_scheme_code END,'') AS amfi_scheme_code,
-				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'status', m.status) ELSE m.status END,'') AS status,
-				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'method', m.method) ELSE m.method END,'') AS method,
 
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
@@ -1888,8 +1834,6 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var sets []string
 			var args []interface{}
 			pos := 1
-			auditOldValues := map[string]interface{}{}
-			auditNewValues := map[string]interface{}{}
 
 			for k, v := range row.Fields {
 				lk := strings.ToLower(k)
@@ -1951,8 +1895,6 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					oldField := "old_" + lk
 					sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
 					args = append(args, v, oldVals[idx])
-					auditOldValues[lk] = oldVals[idx]
-					auditNewValues[lk] = v
 					pos += 2
 				}
 			}
@@ -1975,17 +1917,10 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			oldValuesJSON, newValuesJSON, err := marshalAuditValueSnapshots(auditOldValues, auditNewValues)
-			if err != nil {
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(),
-				})
-				continue
-			}
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
-				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)
-			`, row.SchemeID, row.Reason, userEmail, oldValuesJSON, newValuesJSON); err != nil {
+				INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, reason, requested_by, requested_at)
+				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
+			`, row.SchemeID, row.Reason, userEmail); err != nil {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(),
 				})

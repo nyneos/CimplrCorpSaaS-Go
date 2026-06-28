@@ -166,7 +166,7 @@ var dataSources = map[string]dataSourceFn{
 		return queryCashSweepInitiation(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"cashSweepExecutionLogs": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashSweepExecutionLogsFiltered(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+		return queryCashSweepExecutionLogs(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"cashSweepAllExecutionLogs": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashSweepAllExecutionLogs(ctx, pool, req.EntityIDs, req.Limit)
@@ -428,24 +428,6 @@ func entityNameFilter(ctx context.Context, alias string, colName string, argOffs
 		return "", nil
 	}
 	return fmt.Sprintf("AND %s.%s = ANY($%d)", alias, colName, argOffset), []any{names}
-}
-
-// entityNameLowerFilter matches cash /all APIs: lower(trim(entity_name)) scoped to session BUs.
-func entityNameLowerFilter(ctx context.Context, alias string, colName string, argOffset int) (string, []any) {
-	names, _ := ctx.Value("reqEntityNames").([]string)
-	if len(names) == 0 {
-		return "", nil
-	}
-	lower := make([]string, 0, len(names))
-	for _, n := range names {
-		if s := strings.TrimSpace(n); s != "" {
-			lower = append(lower, strings.ToLower(s))
-		}
-	}
-	if len(lower) == 0 {
-		return "", nil
-	}
-	return fmt.Sprintf("AND LOWER(TRIM(COALESCE(%s.%s,''))) = ANY($%d)", alias, colName, argOffset), []any{lower}
 }
 
 // bankIDFilter appends a "AND alias.bank_id = ANY($N)" clause when the request

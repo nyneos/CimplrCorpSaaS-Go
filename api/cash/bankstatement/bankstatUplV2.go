@@ -861,21 +861,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			}
 			logger.LogInfo("[BANK-UPLOAD-DEBUG] Custom mapping overrides applied: %v", colIdx)
 		}
-
-		// Sanity-check LLM balance mapping: if balance maps to the same column as
-		// withdrawal or deposit the LLM confused them. Drop the wrong balance keys
-		// so the alias fallback below can locate the real Balance column.
-		if bIdx, hasBal := colIdx[balanceHeader]; hasBal {
-			wIdx, hasW := colIdx[withdrawalAmtHeader]
-			dIdx, hasD := colIdx[depositAmtHeader]
-			if (hasW && bIdx == wIdx) || (hasD && bIdx == dIdx) {
-				logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM balance index %d collides with withdrawal(%v=%d)/deposit(%v=%d) — discarding LLM balance mapping",
-					bIdx, hasW, wIdx, hasD, dIdx)
-				delete(colIdx, balanceHeader)
-				delete(colIdx, "Balance")
-			}
-		}
-
 		// Verbose header/column dump for Excel branch as well: index, header,
 		// normalized token, numeric-sample and first few sample cells.
 		sampleValuesLimit := 5
@@ -977,10 +962,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			// prefer explicit Debit/Credit headers that are numeric
 			for colName, idx := range colIdx {
 				lcName := strings.ToLower(strings.TrimSpace(colName))
-				isDebitCredit := lcName == "debit" || lcName == "credit" ||
-					strings.Contains(lcName, "withdrawal") || strings.Contains(lcName, "deposit") ||
-					headerContainsAny(lcName, bankStmtDebitHeaderAliases) || headerContainsAny(lcName, bankStmtCreditHeaderAliases)
-				if isDebitCredit {
+				if lcName == "debit" || lcName == "credit" || strings.Contains(lcName, "withdrawal") || strings.Contains(lcName, "deposit") {
 					if strings.Contains(lcName, "ref") || strings.Contains(lcName, "reference") || strings.Contains(lcName, constants.ErrReferenceRequired) {
 						continue
 					}
@@ -1092,12 +1074,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 					score += 2
 				}
 				hdr := strings.ToLower(strings.TrimSpace(headerRow[cc.idx]))
-				// prefer explicit debit/withdrawal headers; also match "dr amount"/"dr amt" style (PNB, etc.)
-				isDebitHdr := hdr == "debit" || hdr == "withdrawal" ||
-					strings.Contains(hdr, "withdrawal") ||
-					(strings.Contains(hdr, "debit") && !strings.Contains(hdr, "credit")) ||
-					(headerContainsAny(hdr, bankStmtDebitHeaderAliases) && !headerContainsAny(hdr, bankStmtCreditHeaderAliases))
-				if score > bestWScore && isDebitHdr {
+				// prefer explicit debit/withdrawal headers
+				if score > bestWScore && (hdr == "debit" || hdr == "withdrawal" || strings.Contains(hdr, "withdrawal") || (strings.Contains(hdr, "debit") && !strings.Contains(hdr, "credit"))) {
 					bestW = cc.idx
 					bestWScore = score
 				}
@@ -1113,12 +1091,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 					score += 2
 				}
 				hdr := strings.ToLower(strings.TrimSpace(headerRow[cc.idx]))
-				// also match "cr amount"/"cr amt" style (PNB, etc.)
-				isCreditHdr := hdr == "credit" || hdr == "deposit" ||
-					strings.Contains(hdr, "deposit") ||
-					(strings.Contains(hdr, "credit") && !strings.Contains(hdr, "debit")) ||
-					(headerContainsAny(hdr, bankStmtCreditHeaderAliases) && !headerContainsAny(hdr, bankStmtDebitHeaderAliases))
-				if score > bestDScore && isCreditHdr {
+				if score > bestDScore && (hdr == "credit" || hdr == "deposit" || strings.Contains(hdr, "deposit") || (strings.Contains(hdr, "credit") && !strings.Contains(hdr, "debit"))) {
 					bestD = cc.idx
 					bestDScore = score
 				}
@@ -1161,27 +1134,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 				colIdx[depositAmtHeader] = dIdx
 			}
 		}
-
-		// Late sanity-check: now that withdrawal/deposit indices are resolved, verify
-		// the balance column doesn't collide with either of them. The LLM sometimes
-		// maps balance → withdrawal column (e.g. "Dr Amount"). If detected, drop the
-		// wrong mapping and re-detect via header aliases so the real Balance column wins.
-		if bIdx, hasBal := colIdx[balanceHeader]; hasBal {
-			finalW, hasW := colIdx[withdrawalAmtHeader]
-			finalD, hasD := colIdx[depositAmtHeader]
-			if (hasW && bIdx == finalW) || (hasD && bIdx == finalD) {
-				logger.LogInfo("[BANK-UPLOAD-DEBUG] Balance index %d collides with withdrawal(%d)/deposit(%d) — re-detecting real balance column",
-					bIdx, finalW, finalD)
-				delete(colIdx, balanceHeader)
-				delete(colIdx, "Balance")
-				if idx := findColContaining(bankStmtBalanceHeaderAliases...); idx >= 0 {
-					colIdx[balanceHeader] = idx
-					colIdx["Balance"] = idx
-					logger.LogInfo("[BANK-UPLOAD-DEBUG] Re-detected balance column at index %d (header: %q)", idx, headerRow[idx])
-				}
-			}
-		}
-
 		logger.LogInfo("[BANK-UPLOAD-DEBUG] CSV Column mapping: Date=%d, Description=%d, Withdrawal=%d, Deposit=%d, Balance=%d",
 			colIdx["Date"], colIdx["Description"], colIdx["Withdrawal"], colIdx["Deposit"], colIdx["Balance"])
 
@@ -1298,20 +1250,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			}
 			logger.LogInfo("[BANK-UPLOAD-DEBUG] Custom mapping overrides applied for Excel: %v", colIdx)
 		}
-
-		// Sanity-check LLM balance mapping: same as CSV path — if LLM placed balance
-		// at the same index as withdrawal or deposit, discard it so alias fallback wins.
-		if bIdx, hasBal := colIdx[balanceHeader]; hasBal {
-			wIdx, hasW := colIdx[withdrawalAmtHeader]
-			dIdx, hasD := colIdx[depositAmtHeader]
-			if (hasW && bIdx == wIdx) || (hasD && bIdx == dIdx) {
-				logger.LogInfo("[BANK-UPLOAD-DEBUG] Excel: LLM balance index %d collides with withdrawal(%v=%d)/deposit(%v=%d) — discarding LLM balance mapping",
-					bIdx, hasW, wIdx, hasD, dIdx)
-				delete(colIdx, balanceHeader)
-				delete(colIdx, "Balance")
-			}
-		}
-
 		// Add flexible column name mappings for common variations
 		// This allows matching "Detail Description" when code looks for "Description"
 		findColContaining := func(keywords ...string) int {
@@ -1546,24 +1484,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 				colIdx[transactionRemarksHeader] = idx
 			}
 		}
-		// Late sanity-check for Excel: same as CSV path — re-detect balance if it
-		// collides with withdrawal or deposit after both are fully resolved.
-		if bIdx, hasBal := colIdx[balanceHeader]; hasBal {
-			finalW, hasW := colIdx[withdrawalAmtHeader]
-			finalD, hasD := colIdx[depositAmtHeader]
-			if (hasW && bIdx == finalW) || (hasD && bIdx == finalD) {
-				logger.LogInfo("[BANK-UPLOAD-DEBUG] Excel: Balance index %d collides with withdrawal(%d)/deposit(%d) — re-detecting real balance column",
-					bIdx, finalW, finalD)
-				delete(colIdx, balanceHeader)
-				delete(colIdx, "Balance")
-				if idx := findColContaining(bankStmtBalanceHeaderAliases...); idx >= 0 {
-					colIdx[balanceHeader] = idx
-					colIdx["Balance"] = idx
-					logger.LogInfo("[BANK-UPLOAD-DEBUG] Excel: Re-detected balance column at index %d (header: %q)", idx, headerRow[idx])
-				}
-			}
-		}
-
 		// Helper to safely get a column index or -1 when missing
 		getIdx := func(key string) int {
 			if v, ok := colIdx[key]; ok {
@@ -1743,37 +1663,13 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 		var withdrawal, deposit sql.NullFloat64
 		var balance sql.NullFloat64
 
-		// Try to locate cheque/ref and serial-no columns for fallback IDs or description enrichment.
-		// Exclude columns already mapped as description/remarks so a "Debit/Credit Ref" description
-		// column is never mistaken for a transaction reference column (Go map iteration is random).
+		// Try to locate cheque/ref and serial-no columns for fallback IDs or description enrichment
 		chequeRefIdx := -1
 		serialIdx := -1
-		descMappedIdx := -1
-		if v, ok := colIdx[transactionRemarksHeader]; ok {
-			descMappedIdx = v
-		}
-		if v, ok := colIdx["Description"]; ok && descMappedIdx == -1 {
-			descMappedIdx = v
-		}
 		for h, idx := range colIdx {
-			if idx == descMappedIdx {
-				continue // never treat the description column as a reference
-			}
 			lh := strings.ToLower(h)
-			// Prefer columns with explicit cheque/chq/ref/utr/rrn keywords; give priority to
-			// more specific names (cheque, chq) over generic "ref" by not overwriting once found.
-			isRefCol := strings.Contains(lh, "cheque") || strings.Contains(lh, "chq") ||
-				strings.Contains(lh, "utr") || strings.Contains(lh, "rrn") ||
-				strings.Contains(lh, "ref")
-			if isRefCol {
-				// Give priority to explicit cheque/chq/utr/rrn columns; only use "ref"-only match
-				// as a fallback so that a more specific match discovered later can overwrite it.
-				if chequeRefIdx == -1 {
-					chequeRefIdx = idx
-				} else if strings.Contains(lh, "cheque") || strings.Contains(lh, "chq") ||
-					strings.Contains(lh, "utr") || strings.Contains(lh, "rrn") {
-					chequeRefIdx = idx // overwrite with a more specific match
-				}
+			if strings.Contains(lh, "cheque") || strings.Contains(lh, "chq") || strings.Contains(lh, "ref") {
+				chequeRefIdx = idx
 			}
 			if serialIdx == -1 && (lh == "no." || strings.Contains(lh, "sl") || strings.Contains(lh, "serial")) {
 				serialIdx = idx
@@ -1901,16 +1797,11 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			}
 
 			if hasBalance && balanceIdx >= 0 && balanceIdx < len(row) {
-				rawBalCell := strings.TrimSpace(row[balanceIdx])
-				drBalance := isBalanceDrOverdraft(rawBalCell)
-				balanceStr := cleanAmount(rawBalCell)
+				balanceStr := cleanAmount(row[balanceIdx])
 				balance = sql.NullFloat64{Valid: false}
 				if strings.TrimSpace(balanceStr) != "" {
 					var parsedBal float64
 					if n, err := fmt.Sscanf(balanceStr, "%f", &parsedBal); n == 1 && err == nil && isFiniteNumber(parsedBal) {
-						if drBalance && parsedBal > 0 {
-							parsedBal = -parsedBal
-						}
 						balance = sql.NullFloat64{Valid: true, Float64: parsedBal}
 					}
 				}
@@ -2379,16 +2270,11 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 				}
 			}
 			if bIdx, ok := colIdx[balanceHeader]; ok && bIdx >= 0 && bIdx < len(row) {
-				rawBalCell := strings.TrimSpace(row[bIdx])
-				drBalance := isBalanceDrOverdraft(rawBalCell)
-				balanceStr := cleanAmount(rawBalCell)
+				balanceStr := cleanAmount(row[bIdx])
 				balance = sql.NullFloat64{Valid: false}
 				if strings.TrimSpace(balanceStr) != "" {
 					var parsedBal float64
 					if n, err := fmt.Sscanf(balanceStr, "%f", &parsedBal); n == 1 && err == nil && isFiniteNumber(parsedBal) {
-						if drBalance && parsedBal > 0 {
-							parsedBal = -parsedBal
-						}
 						balance = sql.NullFloat64{Valid: true, Float64: parsedBal}
 					}
 				}
@@ -2571,11 +2457,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 				"balance":          balance.Float64,
 			})
 		}
-		// Use a synthetic tran_id only when the file did not supply a real one.
-		// Preserves the bank's original reference/transaction number when available.
-		if !tranID.Valid || strings.TrimSpace(tranID.String) == "" {
-			tranID = sql.NullString{Valid: true, String: buildSyntheticTranID(stmtBatchID, rowNum)}
-		}
+		// Use a synthetic tran_id for every row to keep IDs consistent and sequential
+		// across banks regardless of cheque/reference column quality.
+		tranID = sql.NullString{Valid: true, String: buildSyntheticTranID(stmtBatchID, rowNum)}
 
 		// Append TIME STAMP to description when present so intra-day order is auditable.
 		finalDesc := description
@@ -2626,9 +2510,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 	if statementPeriodEnd.IsZero() && !csvPeriodEnd.IsZero() {
 		statementPeriodEnd = csvPeriodEnd
 	}
-	// Derive start/end from the actual min/max dates across all transactions.
-	// This is authoritative and overrides the file-order-based statementPeriodStart set
-	// from the first encountered row, which is wrong for newest-first exports (e.g. SBI).
+	// Fallback: derive start/end from any date fields on transactions if still zero
 	if len(transactions) > 0 {
 		var firstTxnDate, lastTxnDate time.Time
 		updateBounds := func(t time.Time) {
@@ -2649,12 +2531,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 				updateBounds(txn.PostedDate.Time)
 			}
 		}
-		// Always correct start with the true minimum date (handles newest-first files).
-		if !firstTxnDate.IsZero() && (statementPeriodStart.IsZero() || firstTxnDate.Before(statementPeriodStart)) {
+		if statementPeriodStart.IsZero() && !firstTxnDate.IsZero() {
 			statementPeriodStart = firstTxnDate
 		}
-		// Always correct end with the true maximum date.
-		if !lastTxnDate.IsZero() && (statementPeriodEnd.IsZero() || lastTxnDate.After(statementPeriodEnd)) {
+		if statementPeriodEnd.IsZero() && !lastTxnDate.IsZero() {
 			statementPeriodEnd = lastTxnDate
 		}
 	}
@@ -2679,57 +2559,17 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 		)
 	}
 
-	// Normalize to chronological (oldest-first) order. Some banks export newest-first;
-	// reversing before DB insert ensures auto-increment transaction_id values reflect
-	// chronological sequence so ORDER BY transaction_id gives correct display order.
-	// Detect and normalize file order. Instead of comparing only first vs last (which
-	// fails when both happen to share the same date), scan for the FIRST date change
-	// in the slice. If dates go DOWN on the first transition, the file is newest-first
-	// and we reverse the entire slice so transaction_ids reflect chronological order.
-	if len(transactions) >= 2 {
-		txDate := func(t BankStatementTransaction) time.Time {
-			if !t.ValueDate.IsZero() {
-				return t.ValueDate
-			}
-			return t.TransactionDate
-		}
-		var prevDate time.Time
-		fileDescending := false
-		foundTransition := false
-		for _, t := range transactions {
-			d := txDate(t)
-			if d.IsZero() {
-				continue
-			}
-			if !prevDate.IsZero() && !d.Equal(prevDate) {
-				fileDescending = d.Before(prevDate) // next date is earlier → descending
-				foundTransition = true
-				logger.LogInfo("[BANK-UPLOAD-DEBUG] Order check: first-date-change %s→%s descending=%v",
-					prevDate.Format(constants.DateFormat), d.Format(constants.DateFormat), fileDescending)
-				break
-			}
-			prevDate = d
-		}
-		if foundTransition && fileDescending {
-			for i, j := 0, len(transactions)-1; i < j; i, j = i+1, j-1 {
-				transactions[i], transactions[j] = transactions[j], transactions[i]
-			}
-			logger.LogInfo("[BANK-UPLOAD-DEBUG] Reversed %d transactions to chronological order", len(transactions))
-		}
-	}
-
-	// If opening balance was detected but first transaction has balance 0, recalculate all balances starting from opening balance.
-	// Apply each transaction's amounts first, then store the resulting balance (balance after the transaction).
+	// If opening balance was detected but first transaction has balance 0, recalculate all balances starting from opening balance
 	if openingBalance != 0 && len(transactions) > 0 && (!transactions[0].Balance.Valid || transactions[0].Balance.Float64 == 0) {
 		cumulative = openingBalance
 		for i := 0; i < len(transactions); i++ {
+			transactions[i].Balance = sql.NullFloat64{Valid: true, Float64: cumulative}
 			if transactions[i].DepositAmount.Valid {
 				cumulative += transactions[i].DepositAmount.Float64
 			}
 			if transactions[i].WithdrawalAmount.Valid {
 				cumulative -= transactions[i].WithdrawalAmount.Float64
 			}
-			transactions[i].Balance = sql.NullFloat64{Valid: true, Float64: cumulative}
 		}
 		logger.LogInfo("[BANK-UPLOAD-DEBUG] Recalculated balances starting from opening balance %.2f", openingBalance)
 	}
@@ -3282,8 +3122,8 @@ func UploadMultiAccountBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 
 		// Debit / credit: search for explicit column names first to avoid matching
 		// "Closing ledger balance" etc. that happen to contain "credit"/"debit".
-		debitIdx := findIdx("debit amount", "debit_amount", "withdrawal amount", "withdrawal_amount", "dr amount", "dr amt", "debit", "amount subtracted")
-		creditIdx := findIdx("credit amount", "credit_amount", "deposit amount", "deposit_amount", "cr amount", "cr amt", "amount added")
+		debitIdx := findIdx("debit amount", "debit_amount", "withdrawal amount", "withdrawal_amount", "debit", "amount subtracted")
+		creditIdx := findIdx("credit amount", "credit_amount", "deposit amount", "deposit_amount", "amount added")
 		if creditIdx == -1 {
 			// Only fall back to "credit" / "deposit" when no explicit column found
 			creditIdx = findIdxExclude([]string{"ledger", "available", "brought", "closing", "opening", "current"}, "credit", "deposit")

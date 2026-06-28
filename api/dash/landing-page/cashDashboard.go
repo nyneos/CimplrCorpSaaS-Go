@@ -135,9 +135,13 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			case "last 90 days", "90 days", "90":
 				horizon = 90
 			case "year to date", "ytd":
-				// from Jan 1 of current year to today
+				// Fiscal year starts April 1 — from April 1 of current FY to today
 				now := time.Now().UTC()
-				horizon = int(now.Sub(time.Date(now.Year(), 1, 1, 0, 0, 0, 0, time.UTC)).Hours()/24) + 1
+				fyStart := time.Date(now.Year(), time.April, 1, 0, 0, 0, 0, time.UTC)
+				if now.Before(fyStart) {
+					fyStart = time.Date(now.Year()-1, time.April, 1, 0, 0, 0, 0, time.UTC)
+				}
+				horizon = int(now.Sub(fyStart).Hours()/24) + 1
 				// leave horizon = 70 for any other string
 			}
 		}
@@ -154,11 +158,13 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			filterAsOnDate = cleanFilter(r.URL.Query().Get("as_on_date"))
 		}
 
+		t0Handler := time.Now()
 		ctx := r.Context()
 		allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
 		allowedAccounts := approvedAccountNumbers(ctx)
 		allowedBanks := normalizedLower(api.GetBankNamesFromCtx(ctx))
 		allowedCurrencies := normalizedUpper(api.GetCurrencyCodesFromCtx(ctx))
+		logger.LogInfo("[TIMING] cash/middleware→handler: %v (entities=%d accounts=%d)", time.Since(t0Handler), len(allowedEntityIDs), len(allowedAccounts))
 		if len(allowedEntityIDs) == 0 || len(allowedAccounts) == 0 || len(allowedBanks) == 0 || len(allowedCurrencies) == 0 {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
@@ -182,12 +188,12 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Determine date window ──
 		// Always backward-looking: end = today (or to_date), start = end - horizon (or from_date).
-		// The balance as_of_date filter ALWAYS uses this window — a Sep 2025 balance will NOT
-		// appear when the user selects "Last 90 Days" (Jan–Apr window), for example.
 		var start, end time.Time
+		explicitFromDate := false
 		if fd := strings.TrimSpace(req.FromDate); fd != "" {
 			if t, err := time.Parse(constants.DateFormat, fd); err == nil {
 				start = t
+				explicitFromDate = true
 			}
 		}
 		if td := strings.TrimSpace(req.ToDate); td != "" {
@@ -196,20 +202,26 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if start.IsZero() || end.IsZero() {
-			// Backward-looking window from horizon: end = today, start = today - (horizon-1).
 			end = time.Now().UTC().Truncate(24 * time.Hour)
 			start = end.AddDate(0, 0, -(horizon - 1))
 		}
 		startStr := start.Format(constants.DateFormat)
 		endStr := end.Format(constants.DateFormat)
 
-		// Balance date filter always applied — both horizon and custom ranges restrict as_of_date.
-		balDateStart := startStr
+		// For balance snapshot (bank_balances_manual): no lower-bound on as_of_date unless the
+		// user explicitly provided from_date. The DISTINCT ON picks the latest balance per account
+		// automatically — we never want to hide the current balance just because the last statement
+		// is older than the horizon window.
+		balDateStart := ""
+		if explicitFromDate {
+			balDateStart = startStr
+		}
 		balDateEnd := endStr
 
 		// ── 1) Fetch balance per account ──
 		//   • as_on_date provided → last transaction's running balance on/before that date (from statement transactions)
 		//   • otherwise          → latest APPROVED balance from bank_balances_manual within the date window
+		t0Balance := time.Now()
 		var q string
 		var qArgs []interface{}
 		if filterAsOnDate != "" {
@@ -225,12 +237,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(mba.country, '')                    AS country
 				FROM public.masterbankaccount mba
 				JOIN cimplrcorpsaas.bank_statements bs
-					ON bs.account_number = mba.account_number
-				JOIN (
-					SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-					FROM cimplrcorpsaas.auditactionbankstatement
-					ORDER BY bankstatementid, requested_at DESC
-				) aab ON aab.bankstatementid = bs.bank_statement_id AND aab.processing_status = 'APPROVED'
+					ON bs.account_number = mba.account_number AND bs.is_deleted = false AND bs.current_status = 'APPROVED'
 				JOIN cimplrcorpsaas.bank_statement_transactions tx
 					ON tx.bank_statement_id = bs.bank_statement_id
 				WHERE mba.is_deleted = false
@@ -255,7 +262,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(me.entity_name, '')  AS entity_name,
 				lab.country
 			FROM tx_balance lab
-			JOIN masterbankaccount  mba ON mba.account_number = lab.account_no
+			JOIN masterbankaccount  mba ON mba.account_number = lab.account_no AND mba.is_deleted = false
 			LEFT JOIN masterentitycash me  ON me.entity_id::text = mba.entity_id
 			ORDER BY lab.account_no
 			`
@@ -297,7 +304,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(me.entity_name, '')   AS entity_name,
 				lab.country
 			FROM latest_approved_balance lab
-			JOIN masterbankaccount  mba ON mba.account_number = lab.account_no
+			JOIN masterbankaccount  mba ON mba.account_number = lab.account_no AND mba.is_deleted = false
 			LEFT JOIN masterentitycash me  ON me.entity_id::text = mba.entity_id
 			ORDER BY lab.account_no
 			`
@@ -331,6 +338,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			balRows = append(balRows, balRow{Account: a, Nickname: n, Currency: cur, Balance: bal, Bank: bank, Entity: ent, Country: country})
 		}
+		logger.LogInfo("[TIMING] cash/1-balance: %v (rows=%d)", time.Since(t0Balance), len(balRows))
 
 		// ── Aggregate totals ──
 		var totalINR float64
@@ -385,29 +393,8 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 2) Transaction date window (already computed above) ──
 
-		// ── Shared transaction filter snippet ──
-		// $1=startStr, $2=endStr, $3=filterBank, $4=filterAccount, $5=filterEntity, $6=filterCurrency
-		txnFilter := func(sumCol string) string {
-			return `SELECT COALESCE(SUM(COALESCE(` + sumCol + `,0)),0)::float8,
-	COALESCE(NULLIF(m.currency,''),'INR') AS currency_code
-FROM cimplrcorpsaas.bank_statement_transactions t
-JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
-JOIN cimplrcorpsaas.auditactionbankstatement a
-     ON a.bankstatementid = bs.bank_statement_id AND a.processing_status = 'APPROVED'
-LEFT JOIN public.masterbankaccount m ON bs.account_number = m.account_number
-WHERE t.value_date BETWEEN $1 AND $2
-  AND ($3 = '' OR LOWER(TRIM(m.bank_name))   = LOWER(TRIM($3)))
-  AND ($4 = '' OR m.account_number            = $4)
-  AND ($5 = '' OR m.entity_id::text           = $5)
-  AND ($6 = '' OR UPPER(TRIM(COALESCE(m.currency,''))) = UPPER(TRIM($6)))
-  AND m.entity_id::text = ANY($7)
-  AND m.account_number = ANY($8)
-  AND LOWER(TRIM(COALESCE(m.bank_name, ''))) = ANY($9)
-  AND UPPER(TRIM(COALESCE(m.currency, ''))) = ANY($10)
-GROUP BY COALESCE(NULLIF(m.currency,''),'INR')`
-		}
-
 		// ── 3) Projection KPIs ──
+		t0Proj := time.Now()
 		monthStartKey := start.Year()*12 + int(start.Month())
 		monthEndKey := end.Year()*12 + int(end.Month())
 		logger.LogInfo("[DEBUG] projection month keys start=%d end=%d", monthStartKey, monthEndKey)
@@ -514,6 +501,7 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 			}
 			projRows.Close()
 		}
+		logger.LogInfo("[TIMING] cash/3-projection: %v", time.Since(t0Proj))
 
 		projectedInflowsINR = rd2(projectedInflowsINR)
 		projectedOutflowsINR = rd2(projectedOutflowsINR)
@@ -578,6 +566,12 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 		}
 
 		// ── 6) Weekwise forecast vs actual ──
+		// Week slots and actuals follow the selected period exactly:
+		//   • YTD       → April 1 of current FY to today
+		//   • Last N    → N days back from today
+		//   • Custom    → user-supplied from_date / to_date
+		// Actuals will be 0 for periods where no statement data has been uploaded yet;
+		// users can use Custom Date Range to reach historical data (e.g. Oct 2025 – Feb 2026).
 		totalDays := int(end.Sub(start).Hours()/24) + 1
 		numWeeks := (totalDays + 6) / 7
 		if numWeeks <= 0 {
@@ -587,48 +581,96 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 			numWeeks = 52
 		}
 
-		weeks := make([]map[string]interface{}, 0, numWeeks)
+		// Compute all week boundaries upfront for the label map.
+		type weekBounds struct{ ws, we time.Time }
+		weekSlots := make([]weekBounds, 0, numWeeks)
 		for i := 0; i < numWeeks; i++ {
 			ws := start.AddDate(0, 0, i*7)
 			we := ws.AddDate(0, 0, 6)
 			if we.After(end) {
 				we = end
 			}
-			wsStr := ws.Format(constants.DateFormat)
-			weStr := we.Format(constants.DateFormat)
+			weekSlots = append(weekSlots, weekBounds{ws, we})
+		}
 
-			filters := txnRangeFilters{
-				Bank:              filterBank,
-				Account:           filterAccount,
-				Entity:            filterEntity,
-				Currency:          filterCurrency,
-				AllowedEntityIDs:  allowedEntityIDs,
-				AllowedAccounts:   allowedAccounts,
-				AllowedBankNames:  allowedBanks,
-				AllowedCurrencies: allowedCurrencies,
+		// One query returns per-day deposit+withdrawal sums; we aggregate into weeks in Go.
+		weekActuals := map[string][2]float64{} // key = week-start YYYY-MM-DD → [deposit, withdrawal]
+		t0Week := time.Now()
+		// Uses current_status on bank_statements (maintained by trigger) — no audit table JOIN.
+		// Covering index idx_bst_covering_weekwise makes this an index-only scan at any data volume.
+		batchWeekQ := `SELECT
+    t.value_date::date AS txn_date,
+    COALESCE(SUM(COALESCE(t.deposit_amount, 0)), 0)::float8    AS deposit_sum,
+    COALESCE(SUM(COALESCE(t.withdrawal_amount, 0)), 0)::float8 AS withdrawal_sum
+FROM cimplrcorpsaas.bank_statement_transactions t
+JOIN cimplrcorpsaas.bank_statements bs
+     ON t.bank_statement_id = bs.bank_statement_id AND bs.is_deleted = false AND bs.current_status = 'APPROVED'
+LEFT JOIN public.masterbankaccount m ON bs.account_number = m.account_number
+WHERE t.value_date BETWEEN $1 AND $2
+  AND ($3 = '' OR LOWER(TRIM(m.bank_name))                      = LOWER(TRIM($3)))
+  AND ($4 = '' OR m.account_number                              = $4)
+  AND ($5 = '' OR m.entity_id::text                             = $5)
+  AND ($6 = '' OR UPPER(TRIM(COALESCE(m.currency, '')))         = UPPER(TRIM($6)))
+  AND m.entity_id::text                                         = ANY($7)
+  AND m.account_number                                          = ANY($8)
+  AND LOWER(TRIM(COALESCE(m.bank_name, '')))                    = ANY($9)
+  AND UPPER(TRIM(COALESCE(m.currency, '')))                     = ANY($10)
+GROUP BY t.value_date::date`
+
+		if bwRows, err := pgxPool.Query(ctx, batchWeekQ,
+			startStr, endStr,
+			filterBank, filterAccount, filterEntity, filterCurrency,
+			allowedEntityIDs, allowedAccounts, allowedBanks, allowedCurrencies,
+		); err != nil {
+			logger.LogError("[TIMING] weekwise batch query error: %v", err)
+		} else {
+			for bwRows.Next() {
+				var txnDate time.Time
+				var dep, wdl float64
+				if err := bwRows.Scan(&txnDate, &dep, &wdl); err == nil {
+					// Assign to the week-start that contains this date.
+					for _, wb := range weekSlots {
+						if !txnDate.Before(wb.ws) && !txnDate.After(wb.we) {
+							key := wb.ws.Format(constants.DateFormat)
+							v := weekActuals[key]
+							v[0] += dep
+							v[1] += wdl
+							weekActuals[key] = v
+							break
+						}
+					}
+				}
 			}
-			aIn := sumTxnRange(ctx, pgxPool, txnFilter("t.deposit_amount"), wsStr, weStr, filters)
-			aOut := sumTxnRange(ctx, pgxPool, txnFilter("t.withdrawal_amount"), wsStr, weStr, filters)
+			bwRows.Close()
+		}
+		logger.LogInfo("[TIMING] weekwise batch query: %v", time.Since(t0Week))
+
+		weeks := make([]map[string]interface{}, 0, numWeeks)
+		for _, wb := range weekSlots {
+			key := wb.ws.Format(constants.DateFormat)
+			aIn := rd2(toINR(weekActuals[key][0], "INR"))
+			aOut := rd2(toINR(weekActuals[key][1], "INR"))
 
 			var fIn, fOut float64
-			for d := ws; !d.After(we); d = d.AddDate(0, 0, 1) {
-				key := d.Format(constants.DateFormat)
-				fIn += projectedDailyInflow[key]
-				fOut += projectedDailyOutflow[key]
+			for d := wb.ws; !d.After(wb.we); d = d.AddDate(0, 0, 1) {
+				k := d.Format(constants.DateFormat)
+				fIn += projectedDailyInflow[k]
+				fOut += projectedDailyOutflow[k]
 			}
 
 			weeks = append(weeks, map[string]interface{}{
-				"week":             ws.Format("Jan 2") + " - " + we.Format("Jan 2"),
+				"week":             wb.ws.Format("Jan 2") + " - " + wb.we.Format("Jan 2"),
 				"forecast_inflow":  rd2(fIn),
-				"actual_inflow":    rd2(aIn),
+				"actual_inflow":    aIn,
 				"inflow_variance":  rd2(fIn - aIn),
 				"forecast_outflow": rd2(fOut),
-				"actual_outflow":   rd2(aOut),
+				"actual_outflow":   aOut,
 				"outflow_variance": rd2(fOut - aOut),
 				"net_variance":     rd2((fIn - fOut) - (aIn - aOut)),
 			})
 		}
 
+		logger.LogInfo("[TIMING] cash/total-handler: %v", time.Since(t0Handler))
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -645,32 +687,3 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 	}
 }
 
-type txnRangeFilters struct {
-	Bank              string
-	Account           string
-	Entity            string
-	Currency          string
-	AllowedEntityIDs  []string
-	AllowedAccounts   []string
-	AllowedBankNames  []string
-	AllowedCurrencies []string
-}
-
-// sumTxnRange executes a transaction aggregation query for the given period and filters,
-// returns the total in INR.
-func sumTxnRange(ctx context.Context, pgxPool *pgxpool.Pool, q, startStr, endStr string, f txnRangeFilters) float64 {
-	rs, err := pgxPool.Query(ctx, q, startStr, endStr, f.Bank, f.Account, f.Entity, f.Currency, f.AllowedEntityIDs, f.AllowedAccounts, f.AllowedBankNames, f.AllowedCurrencies)
-	if err != nil {
-		return 0
-	}
-	defer rs.Close()
-	var total float64
-	for rs.Next() {
-		var amt float64
-		var cur string
-		if err := rs.Scan(&amt, &cur); err == nil {
-			total += toINR(amt, cur)
-		}
-	}
-	return math.Round(total*100) / 100
-}

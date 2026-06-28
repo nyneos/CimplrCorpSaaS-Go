@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -134,7 +133,12 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 											SELECT * FROM prioritized_audit WHERE rn = 1
 										)
 										SELECT ss.bank_statement_id, ss.entity_name, ss.account_number, ss.statement_period_start, ss.statement_period_end, ss.opening_balance, ss.closing_balance, ss.uploaded_at,
-													 la.actiontype, la.processing_status, la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason,
+													 la.actiontype,
+													 CASE
+													     WHEN la.actiontype = 'RECAT' AND la.processing_status = 'PENDING_EDIT_APPROVAL' THEN 'APPROVED'
+													     ELSE la.processing_status
+													 END AS processing_status,
+													 la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason,
 														ss.bank_name,
 														ss.account_nickname,
 														ss.upload_s3_key
@@ -236,10 +240,12 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 				t.description,
 				t.withdrawal_amount,
 				t.deposit_amount,
-				-- Use stored balance when available (including legitimate zero balance);
-				-- fall back to running computation only when balance was never stored (NULL).
+				-- Use stored balance when non-zero; otherwise compute running balance
+				-- from opening_balance + cumulative (deposits - withdrawals) ordered
+				-- by value_date. This fixes statements committed before the running-
+				-- balance write was added to CommitHandler.
 				CASE
-					WHEN t.balance IS NOT NULL THEN t.balance
+					WHEN COALESCE(t.balance, 0) <> 0 THEN t.balance
 					ELSE ROUND(
 						COALESCE(s.opening_balance, 0)
 						+ SUM(COALESCE(t.deposit_amount, 0) - COALESCE(t.withdrawal_amount, 0))
@@ -1998,10 +2004,6 @@ func isLikelyMultiAccountStatement(filename string, fileBytes []byte) bool {
 		return false
 	}
 
-	// Only count values that look like real account numbers (pure digits, length >= 6).
-	// This prevents metadata rows like "Branch Details", "City:", or transaction IDs
-	// like "T66643504" from triggering a false multi-account detection.
-	acctNumRe := regexp.MustCompile(`^\d{6,}$`)
 	uniq := map[string]struct{}{}
 	for i := 1; i < len(rows); i++ {
 		row := rows[i]
@@ -2009,7 +2011,7 @@ func isLikelyMultiAccountStatement(filename string, fileBytes []byte) bool {
 			continue
 		}
 		acc := strings.TrimSpace(row[accIdx])
-		if acc == "" || !acctNumRe.MatchString(acc) {
+		if acc == "" {
 			continue
 		}
 		uniq[acc] = struct{}{}

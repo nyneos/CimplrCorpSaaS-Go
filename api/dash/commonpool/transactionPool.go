@@ -20,14 +20,17 @@ import (
 )
 
 type ConsolidatedTransactionPool struct {
-	Date      string `json:"date"`
-	Entity    string `json:"entity"`
-	Bank      string `json:"bank"`
-	Currency  string `json:"currency"`
-	Category  string `json:"category"`
-	Type      string `json:"type"` // credit/debit
-	Amount    string `json:"amount"`
-	Narration string `json:"Narration"`
+	Date          string `json:"date"`
+	Entity        string `json:"entity"`
+	Bank          string `json:"bank"`
+	AccountNo     string `json:"account_no"`
+	StatementID   string `json:"statement_id"`
+	TransactionID int64  `json:"transaction_id"`
+	Currency      string `json:"currency"`
+	Category      string `json:"category"`
+	Type          string `json:"type"` // credit/debit
+	Amount        string `json:"amount"`
+	Narration     string `json:"Narration"`
 }
 
 // TransactionDBRow represents a row from bank_statement_transactions joined with transaction_categories
@@ -35,6 +38,9 @@ type TransactionDBRow struct {
 	ValueDate        time.Time
 	Entity           string
 	Bank             string
+	AccountNo        string
+	StatementID      string
+	TransactionID    int64
 	Currency         string
 	Category         sql.NullString
 	CategoryType     sql.NullString
@@ -184,14 +190,21 @@ func FetchConsolidatedTransactionPool(ctx context.Context, pool *pgxpool.Pool, q
 	args := []interface{}{
 		effectiveEntityIDs,
 		allowedAccountNumbers,
-		effectiveNormBanks,
-		effectiveNormCurrencies,
 	}
-	argN := 5
+	argN := 3
 	extra := ""
 	if filterBankID != nil {
 		extra += fmt.Sprintf(" AND mba.bank_id = $%d", argN)
 		args = append(args, filterBankID)
+		argN++
+	} else if bankF != "" {
+		extra += fmt.Sprintf(" AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($%d)", argN)
+		args = append(args, effectiveNormBanks)
+		argN++
+	}
+	if currencyF != "" {
+		extra += fmt.Sprintf(" AND upper(trim(COALESCE(mba.currency, ''))) = ANY($%d)", argN)
+		args = append(args, effectiveNormCurrencies)
 		argN++
 	}
 	if fromD != "" {
@@ -206,10 +219,13 @@ func FetchConsolidatedTransactionPool(ctx context.Context, pool *pgxpool.Pool, q
 	}
 
 	baseSQL := `
-SELECT
+SELECT DISTINCT ON (t.transaction_id)
 	COALESCE(t.transaction_date, t.value_date) AS value_date,
 	COALESCE(me.entity_name, '') AS entity_name,
 	COALESCE(mb.bank_name, '') AS bank_name,
+	s.account_number,
+	s.bank_statement_id,
+	t.transaction_id,
 	COALESCE(mba.currency, '') AS currency,
 	c.category_name,
 	c.category_type,
@@ -217,23 +233,19 @@ SELECT
 	t.withdrawal_amount,
 	t.deposit_amount
 FROM cimplrcorpsaas.bank_statement_transactions t
-JOIN cimplrcorpsaas.bank_statements s ON t.bank_statement_id = s.bank_statement_id
-JOIN public.masterbankaccount mba
-	ON t.account_number = mba.account_number
-	AND mba.entity_id = s.entity_id
-	AND mba.is_deleted = false
-JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
+JOIN cimplrcorpsaas.bank_statements s
+	ON t.bank_statement_id = s.bank_statement_id
+	AND s.is_deleted = false
+	AND s.current_status = 'APPROVED'
+LEFT JOIN public.masterbankaccount mba
+	ON mba.account_number = s.account_number
+	AND COALESCE(mba.is_deleted, false) = false
+LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 LEFT JOIN public.mastercashflowcategory c ON t.category_id = c.category_id
 LEFT JOIN public.masterentitycash me ON s.entity_id = me.entity_id
-JOIN (
-	SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-	FROM cimplrcorpsaas.auditactionbankstatement
-	ORDER BY bankstatementid, requested_at DESC
-) ap ON ap.bankstatementid = s.bank_statement_id AND ap.processing_status = 'APPROVED'
 WHERE s.entity_id = ANY($1)
-  AND s.account_number = ANY($2)
-  AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($3)
-  AND upper(trim(mba.currency)) = ANY($4)` + extra
+  AND s.account_number = ANY($2)` + extra + `
+ORDER BY t.transaction_id`
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -246,7 +258,7 @@ WHERE s.entity_id = ANY($1)
 	}
 
 	rows, err := tx.Query(ctx, `
-SELECT value_date, entity_name, bank_name, currency, category_name, category_type, description, withdrawal_amount, deposit_amount
+SELECT value_date, entity_name, bank_name, account_number, bank_statement_id, transaction_id, currency, category_name, category_type, description, withdrawal_amount, deposit_amount
 FROM _ctp_pool
 ORDER BY value_date DESC`)
 	if err != nil {
@@ -261,6 +273,9 @@ ORDER BY value_date DESC`)
 			&r.ValueDate,
 			&r.Entity,
 			&r.Bank,
+			&r.AccountNo,
+			&r.StatementID,
+			&r.TransactionID,
 			&r.Currency,
 			&r.Category,
 			&r.CategoryType,
@@ -284,14 +299,17 @@ ORDER BY value_date DESC`)
 		}
 
 		result = append(result, ConsolidatedTransactionPool{
-			Date:      r.ValueDate.Format(constants.DateFormat),
-			Entity:    r.Entity,
-			Bank:      r.Bank,
-			Currency:  r.Currency,
-			Category:  nullToString(r.Category),
-			Type:      typ,
-			Amount:    amt,
-			Narration: r.Description,
+			Date:          r.ValueDate.Format(constants.DateFormat),
+			Entity:        r.Entity,
+			Bank:          r.Bank,
+			AccountNo:     r.AccountNo,
+			StatementID:   r.StatementID,
+			TransactionID: r.TransactionID,
+			Currency:      r.Currency,
+			Category:      nullToString(r.Category),
+			Type:          typ,
+			Amount:        amt,
+			Narration:     r.Description,
 		})
 	}
 	if err := rows.Err(); err != nil {

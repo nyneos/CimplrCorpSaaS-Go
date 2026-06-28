@@ -360,13 +360,6 @@ RULE 5 — Split Headers:
   If the header is split across two consecutive rows (e.g., Row 1: "Transaction", "Value"; Row 2: "Date", "Date"),
   return the row index of the FIRST row of the split header as the header_row_index.
 
-RULE 6 — Cr/Dr indicator vs amount columns:
-  A column whose data cells contain text like "DR", "CR", "DEBIT", "CREDIT" is a DIRECTION INDICATOR.
-  Map it to "crdr". NEVER map it to "withdrawal" or "deposit" — those fields must point to columns
-  containing NUMERIC transaction amounts. If you see a column named "Type" or "Indicator" whose
-  cells contain only "DR" or "CR", that is the crdr column. Then find the single numeric amount
-  column and apply Rule 4 (set both withdrawal and deposit to that column index).
-
 Fields to identify:
    - date        : primary transaction date column
    - value_date  : column with value/posting dates (must have dates in data rows); fall back to date index if none

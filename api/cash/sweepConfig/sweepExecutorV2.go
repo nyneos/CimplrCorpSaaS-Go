@@ -169,7 +169,9 @@ func GetSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// GetAllSweepExecutionLogsV2 returns ALL execution logs across all banks (no entity/bank filtering)
+// GetAllSweepExecutionLogsV2 returns all execution logs for the requested date window.
+// Date filtering is index-friendly (no function cast on the column).
+// Search/sort/pagination are handled client-side on the returned dataset.
 func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -177,7 +179,7 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID       string `json:"user_id"`
 			SweepID      string `json:"sweep_id,omitempty"`
 			InitiationID string `json:"initiation_id,omitempty"`
-			Status       string `json:"status,omitempty"` // SUCCESS, FAILED
+			Status       string `json:"status,omitempty"`
 			FromDate     string `json:"from_date,omitempty"`
 			ToDate       string `json:"to_date,omitempty"`
 		}
@@ -186,19 +188,14 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
-
 		if req.UserID == "" {
 			api.RespondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
-
-		// user_id must match middleware-authenticated user
 		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
 			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-
-		// Validate session
 		valid := false
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -211,9 +208,8 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Build query - NO entity/bank filtering, returns ALL execution logs
 		query := `
-			SELECT 
+			SELECT
 				l.execution_id,
 				l.initiation_id,
 				l.sweep_id,
@@ -231,8 +227,7 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				c.sweep_type
 			FROM cimplrcorpsaas.sweep_execution_log l
 			LEFT JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = l.sweep_id
-			WHERE 1=1
-		`
+			WHERE 1=1`
 
 		args := []interface{}{}
 		argPos := 1
@@ -242,30 +237,29 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, req.SweepID)
 			argPos++
 		}
-
 		if req.InitiationID != "" {
 			query += fmt.Sprintf(" AND l.initiation_id = $%d", argPos)
 			args = append(args, req.InitiationID)
 			argPos++
 		}
-
 		if req.Status != "" {
 			query += fmt.Sprintf(" AND l.status = $%d", argPos)
 			args = append(args, strings.ToUpper(req.Status))
 			argPos++
 		}
-
 		if req.FromDate != "" {
-			query += fmt.Sprintf(" AND l.execution_date >= $%d", argPos)
+			// index-friendly: no cast on the column side
+			query += fmt.Sprintf(" AND l.execution_date >= $%d::date", argPos)
 			args = append(args, req.FromDate)
 			argPos++
 		}
-
 		if req.ToDate != "" {
-			query += fmt.Sprintf(" AND l.execution_date <= $%d", argPos)
+			// covers the entire to_date day without casting the column
+			query += fmt.Sprintf(" AND l.execution_date < $%d::date + 1", argPos)
 			args = append(args, req.ToDate)
 			argPos++
 		}
+		_ = argPos
 
 		query += " ORDER BY l.execution_date DESC"
 
@@ -285,67 +279,52 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var amountSwept, balanceBefore, balanceAfter float64
 			var entityName, sourceBankName, targetBankName, sweepType sql.NullString
 
-			err := rows.Scan(
+			if err := rows.Scan(
 				&executionID, &initiationID, &sweepID, &executionDate, &amountSwept,
 				&fromAccount, &toAccount, &status, &errorMessage,
 				&balanceBefore, &balanceAfter,
 				&entityName, &sourceBankName, &targetBankName, &sweepType,
-			)
-			if err != nil {
+			); err != nil {
 				continue
 			}
 
-			log := map[string]interface{}{
-				"execution_id":   executionID,
-				"sweep_id":       sweepID,
-				"execution_date": executionDate.Format(constants.DateTimeFormat),
-				"amount_swept":   amountSwept,
-				"from_account":   fromAccount,
-				"to_account":     toAccount,
-				"status":         status,
-				"balance_before": balanceBefore,
-				"balance_after":  balanceAfter,
+			entry := map[string]interface{}{
+				"execution_id":     executionID,
+				"sweep_id":         sweepID,
+				"execution_date":   executionDate.Format(constants.DateTimeFormat),
+				"amount_swept":     amountSwept,
+				"from_account":     fromAccount,
+				"to_account":       toAccount,
+				"status":           status,
+				"balance_before":   balanceBefore,
+				"balance_after":    balanceAfter,
+				"initiation_id":    nil,
+				"error_message":    "",
+				"entity_name":      "",
+				"source_bank_name": "",
+				"target_bank_name": "",
+				"sweep_type":       "",
 			}
-
 			if initiationID.Valid {
-				log["initiation_id"] = initiationID.String
-			} else {
-				log["initiation_id"] = nil
+				entry["initiation_id"] = initiationID.String
 			}
-
 			if errorMessage != nil {
-				log["error_message"] = *errorMessage
-			} else {
-				log["error_message"] = ""
+				entry["error_message"] = *errorMessage
 			}
-
 			if entityName.Valid {
-				log["entity_name"] = entityName.String
-			} else {
-				log["entity_name"] = ""
+				entry["entity_name"] = entityName.String
 			}
-
 			if sourceBankName.Valid {
-				log["source_bank_name"] = sourceBankName.String
-			} else {
-				log["source_bank_name"] = ""
+				entry["source_bank_name"] = sourceBankName.String
 			}
-
 			if targetBankName.Valid {
-				log["target_bank_name"] = targetBankName.String
-			} else {
-				log["target_bank_name"] = ""
+				entry["target_bank_name"] = targetBankName.String
 			}
-
 			if sweepType.Valid {
-				log["sweep_type"] = sweepType.String
-			} else {
-				log["sweep_type"] = ""
+				entry["sweep_type"] = sweepType.String
 			}
-
-			logs = append(logs, log)
+			logs = append(logs, entry)
 		}
-
 		if rows.Err() != nil {
 			api.RespondWithResult(w, false, "DB rows error: "+rows.Err().Error())
 			return
