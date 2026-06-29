@@ -1243,7 +1243,7 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		sel := `
-			SELECT DISTINCT ON (demat_id) action_id, demat_id, processing_status
+			SELECT DISTINCT ON (demat_id) action_id, demat_id, actiontype, processing_status
 			FROM investment.auditactiondemat
 			WHERE demat_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY demat_id, requested_at DESC
@@ -1257,11 +1257,12 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		actionIDs := []string{}
+		editDematIDs := []string{}
 		cannotReject := []string{}
 		found := map[string]bool{}
 		for rows.Next() {
-			var aid, sid, ps string
-			if err := rows.Scan(&aid, &sid, &ps); err != nil {
+			var aid, sid, at, ps string
+			if err := rows.Scan(&aid, &sid, &at, &ps); err != nil {
 				continue
 			}
 			found[sid] = true
@@ -1269,6 +1270,11 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cannotReject = append(cannotReject, sid)
 			} else {
 				actionIDs = append(actionIDs, aid)
+				// A rejected EDIT must roll the master row back to its pre-edit
+				// values (the proposed change was applied immediately on edit).
+				if strings.EqualFold(at, "EDIT") && strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusPendingEditApproval {
+					editDematIDs = append(editDematIDs, sid)
+				}
 			}
 		}
 
@@ -1298,6 +1304,27 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			msg, status := getUserFriendlyDematError(err, "rejecting actions")
 			api.RespondWithError(w, status, msg)
 			return
+		}
+
+		// Revert the proposed edit on rejection: restore each field from its old_* snapshot.
+		if len(editDematIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.masterdemataccount
+				SET
+					entity_name                = CASE WHEN old_entity_name IS NOT NULL THEN old_entity_name ELSE entity_name END,
+					dp_id                      = CASE WHEN old_dp_id IS NOT NULL THEN old_dp_id ELSE dp_id END,
+					depository                 = CASE WHEN old_depository IS NOT NULL THEN old_depository ELSE depository END,
+					demat_account_number       = CASE WHEN old_demat_account_number IS NOT NULL THEN old_demat_account_number ELSE demat_account_number END,
+					depository_participant     = CASE WHEN old_depository_participant IS NOT NULL THEN old_depository_participant ELSE depository_participant END,
+					client_id                  = CASE WHEN old_client_id IS NOT NULL THEN old_client_id ELSE client_id END,
+					default_settlement_account = CASE WHEN old_default_settlement_account IS NOT NULL THEN old_default_settlement_account ELSE default_settlement_account END,
+					status                     = CASE WHEN old_status IS NOT NULL THEN old_status ELSE status END
+				WHERE demat_id = ANY($1)
+			`, editDematIDs); err != nil {
+				msg, status := getUserFriendlyDematError(err, "edit revert failed")
+				api.RespondWithError(w, status, msg)
+				return
+			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
