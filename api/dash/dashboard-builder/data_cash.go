@@ -142,7 +142,55 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 	if err != nil {
 		return nil, err
 	}
-	return scanRows(r)
+	rows, err := scanRows(r)
+	if err != nil {
+		return nil, err
+	}
+	return filterPayRecScopeRows(ctx, rows), nil
+}
+
+// queryCashPayableReceivable is the combined legacy source (payables + receivables).
+func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+	payables, err := queryCashPayable(ctx, pool, entityIDs, 0)
+	if err != nil {
+		return nil, err
+	}
+	receivables, err := queryCashReceivable(ctx, pool, entityIDs, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]map[string]any, 0, len(payables)+len(receivables))
+	for _, row := range payables {
+		out = append(out, map[string]any{
+			"transaction_id":    row["payable_id"],
+			"entity_id":         row["entity_name"],
+			"entity_name":       row["entity_name"],
+			"type":              "PAYABLE",
+			"amount":            row["amount"],
+			"due_date":          row["due_date"],
+			"counterparty_name": row["counterparty_name"],
+			"counterparty_id":   row["counterparty_name"],
+			"currency_code":     row["currency_code"],
+		})
+	}
+	for _, row := range receivables {
+		out = append(out, map[string]any{
+			"transaction_id":    row["receivable_id"],
+			"entity_id":         row["entity_name"],
+			"entity_name":       row["entity_name"],
+			"type":              "RECEIVABLE",
+			"amount":            row["invoice_amount"],
+			"due_date":          row["due_date"],
+			"counterparty_name": row["counterparty_name"],
+			"counterparty_id":   row["counterparty_name"],
+			"currency_code":     row["currency_code"],
+		})
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // ── Fund Planning ──────────────────────────────────────────────────────────
@@ -273,7 +321,6 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 			COALESCE(c.sweep_type,          '') AS sweep_type,
 			COALESCE(i.initiated_by,        '') AS initiated_by,
 			i.initiation_time,
-			COALESCE(i.overridden_amount,    0) AS overridden_amount,
 			COALESCE(a.processing_status,   '') AS processing_status
 		FROM cimplrcorpsaas.sweep_initiation i
 		JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id::text = i.sweep_id::text
@@ -389,7 +436,11 @@ func queryCashProjectionList(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 	if err != nil {
 		return nil, err
 	}
-	return scanRows(r)
+	rows, err := scanRows(r)
+	if err != nil {
+		return nil, err
+	}
+	return filterProjectionProposalRows(ctx, pool, rows)
 }
 
 // parentID = proposal_id to drill into a specific proposal's line items.
@@ -412,18 +463,16 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(i.cashflow_type, '')         AS cashflow_type,
 			COALESCE(i.category_id::text, '')     AS category_id,
 			COALESCE(i.currency_code, '')         AS currency_code,
-			COALESCE(i.department_id::text, '')   AS department_id,
-			COALESCE(i.counterparty_name, '')     AS counterparty_name,
 			COALESCE(i.expected_amount, 0)        AS expected_amount,
 			COALESCE(i.is_recurring, false)       AS is_recurring,
 			COALESCE(i.recurrence_frequency, '')  AS recurrence_frequency,
-			i.start_date,
-			i.end_date,
 			i.maturity_date,
 			COALESCE(i.bank_name, '')             AS bank_name,
 			COALESCE(i.bank_account_number, '')   AS bank_account_number
 		FROM cimplrcorpsaas.cashflow_proposal_item i
-		WHERE COALESCE(i.is_deleted, false) = false %s %s
+		JOIN cimplrcorpsaas.cashflow_proposal p ON p.proposal_id = i.proposal_id
+		WHERE i.is_deleted IS NOT TRUE
+		  AND p.is_deleted IS NOT TRUE %s %s
 		ORDER BY i.created_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
 	`, ef, proposalFilter)
@@ -561,5 +610,9 @@ func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 	if err != nil {
 		return nil, err
 	}
-	return scanRows(r)
+	out := make([]map[string]any, len(rows))
+	for i, row := range rows {
+		out[i] = row
+	}
+	return out, nil
 }

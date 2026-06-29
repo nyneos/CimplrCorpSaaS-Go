@@ -716,3 +716,75 @@ func calculateSummary(data []map[string]interface{}) map[string]interface{} {
 		"net_amount":    totalInflow - totalOutflow,
 	}
 }
+
+// fundAvailabilityEndDate returns the horizon end date for a view type.
+func fundAvailabilityEndDate(asOfDate time.Time, viewType string) time.Time {
+	switch viewType {
+	case "weekly":
+		return asOfDate.AddDate(0, 0, 364)
+	case "monthly":
+		return asOfDate.AddDate(0, 24, 0)
+	case "quarterly", "yearly":
+		return asOfDate.AddDate(1, 0, 0)
+	default:
+		return asOfDate.AddDate(0, 0, 31)
+	}
+}
+
+// CombinedFundAvailabilityRows mirrors /cash/fund-availability/combined as flat dashboard rows.
+func CombinedFundAvailabilityRows(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate time.Time, viewType string, entityIDs, entityNames, bankNames []string) ([]map[string]any, error) {
+	viewType = strings.ToLower(strings.TrimSpace(viewType))
+	if viewType == "" {
+		viewType = "daily"
+	}
+	endDate := fundAvailabilityEndDate(asOfDate, viewType)
+
+	actuals, err := fetchActuals(ctx, pgxPool, asOfDate, endDate, viewType, entityIDs, bankNames)
+	if err != nil {
+		return nil, err
+	}
+	projections, err := fetchProjections(ctx, pgxPool, asOfDate, endDate, viewType, entityNames, bankNames)
+	if err != nil {
+		return nil, err
+	}
+
+	rows := make([]map[string]any, 0, len(actuals)+len(projections))
+	for _, item := range actuals {
+		rows = append(rows, flattenFundAvailabilityRow(item, "ACTUAL"))
+	}
+	for _, item := range projections {
+		rows = append(rows, flattenFundAvailabilityRow(item, "PROJECTION"))
+	}
+	return rows, nil
+}
+
+func flattenFundAvailabilityRow(item map[string]interface{}, recordType string) map[string]any {
+	row := map[string]any{
+		"record_type":   recordType,
+		"entity_id":     item["entity_id"],
+		"entity_name":   item["entity_name"],
+		"bank_name":     item["bank_name"],
+		"bank_account":  item["bank_account"],
+		"currency_code": item["currency_code"],
+		"usage":         item["usage"],
+		"flow":          item["flow"],
+		"category_id":   item["category_id"],
+		"category_name": item["category_name"],
+		"description":   item["description"],
+		"total_amount":  item["total_amount"],
+	}
+	if recordType == "PROJECTION" {
+		row["is_recurring"] = item["is_recurring"]
+		row["maturity_date"] = item["maturity_date"]
+		row["recurrence_frequency"] = item["recurrence_frequency"]
+	}
+	row["row_id"] = fmt.Sprintf(
+		"%s|%s|%s|%s|%s",
+		recordType,
+		fmt.Sprint(item["entity_id"]),
+		fmt.Sprint(item["bank_account"]),
+		fmt.Sprint(item["category_id"]),
+		fmt.Sprint(item["description"]),
+	)
+	return row
+}
