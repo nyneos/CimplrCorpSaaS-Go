@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"CimplrCorpSaas/internal/validation"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -100,43 +102,25 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 }
 
 // ── Payable / Receivable ───────────────────────────────────────────────────
-func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	_ = entityIDs // entity filtering via entity_name handled in query if needed
-	args := []any{limit}
+func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+	ef, efArgs := entityNameFilter(ctx, "p", "entity_name", 2)
+	args := append([]any{limit}, efArgs...)
 
-	q := `
-		WITH pr AS (
-			SELECT
-				payable_id::text             AS transaction_id,
-				COALESCE(entity_name, '')    AS entity_name,
-				'PAYABLE'                    AS type,
-				COALESCE(amount, 0)          AS amount,
-				due_date,
-				COALESCE(counterparty_name, '') AS counterparty_name
-			FROM public.tr_payables
-			WHERE COALESCE(is_deleted, false) = false
-			UNION ALL
-			SELECT
-				receivable_id::text               AS transaction_id,
-				COALESCE(entity_name, '')         AS entity_name,
-				'RECEIVABLE'                      AS type,
-				COALESCE(invoice_amount, 0)       AS amount,
-				due_date,
-				COALESCE(counterparty_name, '')   AS counterparty_name
-			FROM public.tr_receivables
-			WHERE COALESCE(is_deleted, false) = false
-		)
+	q := fmt.Sprintf(`
 		SELECT
-			COALESCE(pr.transaction_id,   '') AS transaction_id,
-			COALESCE(pr.entity_name,      '') AS entity_name,
-			COALESCE(pr.type,             '') AS type,
-			COALESCE(pr.amount,            0) AS amount,
-			pr.due_date,
-			COALESCE(pr.counterparty_name,'') AS counterparty_name
-		FROM pr
-		ORDER BY pr.due_date ASC NULLS LAST
+			COALESCE(p.payable_id::text, '')      AS payable_id,
+			COALESCE(p.entity_name, '')            AS entity_name,
+			COALESCE(p.counterparty_name, '')      AS counterparty_name,
+			COALESCE(p.invoice_number, '')         AS invoice_number,
+			p.invoice_date,
+			p.due_date,
+			COALESCE(p.amount, 0)                  AS amount,
+			COALESCE(p.currency_code, '')          AS currency_code
+		FROM public.tr_payables p
+		WHERE COALESCE(p.is_deleted, false) = false %s
+		ORDER BY p.due_date ASC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`
+	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -147,6 +131,52 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 		return nil, err
 	}
 	return filterPayRecScopeRows(ctx, rows), nil
+}
+
+func queryCashReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+	ef, efArgs := entityNameFilter(ctx, "r", "entity_name", 2)
+	args := append([]any{limit}, efArgs...)
+
+	q := fmt.Sprintf(`
+		SELECT
+			COALESCE(r.receivable_id::text, '')    AS receivable_id,
+			COALESCE(r.entity_name, '')            AS entity_name,
+			COALESCE(r.counterparty_name, '')      AS counterparty_name,
+			COALESCE(r.invoice_number, '')         AS invoice_number,
+			r.invoice_date,
+			r.due_date,
+			COALESCE(r.invoice_amount, 0)          AS invoice_amount,
+			COALESCE(r.currency_code, '')          AS currency_code
+		FROM public.tr_receivables r
+		WHERE COALESCE(r.is_deleted, false) = false %s
+		ORDER BY r.due_date ASC NULLS LAST
+		LIMIT NULLIF($1, 0)
+	`, ef)
+
+	r, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := scanRows(r)
+	if err != nil {
+		return nil, err
+	}
+	return filterPayRecScopeRows(ctx, rows), nil
+}
+
+func filterPayRecScopeRows(ctx context.Context, rows []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		if validation.ValidateCashMasterReferences(ctx, map[string]interface{}{
+			"entity_name":       dashboardStr(row["entity_name"]),
+			"counterparty_name": dashboardStr(row["counterparty_name"]),
+			"currency_code":     dashboardStr(row["currency_code"]),
+		}) != "" {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 // queryCashPayableReceivable is the combined legacy source (payables + receivables).
@@ -443,6 +473,74 @@ func queryCashProjectionList(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 	return filterProjectionProposalRows(ctx, pool, rows)
 }
 
+func filterProjectionProposalRows(ctx context.Context, pool *pgxpool.Pool, rows []map[string]any) ([]map[string]any, error) {
+	if len(rows) == 0 {
+		return rows, nil
+	}
+
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if id := dashboardStr(row["proposal_id"]); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return []map[string]any{}, nil
+	}
+
+	r, err := pool.Query(ctx, `
+		SELECT
+			COALESCE(i.proposal_id::text, '')     AS proposal_id,
+			COALESCE(i.entity_name, '')           AS entity_name,
+			COALESCE(i.category_id::text, '')     AS category_id,
+			COALESCE(i.currency_code, '')         AS currency_code,
+			COALESCE(i.bank_name, '')             AS bank_name,
+			COALESCE(i.bank_account_number, '')   AS bank_account_number
+		FROM cimplrcorpsaas.cashflow_proposal_item i
+		WHERE COALESCE(i.is_deleted, false) = false
+		  AND i.proposal_id::text = ANY($1)
+	`, ids)
+	if err != nil {
+		return nil, err
+	}
+	itemRows, err := scanRows(r)
+	if err != nil {
+		return nil, err
+	}
+
+	scopedCounts := make(map[string]int, len(ids))
+	for _, item := range itemRows {
+		if validation.ValidateCashMasterReferences(ctx, map[string]interface{}{
+			"entity_name":         dashboardStr(item["entity_name"]),
+			"category_id":         dashboardStr(item["category_id"]),
+			"currency_code":       dashboardStr(item["currency_code"]),
+			"bank_name":           dashboardStr(item["bank_name"]),
+			"bank_account_number": dashboardStr(item["bank_account_number"]),
+		}) != "" {
+			continue
+		}
+		proposalID := dashboardStr(item["proposal_id"])
+		scopedCounts[proposalID]++
+	}
+
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		proposalID := dashboardStr(row["proposal_id"])
+		if validation.ValidateCashMasterReferences(ctx, map[string]interface{}{
+			"currency_code": dashboardStr(row["base_currency_code"]),
+		}) != "" {
+			continue
+		}
+		count := scopedCounts[proposalID]
+		if count == 0 {
+			continue
+		}
+		row["item_count"] = count
+		out = append(out, row)
+	}
+	return out, nil
+}
+
 // parentID = proposal_id to drill into a specific proposal's line items.
 func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", 2)
@@ -610,9 +708,5 @@ func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 	if err != nil {
 		return nil, err
 	}
-	out := make([]map[string]any, len(rows))
-	for i, row := range rows {
-		out[i] = row
-	}
-	return out, nil
+	return scanRows(r)
 }
