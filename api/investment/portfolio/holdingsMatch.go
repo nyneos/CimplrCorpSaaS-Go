@@ -49,6 +49,19 @@ func attachTransactionsToHoldings(holdings []PortfolioHoldingsRow, txs []Portfol
 				}
 			}
 		}
+		// Final fallback: match on entity + scheme only, ignoring demat/folio.
+		// Needed when the holding was built from an onboard tx (ExcludeInvestmentConfirmation
+		// removed the suite confirmation from the holdings CTE) while allTx contains only the
+		// suite confirmation (onboard was excluded by ExcludeOnboardPurchaseDuplicatingSuite).
+		// Those two paths can resolve the same physical demat account via different UUIDs,
+		// producing non-equal string values that fail the exact demat check above.
+		if len(matched) == 0 {
+			for _, tx := range txs {
+				if txMatchesHoldingLoose(tx, *h) {
+					matched = append(matched, tx)
+				}
+			}
+		}
 
 		for _, row := range matched {
 			txType := row.TxType
@@ -103,6 +116,16 @@ func txMatchesHolding(tx PortfolioTxRow, h PortfolioHoldingsRow) bool {
 		return false
 	}
 	if !folioDematCompatible(tx.DematNumber, h.DematAccountNumber) {
+		return false
+	}
+	return schemeIdentifiersMatch(tx, h)
+}
+
+// txMatchesHoldingLoose matches on entity + scheme only, ignoring folio/demat.
+// Used as a last-resort fallback when demat identifiers differ between the
+// onboard-derived holding and the suite-derived transaction.
+func txMatchesHoldingLoose(tx PortfolioTxRow, h PortfolioHoldingsRow) bool {
+	if !strings.EqualFold(strings.TrimSpace(tx.EntityName), strings.TrimSpace(h.EntityName)) {
 		return false
 	}
 	return schemeIdentifiersMatch(tx, h)

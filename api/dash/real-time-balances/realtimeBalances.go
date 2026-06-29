@@ -220,6 +220,9 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 		currency := strFromBodyThenQuery(body, q, "currency")
 		asOnDate := strFromBodyKeysThenQuery(body, q, "as_on_date",
 			"as_on_date", "asOnDate", "snapshot_date", "snapshotDate")
+		horizonStr := strFromBodyThenQuery(body, q, "horizon")
+		fromDateStr := strFromBodyKeysThenQuery(body, q, "from_date", "from_date", "fromDate")
+		toDateStr := strFromBodyKeysThenQuery(body, q, "to_date", "to_date", "toDate")
 
 		if entity != "" && !api.IsEntityAllowed(ctx, entity) {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
@@ -284,12 +287,9 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 			INNER JOIN cimplrcorpsaas.bank_statements bs ON tx.bank_statement_id = bs.bank_statement_id
 			INNER JOIN public.masterbankaccount mba ON bs.account_number = mba.account_number AND COALESCE(mba.is_deleted, false) = false
 			INNER JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
-			INNER JOIN (
-				SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-				FROM cimplrcorpsaas.auditactionbankstatement
-				ORDER BY bankstatementid, requested_at DESC
-			) a ON a.bankstatementid = bs.bank_statement_id AND a.processing_status = 'APPROVED'
-			WHERE bs.account_number = ANY($1)
+			WHERE bs.is_deleted = false
+			AND bs.current_status = 'APPROVED'
+			AND bs.account_number = ANY($1)
 				AND bs.entity_id = ANY($2)
 				AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($3)
 				AND upper(trim(COALESCE(mba.currency, ''))) = ANY($4)
@@ -793,11 +793,118 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 		}
 		stmt2Rows.Close()
 
+		// ── Daily balance trend: compute window dates (query runs after commit on pool) ──
+		horizonDays := 7
+		if h, err := strconv.Atoi(strings.TrimSpace(horizonStr)); err == nil && h > 0 {
+			horizonDays = h
+		}
+		endT, _ := time.Parse(constants.DateFormat, evalAsOn)
+		trendEnd := endT
+		var trendStart time.Time
+		if toDateStr != "" {
+			if t2, err := time.Parse(constants.DateFormat, toDateStr); err == nil {
+				trendEnd = t2
+			}
+		}
+		if fromDateStr != "" {
+			if t1, err := time.Parse(constants.DateFormat, fromDateStr); err == nil {
+				trendStart = t1
+			}
+		} else {
+			trendStart = trendEnd.AddDate(0, 0, -(horizonDays - 1))
+		}
+		trendStartStr := trendStart.Format(constants.DateFormat)
+		trendEndStr := trendEnd.Format(constants.DateFormat)
+
+		type DayPoint struct {
+			X string  `json:"x"`
+			Y float64 `json:"y"`
+		}
+		balanceTrend := []DayPoint{}
+
 		if err := txn.Commit(ctx); err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		committed = true
+
+		// ── Daily balance trend: runs on pool after commit (tempTx is dropped) ──
+		// Queries base tables directly with the same access filters.
+		// Any error here is swallowed — trend is best-effort and must not fail the response.
+		{
+			trendExtraSQL := ""
+			trendArgs := []interface{}{
+				trendStartStr, trendEndStr,
+				allowedEntityIDs, allowedAccountNumbers,
+				allowedBanksNorm, allowedCurrenciesNorm,
+			}
+			trendN := 7
+			if entity != "" {
+				if eid, ok := api.ResolveEntityIDForFilter(ctx, entity); ok {
+					trendExtraSQL += fmt.Sprintf(" AND bs.entity_id = $%d", trendN)
+					trendArgs = append(trendArgs, eid)
+					trendN++
+				}
+			}
+			if bank != "" {
+				if bid, ok := api.ResolveBankIDForFilter(ctx, bank); ok {
+					trendExtraSQL += fmt.Sprintf(" AND mba.bank_id = $%d", trendN)
+					trendArgs = append(trendArgs, bid)
+					trendN++
+				} else if bankNorm != "" {
+					trendExtraSQL += fmt.Sprintf(" AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = $%d", trendN)
+					trendArgs = append(trendArgs, bankNorm)
+					trendN++
+				}
+			}
+			if currencyNorm != "" {
+				trendExtraSQL += fmt.Sprintf(" AND upper(trim(COALESCE(mba.currency, ''))) = $%d", trendN)
+				trendArgs = append(trendArgs, currencyNorm)
+				trendN++
+			}
+			_ = trendN
+			tDailyQ := `
+WITH daily_series AS (
+    SELECT generate_series($1::date, $2::date, '1 day'::interval)::date AS day
+),
+per_day_account AS (
+    SELECT DISTINCT ON (d.day, bs.account_number)
+        d.day,
+        COALESCE(t.balance, 0) AS balance
+    FROM cimplrcorpsaas.bank_statement_transactions t
+    JOIN cimplrcorpsaas.bank_statements bs
+        ON t.bank_statement_id = bs.bank_statement_id
+        AND bs.is_deleted = false
+        AND bs.current_status = 'APPROVED'
+        AND bs.entity_id = ANY($3)
+        AND bs.account_number = ANY($4)
+    INNER JOIN public.masterbankaccount mba
+        ON bs.account_number = mba.account_number
+        AND COALESCE(mba.is_deleted, false) = false
+    INNER JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
+    CROSS JOIN daily_series d
+    WHERE lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($5)
+      AND upper(trim(COALESCE(mba.currency, ''))) = ANY($6)
+      AND COALESCE(t.transaction_date, t.value_date)::date <= d.day` + trendExtraSQL + `
+    ORDER BY d.day, bs.account_number, COALESCE(t.transaction_date, t.value_date) DESC, t.transaction_id DESC
+)
+SELECT
+    day,
+    ROUND(SUM(balance) / 10000000.0, 2) AS value_cr
+FROM per_day_account
+GROUP BY day
+ORDER BY day`
+			if tRows, err := pool.Query(ctx, tDailyQ, trendArgs...); err == nil {
+				for tRows.Next() {
+					var day time.Time
+					var val float64
+					if err := tRows.Scan(&day, &val); err == nil {
+						balanceTrend = append(balanceTrend, DayPoint{X: day.Format("02 Jan"), Y: val})
+					}
+				}
+				tRows.Close()
+			}
+		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
@@ -810,6 +917,7 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 			"donutSlices":     donutSlices,
 			"entityRows":      entityRows,
 			"topCurrencies":   topCurrencies,
+			"balanceTrend":    balanceTrend,
 		})
 	})
 }

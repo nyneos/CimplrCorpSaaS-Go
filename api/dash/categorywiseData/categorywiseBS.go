@@ -161,36 +161,27 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Resolve date window:
 		// - explicit from_date + to_date wins
-		// - else as_on_date alone means cumulative through that date (from 1970-01-01, or horizon days before as_on if horizon is set)
-		// - else rolling horizon ending today
+		// - else as_on_date: toDate = as_on_date; fromDate = (horizon days before as_on) or 1970-01-01
+		// - else (horizon or nothing, no anchor): toDate = today, fromDate = 1970-01-01 (all history).
+		//   horizon alone does NOT restrict fromDate — it only narrows when anchored to as_on_date.
 		const dashboardFromMin = "1970-01-01"
 		var fromDate, toDate string
 		if fromDateParam != "" && toDateParam != "" {
 			fromDate = fromDateParam
 			toDate = toDateParam
 		} else if asOnDate != "" {
+			// as_on_date = ceiling on transactions; show all history up to that date.
+			// horizon is ignored here — the point of as_on_date is a balance snapshot,
+			// not a rolling window. Use explicit from_date if provided.
 			toDate = asOnDate
-			fromDate = dashboardFromMin
 			if fromDateParam != "" {
 				fromDate = fromDateParam
 			} else {
-				days, err := strconv.Atoi(horizon)
-				if err != nil || days <= 0 {
-					days = 0
-				}
-				if days > 0 {
-					if t, err := time.Parse(constants.DateFormat, toDate); err == nil {
-						fromDate = t.AddDate(0, 0, -(days - 1)).Format(constants.DateFormat)
-					}
-				}
+				fromDate = dashboardFromMin
 			}
 		} else {
-			days, err := strconv.Atoi(horizon)
-			if err != nil || days <= 0 {
-				days = 30
-			}
 			toDate = time.Now().Format(constants.DateFormat)
-			fromDate = time.Now().AddDate(0, 0, -days).Format(constants.DateFormat)
+			fromDate = dashboardFromMin
 		}
 
 		// KPI balance window upper bound tracks transaction window end
@@ -211,7 +202,7 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		allowedEntityNames := api.GetEntityNamesFromCtx(ctx)
+		allowedEntityNames := normalizeLowerTrimSlice(api.GetEntityNamesFromCtx(ctx))
 		allowedAccountNumbers := ctxApprovedAccountNumbers(ctx)
 		allowedBanksNorm := normalizeLowerTrimSlice(api.GetBankNamesFromCtx(ctx))
 		allowedCurrenciesNorm := normalizeUpperTrimSlice(api.GetCurrencyCodesFromCtx(ctx))
@@ -296,6 +287,8 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			arg++
 		}
 
+		filters = append(filters, "bs.is_deleted = false")
+		filters = append(filters, "bs.current_status = 'APPROVED'")
 		whereClause := ""
 		if len(filters) > 0 {
 			whereClause = constants.ErrWhereClause + strings.Join(filters, " AND ")
@@ -313,17 +306,11 @@ JOIN cimplrcorpsaas.bank_statements bs
 LEFT JOIN public.mastercashflowcategory tc
 	ON t.category_id = tc.category_id
 LEFT JOIN public.masterbankaccount mba
-	ON mba.account_number = bs.account_number
+	ON mba.account_number = bs.account_number AND COALESCE(mba.is_deleted, false) = false
 LEFT JOIN public.masterbank mb
 	ON mb.bank_id = mba.bank_id
 LEFT JOIN public.masterentitycash me
 	ON me.entity_id = mba.entity_id
-JOIN (
-	SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-	FROM cimplrcorpsaas.auditactionbankstatement
-	ORDER BY bankstatementid, requested_at DESC
-) a ON a.bankstatementid = bs.bank_statement_id
-	AND a.processing_status = 'APPROVED'
 ` + whereClause + `
 GROUP BY category
 ORDER BY inflow DESC, outflow DESC;
@@ -372,19 +359,13 @@ FROM (
   JOIN cimplrcorpsaas.bank_statements bs
     ON t.bank_statement_id = bs.bank_statement_id
   LEFT JOIN public.masterbankaccount mba
-    ON mba.account_number = bs.account_number
+    ON mba.account_number = bs.account_number AND COALESCE(mba.is_deleted, false) = false
   LEFT JOIN public.masterbank mb
     ON mb.bank_id = mba.bank_id
   LEFT JOIN public.masterentitycash me
     ON bs.entity_id = me.entity_id
-  JOIN (
-    SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-    FROM cimplrcorpsaas.auditactionbankstatement
-    ORDER BY bankstatementid, requested_at DESC
-  ) ap ON ap.bankstatementid = bs.bank_statement_id
-     AND ap.processing_status = 'APPROVED'
 ` + whereClause + `
-  GROUP BY 
+  GROUP BY
     bs.entity_id,
     me.entity_name,
     COALESCE(mba.bank_name, mb.bank_name),
@@ -407,13 +388,9 @@ LEFT JOIN LATERAL (
     ON tx.bank_statement_id = bs2.bank_statement_id
 	LEFT JOIN public.mastercashflowcategory tc
 		ON tx.category_id = tc.category_id
-  JOIN (
-    SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-    FROM cimplrcorpsaas.auditactionbankstatement
-    ORDER BY bankstatementid, requested_at DESC
-  ) ap2 ON ap2.bankstatementid = bs2.bank_statement_id
-     AND ap2.processing_status = 'APPROVED'
-  WHERE bs2.account_number = x.account_number
+  WHERE bs2.is_deleted = false
+    AND bs2.current_status = 'APPROVED'
+    AND bs2.account_number = x.account_number
     AND bs2.entity_id = x.entity_id
     AND COALESCE(tx.transaction_date, tx.value_date) >= $1::date
     AND COALESCE(tx.transaction_date, tx.value_date) <= $2::date
@@ -483,12 +460,6 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		ON mb.bank_id = mba.bank_id
 	LEFT JOIN public.masterentitycash me
 		ON bs.entity_id = me.entity_id
-	JOIN (
-		SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-		FROM cimplrcorpsaas.auditactionbankstatement
-		ORDER BY bankstatementid, requested_at DESC
-		) ap ON ap.bankstatementid = bs.bank_statement_id
-	   AND ap.processing_status = 'APPROVED'
 	` + whereClause + `
 	ORDER BY COALESCE(t.transaction_date, t.value_date) DESC
 	LIMIT ` + strconv.Itoa(txnLimit) + `;
@@ -664,7 +635,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 			snapParts := []string{`COALESCE(t.transaction_date, t.value_date)::date <= $1::date`}
 			snapArgs := []interface{}{asOnDate}
 			sn := 2
-			snapParts = append(snapParts, fmt.Sprintf("bs.entity_id = ANY($%d)", sn))
+			snapParts = append(snapParts, fmt.Sprintf("LOWER(TRIM(COALESCE(me.entity_name,''))) = ANY($%d)", sn))
 			snapArgs = append(snapArgs, allowedEntityNames)
 			sn++
 			snapParts = append(snapParts, fmt.Sprintf("bs.account_number = ANY($%d)", sn))
@@ -676,6 +647,8 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 			snapParts = append(snapParts, fmt.Sprintf("upper(trim(COALESCE(mba.currency, ''))) = ANY($%d)", sn))
 			snapArgs = append(snapArgs, allowedCurrenciesNorm)
 			sn++
+			snapParts = append(snapParts, "bs.is_deleted = false")
+			snapParts = append(snapParts, "bs.current_status = 'APPROVED'")
 			if entityF != "" {
 				eid, ok := api.ResolveEntityIDForFilter(ctx, entityF)
 				if ok {
@@ -719,11 +692,6 @@ WITH ranked AS (
   JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
   LEFT JOIN public.masterbankaccount mba ON mba.account_number = bs.account_number AND COALESCE(mba.is_deleted, false) = false
   LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-  JOIN (
-    SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-    FROM cimplrcorpsaas.auditactionbankstatement
-    ORDER BY bankstatementid, requested_at DESC
-  ) ap ON ap.bankstatementid = bs.bank_statement_id AND ap.processing_status = 'APPROVED'
   ` + snapWhere + `
 )
 `
@@ -780,19 +748,11 @@ JOIN cimplrcorpsaas.bank_statements bs
 LEFT JOIN public.mastercashflowcategory tc
 	ON t.category_id = tc.category_id
 LEFT JOIN public.masterbankaccount mba
-	ON mba.account_number = bs.account_number
+	ON mba.account_number = bs.account_number AND COALESCE(mba.is_deleted, false) = false
 LEFT JOIN public.masterbank mb
 	ON mb.bank_id = mba.bank_id
 LEFT JOIN public.masterentitycash me
-	ON me.entity_id = mba.entity_id
-LEFT JOIN public.masterentitycash me
 	ON bs.entity_id = me.entity_id
-JOIN (
-	SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-	FROM cimplrcorpsaas.auditactionbankstatement
-	ORDER BY bankstatementid, requested_at DESC
-) ap ON ap.bankstatementid = bs.bank_statement_id
-   AND ap.processing_status = 'APPROVED'
 ` + whereClause + `
 AND COALESCE(t.misclassified_flag, false) = true
 ORDER BY COALESCE(t.transaction_date, t.value_date) DESC
@@ -848,12 +808,6 @@ LIMIT ` + strconv.Itoa(txnLimit) + `;
 					ON mba.account_number = bs.account_number
 				LEFT JOIN public.masterbank mb
 					ON mb.bank_id = mba.bank_id
-				JOIN (
-					SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-					FROM cimplrcorpsaas.auditactionbankstatement
-					ORDER BY bankstatementid, requested_at DESC
-				) ap ON ap.bankstatementid = bs.bank_statement_id
-					AND ap.processing_status = 'APPROVED'
 				` + whereClause + `
 			`
 			var txnCount int64

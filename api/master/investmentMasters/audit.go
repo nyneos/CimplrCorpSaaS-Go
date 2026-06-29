@@ -87,18 +87,6 @@ func respondMasterAuditPayload(w http.ResponseWriter, payload interface{}) {
 	})
 }
 
-func marshalAuditValueSnapshots(oldValues, newValues map[string]interface{}) (string, string, error) {
-	oldJSON, err := json.Marshal(oldValues)
-	if err != nil {
-		return "", "", err
-	}
-	newJSON, err := json.Marshal(newValues)
-	if err != nil {
-		return "", "", err
-	}
-	return string(oldJSON), string(newJSON), nil
-}
-
 // ─── GetInterestTypeAuditHistory ─────────────────────────────────────────────
 // POST /master/interest-type/audit-history
 // Body: { user_id, interest_id? }
@@ -809,8 +797,6 @@ func GetAMCAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.checker_ip,'') AS checker_ip,
 				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment,
-				COALESCE(a.old_values, '{}'::jsonb)::text AS old_values,
-				COALESCE(a.new_values, '{}'::jsonb)::text AS new_values,
 				COALESCE(m.amc_name,'') AS amc_name,
 				COALESCE(m.old_amc_name,'') AS old_amc_name,
 				COALESCE(m.internal_amc_code,'') AS internal_amc_code,
@@ -912,26 +898,15 @@ func GetSchemeAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.checker_ip,'') AS checker_ip,
 				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment,
-				COALESCE(a.old_values, '{}'::jsonb)::text AS old_values,
-				COALESCE(a.new_values, '{}'::jsonb)::text AS new_values,
 				COALESCE(m.scheme_name,'') AS scheme_name,
-				COALESCE(m.old_scheme_name,'') AS old_scheme_name,
 				COALESCE(m.isin,'') AS isin,
-				COALESCE(m.old_isin,'') AS old_isin,
 				COALESCE(m.amc_name,'') AS amc_name,
-				COALESCE(m.old_amc_name,'') AS old_amc_name,
 				COALESCE(m.internal_scheme_code,'') AS internal_scheme_code,
-				COALESCE(m.old_internal_scheme_code,'') AS old_internal_scheme_code,
 				COALESCE(m.internal_risk_rating,'') AS internal_risk_rating,
-				COALESCE(m.old_internal_risk_rating,'') AS old_internal_risk_rating,
 				COALESCE(m.erp_gl_account,'') AS erp_gl_account,
-				COALESCE(m.old_erp_gl_account,'') AS old_erp_gl_account,
 				COALESCE(m.amfi_scheme_code,'') AS amfi_scheme_code,
-				COALESCE(m.old_amfi_scheme_code,'') AS old_amfi_scheme_code,
 				COALESCE(m.status,'') AS status,
-				COALESCE(m.old_status,'') AS old_status,
 				COALESCE(m.method,'') AS method,
-				COALESCE(m.old_method,'') AS old_method,
 				COALESCE(m.source,'') AS source,
 				COALESCE(m.is_deleted,false) AS is_deleted
 			FROM investment.auditactionscheme a
@@ -1007,16 +982,10 @@ func GetDPAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.checker_ip,'') AS checker_ip,
 				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment,
-				COALESCE(a.old_values, '{}'::jsonb)::text AS old_values,
-				COALESCE(a.new_values, '{}'::jsonb)::text AS new_values,
 				COALESCE(m.dp_name,'') AS dp_name,
-				COALESCE(m.old_dp_name,'') AS old_dp_name,
 				COALESCE(m.dp_code,'') AS dp_code,
-				COALESCE(m.old_dp_code,'') AS old_dp_code,
 				COALESCE(m.depository,'') AS depository,
-				COALESCE(m.old_depository,'') AS old_depository,
 				COALESCE(m.status,'') AS status,
-				COALESCE(m.old_status,'') AS old_status,
 				COALESCE(m.source,'') AS source,
 				COALESCE(m.is_deleted,false) AS is_deleted
 			FROM investment.auditactiondp a
