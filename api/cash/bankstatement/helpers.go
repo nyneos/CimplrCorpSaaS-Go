@@ -679,6 +679,12 @@ func scanOpeningBalanceFromRows(rows [][]string) *float64 {
 	return nil
 }
 
+// isBalanceDrOverdraft checks if a raw string signifies an overdraft balance.
+func isBalanceDrOverdraft(raw string) bool {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	return strings.HasSuffix(s, "dr") || strings.HasSuffix(s, "od") || strings.HasPrefix(s, "-")
+}
+
 // scanDeclaredClosingBalance extracts the statement's own declared closing balance from a summary,
 // "Closing Balance", or totals ("Page Total" / "Total" / "Grand Total") row. Unlike the running
 // balances on transaction rows, this is an INDEPENDENT anchor for the FINAL balance: the last
