@@ -560,6 +560,8 @@ func UpdateDP(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var sets []string
 		var args []interface{}
 		pos := 1
+		auditOldValues := map[string]interface{}{}
+		auditNewValues := map[string]interface{}{}
 
 		for k, v := range req.Fields {
 			lk := strings.ToLower(k)
@@ -579,6 +581,8 @@ func UpdateDP(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				oldField := "old_" + lk
 				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
 				args = append(args, v, oldVals[idx])
+				auditOldValues[lk] = oldVals[idx]
+				auditNewValues[lk] = v
 				pos += 2
 			}
 		}
@@ -597,10 +601,16 @@ func UpdateDP(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// insert audit record
+		oldValuesJSON, newValuesJSON, err := marshalAuditValueSnapshots(auditOldValues, auditNewValues)
+		if err != nil {
+			msg, status := getUserFriendlyDPError(err, constants.ErrAuditInsertFailed)
+			api.RespondWithError(w, status, msg)
+			return
+		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, reason, requested_by, requested_at)
-			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
-		`, req.DPID, req.Reason, userEmail); err != nil {
+			INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
+			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)
+		`, req.DPID, req.Reason, userEmail, oldValuesJSON, newValuesJSON); err != nil {
 			msg, status := getUserFriendlyDPError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
 			return
@@ -686,6 +696,8 @@ func UpdateDPBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var sets []string
 			var args []interface{}
 			pos := 1
+			auditOldValues := map[string]interface{}{}
+			auditNewValues := map[string]interface{}{}
 
 			for k, v := range row.Fields {
 				lk := strings.ToLower(k)
@@ -704,6 +716,8 @@ func UpdateDPBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					oldField := "old_" + lk
 					sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
 					args = append(args, v, oldVals[idx])
+					auditOldValues[lk] = oldVals[idx]
+					auditNewValues[lk] = v
 					pos += 2
 				}
 			}
@@ -720,10 +734,15 @@ func UpdateDPBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			oldValuesJSON, newValuesJSON, err := marshalAuditValueSnapshots(auditOldValues, auditNewValues)
+			if err != nil {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "dp_id": row.DPID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
+				continue
+			}
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, reason, requested_by, requested_at)
-				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
-			`, row.DPID, row.Reason, userEmail); err != nil {
+				INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
+				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)
+			`, row.DPID, row.Reason, userEmail, oldValuesJSON, newValuesJSON); err != nil {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "dp_id": row.DPID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
 				continue
 			}
@@ -825,6 +844,11 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+		req.Comment = strings.TrimSpace(req.Comment)
+		if req.Comment == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "checker comment is required")
 			return
 		}
 
@@ -976,6 +1000,11 @@ func BulkRejectDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		req.Comment = strings.TrimSpace(req.Comment)
+		if req.Comment == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "checker comment is required")
+			return
+		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
@@ -987,7 +1016,7 @@ func BulkRejectDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		sel := `
-			SELECT DISTINCT ON (dp_id) action_id, dp_id, processing_status
+			SELECT DISTINCT ON (dp_id) action_id, dp_id, actiontype, processing_status
 			FROM investment.auditactiondp
 			WHERE dp_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY dp_id, requested_at DESC
@@ -1001,11 +1030,12 @@ func BulkRejectDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		actionIDs := []string{}
+		editDPIDs := []string{}
 		cannotReject := []string{}
 		found := map[string]bool{}
 		for rows.Next() {
-			var aid, sid, ps string
-			if err := rows.Scan(&aid, &sid, &ps); err != nil {
+			var aid, sid, actionType, ps string
+			if err := rows.Scan(&aid, &sid, &actionType, &ps); err != nil {
 				continue
 			}
 			found[sid] = true
@@ -1013,6 +1043,9 @@ func BulkRejectDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cannotReject = append(cannotReject, sid)
 			} else {
 				actionIDs = append(actionIDs, aid)
+				if strings.EqualFold(actionType, "EDIT") && strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusPendingEditApproval {
+					editDPIDs = append(editDPIDs, sid)
+				}
 			}
 		}
 
@@ -1042,6 +1075,21 @@ func BulkRejectDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			msg, status := getUserFriendlyDPError(err, constants.ErrUpdateFailed)
 			api.RespondWithError(w, status, msg)
 			return
+		}
+		if len(editDPIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.masterdepositoryparticipant
+				SET
+					dp_name = CASE WHEN old_dp_name IS NOT NULL THEN old_dp_name ELSE dp_name END,
+					dp_code = CASE WHEN old_dp_code IS NOT NULL THEN old_dp_code ELSE dp_code END,
+					depository = CASE WHEN old_depository IS NOT NULL THEN old_depository ELSE depository END,
+					status = CASE WHEN old_status IS NOT NULL THEN old_status ELSE status END
+				WHERE dp_id = ANY($1)
+			`, editDPIDs); err != nil {
+				msg, status := getUserFriendlyDPError(err, "edit revert failed")
+				api.RespondWithError(w, status, msg)
+				return
+			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -1106,10 +1154,11 @@ func GetDPsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.dp_id)
 					a.dp_id, a.actiontype, a.processing_status, a.action_id,
-					a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason
+					a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason,
+					a.old_values
 				FROM investment.auditactiondp a
 				WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
-				ORDER BY a.dp_id, a.requested_at DESC
+				ORDER BY a.dp_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (
 				SELECT 
@@ -1125,6 +1174,10 @@ func GetDPsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 			SELECT
 				m.*,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'dp_name', m.dp_name) ELSE m.dp_name END,'') AS dp_name,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'dp_code', m.dp_code) ELSE m.dp_code END,'') AS dp_code,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'depository', m.depository) ELSE m.depository END,'') AS depository,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'status', m.status) ELSE m.status END,'') AS status,
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
