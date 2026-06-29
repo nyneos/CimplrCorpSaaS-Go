@@ -854,56 +854,32 @@ func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			allowedParam = allowedEntities
 		}
 
-		// QUERY 1: Summary rows for chart
-		// Compute true YTD P&L per scheme: Closing - Opening - (Buys - Sells)
+		// QUERY 1: Entity-level YTD P&L from portfolio_snapshot gain_loss (pre-computed)
+		// Groups by entity_name so the chart shows entity labels, not scheme names.
 		q := `
-				WITH params AS (
-						SELECT $1::date AS fy_start, $2::text AS entity_filter, $3::text AS amc_filter, $4::text[] AS allowed_entities
-				),
-				-- Transactions since FY start
-				tx AS (
-						SELECT COALESCE(ot.scheme_id, ot.scheme_internal_code, ms.scheme_id::text) AS scheme_ref,
-									 COALESCE(ms.scheme_name, ot.scheme_internal_code, ot.scheme_id::text) AS scheme_name,
-									 COALESCE(ms.amc_name,'') AS amc_name,
-									 SUM(CASE WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in') THEN COALESCE(ot.amount,0) ELSE 0 END) AS buys_since,
-									 SUM(CASE WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out') THEN COALESCE(ot.amount,0) ELSE 0 END) AS sells_since
-						FROM investment.approved_onboard_transaction ot
-						LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))), params p
-						WHERE ot.transaction_date >= p.fy_start
-							AND (p.entity_filter IS NULL OR COALESCE(ot.entity_name,'') = p.entity_filter)
-							AND (p.allowed_entities IS NULL OR COALESCE(ot.entity_name,'') = ANY(p.allowed_entities))
-						GROUP BY COALESCE(ot.scheme_id, ot.scheme_internal_code, ms.scheme_id::text), COALESCE(ms.scheme_name, ot.scheme_internal_code, ot.scheme_id::text), ms.amc_name
-				),
-				-- Closing values (current)
-				pv AS (
-						SELECT COALESCE(ps.scheme_id, ps.isin, ps.scheme_name::text, '') AS scheme_ref, SUM(COALESCE(ps.current_value,0)) AS current_value
-						FROM investment.portfolio_snapshot ps, params p
-						WHERE (p.entity_filter IS NULL OR LOWER(TRIM(ps.entity_name)) = LOWER(TRIM(p.entity_filter)))
-							AND (p.allowed_entities IS NULL OR LOWER(TRIM(ps.entity_name)) = ANY(SELECT LOWER(TRIM(x)) FROM unnest(p.allowed_entities) AS x))
-						GROUP BY COALESCE(ps.scheme_id, ps.isin, ps.scheme_name::text, '')
-				),
-				-- Opening values as of fy_start (take latest snapshot before or on fy_start per scheme)
-				start_snap AS (
-						SELECT DISTINCT ON (COALESCE(ps.scheme_id, ps.isin)) COALESCE(ps.scheme_id, ps.isin, ps.scheme_name::text) AS scheme_ref,
-									 COALESCE(ps.current_value,0)::numeric AS start_value
-						FROM investment.portfolio_snapshot ps, params p
-						WHERE ps.created_at <= p.fy_start
-							AND (p.entity_filter IS NULL OR LOWER(TRIM(ps.entity_name)) = LOWER(TRIM(p.entity_filter)))
-							AND (p.allowed_entities IS NULL OR LOWER(TRIM(ps.entity_name)) = ANY(SELECT LOWER(TRIM(x)) FROM unnest(p.allowed_entities) AS x))
-						ORDER BY COALESCE(ps.scheme_id, ps.isin), ps.created_at DESC
+				WITH latest_batch AS (
+						SELECT MAX(created_at::date) AS batch_date FROM investment.portfolio_snapshot
 				)
-				SELECT COALESCE(t.scheme_name,'Unknown') AS scheme_name,
-							 (COALESCE(pv.current_value,0) - COALESCE(s.start_value,0) - (COALESCE(t.buys_since,0) - COALESCE(t.sells_since,0)))::float8 AS ytd_pl,
-							 t.amc_name
-				FROM tx t
-				LEFT JOIN pv ON pv.scheme_ref = t.scheme_ref
-				LEFT JOIN start_snap s ON s.scheme_ref = t.scheme_ref, params p
-				WHERE (p.amc_filter IS NULL OR t.amc_name = p.amc_filter)
+				SELECT COALESCE(ps.entity_name, 'Unknown') AS entity_name,
+							 SUM(COALESCE(ps.gain_loss, 0))::float8 AS ytd_pl
+				FROM investment.portfolio_snapshot ps
+				CROSS JOIN latest_batch lb
+				LEFT JOIN investment.masterscheme ms ON (
+						COALESCE(ms.is_deleted, false) = false
+						AND ((NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ps.scheme_id))
+						  OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ps.scheme_id))
+						  OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ps.scheme_id)))
+				)
+				WHERE ps.created_at::date = lb.batch_date
+					AND ($1::text IS NULL OR LOWER(TRIM(ps.entity_name)) = LOWER(TRIM($1)))
+					AND ($3::text[] IS NULL OR LOWER(TRIM(ps.entity_name)) = ANY(SELECT LOWER(TRIM(x)) FROM unnest($3::text[]) AS x))
+					AND ($2::text IS NULL OR COALESCE(ms.amc_name, '') = $2)
+				GROUP BY ps.entity_name
 				ORDER BY ytd_pl DESC
-				LIMIT $5
+				LIMIT $4
 				`
 
-		rows, err := pgxPool.Query(ctx, q, fyStart.Format(constants.DateFormat), nullIfEmpty(entityFilter), nullIfEmpty(req.AMCName), allowedParam, req.Limit)
+		rows, err := pgxPool.Query(ctx, q, nullIfEmpty(entityFilter), nullIfEmpty(req.AMCName), allowedParam, req.Limit)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -912,9 +888,9 @@ func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := make([]EntityPerformanceRow, 0, req.Limit)
 		for rows.Next() {
-			var name, amc string
+			var name string
 			var ytd float64
-			if err := rows.Scan(&name, &ytd, &amc); err != nil {
+			if err := rows.Scan(&name, &ytd); err != nil {
 				continue
 			}
 			out = append(out, EntityPerformanceRow{Label: name, YTD: ytd})
@@ -1035,7 +1011,7 @@ func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
                  ps.total_units::numeric AS total_units, ps.avg_nav::numeric AS avg_nav, ps.current_nav::numeric AS current_nav,
                  ps.current_value::numeric AS current_value, ps.entity_name
           FROM investment.portfolio_snapshot ps, params p
-          WHERE ps.created_at <= $2::date
+          WHERE ps.created_at::date <= $2::date
             AND (p.entity_filter IS NULL OR LOWER(TRIM(ps.entity_name)) = LOWER(TRIM(p.entity_filter)))
             AND (p.allowed_entities IS NULL OR LOWER(TRIM(ps.entity_name)) = ANY(SELECT LOWER(TRIM(x)) FROM unnest(p.allowed_entities) AS x))
           ORDER BY COALESCE(ps.scheme_id, ps.isin), ps.created_at DESC
@@ -1044,19 +1020,19 @@ func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
                  ps.total_units::numeric AS total_units, ps.avg_nav::numeric AS avg_nav, ps.current_nav::numeric AS current_nav,
                  ps.current_value::numeric AS current_value, ps.entity_name
           FROM investment.portfolio_snapshot ps, params p
-          WHERE ps.created_at <= $3::date
+          WHERE ps.created_at::date <= $3::date
             AND (p.entity_filter IS NULL OR LOWER(TRIM(ps.entity_name)) = LOWER(TRIM(p.entity_filter)))
             AND (p.allowed_entities IS NULL OR LOWER(TRIM(ps.entity_name)) = ANY(SELECT LOWER(TRIM(x)) FROM unnest(p.allowed_entities) AS x))
           ORDER BY COALESCE(ps.scheme_id, ps.isin), ps.created_at DESC
         ), start_amc AS (
           SELECT COALESCE(ms.amc_name,'') AS amc_name,
-                 SUM(COALESCE(s.total_units,0) * COALESCE(s.avg_nav,0))::numeric AS start_value
+                 SUM(COALESCE(s.current_value,0))::numeric AS start_value
           FROM start_snap s
           LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(s.scheme_ref), '') IS NOT NULL AND ms.scheme_id::text = TRIM(s.scheme_ref)) OR (NULLIF(TRIM(s.scheme_ref), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(s.scheme_ref)) OR (NULLIF(TRIM(s.scheme_ref), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(s.scheme_ref))))
           GROUP BY COALESCE(ms.amc_name,'')
         ), end_amc AS (
           SELECT COALESCE(ms.amc_name,'') AS amc_name,
-                 SUM(COALESCE(e.total_units,0) * COALESCE(e.current_nav,0))::numeric AS end_value
+                 SUM(COALESCE(e.current_value,0))::numeric AS end_value
           FROM end_snap e
           LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(e.scheme_ref), '') IS NOT NULL AND ms.scheme_id::text = TRIM(e.scheme_ref)) OR (NULLIF(TRIM(e.scheme_ref), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(e.scheme_ref)) OR (NULLIF(TRIM(e.scheme_ref), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(e.scheme_ref))))
           GROUP BY COALESCE(ms.amc_name,'')
@@ -1103,12 +1079,27 @@ func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			amcRows = append(amcRows, r)
 		}
 
-		// If opening total is zero (no snapshots), fallback to holdings-based AUM as of period start
+		// If opening total is zero (no snapshots before period start), fallback to holdings-based AUM
 		if openingTotal == 0 {
-			// parse period start
 			if t, err := time.Parse(constants.DateFormat, req.PeriodStart); err == nil {
 				openingTotal = getAUMAtDate(ctx, pgxPool, entityFilter, allowedEntities, t)
 			}
+		}
+
+		// If closing total is zero (snapshots didn't match end date), fallback to latest snapshot sum
+		if closingTotal == 0 {
+			var fallback float64
+			closingFallbackQ := `
+				WITH latest AS (SELECT MAX(created_at::date) AS d FROM investment.portfolio_snapshot)
+				SELECT COALESCE(SUM(ps.current_value),0)::float8
+				FROM investment.portfolio_snapshot ps
+				CROSS JOIN latest
+				WHERE ps.created_at::date = latest.d
+				  AND ($1::text IS NULL OR LOWER(TRIM(ps.entity_name)) = LOWER(TRIM($1)))
+				  AND ($2::text[] IS NULL OR LOWER(TRIM(ps.entity_name)) = ANY(SELECT LOWER(TRIM(x)) FROM unnest($2::text[]) AS x))
+			`
+			_ = pgxPool.QueryRow(ctx, closingFallbackQ, nullIfEmpty(entityFilter), allowedParam).Scan(&fallback)
+			closingTotal = fallback
 		}
 
 		// Build waterfall rows: Opening, each AMC delta, Closing

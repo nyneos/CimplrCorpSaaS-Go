@@ -80,6 +80,15 @@ func NewDashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 			),
 		)
 	}
+	// Cash dashboard only needs entity/bank/currency/account context — skip MF+FD master preloads
+	// (InvestmentMFMiddleware scans all AMFI schemes with correlated subqueries, causing 5-10 min hangs).
+	midDashCash := func(h http.Handler) http.Handler {
+		return middlewares.SessionMiddleware(pgxPool)(
+			middlewares.GlobalIndependentMiddleware(pgxPool)(
+				middlewares.GlobalDependentMiddleware(pgxPool)(h),
+			),
+		)
+	}
 	// Statement Status Dashboard
 	mux.Handle("/dash/statement-status", midDashFull(statementstatus.GetStatementStatusHandler(pgxPool)))
 	mux.Handle("/dash/transaction-pool", midDashFull(commonpool.GetTransactionPoolHandler(pgxPool)))
@@ -143,7 +152,7 @@ func NewDashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	mux.Handle("/dash/landingpage/dashboard", midDashFull(landingpage.GetFXOpsDashboard(pgxPool)))
 	// Home/Landing dashboard (liquidity + investments + risk)
 	mux.Handle("/dash/landingpage/home", midDashFull(landingpage.GetHomePageDashboard(pgxPool)))
-	mux.Handle("/dash/landingpage/cash", midDashFull(landingpage.GetLandingCashDashboard(pgxPool)))
+	mux.Handle("/dash/landingpage/cash", midDashCash(landingpage.GetLandingCashDashboard(pgxPool)))
 	// Combined investment overview (aggregates multiple investment endpoints sequentially)
 	mux.Handle("/dash/investment/overview/combined", midDashInvestRead(investmentdashboards.GetCombinedInvestmentOverview(pgxPool)))
 	mux.Handle("/dash/investment/portfolio/dashboard", midDashInvestRead(investmentdashboards.PortfolioDashboardHandler(pgxPool)))

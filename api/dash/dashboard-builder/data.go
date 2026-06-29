@@ -150,6 +150,12 @@ var dataSources = map[string]dataSourceFn{
 	"cashBankStatementTransactions": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashBankStatementTransactions(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
 	},
+	"cashPayable": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashPayable(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashReceivable": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashReceivable(ctx, pool, req.EntityIDs, req.Limit)
+	},
 	"cashPayableReceivable": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashPayableReceivable(ctx, pool, req.EntityIDs, req.Limit)
 	},
@@ -170,9 +176,6 @@ var dataSources = map[string]dataSourceFn{
 	},
 	"cashSweepAllExecutionLogs": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashSweepAllExecutionLogs(ctx, pool, req.EntityIDs, req.Limit)
-	},
-	"cashSweepStatistics": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashSweepStatistics(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"cashProjectionList": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashProjectionList(ctx, pool, req.EntityIDs, req.Limit)

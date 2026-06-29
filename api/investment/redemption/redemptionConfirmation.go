@@ -683,7 +683,7 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
 		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
-			logger.LogError("Failed to run global portfolio refresh after redemption confirmation approval: %v", err)
+			logger.LogError(constants.ErrPortfolioRefreshRedemptionApproval, err)
 		}
 
 		go func() {
@@ -887,7 +887,7 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
 		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
-			logger.LogError("Failed to run global portfolio refresh after redemption confirmation approval: %v", err)
+			logger.LogError(constants.ErrPortfolioRefreshRedemptionApproval, err)
 		}
 
 		go func() {
@@ -1141,7 +1141,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 
 		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
 		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
-			logger.LogError("Failed to run global portfolio refresh after redemption confirmation approval: %v", err)
+			logger.LogError(constants.ErrPortfolioRefreshRedemptionApproval, err)
 		}
 
 		// Automatically process confirmed redemptions (create SELL transactions and refresh snapshots)
@@ -1276,7 +1276,7 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 
 		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
 		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
-			logger.LogError("Failed to run global portfolio refresh after redemption confirmation approval: %v", err)
+			logger.LogError(constants.ErrPortfolioRefreshRedemptionApproval, err)
 		}
 
 		if len(req.RedemptionConfirmIDs) > 0 {

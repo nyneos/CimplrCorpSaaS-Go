@@ -133,7 +133,12 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 											SELECT * FROM prioritized_audit WHERE rn = 1
 										)
 										SELECT ss.bank_statement_id, ss.entity_name, ss.account_number, ss.statement_period_start, ss.statement_period_end, ss.opening_balance, ss.closing_balance, ss.uploaded_at,
-													 la.actiontype, la.processing_status, la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason,
+													 la.actiontype,
+													 CASE
+													     WHEN la.actiontype = 'RECAT' AND la.processing_status = 'PENDING_EDIT_APPROVAL' THEN 'APPROVED'
+													     ELSE la.processing_status
+													 END AS processing_status,
+													 la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason,
 														ss.bank_name,
 														ss.account_nickname,
 														ss.upload_s3_key

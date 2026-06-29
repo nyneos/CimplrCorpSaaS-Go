@@ -294,6 +294,72 @@ func handleZipBankStatementUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *
 	})
 }
 
+// singlePDFJob carries the inputs for converting one directly-uploaded PDF in the background.
+type singlePDFJob struct {
+	batchID         string
+	stagingID       string
+	userID          string
+	filename        string
+	accountOverride string
+	password        string
+	pdfBytes        []byte
+}
+
+// processSinglePDFAsync converts a single directly-uploaded PDF off the request path: it uploads the
+// original to storage, replaces the queued placeholder row with the parsed staged statement(s) (via
+// processPDFViaPDFCo), finalises the 1-file batch, and notifies the user — exactly the staging/
+// review/commit flow the synchronous path used, just detached so the client isn't blocked on the
+// converter. Runs on context.Background() so it survives the already-sent 202 response.
+func processSinglePDFAsync(pool *pgxpool.Pool, j singlePDFJob) {
+	ctx := context.Background()
+
+	fileRec, upErr := uploadStagingOriginalFile(ctx, j.pdfBytes, j.filename, j.userID)
+	if upErr != nil {
+		logger.LogError("[PDF-ASYNC] s3 upload failed %s: %v", j.filename, upErr)
+	} else if fileRec != nil && fileRec.hasFile() {
+		if err := updateStagingStatementFileStorage(ctx, pool, j.stagingID, fileRec); err != nil {
+			logger.LogError("[PDF-ASYNC] store s3 metadata failed %s: %v", j.filename, err)
+		}
+	}
+
+	// Remove the queued placeholder; processPDFViaPDFCo inserts the parsed staged statement rows.
+	_, _ = pool.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1`, j.stagingID)
+
+	stagingIDs, err := processPDFViaPDFCo(ctx, pool, pdfConvertParams{
+		pdfBytes:        j.pdfBytes,
+		filename:        j.filename,
+		batchID:         j.batchID,
+		accountOverride: j.accountOverride,
+		password:        j.password,
+		uploadedBy:      j.userID,
+		fileIndex:       0,
+		fileRec:         fileRec,
+	})
+	if err != nil || len(stagingIDs) == 0 {
+		msg := "no parsed statements from PDF"
+		if err != nil {
+			msg = err.Error()
+		}
+		logger.LogError("[PDF-ASYNC] pdf conversion failed %s: %s", j.filename, msg)
+		failParams := insertStagingStatementParams{
+			BatchID: j.batchID, Filename: j.filename, Status: "failed", ErrMsg: msg, FileIndex: 0,
+		}
+		applyStagingFileRecordToInsert(&failParams, fileRec)
+		_, _ = insertStagingStatement(ctx, pool, failParams)
+		_ = finaliseStagingBatch(ctx, pool, j.batchID, 0, 1)
+		notifyZipBatchReady(ctx, pool, zipBatchReadyParams{
+			batchID: j.batchID, userID: j.userID, zipName: j.filename, succeeded: 0, failed: 1, total: 1,
+		})
+		return
+	}
+
+	_ = finaliseStagingBatch(ctx, pool, j.batchID, len(stagingIDs), 0)
+	notifyZipBatchReady(ctx, pool, zipBatchReadyParams{
+		batchID: j.batchID, userID: j.userID, zipName: j.filename, succeeded: len(stagingIDs), failed: 0, total: 1,
+	})
+	logger.LogInfo("[PDF-ASYNC] batch %s done: staged=%d", j.batchID, len(stagingIDs))
+}
+
 func zipWorkerConcurrency() int {
 	if bindref.BrOn() {
 		return zipBatchConcurrencyLLM

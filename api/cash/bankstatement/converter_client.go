@@ -152,13 +152,13 @@ func previewLogString(s string, limit int) string {
 func BuildPreviewResponseFromFileBytes(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings, accountOverride string) (map[string]interface{}, error) {
 	txns, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, filename, useMapping, mappings, accountOverride)
 	if err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
+		return nil, fmt.Errorf(constants.ErrParseFmt, err)
 	}
 	if len(txns) == 0 {
 		if preview, ok, sumErr := tryBuildSummaryOnlyPreview(fileBytes, filename, accountOverride); ok {
 			return preview, nil
 		} else if sumErr != nil {
-			return nil, fmt.Errorf("parse: %w", sumErr)
+			return nil, fmt.Errorf(constants.ErrParseFmt, sumErr)
 		}
 		return nil, ErrStatementSummaryOnly
 	}
@@ -179,13 +179,13 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, pool *pgxpool.Pool, c
 
 	txns, err := processSingleFilePreviewFlat(ctx, pool, csvBytes, csvFilename, false, nil, accountOverride)
 	if err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
+		return nil, fmt.Errorf(constants.ErrParseFmt, err)
 	}
 	if len(txns) == 0 {
 		if preview, ok, sumErr := tryBuildSummaryOnlyPreview(csvBytes, csvFilename, accountOverride); ok {
 			return preview, nil
 		} else if sumErr != nil {
-			return nil, fmt.Errorf("parse: %w", sumErr)
+			return nil, fmt.Errorf(constants.ErrParseFmt, sumErr)
 		}
 		return nil, fmt.Errorf("no transactions found in converted output")
 	}
@@ -260,14 +260,23 @@ func buildPreviewResponseFromTxnMaps(txns []map[string]interface{}, csvBytes []b
 		}
 	}
 	openingBalance := parserOpening
+	// A parser opening of exactly 0 is almost always "unknown" (no opening row, or an empty cell next
+	// to an "Opening Balance" label), not a genuine zero — fall through to derivation / the labelled
+	// summary-box figure rather than locking in 0.
+	if openingBalance != nil && *openingBalance == 0 {
+		openingBalance = nil
+	}
 	if openingBalance == nil {
 		openingBalance = deriveOpeningBalanceFromTxnMaps(txns)
 	}
-	if openingBalance == nil {
-		openingBalance = labelledOpeningBalance
+	if openingBalance == nil || *openingBalance == 0 {
+		if labelledOpeningBalance != nil {
+			openingBalance = labelledOpeningBalance
+		}
 	} else if labelledOpeningBalance != nil && math.Abs(*openingBalance-*labelledOpeningBalance) > 0.01 {
-		logger.LogInfo("[PREVIEW] opening balance label mismatch: labelled=%.2f parser=%.2f; using parser value",
+		logger.LogInfo("[PREVIEW] opening balance label mismatch: labelled=%.2f parser=%.2f; using labelled value (bank's declared figure)",
 			*labelledOpeningBalance, *openingBalance)
+		openingBalance = labelledOpeningBalance
 	}
 	closingBalance := extractClosingBalanceFromCSV(csvBytes)
 	if closingBalance == nil {
@@ -391,17 +400,33 @@ func extractLabelledBalance(data []byte, labels []string) *float64 {
 		return nil
 	}
 	replacer := strings.NewReplacer(" ", "", "\t", "")
-	for _, row := range rows {
+	for r, row := range rows {
 		for i, cell := range row {
 			norm := strings.ToLower(replacer.Replace(cell))
+			matched := false
 			for _, lbl := range labels {
 				if strings.Contains(norm, lbl) {
-					for j := i + 1; j < len(row); j++ {
-						if val, err := parseAmount(cleanAmount(row[j])); err == nil {
-							v := val
-							return &v
-						}
-					}
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+			// Same-row layout: value sits to the right of the label (e.g. "Opening Balance: 17.91").
+			for j := i + 1; j < len(row); j++ {
+				if val, err := parseAmount(cleanAmount(row[j])); err == nil && val != 0 {
+					v := val
+					return &v
+				}
+			}
+			// Header/value table layout (summary box): the figure sits directly below the label cell,
+			// e.g. "Opening Balance | Total Debit | Total Credit | Closing Balance" followed by
+			// "17.91 CR | 1,47,103.00 | 1,47,090.00 | 4.91 CR".
+			if r+1 < len(rows) && i < len(rows[r+1]) {
+				if val, err := parseAmount(cleanAmount(rows[r+1][i])); err == nil && val != 0 {
+					v := val
+					return &v
 				}
 			}
 		}

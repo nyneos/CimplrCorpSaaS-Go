@@ -12,7 +12,6 @@ import (
 	sweepconfig "CimplrCorpSaas/api/cash/sweepConfig"
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
-	"CimplrCorpSaas/api/travel"
 	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
@@ -347,11 +346,6 @@ func NewCashServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, error)
 
 	// Bank Limit Management - Limit sanctioning and tracking
 	limit.RegisterLimitRoutes(mux, pgxPool)
-
-	// Travel package endpoints
-	mux.Handle("/cash/package/create", cashChain(travel.CreatePackageHandler(pgxPool)))
-	mux.Handle("/cash/package", cashChain(travel.GetPackageHandler(pgxPool)))
-	mux.Handle("/cash/package/delete", cashChain(travel.DeletePackageHandler(pgxPool)))
 
 	mux.HandleFunc("/cash/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Cash Service is active"))

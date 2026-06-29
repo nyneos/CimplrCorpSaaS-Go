@@ -552,12 +552,10 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// GetAllUtilizations returns all utilizations with latest audit info
-func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-
-		query := `
+// QueryAllUtilizations returns utilization rows with latest audit and limit info.
+// rowLimit 0 means no cap (applied after cash scope filtering).
+func QueryAllUtilizations(ctx context.Context, pgxPool *pgxpool.Pool, rowLimit int) ([]map[string]interface{}, error) {
+	query := `
 			SELECT 
 				u.utilization_id, u.limit_id, u.utilization_date, u.currency_code, u.utilized_amount,
 				u.remarks, u.reference_doc, u.entry_mode, u.status, u.upload_s3_key,
@@ -592,15 +590,14 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE COALESCE(u.is_deleted, false) = false
 			ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC`
 
-		rows, err := pgxPool.Query(ctx, query)
-		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
-			return
-		}
-		defer rows.Close()
+	rows, err := pgxPool.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 
-		results := make([]map[string]interface{}, 0)
-		for rows.Next() {
+	results := make([]map[string]interface{}, 0)
+	for rows.Next() {
 			var utilizationID, limitID, currencyCode, entryMode, status string
 			var utilizationDate *time.Time
 			var utilizedAmount float64
@@ -747,9 +744,23 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"limit_utilization_pct": limitUtilPct,
 			}
 
-			results = append(results, item)
+		results = append(results, item)
+		if rowLimit > 0 && len(results) >= rowLimit {
+			break
 		}
+	}
 
+	return results, rows.Err()
+}
+
+// GetAllUtilizations returns all utilizations with latest audit info
+func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		results, err := QueryAllUtilizations(r.Context(), pgxPool, 0)
+		if err != nil {
+			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
+			return
+		}
 		api.RespondWithPayload(w, true, "", results)
 	}
 }

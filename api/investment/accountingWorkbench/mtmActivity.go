@@ -290,7 +290,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		entities, err := accountingEntitiesForQuery(ctx, pgxPool)
 		if err != nil {
 			logger.LogError("CreateMTMBulk: entity list failed: %v", err)
-			api.RespondWithError(w, http.StatusInternalServerError, "Holdings fetch failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrHoldingsFetchFailed+err.Error())
 			return
 		}
 
@@ -299,7 +299,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err := portfolio.QueryEntityHoldings(ctx, pgxPool, entity)
 			if err != nil {
 				logger.LogError("CreateMTMBulk: holdings query failed for entity %s: %v", entity, err)
-				api.RespondWithError(w, http.StatusInternalServerError, "Holdings fetch failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrHoldingsFetchFailed+err.Error())
 				return
 			}
 			for _, row := range rows {
@@ -1183,7 +1183,7 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		holdingsRows, err := pgxPool.Query(ctx, holdingsQuery, startDate)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Holdings fetch failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrHoldingsFetchFailed+err.Error())
 			return
 		}
 		defer holdingsRows.Close()

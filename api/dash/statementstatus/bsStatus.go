@@ -320,7 +320,7 @@ SELECT
 	mba.account_number                                              AS account_number,
 	CASE
 		WHEN bs_latest.bank_statement_id IS NULL THEN '` + UploadStatusNotUploaded + `'
-		ELSE COALESCE(a.processing_status, '` + UploadStatusPending + `')
+		ELSE COALESCE(bs_latest.current_status, '` + UploadStatusPending + `')
 	END                                                              AS status,
 	bs_latest.uploaded_at                                             AS uploaded_at_ts,
 	COALESCE(stmts.statements_json, '[]')                              AS statements_json
@@ -337,24 +337,15 @@ LEFT JOIN public.masterentitycash me ON mba.entity_id = me.entity_id
 LEFT JOIN LATERAL (
 	SELECT bs2.*
 	FROM cimplrcorpsaas.bank_statements bs2
-	JOIN (
-		SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-		FROM cimplrcorpsaas.auditactionbankstatement
-		ORDER BY bankstatementid, requested_at DESC
-	) a2 ON a2.bankstatementid = bs2.bank_statement_id AND a2.processing_status = 'APPROVED'
-	WHERE COALESCE(NULLIF(ltrim(trim(bs2.account_number), '0'), ''), trim(bs2.account_number))
+	WHERE bs2.is_deleted = false
+	  AND bs2.current_status = 'APPROVED'
+	  AND COALESCE(NULLIF(ltrim(trim(bs2.account_number), '0'), ''), trim(bs2.account_number))
 	      = COALESCE(NULLIF(ltrim(trim(mba.account_number), '0'), ''), trim(mba.account_number))
 		AND bs2.statement_period_start <= $6::date
 		AND bs2.statement_period_end >= $1::date
 	ORDER BY bs2.statement_period_end DESC
 	LIMIT 1
 ) bs_latest ON true
--- latest audit row per bank_statement_id to derive status for uploaded statements
-LEFT JOIN (
-	SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-	FROM cimplrcorpsaas.auditactionbankstatement
-	ORDER BY bankstatementid, requested_at DESC
-) a ON a.bankstatementid = bs_latest.bank_statement_id
 -- all approved statements for the account in horizon (drill-down)
 LEFT JOIN LATERAL (
 	SELECT json_agg(
@@ -362,17 +353,12 @@ LEFT JOIN LATERAL (
 			'statementId', bs3.bank_statement_id,
 			'statementPeriodStart', to_char(bs3.statement_period_start, 'YYYY-MM-DD'),
 			'statementPeriodEnd', to_char(bs3.statement_period_end, 'YYYY-MM-DD'),
-			'status', COALESCE(a3.processing_status, '` + UploadStatusPending + `'),
+			'status', COALESCE(bs3.current_status, '` + UploadStatusPending + `'),
 			'uploadedAt', COALESCE(to_char(bs3.uploaded_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
 			'transactions', COALESCE(txn.tx_json, '[]')
 		) ORDER BY bs3.statement_period_end DESC
 	) AS statements_json
 	FROM cimplrcorpsaas.bank_statements bs3
-	JOIN (
-		SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-		FROM cimplrcorpsaas.auditactionbankstatement
-		ORDER BY bankstatementid, requested_at DESC
-	) a3 ON a3.bankstatementid = bs3.bank_statement_id AND a3.processing_status = 'APPROVED'
 	LEFT JOIN LATERAL (
 		SELECT json_agg(
 			json_build_object(
@@ -394,7 +380,9 @@ LEFT JOIN LATERAL (
 				ON tx.category_id = tc.category_id
 		WHERE tx.bank_statement_id = bs3.bank_statement_id
 	) txn ON true
-	WHERE COALESCE(NULLIF(ltrim(trim(bs3.account_number), '0'), ''), trim(bs3.account_number))
+	WHERE bs3.is_deleted = false
+	  AND bs3.current_status = 'APPROVED'
+	  AND COALESCE(NULLIF(ltrim(trim(bs3.account_number), '0'), ''), trim(bs3.account_number))
 	      = COALESCE(NULLIF(ltrim(trim(mba.account_number), '0'), ''), trim(mba.account_number))
 		AND bs3.statement_period_start <= $6::date
 		AND bs3.statement_period_end >= $1::date
@@ -474,17 +462,14 @@ LEFT JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
 LEFT JOIN LATERAL (
 	SELECT bs2.bank_statement_id
 	FROM cimplrcorpsaas.bank_statements bs2
-	JOIN (
-		SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-		FROM cimplrcorpsaas.auditactionbankstatement
-		ORDER BY bankstatementid, requested_at DESC
-	) a2 ON a2.bankstatementid = bs2.bank_statement_id AND a2.processing_status = 'APPROVED'
-	WHERE COALESCE(NULLIF(ltrim(trim(bs2.account_number), '0'), ''), trim(bs2.account_number))
+	WHERE bs2.is_deleted = false
+	  AND bs2.current_status = 'APPROVED'
+	  AND COALESCE(NULLIF(ltrim(trim(bs2.account_number), '0'), ''), trim(bs2.account_number))
 	      = COALESCE(NULLIF(ltrim(trim(mba.account_number), '0'), ''), trim(mba.account_number))
 		AND bs2.statement_period_start <= $6::date
 		AND bs2.statement_period_end >= $1::date
 	ORDER BY bs2.statement_period_end DESC
-		LIMIT 1
+	LIMIT 1
 ) bs_latest ON true
 WHERE mba.is_deleted = false
   AND mba.entity_id = ANY($2)
@@ -538,12 +523,9 @@ LEFT JOIN public.masterentitycash me ON mba.entity_id = me.entity_id
 LEFT JOIN LATERAL (
 	SELECT bs2.bank_statement_id
 	FROM cimplrcorpsaas.bank_statements bs2
-	JOIN (
-		SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-		FROM cimplrcorpsaas.auditactionbankstatement
-		ORDER BY bankstatementid, requested_at DESC
-	) a2 ON a2.bankstatementid = bs2.bank_statement_id AND a2.processing_status = 'APPROVED'
-	WHERE COALESCE(NULLIF(ltrim(trim(bs2.account_number), '0'), ''), trim(bs2.account_number))
+	WHERE bs2.is_deleted = false
+	  AND bs2.current_status = 'APPROVED'
+	  AND COALESCE(NULLIF(ltrim(trim(bs2.account_number), '0'), ''), trim(bs2.account_number))
 	      = COALESCE(NULLIF(ltrim(trim(mba.account_number), '0'), ''), trim(mba.account_number))
 		AND bs2.statement_period_start <= $6::date
 		AND bs2.statement_period_end >= $1::date

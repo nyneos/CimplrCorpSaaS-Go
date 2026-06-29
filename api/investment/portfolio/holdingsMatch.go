@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"CimplrCorpSaas/api/constants"
 )
 
 // attachTransactionsToHoldings maps transaction rows onto holdings using the same
@@ -43,6 +45,19 @@ func attachTransactionsToHoldings(holdings []PortfolioHoldingsRow, txs []Portfol
 		if len(matched) == 0 {
 			for _, tx := range unkeyed {
 				if txMatchesHolding(tx, *h) {
+					matched = append(matched, tx)
+				}
+			}
+		}
+		// Final fallback: match on entity + scheme only, ignoring demat/folio.
+		// Needed when the holding was built from an onboard tx (ExcludeInvestmentConfirmation
+		// removed the suite confirmation from the holdings CTE) while allTx contains only the
+		// suite confirmation (onboard was excluded by ExcludeOnboardPurchaseDuplicatingSuite).
+		// Those two paths can resolve the same physical demat account via different UUIDs,
+		// producing non-equal string values that fail the exact demat check above.
+		if len(matched) == 0 {
+			for _, tx := range txs {
+				if txMatchesHoldingLoose(tx, *h) {
 					matched = append(matched, tx)
 				}
 			}
@@ -101,6 +116,16 @@ func txMatchesHolding(tx PortfolioTxRow, h PortfolioHoldingsRow) bool {
 		return false
 	}
 	if !folioDematCompatible(tx.DematNumber, h.DematAccountNumber) {
+		return false
+	}
+	return schemeIdentifiersMatch(tx, h)
+}
+
+// txMatchesHoldingLoose matches on entity + scheme only, ignoring folio/demat.
+// Used as a last-resort fallback when demat identifiers differ between the
+// onboard-derived holding and the suite-derived transaction.
+func txMatchesHoldingLoose(tx PortfolioTxRow, h PortfolioHoldingsRow) bool {
+	if !strings.EqualFold(strings.TrimSpace(tx.EntityName), strings.TrimSpace(h.EntityName)) {
 		return false
 	}
 	return schemeIdentifiersMatch(tx, h)
@@ -178,7 +203,7 @@ func portfolioTxSchemeMatch(a, b PortfolioTxRow) bool {
 func onboardMirrorsSuiteRow(onboard PortfolioTxRow, suites []PortfolioTxRow) bool {
 	onboardInflow := IsPortfolioTxInflow(onboard)
 	for _, suite := range suites {
-		if suite.Source != "Investment Suite" && suite.Source != "Redemption Suite" {
+		if suite.Source != constants.InvestmentSuite && suite.Source != constants.RedemptionSuite {
 			continue
 		}
 		if IsPortfolioTxInflow(suite) != onboardInflow {
@@ -226,7 +251,7 @@ func dedupePortfolioTxRowsPreferSuite(rows []PortfolioTxRow) []PortfolioTxRow {
 	}
 	suiteRows := make([]PortfolioTxRow, 0, len(rows))
 	for _, row := range rows {
-		if row.Source == "Investment Suite" || row.Source == "Redemption Suite" {
+		if row.Source == constants.InvestmentSuite || row.Source == constants.RedemptionSuite {
 			suiteRows = append(suiteRows, row)
 		}
 	}
@@ -270,9 +295,9 @@ func dedupePortfolioTxRows(rows []PortfolioTxRow) []PortfolioTxRow {
 
 func txSourceRank(source string) int {
 	switch strings.TrimSpace(source) {
-	case "Redemption Suite":
+	case constants.RedemptionSuite:
 		return 4
-	case "Investment Suite":
+	case constants.InvestmentSuite:
 		return 3
 	case "Workbench":
 		return 2

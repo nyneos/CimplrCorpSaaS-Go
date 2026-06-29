@@ -53,6 +53,9 @@ func investmentDashboardEntityScope(ctx context.Context, requestedEntityName str
 		return "", nil, constants.ErrNoAccessibleBusinessUnit
 	}
 	if requestedEntityName != "" {
+		if scope.IsAdminOverride {
+			return requestedEntityName, nil, ""
+		}
 		for _, entityName := range allowed {
 			if strings.EqualFold(strings.TrimSpace(entityName), requestedEntityName) {
 				return requestedEntityName, allowed, ""

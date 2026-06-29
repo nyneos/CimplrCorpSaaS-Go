@@ -338,9 +338,13 @@ CRITICAL — PDF-to-CSV conversion often shifts data so it does not align with h
 
 RULE 1 — Balance column:
   The balance column contains the running account total that changes by the transaction amount each row.
-  Look at consecutive data rows: balance[N] = balance[N-1] + deposit[N] - withdrawal[N].
+  To identify it: pick 3+ consecutive data rows and verify the formula holds —
+    balance[N] = balance[N-1] + deposit[N] - withdrawal[N]
+  Only a column that satisfies this formula across multiple rows is the balance column.
   If the column whose header says "Balance" is EMPTY in data rows, it is NOT the balance column.
   Find the column that actually contains the running totals in data rows and use that index for "balance".
+  IMPORTANT: The balance column will have a numeric value in EVERY (or nearly every) transaction row —
+  including rows that are clearly withdrawals AND rows that are clearly deposits.
 
 RULE 2 — Withdrawal / Deposit columns:
   Withdrawal and deposit columns contain individual transaction amounts (relatively small, varying).
@@ -348,6 +352,17 @@ RULE 2 — Withdrawal / Deposit columns:
   (including rows that are obviously ATM withdrawals or fee charges), that column is the BALANCE column, not deposits.
   A genuine deposit column will be EMPTY (or zero) in rows that are clearly debits.
   NOTE: "Amount Subtracted" means Withdrawal/Debit. "Amount Added" means Deposit/Credit.
+
+RULE 2b — Sparse deposit or withdrawal columns are still valid:
+  A deposit column may have very few non-empty values — for example, only 1 non-empty value in 16 rows —
+  if the statement has mostly debit activity (ATM withdrawals, fees, transfers). This is normal and does NOT
+  make it the balance column. Likewise, a withdrawal column may be mostly empty in a statement with mostly credits.
+  Key test: a genuine deposit column will ONLY have values in rows where money was credited (never in debit rows).
+  A balance column will have values in EVERY row regardless of whether that row is a debit or credit.
+  WARNING: Do NOT confuse the Deposits column with the Balance column just because a deposit amount
+  happens to equal the running balance on that row (this always occurs when opening balance is 0 and
+  the first transaction is a credit — both the Deposits column and Balance column will show the same
+  amount on that one row). Check multiple rows to confirm the running-total pattern.
 
 RULE 3 — Value Date:
   A value_date column must contain dates. If that column has numeric amounts in data rows, it is not the value date.
@@ -359,6 +374,19 @@ RULE 4 — Single combined amount column:
 RULE 5 — Split Headers:
   If the header is split across two consecutive rows (e.g., Row 1: "Transaction", "Value"; Row 2: "Date", "Date"),
   return the row index of the FIRST row of the split header as the header_row_index.
+
+RULE 6 — Cr/Dr indicator vs amount columns:
+  A column whose data cells contain text like "DR", "CR", "DEBIT", "CREDIT" is a DIRECTION INDICATOR.
+  Map it to "crdr". NEVER map it to "withdrawal" or "deposit" — those fields must point to columns
+  containing NUMERIC transaction amounts. If you see a column named "Type" or "Indicator" whose
+  cells contain only "DR" or "CR", that is the crdr column. Then find the single numeric amount
+  column and apply Rule 4 (set both withdrawal and deposit to that column index).
+
+RULE 7 — Trust the Balance header when data is present:
+  If a column is explicitly labeled "Balance" (or "Closing Balance", "Running Balance") AND it contains
+  numeric values in the majority of data rows, treat it as the balance column directly.
+  Only override the "Balance" label if that column is empty in data rows — in that case, apply Rule 1
+  to find the real balance column elsewhere.
 
 Fields to identify:
    - date        : primary transaction date column
@@ -495,22 +523,56 @@ func fixMisalignedBalanceColumn(layout llmColumnLayout, rows [][]string) llmColu
 	dIdx := layout.col("deposit")
 
 	// ── Step 1: find the real balance column ─────────────────────────────────
+	// Scan dIdx before wIdx: when the LLM swaps deposit↔balance (common for sparse deposit
+	// columns whose single value coincidentally equals the running balance on that row), the
+	// deposit slot holds the actual balance data, so checking it first recovers the real column.
 	realBalIdx := balIdx
-	if balIdx < 0 || colFillRate(rows, dataStart, balIdx, 10) <= 0.5 {
-		// LLM balance column is absent or mostly empty — scan withdrawal / deposit columns.
-		for _, candidateIdx := range []int{wIdx, dIdx} {
+	originalBalFill := 0.0
+	if balIdx >= 0 {
+		originalBalFill = colFillRate(rows, dataStart, balIdx, 10)
+	}
+	if balIdx < 0 || originalBalFill <= 0.5 {
+		// LLM balance column is absent or mostly empty — scan deposit then withdrawal.
+		// Use a relaxed threshold (0.8) so we catch cases where the PDF converter shifts
+		// the balance column off by one row (e.g. opening-balance row is empty at that col).
+		for _, candidateIdx := range []int{dIdx, wIdx} {
 			if candidateIdx < 0 {
 				continue
 			}
-			if colFillRate(rows, dataStart, candidateIdx, 10) >= 0.9 {
+			if colFillRate(rows, dataStart, candidateIdx, 10) >= 0.8 {
 				realBalIdx = candidateIdx
 				break
 			}
 		}
+
+		// Full-width fallback: scan RIGHT-TO-LEFT and take the FIRST (rightmost) numeric
+		// column with fill ≥ 0.8. Balance is always the rightmost amount column in standard
+		// bank statement tables (Withdrawals | Deposits | Balance), so this reliably picks
+		// the balance column even when an adjacent amount column has slightly higher fill.
+		if realBalIdx == balIdx {
+			maxCols := 0
+			for _, row := range rows {
+				if len(row) > maxCols {
+					maxCols = len(row)
+				}
+			}
+			for c := maxCols - 1; c >= 0; c-- {
+				if fill := colFillRate(rows, dataStart, c, 10); fill >= 0.8 {
+					realBalIdx = c
+					logger.LogInfo("[LLM-COLS] balance-fix: full-width scan found balance candidate col=%d (fill=%.2f)", c, fill)
+					break
+				}
+			}
+		}
 	}
 
-	if realBalIdx == balIdx && wIdx == layout.col("withdrawal") && dIdx == layout.col("deposit") {
-		return layout // Nothing to fix.
+	if realBalIdx == balIdx && originalBalFill > 0.5 {
+		return layout // Balance column is fine; nothing to fix.
+	}
+	if realBalIdx == balIdx {
+		// Even the full-width scan found nothing — log and return unchanged; can't fix.
+		logger.LogInfo("[LLM-COLS] balance-fix: all columns empty, cannot determine real balance col")
+		return layout
 	}
 
 	newCols := make(map[string]int, len(layout.Columns))
@@ -519,9 +581,28 @@ func fixMisalignedBalanceColumn(layout llmColumnLayout, rows [][]string) llmColu
 	}
 	newCols["balance"] = realBalIdx
 
-	// ── Step 2: find the real amount column ──────────────────────────────────
+	// ── Step 2: find the real amount column(s) ───────────────────────────────
+	// Preferred path: if the LLM identified SEPARATE withdrawal and deposit columns that are
+	// both valid (neither equals the new balance, both have at least some data), restore them
+	// as-is rather than forcing single-amount mode. This handles the case where the LLM
+	// correctly identified the two amount columns but only got the balance column wrong.
+	if wIdx >= 0 && wIdx != realBalIdx && dIdx >= 0 && dIdx != realBalIdx && wIdx != dIdx {
+		wRate := colFillRate(rows, dataStart, wIdx, 10)
+		dRate := colFillRate(rows, dataStart, dIdx, 10)
+		// Accept if the higher-fill column looks like a real amount column, and both have at least
+		// one value (so the other isn't just leftover noise from a header-index mismatch).
+		if (wRate >= 0.4 || dRate >= 0.4) && wRate > 0 && dRate > 0 {
+			newCols["withdrawal"] = wIdx
+			newCols["deposit"] = dIdx
+			logger.LogInfo("[LLM-COLS] balance-fix: balance col=%d; restored separate withdrawal=%d deposit=%d",
+				realBalIdx, wIdx, dIdx)
+			layout.Columns = newCols
+			return layout
+		}
+	}
+
+	// Fallback: find a single-amount column (both withdrawal and deposit point to it).
 	// The LLM's surviving withdrawal / deposit column might itself be empty.
-	// Determine what non-balance numeric column actually has transaction amounts.
 	amountIdx := -1
 
 	// First try: whichever of {wIdx, dIdx} is NOT the new balance and has data.

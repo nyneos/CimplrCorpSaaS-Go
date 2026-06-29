@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -109,13 +110,45 @@ func getUserFriendlyDematError(err error, context string) (string, int) {
 		return "Required field is missing.", http.StatusOK
 	}
 
+	// Value too long — field-specific messages
+	if strings.Contains(lower, "value too long") || strings.Contains(lower, "character varying") {
+		if strings.Contains(lower, "entity_name") {
+			return "Entity name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(lower, "demat_account_number") {
+			return "Demat account number is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(lower, "dp_id") {
+			return "DP ID value is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(lower, "client_id") {
+			return "Client ID is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(lower, "default_settlement_account") {
+			return "Settlement account value is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(lower, "depository") {
+			return "Depository value is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(lower, "status") {
+			return "Status value is too long.", http.StatusBadRequest
+		}
+		return "A field value is too long. Please check your data.", http.StatusBadRequest
+	}
+
 	// Timeout errors
 	if strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded") {
 		return "Operation timed out. Please try again.", http.StatusServiceUnavailable
 	}
 
-	// Default fallback
-	return fmt.Sprintf("Operation failed: %s", context), http.StatusInternalServerError
+	// Unknown error — expose details only in dev mode
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("DEVEL_MODE")), "true") {
+		if context != "" {
+			return context + " (dev): " + errMsg, http.StatusInternalServerError
+		}
+		return errMsg, http.StatusInternalServerError
+	}
+	return "Failed to process demat request. Please try again.", http.StatusInternalServerError
 }
 
 type CreateDematRequestSingle struct {
