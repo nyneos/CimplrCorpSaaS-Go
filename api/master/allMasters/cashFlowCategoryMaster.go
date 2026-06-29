@@ -501,7 +501,6 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if parentName == "" {
 				continue
 			}
-			ctx := context.Background()
 			var exists bool
 			// relationships are now stored by names
 			err := pgxPool.QueryRow(ctx, `SELECT true FROM cashflowcategoryrelationships WHERE parent_category_name=$1 AND child_category_name=$2`, parentName, cat.CategoryName).Scan(&exists)
@@ -555,7 +554,7 @@ WHERE m.category_id = h.category_id
 		}
 		if len(createdIDs) > 0 {
 			fmt.Printf("[DEBUG] Auto-correcting levels for %d created categories: %v\\n", len(createdIDs), createdIDs)
-			result, err := pgxPool.Exec(context.Background(), hierarchySQL, createdIDs)
+			result, err := pgxPool.Exec(ctx, hierarchySQL, createdIDs)
 			if err != nil {
 				fmt.Printf("[DEBUG] Level auto-correction failed: %v\\n", err)
 			} else {
@@ -921,7 +920,7 @@ func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		  AND UPPER(COALESCE(a.processing_status, '')) = 'APPROVED'
 	`
 
-		rows, err := pgxPool.Query(context.Background(), query, parentLevel)
+		rows, err := pgxPool.Query(ctx, query, parentLevel)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to find parent categories")
 			if statusCode == http.StatusOK {

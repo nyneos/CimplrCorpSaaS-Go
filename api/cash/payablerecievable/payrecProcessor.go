@@ -19,7 +19,8 @@ import (
 )
 
 func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UUID, userName string) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
 	startTime := time.Now()
 
 	mappingRows, err := pool.Query(ctx, `
