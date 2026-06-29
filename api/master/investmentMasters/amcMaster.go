@@ -1002,6 +1002,8 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var sets []string
 				var args []interface{}
 				pos := 1
+				auditOldValues := map[string]interface{}{}
+				auditNewValues := map[string]interface{}{}
 
 				//  Map field -> (current, old)
 				fieldPairs := map[string]int{
@@ -1026,6 +1028,8 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						oldField := "old_" + k
 						sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, k, pos, oldField, pos+1))
 						args = append(args, v, oldVals[idx])
+						auditOldValues[k] = oldVals[idx]
+						auditNewValues[k] = v
 						pos += 2
 					}
 				}
@@ -1049,11 +1053,18 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				// Insert audit record
+				oldValuesJSON, newValuesJSON, err := marshalAuditValueSnapshots(auditOldValues, auditNewValues)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						constants.ValueSuccess: false, "amc_id": row.AmcID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(),
+					})
+					return
+				}
 				audit := `
 					INSERT INTO investment.auditactionamc
-						(amc_id, actiontype, processing_status, reason, requested_by, requested_at)
-					VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())`
-				if _, err := tx.Exec(ctx, audit, row.AmcID, row.Reason, userEmail); err != nil {
+						(amc_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
+					VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)`
+				if _, err := tx.Exec(ctx, audit, row.AmcID, row.Reason, userEmail, oldValuesJSON, newValuesJSON); err != nil {
 					results = append(results, map[string]interface{}{
 						constants.ValueSuccess: false, "amc_id": row.AmcID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(),
 					})
@@ -1159,6 +1170,8 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var sets []string
 		var args []interface{}
 		pos := 1
+		auditOldValues := map[string]interface{}{}
+		auditNewValues := map[string]interface{}{}
 
 		for k, v := range req.Fields {
 			k = strings.ToLower(k)
@@ -1166,6 +1179,8 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				oldField := "old_" + k
 				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, k, pos, oldField, pos+1))
 				args = append(args, v, oldVals[idx])
+				auditOldValues[k] = oldVals[idx]
+				auditNewValues[k] = v
 				pos += 2
 			}
 		}
@@ -1187,11 +1202,17 @@ func UpdateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// --- Insert audit record ---
+		oldValuesJSON, newValuesJSON, err := marshalAuditValueSnapshots(auditOldValues, auditNewValues)
+		if err != nil {
+			msg, status := getUserFriendlyAMCError(err, constants.ErrAuditInsertFailed)
+			api.RespondWithError(w, status, msg)
+			return
+		}
 		audit := `
 			INSERT INTO investment.auditactionamc
-				(amc_id, actiontype, processing_status, reason, requested_by, requested_at)
-			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())`
-		if _, err := tx.Exec(ctx, audit, req.AmcID, req.Reason, userEmail); err != nil {
+				(amc_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
+			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)`
+		if _, err := tx.Exec(ctx, audit, req.AmcID, req.Reason, userEmail, oldValuesJSON, newValuesJSON); err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
 			return
@@ -1281,6 +1302,11 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		req.Comment = strings.TrimSpace(req.Comment)
+		if req.Comment == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "checker comment is required")
+			return
+		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
@@ -1292,7 +1318,7 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		sel := `
-			SELECT DISTINCT ON (amc_id) action_id, amc_id, processing_status
+			SELECT DISTINCT ON (amc_id) action_id, amc_id, actiontype, processing_status
 			FROM investment.auditactionamc
 			WHERE amc_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY amc_id, requested_at DESC`
@@ -1305,11 +1331,15 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		actionIDs := []string{}
+		editAMCIDs := []string{}
 		for rows.Next() {
-			var aid, cid, ps string
-			_ = rows.Scan(&aid, &cid, &ps)
+			var aid, cid, actionType, ps string
+			_ = rows.Scan(&aid, &cid, &actionType, &ps)
 			if strings.ToUpper(ps) != constants.StatusApproved {
 				actionIDs = append(actionIDs, aid)
+				if strings.EqualFold(actionType, "EDIT") && strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusPendingEditApproval {
+					editAMCIDs = append(editAMCIDs, cid)
+				}
 			}
 		}
 
@@ -1326,6 +1356,30 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrUpdateFailed)
 			api.RespondWithError(w, status, msg)
 			return
+		}
+		if len(editAMCIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.masteramc
+				SET
+					amc_name = CASE WHEN old_amc_name IS NOT NULL THEN old_amc_name ELSE amc_name END,
+					internal_amc_code = CASE WHEN old_internal_amc_code IS NOT NULL THEN old_internal_amc_code ELSE internal_amc_code END,
+					status = CASE WHEN old_status IS NOT NULL THEN old_status ELSE status END,
+					primary_contact_name = CASE WHEN old_primary_contact_name IS NOT NULL THEN old_primary_contact_name ELSE primary_contact_name END,
+					primary_contact_email = CASE WHEN old_primary_contact_email IS NOT NULL THEN old_primary_contact_email ELSE primary_contact_email END,
+					sebi_registration_no = CASE WHEN old_sebi_registration_no IS NOT NULL THEN old_sebi_registration_no ELSE sebi_registration_no END,
+					amc_beneficiary_name = CASE WHEN old_amc_beneficiary_name IS NOT NULL THEN old_amc_beneficiary_name ELSE amc_beneficiary_name END,
+					amc_bank_account_no = CASE WHEN old_amc_bank_account_no IS NOT NULL THEN old_amc_bank_account_no ELSE amc_bank_account_no END,
+					amc_bank_name = CASE WHEN old_amc_bank_name IS NOT NULL THEN old_amc_bank_name ELSE amc_bank_name END,
+					amc_bank_ifsc = CASE WHEN old_amc_bank_ifsc IS NOT NULL THEN old_amc_bank_ifsc ELSE amc_bank_ifsc END,
+					mfu_amc_code = CASE WHEN old_mfu_amc_code IS NOT NULL THEN old_mfu_amc_code ELSE mfu_amc_code END,
+					cams_amc_code = CASE WHEN old_cams_amc_code IS NOT NULL THEN old_cams_amc_code ELSE cams_amc_code END,
+					erp_vendor_code = CASE WHEN old_erp_vendor_code IS NOT NULL THEN old_erp_vendor_code ELSE erp_vendor_code END
+				WHERE amc_id = ANY($1)
+			`, editAMCIDs); err != nil {
+				msg, status := getUserFriendlyAMCError(err, "Edit revert failed")
+				api.RespondWithError(w, status, msg)
+				return
+			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -1352,6 +1406,11 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		checkerBy := api.GetUserEmailFromCtx(r.Context())
 		if checkerBy == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+		req.Comment = strings.TrimSpace(req.Comment)
+		if req.Comment == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "checker comment is required")
 			return
 		}
 
@@ -1540,7 +1599,8 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_by,
 					a.checker_at,
 					a.checker_comment,
-					a.reason
+					a.reason,
+					a.old_values
 					FROM investment.auditactionamc a
 					WHERE a.actiontype IN ('CREATE','EDIT','DELETE')
 					ORDER BY a.amc_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
@@ -1559,31 +1619,31 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 			SELECT
 				m.amc_id,
-				COALESCE(m.amc_name,'') AS amc_name,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'amc_name', m.amc_name) ELSE m.amc_name END,'') AS amc_name,
 				COALESCE(m.old_amc_name,'') AS old_amc_name,
-				COALESCE(m.internal_amc_code,'') AS internal_amc_code,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'internal_amc_code', m.internal_amc_code) ELSE m.internal_amc_code END,'') AS internal_amc_code,
 				COALESCE(m.old_internal_amc_code,'') AS old_internal_amc_code,
-				COALESCE(m.status,'') AS status,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'status', m.status) ELSE m.status END,'') AS status,
 				COALESCE(m.old_status,'') AS old_status,
-				COALESCE(m.primary_contact_name,'') AS primary_contact_name,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'primary_contact_name', m.primary_contact_name) ELSE m.primary_contact_name END,'') AS primary_contact_name,
 				COALESCE(m.old_primary_contact_name,'') AS old_primary_contact_name,
-				COALESCE(m.primary_contact_email,'') AS primary_contact_email,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'primary_contact_email', m.primary_contact_email) ELSE m.primary_contact_email END,'') AS primary_contact_email,
 				COALESCE(m.old_primary_contact_email,'') AS old_primary_contact_email,
-				COALESCE(m.sebi_registration_no,'') AS sebi_registration_no,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'sebi_registration_no', m.sebi_registration_no) ELSE m.sebi_registration_no END,'') AS sebi_registration_no,
 				COALESCE(m.old_sebi_registration_no,'') AS old_sebi_registration_no,
-				COALESCE(m.amc_beneficiary_name,'') AS amc_beneficiary_name,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'amc_beneficiary_name', m.amc_beneficiary_name) ELSE m.amc_beneficiary_name END,'') AS amc_beneficiary_name,
 				COALESCE(m.old_amc_beneficiary_name,'') AS old_amc_beneficiary_name,
-				COALESCE(m.amc_bank_account_no,'') AS amc_bank_account_no,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'amc_bank_account_no', m.amc_bank_account_no) ELSE m.amc_bank_account_no END,'') AS amc_bank_account_no,
 				COALESCE(m.old_amc_bank_account_no,'') AS old_amc_bank_account_no,
-				COALESCE(m.amc_bank_name,'') AS amc_bank_name,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'amc_bank_name', m.amc_bank_name) ELSE m.amc_bank_name END,'') AS amc_bank_name,
 				COALESCE(m.old_amc_bank_name,'') AS old_amc_bank_name,
-				COALESCE(m.amc_bank_ifsc,'') AS amc_bank_ifsc,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'amc_bank_ifsc', m.amc_bank_ifsc) ELSE m.amc_bank_ifsc END,'') AS amc_bank_ifsc,
 				COALESCE(m.old_amc_bank_ifsc,'') AS old_amc_bank_ifsc,
-				COALESCE(m.mfu_amc_code,'') AS mfu_amc_code,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'mfu_amc_code', m.mfu_amc_code) ELSE m.mfu_amc_code END,'') AS mfu_amc_code,
 				COALESCE(m.old_mfu_amc_code,'') AS old_mfu_amc_code,
-				COALESCE(m.cams_amc_code,'') AS cams_amc_code,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'cams_amc_code', m.cams_amc_code) ELSE m.cams_amc_code END,'') AS cams_amc_code,
 				COALESCE(m.old_cams_amc_code,'') AS old_cams_amc_code,
-				COALESCE(m.erp_vendor_code,'') AS erp_vendor_code,
+				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'erp_vendor_code', m.erp_vendor_code) ELSE m.erp_vendor_code END,'') AS erp_vendor_code,
 				COALESCE(m.old_erp_vendor_code,'') AS old_erp_vendor_code,
 				COALESCE(m.source,'') AS source,
 				COALESCE(m.old_source,'') AS old_source,
