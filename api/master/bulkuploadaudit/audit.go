@@ -31,6 +31,20 @@ type Entry struct {
 	Status           string
 	UploadedBy       string
 	UploadedAt       time.Time
+	FileHash         string
+}
+
+func ExistsByHash(ctx context.Context, pool *pgxpool.Pool, moduleKey, fileHash string) (bool, error) {
+	if fileHash == "" {
+		return false, nil
+	}
+	var exists bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM `+auditTable+`
+			WHERE module_key = $1 AND file_hash = $2
+		)`, moduleKey, fileHash).Scan(&exists)
+	return exists, err
 }
 
 // StatusFor returns COMPLETED, PARTIAL, or FAILED based on counts.
@@ -70,8 +84,9 @@ func Record(ctx context.Context, pool *pgxpool.Pool, e Entry) {
 			error_count,
 			status,
 			uploaded_by,
-			uploaded_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+			uploaded_at,
+			file_hash
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		e.ModuleKey,
 		e.OriginalFileName,
 		nullText(e.StoredFileName),
@@ -84,6 +99,7 @@ func Record(ctx context.Context, pool *pgxpool.Pool, e Entry) {
 		e.Status,
 		nullText(e.UploadedBy),
 		e.UploadedAt,
+		nullText(e.FileHash),
 	)
 	if err != nil {
 		logger.LogError("master_bulk_upload_audit: module=%s file=%s: %v", e.ModuleKey, e.OriginalFileName, err)
