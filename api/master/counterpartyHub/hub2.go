@@ -583,7 +583,18 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // as APPROVED. Called when the approval engine signals a fully approved instance.
 func activateCounterparty(ctx context.Context, pool *pgxpool.Pool,
 	cpID, cpType, userEmail, comment string) {
-	_, _ = pool.Exec(ctx, `
+	tx, txErr := pool.Begin(ctx)
+	if txErr != nil {
+		return
+	}
+	txOk := false
+	defer func() {
+		if !txOk {
+			tx.Rollback(ctx) //nolint:errcheck
+		}
+	}()
+
+	_, _ = tx.Exec(ctx, `
 		UPDATE apibox_svc.counterparty SET status='ACTIVE', updated_by=$1, updated_at=now()
 		WHERE counterparty_id=$2`, userEmail, cpID)
 
@@ -591,13 +602,17 @@ func activateCounterparty(ctx context.Context, pool *pgxpool.Pool,
 	idCol := typedIDColumn(cpType)
 	masterTbl := typedMasterTable(cpType)
 	if auditTbl != "" && idCol != "" && masterTbl != "" {
-		_, _ = pool.Exec(ctx, fmt.Sprintf(`
+		_, _ = tx.Exec(ctx, fmt.Sprintf(`
 			UPDATE %s
 			SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
 			WHERE %s = (SELECT %s FROM %s WHERE counterparty_id=$3)
 			AND processing_status LIKE 'PENDING%%'`,
 			auditTbl, idCol, idCol, masterTbl),
 			userEmail, comment, cpID)
+	}
+
+	if err := tx.Commit(ctx); err == nil {
+		txOk = true
 	}
 }
 
