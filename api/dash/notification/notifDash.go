@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -33,7 +34,86 @@ import (
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 	w.WriteHeader(code)
+	if m, ok := v.(map[string]interface{}); ok {
+		dashEnrichMap(m, code)
+	}
 	json.NewEncoder(w).Encode(v)
+}
+
+func dashEnrichMap(m map[string]interface{}, status int) {
+	if _, ok := m["statusCode"]; !ok {
+		m["statusCode"] = dashHTTPToCode(status)
+	}
+	if _, ok := m["message"]; !ok {
+		if success, _ := m["success"].(bool); success {
+			m["message"] = "Success"
+		} else {
+			m["message"] = dashHTTPToMessage(status)
+		}
+	}
+	if errStr, ok := m["error"].(string); ok {
+		delete(m, "error")
+		m["error"] = map[string]interface{}{
+			"code":    dashInferErrCode(errStr, status),
+			"details": errStr,
+		}
+	}
+}
+
+func dashHTTPToCode(status int) int {
+	switch status {
+	case 400:
+		return constants.StatusBadRequest.Code
+	case 401:
+		return constants.StatusUnauthorized.Code
+	case 403:
+		return constants.StatusForbidden.Code
+	case 404:
+		return constants.StatusNotFound.Code
+	default:
+		if status >= 500 {
+			return constants.StatusInternalError.Code
+		}
+		return constants.StatusSuccess.Code
+	}
+}
+
+func dashHTTPToMessage(status int) string {
+	switch status {
+	case 400:
+		return constants.StatusBadRequest.Message
+	case 401:
+		return constants.StatusUnauthorized.Message
+	case 403:
+		return constants.StatusForbidden.Message
+	case 404:
+		return constants.StatusNotFound.Message
+	default:
+		if status >= 500 {
+			return constants.StatusInternalError.Message
+		}
+		return constants.StatusBadRequest.Message
+	}
+}
+
+func dashInferErrCode(errMsg string, status int) string {
+	lower := strings.ToLower(errMsg)
+	if strings.Contains(lower, "invalid") && strings.Contains(lower, "filter") {
+		return constants.CodeInvalidFieldValue
+	}
+	if strings.Contains(lower, "required") || strings.Contains(lower, "missing") {
+		return constants.CodeMissingRequiredField
+	}
+	if strings.Contains(lower, "not found") {
+		return constants.CodeEntityNotFound
+	}
+	if strings.Contains(lower, "invalid") {
+		return constants.CodeInvalidFieldValue
+	}
+	if status >= 500 {
+		return constants.CodeInternalServer
+	}
+	return constants.CodeOperationFailed
 }
 
 func errResp(w http.ResponseWriter, code int, msg string) {

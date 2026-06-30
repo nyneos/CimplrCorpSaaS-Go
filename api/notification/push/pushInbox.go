@@ -41,11 +41,91 @@ func userIDFromCtx(r *http.Request) string {
 	return r.URL.Query().Get("user_id")
 }
 
-// writeJSON is the low-level JSON writer — always sets Content-Type.
+// writeJSON is the low-level JSON writer — always sets Content-Type and enriches maps.
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
+	if m, ok := v.(map[string]interface{}); ok {
+		pushEnrichMap(m, status)
+	}
 	json.NewEncoder(w).Encode(v)
+}
+
+// pushEnrichMap adds statusCode, message, and converts error strings to structured objects.
+func pushEnrichMap(m map[string]interface{}, status int) {
+	if _, ok := m["statusCode"]; !ok {
+		m["statusCode"] = pushHTTPToCode(status)
+	}
+	if _, ok := m["message"]; !ok {
+		if success, _ := m["success"].(bool); success {
+			m["message"] = "Success"
+		} else {
+			m["message"] = pushHTTPToMessage(status)
+		}
+	}
+	if errStr, ok := m["error"].(string); ok {
+		delete(m, "error")
+		errCode := pushInferErrCode(errStr, status)
+		m["error"] = map[string]interface{}{"code": errCode, "details": errStr}
+	}
+}
+
+func pushHTTPToCode(status int) int {
+	switch status {
+	case 400:
+		return constants.StatusBadRequest.Code
+	case 401:
+		return constants.StatusUnauthorized.Code
+	case 403:
+		return constants.StatusForbidden.Code
+	case 404:
+		return constants.StatusNotFound.Code
+	case 405:
+		return constants.StatusBadRequest.Code
+	default:
+		if status >= 500 {
+			return constants.StatusInternalError.Code
+		}
+		return constants.StatusSuccess.Code
+	}
+}
+
+func pushHTTPToMessage(status int) string {
+	switch status {
+	case 400:
+		return constants.StatusBadRequest.Message
+	case 401:
+		return constants.StatusUnauthorized.Message
+	case 403:
+		return constants.StatusForbidden.Message
+	case 404:
+		return constants.StatusNotFound.Message
+	default:
+		if status >= 500 {
+			return constants.StatusInternalError.Message
+		}
+		return constants.StatusBadRequest.Message
+	}
+}
+
+func pushInferErrCode(errMsg string, status int) string {
+	lower := strings.ToLower(errMsg)
+	if strings.Contains(lower, "unauthorized") || strings.Contains(lower, "user_id required") {
+		return constants.CodeAuthUnauthorized
+	}
+	if strings.Contains(lower, "not found") {
+		return constants.CodeEntityNotFound
+	}
+	if strings.Contains(lower, "required") || strings.Contains(lower, "missing") {
+		return constants.CodeMissingRequiredField
+	}
+	if strings.Contains(lower, "invalid") {
+		return constants.CodeInvalidFieldValue
+	}
+	if status >= 500 {
+		return constants.CodeInternalServer
+	}
+	return constants.CodeOperationFailed
 }
 
 // writeOK writes a standard success envelope: {"success":true, "data":{...}}
@@ -56,7 +136,7 @@ func writeOK(w http.ResponseWriter, data interface{}) {
 	})
 }
 
-// writeErr writes a standard error envelope: {"success":false, "error":"..."}
+// writeErr writes a standard error envelope.
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]interface{}{
 		"success": false,

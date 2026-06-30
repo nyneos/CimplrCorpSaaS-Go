@@ -133,81 +133,214 @@ func sanitizeInternalError(msg string) string {
 	return msg
 }
 
-// Error response helper
-func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
-	logger.LogError("%s", errMsg) // always log the full detail
+// ErrorDetail is the structured error object returned in error responses.
+type ErrorDetail struct {
+	Code    string `json:"code"`
+	Details string `json:"details"`
+}
 
-	clientMsg := errMsg
+// APIResponse is the standard envelope for all API responses.
+type APIResponse struct {
+	Success    bool        `json:"success"`
+	StatusCode int         `json:"statusCode"`
+	Message    string      `json:"message"`
+	Data       interface{} `json:"data,omitempty"`
+	Error      *ErrorDetail `json:"error,omitempty"`
+}
+
+// httpStatusToAppCode maps a standard HTTP status to the matching custom AppCode.
+func httpStatusToAppCode(status int) constants.AppCode {
+	switch status {
+	case 400:
+		return constants.StatusBadRequest
+	case 401:
+		return constants.StatusUnauthorized
+	case 403:
+		return constants.StatusForbidden
+	case 404:
+		return constants.StatusNotFound
+	case 413:
+		return constants.StatusPayloadTooLarge
+	case 422:
+		return constants.StatusValidation
+	default:
+		if status >= 500 {
+			return constants.StatusInternalError
+		}
+		return constants.StatusBadRequest
+	}
+}
+
+// inferErrorCode maps an error message and HTTP status to a machine-readable error code.
+func inferErrorCode(errMsg string, httpStatus int) string {
+	lower := strings.ToLower(errMsg)
+
+	if strings.Contains(lower, "session") && strings.Contains(lower, "expired") {
+		return constants.CodeAuthSessionExpired
+	}
+	if strings.Contains(lower, "invalid session") || strings.Contains(lower, "session not found") {
+		return constants.CodeAuthInvalidSession
+	}
+	if strings.Contains(lower, "user_id") && strings.Contains(lower, "missing") {
+		return constants.CodeAuthMissingUserID
+	}
+	if strings.Contains(lower, "unauthorized") || strings.Contains(lower, "not authorized") {
+		return constants.CodeAuthUnauthorized
+	}
+	if strings.Contains(lower, "access denied") || strings.Contains(lower, "forbidden") {
+		return constants.CodeAuthForbidden
+	}
+	if strings.Contains(lower, "no accessible business unit") {
+		return constants.CodeNoAccessibleBusinessUnit
+	}
+	if strings.Contains(lower, "duplicate") || strings.Contains(lower, "already exists") {
+		return constants.CodeDuplicateEntry
+	}
+	if strings.Contains(lower, "not found") {
+		if strings.Contains(lower, "user") {
+			return constants.CodeUserNotFound
+		}
+		if strings.Contains(lower, "bank account") {
+			return constants.CodeBankAccountNotFound
+		}
+		if strings.Contains(lower, "bank") {
+			return constants.CodeBankNotFound
+		}
+		if strings.Contains(lower, "scheme") {
+			return constants.CodeSchemeNotFound
+		}
+		if strings.Contains(lower, "currency") {
+			return constants.CodeCurrencyNotFound
+		}
+		return constants.CodeEntityNotFound
+	}
+	if strings.Contains(lower, "required") || strings.Contains(lower, "missing") {
+		return constants.CodeMissingRequiredField
+	}
+	if strings.Contains(lower, "invalid") {
+		return constants.CodeInvalidFieldValue
+	}
+	if strings.Contains(lower, "failed to fetch") || strings.Contains(lower, "failed to query") {
+		return constants.CodeQueryFailed
+	}
+	if strings.Contains(lower, "failed to") {
+		return constants.CodeOperationFailed
+	}
+	if strings.Contains(lower, "no data") || strings.Contains(lower, "no records") {
+		return constants.CodeNoDataFound
+	}
+	switch httpStatus {
+	case 401:
+		return constants.CodeAuthUnauthorized
+	case 403:
+		return constants.CodeAuthForbidden
+	case 404:
+		return constants.CodeEntityNotFound
+	}
+	return constants.CodeInternalServer
+}
+
+// RespondWithError writes a structured error response with no data payload.
+func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
+	logger.LogError("%s", errMsg)
+
+	appCode := httpStatusToAppCode(status)
+	clientDetails := errMsg
 	if status >= 500 {
-		clientMsg = sanitizeInternalError(errMsg)
+		clientDetails = sanitizeInternalError(errMsg)
 	}
 
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   clientMsg,
+	json.NewEncoder(w).Encode(APIResponse{
+		Success:    false,
+		StatusCode: appCode.Code,
+		Message:    appCode.Message,
+		Error:      &ErrorDetail{Code: inferErrorCode(errMsg, status), Details: clientDetails},
 	})
 }
 
-// RespondWithResult sends a consistent JSON response for success or error
+// RespondWithResult sends a consistent JSON response for success or error with no payload.
 func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 	if success {
-		w.WriteHeader(http.StatusOK) // 200
+		w.WriteHeader(http.StatusOK)
 		logger.LogInfo("RespondWithResult success")
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true})
-	} else {
-		logger.LogError("RespondWithResult: %s", errMsg) // log full detail before any sanitization
-
-		clientMsg := errMsg
-		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
-			w.WriteHeader(http.StatusBadRequest) // 400
-		} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
-			w.WriteHeader(http.StatusUnprocessableEntity) // 422
-		} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
-			w.WriteHeader(http.StatusUnauthorized) // 401
-		} else {
-			w.WriteHeader(http.StatusInternalServerError) // 500
-			clientMsg = sanitizeInternalError(errMsg)
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: clientMsg})
+		json.NewEncoder(w).Encode(APIResponse{
+			Success:    true,
+			StatusCode: constants.StatusSuccess.Code,
+			Message:    constants.StatusSuccess.Message,
+		})
+		return
 	}
+
+	logger.LogError("RespondWithResult: %s", errMsg)
+	var httpStatus int
+	if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
+		httpStatus = http.StatusBadRequest
+	} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
+		httpStatus = http.StatusUnprocessableEntity
+	} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
+		httpStatus = http.StatusUnauthorized
+	} else {
+		httpStatus = http.StatusInternalServerError
+	}
+	appCode := httpStatusToAppCode(httpStatus)
+	clientDetails := errMsg
+	if httpStatus >= 500 {
+		clientDetails = sanitizeInternalError(errMsg)
+	}
+	w.WriteHeader(httpStatus)
+	json.NewEncoder(w).Encode(APIResponse{
+		Success:    false,
+		StatusCode: appCode.Code,
+		Message:    appCode.Message,
+		Error:      &ErrorDetail{Code: inferErrorCode(errMsg, httpStatus), Details: clientDetails},
+	})
 }
 
-// RespondWithPayload sends a consistent JSON response and includes an arbitrary payload
+// RespondWithPayload sends a consistent JSON response and includes an arbitrary payload.
 func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payload interface{}) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	resp := map[string]interface{}{constants.ValueSuccess: success}
 
-	if !success {
-		errMsg = promotePayloadErrors(errMsg, payload)
+	if success {
+		w.WriteHeader(http.StatusOK)
+		logger.LogInfo("RespondWithPayload success")
+		json.NewEncoder(w).Encode(APIResponse{
+			Success:    true,
+			StatusCode: constants.StatusSuccess.Code,
+			Message:    constants.StatusSuccess.Message,
+			Data:       payload,
+		})
+		return
 	}
 
-	if !success && errMsg != "" {
-		logger.LogError("RespondWithPayload: %s", errMsg) // log full detail before any sanitization
-		clientMsg := errMsg
-		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
-			w.WriteHeader(http.StatusBadRequest) // 400
-		} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
-			w.WriteHeader(http.StatusUnprocessableEntity) // 422
-		} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
-			w.WriteHeader(http.StatusUnauthorized) // 401
-		} else {
-			w.WriteHeader(http.StatusInternalServerError) // 500
-			clientMsg = sanitizeInternalError(errMsg)
-		}
-		resp[constants.ValueError] = clientMsg
+	errMsg = promotePayloadErrors(errMsg, payload)
+	logger.LogError("RespondWithPayload: %s", errMsg)
+	var httpStatus int
+	if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
+		httpStatus = http.StatusBadRequest
+	} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
+		httpStatus = http.StatusUnprocessableEntity
+	} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
+		httpStatus = http.StatusUnauthorized
 	} else {
-		w.WriteHeader(http.StatusOK) // 200
+		httpStatus = http.StatusInternalServerError
 	}
-	if payload != nil {
-		// use a conventional key `rows` for list payloads
-		resp["rows"] = payload
-		logger.LogInfo("RespondWithPayload: payload included")
+	appCode := httpStatusToAppCode(httpStatus)
+	clientDetails := errMsg
+	if httpStatus >= 500 {
+		clientDetails = sanitizeInternalError(errMsg)
 	}
-	json.NewEncoder(w).Encode(resp)
+	w.WriteHeader(httpStatus)
+	json.NewEncoder(w).Encode(APIResponse{
+		Success:    false,
+		StatusCode: appCode.Code,
+		Message:    appCode.Message,
+		Data:       payload,
+		Error:      &ErrorDetail{Code: inferErrorCode(errMsg, httpStatus), Details: clientDetails},
+	})
 }
 
 func promotePayloadErrors(errMsg string, payload interface{}) string {

@@ -210,12 +210,16 @@ const (
 
 // Generic keys and small common tokens
 const (
-	ValueSuccess                  = "success"
-	ErrDBAcquire                  = "db acquire: "
-	ErrTxBegin                    = "tx begin: "
-	LogWarn                       = "[WARN] %s"
-	LogSweepWorker                = "[SWEEP V2] ═══════════════════════════════════════════════════════"
-	ValueError                    = "error"
+	// Deprecated: response helpers now use the APIResponse struct.
+	// Kept for internal payload inspection (errorStringsFromMap) and legacy
+	// call sites until the response migration is fully complete.
+	ValueSuccess  = "success"
+	ErrDBAcquire  = "db acquire: "
+	ErrTxBegin    = "tx begin: "
+	LogWarn       = "[WARN] %s"
+	LogSweepWorker  = "[SWEEP V2] ═══════════════════════════════════════════════════════"
+	// Deprecated: see ValueSuccess above.
+	ValueError  = "error"
 	KeyStatus                     = "status"
 	KeyUserID                     = "user_id"
 	ErrInvalidSessionCapitalized  = "Invalid user_id or session"

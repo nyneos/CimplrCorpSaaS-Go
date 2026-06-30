@@ -608,5 +608,104 @@ func frontendRedirectError(w http.ResponseWriter, r *http.Request, msg string) {
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
+	if m, ok := v.(map[string]interface{}); ok {
+		enrichAuthMap(m, status)
+	}
 	json.NewEncoder(w).Encode(v)
+}
+
+// enrichAuthMap adds statusCode, message, and converts error strings to structured objects.
+func enrichAuthMap(m map[string]interface{}, status int) {
+	if _, ok := m["statusCode"]; !ok {
+		m["statusCode"] = authHTTPToCode(status)
+	}
+	if _, ok := m["message"]; !ok {
+		if success, _ := m["success"].(bool); success {
+			m["message"] = "Success"
+		} else {
+			m["message"] = authHTTPToMessage(status)
+		}
+	}
+	if errStr, ok := m["error"].(string); ok {
+		delete(m, "error")
+		m["error"] = map[string]interface{}{
+			"code":    authInferErrCode(errStr, status),
+			"details": errStr,
+		}
+	}
+}
+
+func authHTTPToCode(status int) int {
+	switch status {
+	case 201:
+		return constants.StatusCreated.Code
+	case 400:
+		return constants.StatusBadRequest.Code
+	case 401:
+		return constants.StatusUnauthorized.Code
+	case 403:
+		return constants.StatusForbidden.Code
+	case 404:
+		return constants.StatusNotFound.Code
+	case 422:
+		return constants.StatusValidation.Code
+	default:
+		if status >= 500 {
+			return constants.StatusInternalError.Code
+		}
+		return constants.StatusSuccess.Code
+	}
+}
+
+func authHTTPToMessage(status int) string {
+	switch status {
+	case 400:
+		return constants.StatusBadRequest.Message
+	case 401:
+		return constants.StatusUnauthorized.Message
+	case 403:
+		return constants.StatusForbidden.Message
+	case 404:
+		return constants.StatusNotFound.Message
+	default:
+		if status >= 500 {
+			return constants.StatusInternalError.Message
+		}
+		return constants.StatusBadRequest.Message
+	}
+}
+
+func authInferErrCode(errMsg string, status int) string {
+	lower := strings.ToLower(errMsg)
+	if strings.Contains(lower, "session") && strings.Contains(lower, "expired") {
+		return constants.CodeAuthSessionExpired
+	}
+	if strings.Contains(lower, "invalid session") || strings.Contains(lower, "session") {
+		return constants.CodeAuthInvalidSession
+	}
+	if strings.Contains(lower, "no account") || (strings.Contains(lower, "not found") && strings.Contains(lower, "user")) {
+		return constants.CodeUserNotFound
+	}
+	if strings.Contains(lower, "not found") {
+		return constants.CodeEntityNotFound
+	}
+	if strings.Contains(lower, "not active") || strings.Contains(lower, "not configured") {
+		return constants.CodeAuthForbidden
+	}
+	if strings.Contains(lower, "required") || strings.Contains(lower, "missing") {
+		return constants.CodeMissingRequiredField
+	}
+	if strings.Contains(lower, "invalid") {
+		return constants.CodeInvalidFieldValue
+	}
+	switch status {
+	case 401:
+		return constants.CodeAuthUnauthorized
+	case 403:
+		return constants.CodeAuthForbidden
+	}
+	if status >= 500 {
+		return constants.CodeInternalServer
+	}
+	return constants.CodeOperationFailed
 }
