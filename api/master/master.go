@@ -325,6 +325,8 @@ func NewMasterServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, erro
 	// Folio Master routes
 	mux.Handle("/master/folio/upload", midInvestMF(investmentMasters.UploadFolio(pgxPool)))
 	mux.Handle("/master/folio/all", midInvestMF(investmentMasters.GetFoliosWithAudit(pgxPool)))
+	mux.Handle("/master/folio/download", midInvestMF(investmentMasters.GetFolioDownloadURL(pgxPool)))
+	mux.Handle("/master/folio/download-bulk", midInvestMF(investmentMasters.GetFolioBulkDownloadURL(pgxPool)))
 	mux.Handle("/master/folio/approved-active", midInvestMF(investmentMasters.GetApprovedActiveFolios(pgxPool)))
 	mux.Handle("/master/folio/create", midInvestMF(investmentMasters.CreateFolioSingle(pgxPool)))
 	mux.Handle("/master/folio/bulk-create", midInvestMF(investmentMasters.CreateFolioBulk(pgxPool)))

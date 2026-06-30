@@ -6,6 +6,9 @@ import (
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -204,6 +207,16 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
+
+			
+			sum := sha256.Sum256(fileBytes)
+			fileHash := hex.EncodeToString(sum[:])
+			if dup, derr := bulkuploadaudit.ExistsByHash(ctx, pgxPool, "master-folio", fileHash); derr != nil {
+				api.LogError("folio duplicate-file check failed: %v", derr)
+			} else if dup {
+				api.RespondWithError(w, http.StatusConflict, "This file has already been uploaded. Please upload a different file.")
+				return
+			}
 
 			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 			if err != nil || len(records) < 2 {
@@ -539,11 +552,26 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 			}
+
+			
+			if s3Key != "" {
+				if _, err := tx.Exec(ctx, `
+					UPDATE investment.masterfolio m
+					SET upload_s3_key = $1
+					FROM tmp_folio t
+					WHERE m.folio_number = t.folio_number
+					  AND COALESCE(m.is_deleted, false) = false
+				`, s3Key); err != nil {
+					api.LogError("Failed to store folio upload_s3_key: %v", err)
+				}
+			}
+
 			if err := tx.Commit(ctx); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "commit")
 				api.RespondWithError(w, status, msg)
 				return
 			}
+			committed = true 
 			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
 				ModuleKey:        "master-folio",
 				OriginalFileName: fh.Filename,
@@ -557,6 +585,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Status:           bulkuploadaudit.StatusCompleted,
 				UploadedBy:       userEmail,
 				UploadedAt:       time.Now().UTC(),
+				FileHash:         fileHash,
 			})
 
 			results = append(results, map[string]interface{}{
@@ -692,6 +721,7 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.source,
 				m.old_source,
 				m.is_deleted,
+				COALESCE(m.upload_s3_key,'') AS upload_s3_key,
 
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
@@ -803,6 +833,154 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", out)
+	}
+}
+
+
+func insertFolioDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, folioID, userID, requestedIP string) {
+	folioID = strings.TrimSpace(folioID)
+	if folioID == "" {
+		return
+	}
+	requestedBy := ""
+	for _, s := range auth.GetActiveSessions() {
+		if s.UserID == userID {
+			requestedBy = s.Email
+			break
+		}
+	}
+	if requestedBy == "" {
+		requestedBy = strings.TrimSpace(userID)
+	}
+	if _, err := pgxPool.Exec(ctx, `
+		INSERT INTO investment.auditactionfolio
+			(folio_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+		VALUES ($1, 'DOWNLOAD', 'APPROVED', 'File downloaded', $2, now(), $3)
+	`, folioID, requestedBy, requestedIP); err != nil {
+		api.LogError("failed to insert folio download audit for %s: %v", folioID, err)
+	}
+}
+
+func GetFolioDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID  string `json:"user_id"`
+			FolioID string `json:"folio_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.FolioID) == "" {
+			api.RespondWithResult(w, false, "folio_id required")
+			return
+		}
+
+		ctx := r.Context()
+		var uploadS3Key string
+		err := pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(upload_s3_key, '')
+			FROM investment.masterfolio
+			WHERE folio_id = $1 AND COALESCE(is_deleted, false) = false
+		`, req.FolioID).Scan(&uploadS3Key)
+		if err != nil {
+			api.RespondWithResult(w, false, "folio_id not found")
+			return
+		}
+
+		key := strings.TrimSpace(uploadS3Key)
+		if key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to generate download url")
+			return
+		}
+
+		insertFolioDownloadAudit(ctx, pgxPool, req.FolioID, req.UserID, api.ClientIPFromRequest(r))
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+
+func GetFolioBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string   `json:"user_id"`
+			FolioIDs []string `json:"folio_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.FolioIDs) == 0 {
+			api.RespondWithResult(w, false, "folio_ids required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(req.FolioIDs))
+		failedIDs := make([]string, 0)
+
+		for _, rawID := range req.FolioIDs {
+			folioID := strings.TrimSpace(rawID)
+			if folioID == "" {
+				continue
+			}
+
+			var uploadS3Key string
+			err := pgxPool.QueryRow(ctx, `
+				SELECT COALESCE(upload_s3_key, '')
+				FROM investment.masterfolio
+				WHERE folio_id = $1 AND COALESCE(is_deleted, false) = false
+			`, folioID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, folioID)
+				continue
+			}
+
+			key := strings.TrimSpace(uploadS3Key)
+			if key == "" {
+				failedIDs = append(failedIDs, folioID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, folioID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"folio_id":     folioID,
+				"download_url": downloadURL,
+			})
+			insertFolioDownloadAudit(ctx, pgxPool, folioID, req.UserID, api.ClientIPFromRequest(r))
+		}
+
+		if len(files) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: false,
+				"message":              "no downloadable files found",
+				"data": map[string]interface{}{
+					"files":      []map[string]string{},
+					"failed_ids": failedIDs,
+				},
+			})
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
 	}
 }
 
