@@ -1181,6 +1181,8 @@ func GetDematAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.checker_ip,'') AS checker_ip,
 				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment,
+				COALESCE(a.old_values, '{}'::jsonb)::text AS old_values,
+				COALESCE(a.new_values, '{}'::jsonb)::text AS new_values,
 				COALESCE(m.entity_name,'') AS entity_name,
 				COALESCE(m.old_entity_name,'') AS old_entity_name,
 				COALESCE(m.depository,'') AS depository,

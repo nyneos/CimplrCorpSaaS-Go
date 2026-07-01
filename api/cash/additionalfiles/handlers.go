@@ -387,6 +387,93 @@ func NewMainFileDownloadHandler(pool *pgxpool.Pool, cfg Config, loadMain func(ct
 	}
 }
 
+type mainFileBulkRequest struct {
+	UserID string   `json:"user_id"`
+	IDs    []string `json:"ids"`
+}
+
+func NewMainFileBulkDownloadHandler(pool *pgxpool.Pool, cfg Config, loadMain func(ctx context.Context, pool *pgxpool.Pool, rowID string) (*MainPackageFile, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			return
+		}
+
+		var req mainFileBulkRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			return
+		}
+		if strings.TrimSpace(req.UserID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			return
+		}
+		if loadMain == nil {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			return
+		}
+
+		ids := trimStringList(req.IDs)
+		if len(ids) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "ids required")
+			return
+		}
+
+		performedBy := requestedByOrFallback(r.Context(), req.UserID)
+		requestedIP := api.ClientIPFromRequest(r)
+
+		files := make([]map[string]string, 0, len(ids))
+		failedIDs := make([]string, 0)
+		seenKeys := make(map[string]struct{}, len(ids))
+
+		for _, id := range ids {
+			mainFile, err := loadMain(r.Context(), pool, id)
+			if err != nil || mainFile == nil || strings.TrimSpace(mainFile.UploadS3Key) == "" {
+				failedIDs = append(failedIDs, id)
+				continue
+			}
+			key := strings.TrimSpace(mainFile.UploadS3Key)
+			if _, done := seenKeys[key]; done {
+				continue // same uploaded file already returned for another row
+			}
+
+			downloadURL, presignErr := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+			if presignErr != nil {
+				failedIDs = append(failedIDs, id)
+				continue
+			}
+
+			if auditEnabled(cfg) {
+				fileName := strings.TrimSpace(mainFile.FileName)
+				if fileName == "" {
+					fileName = objectBaseName(key)
+				}
+				if auditErr := recordMainDownloadAuditSafely(r.Context(), pool, cfg, id, MainUploadAuditPayload{
+					FileName:    fileName,
+					UploadS3Key: key,
+					UploadedBy:  performedBy,
+					UploadedAt:  time.Now().UTC(),
+					RequestedIP: requestedIP,
+				}); auditErr != nil {
+					failedIDs = append(failedIDs, id)
+					continue
+				}
+			}
+
+			seenKeys[key] = struct{}{}
+			files = append(files, map[string]string{
+				"id":           id,
+				"download_url": downloadURL,
+			})
+		}
+
+		writeSuccess(w, map[string]interface{}{
+			"files":      files,
+			"failed_ids": uniqueStrings(failedIDs),
+		})
+	}
+}
+
 func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

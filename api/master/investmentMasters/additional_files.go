@@ -28,16 +28,17 @@ func newBytesMultipartFile(b []byte) bytesMultipartFile {
 
 // investmentFilesHandlers groups the HTTP handlers for one investment master module.
 type investmentFilesHandlers struct {
-	List          http.HandlerFunc
-	Upload        http.HandlerFunc
-	Download      http.HandlerFunc
-	DownloadMain  http.HandlerFunc
-	DownloadBulk  http.HandlerFunc
-	PackageZip    http.HandlerFunc
-	Delete        http.HandlerFunc
-	Audit         http.HandlerFunc
-	ApproveDelete http.HandlerFunc
-	RejectDelete  http.HandlerFunc
+	List             http.HandlerFunc
+	Upload           http.HandlerFunc
+	Download         http.HandlerFunc
+	DownloadMain     http.HandlerFunc
+	DownloadMainBulk http.HandlerFunc
+	DownloadBulk     http.HandlerFunc
+	PackageZip       http.HandlerFunc
+	Delete           http.HandlerFunc
+	Audit            http.HandlerFunc
+	ApproveDelete    http.HandlerFunc
+	RejectDelete     http.HandlerFunc
 }
 
 // newInvestmentFilesHandlers builds all handlers for an investment master
@@ -61,16 +62,17 @@ func newInvestmentFilesHandlers(pool *pgxpool.Pool, args InvestmentFilesConfigAr
 		moduleLabel = args.ModuleKey
 	}
 	return investmentFilesHandlers{
-		List:          additionalfiles.NewListHandler(pool, cfg),
-		Upload:        additionalfiles.NewUploadHandler(pool, cfg),
-		Download:      additionalfiles.NewDownloadHandler(pool, cfg),
-		DownloadMain:  additionalfiles.NewMainFileDownloadHandler(pool, cfg, loadMain),
-		DownloadBulk:  additionalfiles.NewDownloadSelectedHandler(pool, cfg),
-		PackageZip:    additionalfiles.NewPackageZipHandler(pool, cfg, additionalfiles.PackageZipOptions{ModuleLabel: moduleLabel, IDField: args.ParentCol, LoadMain: loadMain}),
-		Delete:        additionalfiles.NewDeleteHandler(pool, cfg),
-		Audit:         additionalfiles.NewAuditHandler(pool, cfg),
-		ApproveDelete: additionalfiles.NewApproveDeleteHandler(pool, cfg),
-		RejectDelete:  additionalfiles.NewRejectDeleteHandler(pool, cfg),
+		List:             additionalfiles.NewListHandler(pool, cfg),
+		Upload:           additionalfiles.NewUploadHandler(pool, cfg),
+		Download:         additionalfiles.NewDownloadHandler(pool, cfg),
+		DownloadMain:     additionalfiles.NewMainFileDownloadHandler(pool, cfg, loadMain),
+		DownloadMainBulk: additionalfiles.NewMainFileBulkDownloadHandler(pool, cfg, loadMain),
+		DownloadBulk:     additionalfiles.NewDownloadSelectedHandler(pool, cfg),
+		PackageZip:       additionalfiles.NewPackageZipHandler(pool, cfg, additionalfiles.PackageZipOptions{ModuleLabel: moduleLabel, IDField: args.ParentCol, LoadMain: loadMain}),
+		Delete:           additionalfiles.NewDeleteHandler(pool, cfg),
+		Audit:            additionalfiles.NewAuditHandler(pool, cfg),
+		ApproveDelete:    additionalfiles.NewApproveDeleteHandler(pool, cfg),
+		RejectDelete:     additionalfiles.NewRejectDeleteHandler(pool, cfg),
 	}
 }
 
