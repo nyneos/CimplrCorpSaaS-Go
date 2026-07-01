@@ -2132,14 +2132,6 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 					engineActed++
 					continue
 				}
-				// Idempotency guard: re-check status under the same connection before posting journals
-				// to avoid double-posting if another goroutine or request raced us.
-				var currentStatusCheck string
-				_ = pool.QueryRow(ctx, `SELECT closure_status FROM investment.fd_closure_request WHERE closure_request_id=$1 AND is_deleted=false FOR UPDATE`, crID).Scan(&currentStatusCheck)
-				if currentStatusCheck != constants.StatusPendingApproval {
-					errors = append(errors, crID+": status changed to "+currentStatusCheck+" — skipped")
-					continue
-				}
 				if postErr := postClosureJournals(ctx, PostClosureJournalsParams{Pool: pool, ClosureRequestID: crID, FDID: fdID, ClosureType: closureType, EntityID: entityID, EntityName: entityName, PrincipalAmt: principalAmt, AccruedInterest: accruedInt, TDSAmt: tdsAmt, PenaltyAmt: penaltyAmt, NetPayout: netPayout, ApprovedBy: req.UserID, ApprovedByEmail: userEmail}); postErr != nil {
 					errors = append(errors, crID+": "+postErr.Error())
 					continue
@@ -2571,6 +2563,14 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		return fmt.Errorf("postClosureJournals begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Re-check status inside the transaction with a row lock to prevent double-posting
+	// if two concurrent requests both pass the pre-call status check.
+	var currentStatus string
+	_ = tx.QueryRow(ctx, `SELECT closure_status FROM investment.fd_closure_request WHERE closure_request_id=$1 AND is_deleted=false FOR UPDATE`, closureRequestID).Scan(&currentStatus)
+	if currentStatus != constants.StatusPendingApproval {
+		return fmt.Errorf("closure %s status is %s — skipped", closureRequestID, currentStatus)
+	}
 
 	now := time.Now()
 	accountingPeriod := fmt.Sprintf("%d-%02d", now.Year(), now.Month())

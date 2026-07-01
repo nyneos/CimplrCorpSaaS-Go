@@ -489,6 +489,17 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nameToID[strings.ToLower(cat.CategoryName)] = categoryID
 		}
 		relAdded := 0
+		relTx, relTxErr := pgxPool.Begin(ctx)
+		if relTxErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to begin relationship transaction: "+relTxErr.Error())
+			return
+		}
+		relTxOk := false
+		defer func() {
+			if !relTxOk {
+				relTx.Rollback(ctx)
+			}
+		}()
 		for _, cat := range req.Categories {
 			childID := ""
 			if id := nameToID[strings.ToLower(cat.CategoryName)]; id != "" {
@@ -501,17 +512,15 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if parentName == "" {
 				continue
 			}
-			ctx := context.Background()
-			var exists bool
-			// relationships are now stored by names
-			err := pgxPool.QueryRow(ctx, `SELECT true FROM cashflowcategoryrelationships WHERE parent_category_name=$1 AND child_category_name=$2`, parentName, cat.CategoryName).Scan(&exists)
-			if err == nil && exists {
-				continue
-			}
-			if _, err := pgxPool.Exec(ctx, `INSERT INTO cashflowcategoryrelationships (parent_category_name, child_category_name, status) VALUES ($1,$2,'Active')`, parentName, cat.CategoryName); err == nil {
-				relAdded++
+			if tag, err := relTx.Exec(ctx, `INSERT INTO cashflowcategoryrelationships (parent_category_name, child_category_name, status) VALUES ($1,$2,'Active') ON CONFLICT DO NOTHING`, parentName, cat.CategoryName); err == nil {
+				relAdded += int(tag.RowsAffected())
 			}
 		}
+		if err := relTx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to commit relationship inserts: "+err.Error())
+			return
+		}
+		relTxOk = true
 
 		// Auto-correct category_level based on parent hierarchy
 		hierarchySQL := `
@@ -555,7 +564,7 @@ WHERE m.category_id = h.category_id
 		}
 		if len(createdIDs) > 0 {
 			fmt.Printf("[DEBUG] Auto-correcting levels for %d created categories: %v\\n", len(createdIDs), createdIDs)
-			result, err := pgxPool.Exec(context.Background(), hierarchySQL, createdIDs)
+			result, err := pgxPool.Exec(ctx, hierarchySQL, createdIDs)
 			if err != nil {
 				fmt.Printf("[DEBUG] Level auto-correction failed: %v\\n", err)
 			} else {
@@ -921,7 +930,7 @@ func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		  AND UPPER(COALESCE(a.processing_status, '')) = 'APPROVED'
 	`
 
-		rows, err := pgxPool.Query(context.Background(), query, parentLevel)
+		rows, err := pgxPool.Query(ctx, query, parentLevel)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to find parent categories")
 			if statusCode == http.StatusOK {

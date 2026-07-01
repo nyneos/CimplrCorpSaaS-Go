@@ -2584,7 +2584,9 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					// try to enrich from masterscheme: scheme_id, isin, scheme_name
 					var schemeID, isin, msName sql.NullString
 					q := `SELECT scheme_id, isin, scheme_name FROM investment.masterscheme WHERE amfi_scheme_code::text = $1 LIMIT 1`
-					_ = pgxPool.QueryRow(context.Background(), q, code).Scan(&schemeID, &isin, &msName)
+					qCtx, qCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer qCancel()
+					_ = pgxPool.QueryRow(qCtx, q, code).Scan(&schemeID, &isin, &msName)
 					if name == "" && msName.Valid {
 						name = msName.String
 					}
@@ -2639,7 +2641,9 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							ON CONFLICT (scheme_code, nav_date) DO UPDATE SET nav_value = EXCLUDED.nav_value, scheme_name = COALESCE(amfi_nav_staging.scheme_name, EXCLUDED.scheme_name)`
 						go func(codeInt int64, name string, navVal float64) {
 							// run in goroutine to avoid blocking
-							_, _ = pgxPool.Exec(context.Background(), upsertQ, codeInt, nullIfEmpty(name), navVal)
+							uCtx, uCancel := context.WithTimeout(context.Background(), 10*time.Second)
+							defer uCancel()
+							_, _ = pgxPool.Exec(uCtx, upsertQ, codeInt, nullIfEmpty(name), navVal)
 						}(sc, r.Name, nav)
 					}
 				}

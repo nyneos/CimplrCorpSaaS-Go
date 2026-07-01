@@ -134,7 +134,9 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 				}
 				// Persist asynchronously so subsequent fetches already have it.
 				go func(txID int64, nc, ns, ref string, pc cat.IndianBankChannel) {
-					_, _ = pool.Exec(context.Background(), `
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					_, _ = pool.Exec(ctx, `
 						UPDATE cimplrcorpsaas.bank_statement_transactions
 						SET narration_clean=$1, narration_stemmed=$2,
 						    narration_ref=$3, payment_channel=$4

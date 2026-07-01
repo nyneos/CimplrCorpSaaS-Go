@@ -1115,7 +1115,8 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDAccrual] SubmitForApproval engine goroutine panic for run %s: %v", runID, rec)
 				}
 			}()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       eID,
@@ -2330,7 +2331,8 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDAccrual] ProposeOverride engine panic for ledger %s: %v", lID, rec)
 				}
 			}()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", lID, uEmail); err != nil {
 				api.LogError("[FDAccrual] ProposeOverride CancelPendingInstances failed ledger=%s: %v", lID, err)
 			}

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -175,7 +176,8 @@ func CreateBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		go func(id, uID, uEmail string) {
 			defer func() { recover() }()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "BANK_CREATE",
 				RecordID: id, RecordTable: "apibox.bank_master",

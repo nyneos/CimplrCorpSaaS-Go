@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -190,7 +191,8 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		go func(eid, uID, uEmail string) {
 			defer func() { recover() }()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "EXCHANGE_MASTER_CREATE",
 				RecordID: eid, RecordTable: "apibox.exchange_master",

@@ -1107,7 +1107,8 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDMaster] ActivateFD engine goroutine panic for fd %s: %v", fdRecordID, rec)
 				}
 			}()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			auditTableName := resolveFDAuditTable(bgCtx, pgxPool)
 			auditIDColumn := "fd_id"
 			if auditTableName != "" {
@@ -3054,7 +3055,8 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						api.LogError("[CashflowEdit] engine goroutine panic for audit %s: %v", auditID, rec)
 					}
 				}()
-				bgCtx := context.Background()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode:       "FIXED_DEPOSIT",
 					EntityCode:       entityID,
@@ -3774,7 +3776,8 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						api.LogError("[FDMaster] DeleteCashflowLineItem engine panic for %s: %v", cfID, rec)
 					}
 				}()
-				bgCtx := context.Background()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 				if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", aID, uEmail); err != nil {
 					api.LogError("[FDMaster] DeleteCashflowLineItem CancelPendingInstances failed audit=%s: %v", aID, err)
 					return

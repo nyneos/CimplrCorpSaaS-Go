@@ -251,7 +251,8 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 		go func(id, uEmail, fID, eID string) {
 			defer func() { recover() }() //nolint:errcheck
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       eID,
@@ -579,7 +580,8 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 		go func(uEmail, eID, action string) {
 			defer func() { recover() }() //nolint:errcheck
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       eID,
@@ -855,7 +857,8 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDTDS] UpdateTDSRegister engine panic for %s: %v", tID, rec)
 				}
 			}()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", tID, uEmail)
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",

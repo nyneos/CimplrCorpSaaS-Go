@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -134,7 +135,8 @@ func CreateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		go func(pid, uID, uEmail string) {
 			defer func() { recover() }()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "DATA_PROVIDER_CREATE",
 				RecordID: pid, RecordTable: "apibox.data_provider_master",

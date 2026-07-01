@@ -1731,7 +1731,7 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - Query: %s", q)
 		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - Args: %v", args)
 
-		rows, err := pgxPool.Query(context.Background(), q, args...)
+		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to fetch parent centres")
 			if statusCode == http.StatusOK {
@@ -1879,7 +1879,7 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		checkerBy := session.Name
 		// Fetch relationships and compute descendants, then update audit rows by centre_id
-		ctx := context.Background()
+		ctx := r.Context()
 
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
 		if err != nil {
@@ -2020,7 +2020,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 		checkerBy := session.Name
-		ctx := context.Background()
+		ctx := r.Context()
 
 		// Fetch relationships
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)

@@ -194,8 +194,10 @@ func processSchemeDataManually(url string, pool *pgxpool.Pool, batchSize int, ht
 
 // getAmcCount returns the current count of unique AMCs in the database
 func getAmcCount(pool *pgxpool.Pool) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var count int
-	err := pool.QueryRow(context.Background(), "SELECT COUNT(DISTINCT amc_name) FROM investment.amfi_scheme_master_staging").Scan(&count)
+	err := pool.QueryRow(ctx, "SELECT COUNT(DISTINCT amc_name) FROM investment.amfi_scheme_master_staging").Scan(&count)
 	if err != nil {
 		// If table doesn't exist or query fails, return 0
 		return 0, nil
@@ -205,8 +207,10 @@ func getAmcCount(pool *pgxpool.Pool) (int, error) {
 
 // getSchemeCount returns the current count of schemes in the database
 func getSchemeCount(pool *pgxpool.Pool) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var count int
-	err := pool.QueryRow(context.Background(), "SELECT COUNT(*) FROM investment.amfi_scheme_master_staging").Scan(&count)
+	err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM investment.amfi_scheme_master_staging").Scan(&count)
 	if err != nil {
 		// If table doesn't exist or query fails, return 0
 		return 0, nil
