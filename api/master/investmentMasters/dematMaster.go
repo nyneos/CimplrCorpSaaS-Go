@@ -7,6 +7,9 @@ import (
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/dependency"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -266,6 +269,17 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
+
+			// Duplicate-upload guard: reject a byte-identical file already uploaded for this module.
+			sum := sha256.Sum256(fileBytes)
+			fileHash := hex.EncodeToString(sum[:])
+			if dup, derr := bulkuploadaudit.ExistsByHash(ctx, pgxPool, "master-demat", fileHash); derr != nil {
+				api.LogError("demat duplicate-file check failed: %v", derr)
+			} else if dup {
+				api.RespondWithError(w, http.StatusConflict, "This file has already been uploaded. Please upload a different file.")
+				return
+			}
+
 			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidOrEmptyFile)
@@ -507,6 +521,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Status:           bulkuploadaudit.StatusCompleted,
 				UploadedBy:       userName,
 				UploadedAt:       time.Now().UTC(),
+				FileHash:         fileHash,
 			})
 
 			results = append(results, UploadDematResult{Success: true, BatchID: uuid.New().String()})
@@ -845,6 +860,9 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var sets []string
 		var args []interface{}
 		pos := 1
+		
+		auditOldValues := map[string]interface{}{}
+		auditNewValues := map[string]interface{}{}
 
 		for k, v := range req.Fields {
 			lk := strings.ToLower(k)
@@ -865,6 +883,8 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				oldField := "old_" + lk
 				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
 				args = append(args, v, oldVals[idx])
+				auditOldValues[lk] = oldVals[idx]
+				auditNewValues[lk] = v
 				pos += 2
 			}
 		}
@@ -883,10 +903,16 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// insert audit record
+		oldValuesJSON, newValuesJSON, err := marshalAuditValueSnapshots(auditOldValues, auditNewValues)
+		if err != nil {
+			msg, status := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
+			api.RespondWithError(w, status, msg)
+			return
+		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at)
-			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
-		`, req.DematID, req.Reason, userEmail); err != nil {
+			INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
+			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)
+		`, req.DematID, req.Reason, userEmail, oldValuesJSON, newValuesJSON); err != nil {
 			msg, status := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
 			api.RespondWithError(w, status, msg)
 			return
@@ -979,6 +1005,9 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var sets []string
 			var args []interface{}
 			pos := 1
+			// Immutable before/after snapshot — see UpdateDemat for rationale.
+			auditOldValues := map[string]interface{}{}
+			auditNewValues := map[string]interface{}{}
 
 			for k, v := range row.Fields {
 				lk := strings.ToLower(k)
@@ -997,6 +1026,8 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					oldField := "old_" + lk
 					sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
 					args = append(args, v, oldVals[idx])
+					auditOldValues[lk] = oldVals[idx]
+					auditNewValues[lk] = v
 					pos += 2
 				}
 			}
@@ -1015,10 +1046,16 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			oldValuesJSON, newValuesJSON, err := marshalAuditValueSnapshots(auditOldValues, auditNewValues)
+			if err != nil {
+				msg, _ := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: msg})
+				continue
+			}
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at)
-				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
-			`, row.DematID, row.Reason, userEmail); err != nil {
+				INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
+				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)
+			`, row.DematID, row.Reason, userEmail, oldValuesJSON, newValuesJSON); err != nil {
 				msg, _ := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: msg})
 				continue
@@ -1611,6 +1648,152 @@ func GetApprovedActiveDemats(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", out)
+	}
+}
+
+func insertDematDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, dematID, userID, requestedIP string) {
+	dematID = strings.TrimSpace(dematID)
+	if dematID == "" {
+		return
+	}
+	requestedBy := ""
+	for _, s := range auth.GetActiveSessions() {
+		if s.UserID == userID {
+			requestedBy = s.Email
+			break
+		}
+	}
+	if requestedBy == "" {
+		requestedBy = strings.TrimSpace(userID)
+	}
+	if _, err := pgxPool.Exec(ctx, `
+		INSERT INTO investment.auditactiondemat
+			(demat_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+		VALUES ($1, 'DOWNLOAD', 'APPROVED', 'File downloaded', $2, now(), $3)
+	`, dematID, requestedBy, requestedIP); err != nil {
+		api.LogError("failed to insert demat download audit for %s: %v", dematID, err)
+	}
+}
+
+func GetDematDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID  string `json:"user_id"`
+			DematID string `json:"demat_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.DematID) == "" {
+			api.RespondWithResult(w, false, "demat_id required")
+			return
+		}
+
+		ctx := r.Context()
+		var uploadS3Key string
+		err := pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(upload_s3_key, '')
+			FROM investment.masterdemataccount
+			WHERE demat_id = $1 AND COALESCE(is_deleted, false) = false
+		`, req.DematID).Scan(&uploadS3Key)
+		if err != nil {
+			api.RespondWithResult(w, false, "demat_id not found")
+			return
+		}
+
+		key := strings.TrimSpace(uploadS3Key)
+		if key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to generate download url")
+			return
+		}
+
+		insertDematDownloadAudit(ctx, pgxPool, req.DematID, req.UserID, api.ClientIPFromRequest(r))
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+func GetDematBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string   `json:"user_id"`
+			DematIDs []string `json:"demat_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.DematIDs) == 0 {
+			api.RespondWithResult(w, false, "demat_ids required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(req.DematIDs))
+		failedIDs := make([]string, 0)
+
+		for _, rawID := range req.DematIDs {
+			dematID := strings.TrimSpace(rawID)
+			if dematID == "" {
+				continue
+			}
+
+			var uploadS3Key string
+			err := pgxPool.QueryRow(ctx, `
+				SELECT COALESCE(upload_s3_key, '')
+				FROM investment.masterdemataccount
+				WHERE demat_id = $1 AND COALESCE(is_deleted, false) = false
+			`, dematID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, dematID)
+				continue
+			}
+
+			key := strings.TrimSpace(uploadS3Key)
+			if key == "" {
+				failedIDs = append(failedIDs, dematID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, dematID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"demat_id":     dematID,
+				"download_url": downloadURL,
+			})
+			insertDematDownloadAudit(ctx, pgxPool, dematID, req.UserID, api.ClientIPFromRequest(r))
+		}
+
+		if len(files) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: false,
+				"message":              "no downloadable files found",
+				"data": map[string]interface{}{
+					"files":      []map[string]string{},
+					"failed_ids": failedIDs,
+				},
+			})
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -208,6 +210,17 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
+
+			// Duplicate-upload guard.
+			sum := sha256.Sum256(fileBytes)
+			fileHash := hex.EncodeToString(sum[:])
+			if dup, derr := bulkuploadaudit.ExistsByHash(ctx, pgxPool, "master-dp", fileHash); derr != nil {
+				api.LogError("dp duplicate-file check failed: %v", derr)
+			} else if dup {
+				api.RespondWithError(w, http.StatusConflict, "This file has already been uploaded. Please upload a different file.")
+				return
+			}
+
 			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidOrEmptyFile)
@@ -390,6 +403,7 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Status:           bulkuploadaudit.StatusCompleted,
 				UploadedBy:       userName,
 				UploadedAt:       time.Now().UTC(),
+				FileHash:         fileHash,
 			})
 
 			results = append(results, UploadDPResult{Success: true, BatchID: uuid.New().String()})

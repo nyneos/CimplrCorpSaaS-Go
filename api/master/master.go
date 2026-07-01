@@ -265,6 +265,8 @@ func NewMasterServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, erro
 	mux.Handle("/master/demat/approved-active", midInvestMF(investmentMasters.GetApprovedActiveDemats(pgxPool)))
 	mux.Handle("/master/demat/all", midInvestMF(investmentMasters.GetDematsWithAudit(pgxPool)))
 	mux.Handle("/master/demat/audit-history", midInvestMF(investmentMasters.GetDematAuditHistory(pgxPool)))
+	mux.Handle("/master/demat/download", midInvestMF(investmentMasters.GetDematDownloadURL(pgxPool)))
+	mux.Handle("/master/demat/download-bulk", midInvestMF(investmentMasters.GetDematBulkDownloadURL(pgxPool)))
 
 	// Interest Type Master routes
 	mux.Handle("/master/interest-type/create", midInvestFD(investmentMasters.CreateInterestTypeSingle(pgxPool)))
@@ -554,6 +556,9 @@ func NewMasterServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, erro
 
 	// DP (Depository Participant) Master
 	dpMF := investmentMasters.DPMasterFilesHandlers(pgxPool)
+	
+	mux.Handle("/master/dp/download", midInvestMF(dpMF.DownloadMain))
+	mux.Handle("/master/dp/download-bulk", midInvestMF(dpMF.DownloadMainBulk))
 	mux.Handle("/master/dp/additional-files/list", midInvestMF(dpMF.List))
 	mux.Handle("/master/dp/additional-files/upload", midInvestMF(dpMF.Upload))
 	mux.Handle("/master/dp/additional-files/download", midInvestMF(dpMF.Download))
