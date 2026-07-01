@@ -3,16 +3,33 @@ package dashboardbuilder
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
+	fundavailibilty "CimplrCorpSaas/api/cash/fundavailibilty"
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/validation"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ── Bank Statements ────────────────────────────────────────────────────────
-func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "b", 2)
-	args := append([]any{limit}, efArgs...)
+func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, scopePairs []bankAccountScopePair) ([]map[string]any, error) {
+	args := []any{limit}
+	argIdx := 2
+	extraFilters := ""
+
+	ef, efArgs := entityFilter(entityIDs, "b", argIdx)
+	if ef != "" {
+		extraFilters += " " + ef
+		args = append(args, efArgs...)
+		argIdx += len(efArgs)
+	}
+
+	sf, sfArgs, _ := bankStatementScopeFilter("b", scopePairs, argIdx)
+	extraFilters += sf
+	args = append(args, sfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -46,7 +63,7 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 		WHERE COALESCE(b.is_deleted, false) = false %s
 		ORDER BY b.uploaded_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, extraFilters)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -56,13 +73,26 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 }
 
 // parentID = bank_statement_id to drill into a specific statement's transactions.
-func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "s", 2)
-	args := append([]any{limit}, efArgs...)
+func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string, scopePairs []bankAccountScopePair) ([]map[string]any, error) {
+	args := []any{limit}
+	argIdx := 2
+	extraFilters := ""
+
+	ef, efArgs := entityFilter(entityIDs, "s", argIdx)
+	if ef != "" {
+		extraFilters += " " + ef
+		args = append(args, efArgs...)
+		argIdx += len(efArgs)
+	}
+
+	sf, sfArgs, nextIdx := bankStatementScopeFilter("s", scopePairs, argIdx)
+	extraFilters += sf
+	args = append(args, sfArgs...)
+	argIdx = nextIdx
 
 	stmtFilter := ""
 	if parentID != "" {
-		stmtFilter = fmt.Sprintf(" AND t.bank_statement_id = $%d", len(args)+1)
+		stmtFilter = fmt.Sprintf(" AND t.bank_statement_id = $%d", argIdx)
 		args = append(args, parentID)
 	}
 
@@ -89,10 +119,11 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 		FROM cimplrcorpsaas.bank_statement_transactions t
 		JOIN cimplrcorpsaas.bank_statements s ON t.bank_statement_id = s.bank_statement_id
 		LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
-		WHERE 1=1 %s %s
+		LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND COALESCE(mba.is_deleted, false) = false
+		WHERE COALESCE(s.is_deleted, false) = false %s %s
 		ORDER BY t.value_date DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`, ef, stmtFilter)
+	`, extraFilters, stmtFilter)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -541,15 +572,16 @@ func filterProjectionProposalRows(ctx context.Context, pool *pgxpool.Pool, rows 
 	return out, nil
 }
 
-// parentID = proposal_id to drill into a specific proposal's line items.
-func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
+// proposalIDs filters line items to the selected cashflow proposals.
+func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, proposalIDs []string) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", 2)
 	args := append([]any{limit}, efArgs...)
 
 	proposalFilter := ""
-	if parentID != "" {
-		proposalFilter = fmt.Sprintf(" AND i.proposal_id = $%d", len(args)+1)
-		args = append(args, parentID)
+	proposalIDs = normalizeProposalIDs(proposalIDs)
+	if len(proposalIDs) > 0 {
+		proposalFilter = fmt.Sprintf(" AND i.proposal_id::text = ANY($%d)", len(args)+1)
+		args = append(args, proposalIDs)
 	}
 
 	q := fmt.Sprintf(`
@@ -623,9 +655,30 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 }
 
 func queryCashFundAvailability(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	// Return a dummy/empty set because this is a complex aggregate API (from GetFundAvailability) that aggregates bank statement actuals and cashflow projections across dates.
-	// It doesn't have a single table we can just SELECT from. We will provide a minimal struct.
-	return []map[string]any{}, nil
+	asOfDate := time.Now()
+	if asOf, ok := ctx.Value(ctxKeyReqAsOfDate).(string); ok {
+		if parsed, err := time.Parse(constants.DateFormat, strings.TrimSpace(asOf)); err == nil {
+			asOfDate = parsed
+		}
+	}
+
+	viewType := "daily"
+	entityNames := api.GetEntityNamesFromCtx(ctx)
+	bankNames := api.GetBankNamesFromCtx(ctx)
+	if names, ok := ctx.Value(ctxKeyReqBankNamesNorm).([]string); ok && len(names) > 0 {
+		bankNames = names
+	}
+
+	rows, err := fundavailibilty.CombinedFundAvailabilityRows(
+		ctx, pool, asOfDate, viewType, entityIDs, entityNames, bankNames,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
 }
 
 func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {

@@ -159,12 +159,13 @@ func queryCashSweepInitiationAudit(ctx context.Context, pool *pgxpool.Pool, enti
 }
 
 // ── Cashflow Projection Audit ─────────────────────────────────────────────────
-func queryCashProjectionAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
+func queryCashProjectionAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, proposalIDs []string) ([]map[string]any, error) {
 	args := []any{limit}
 	parentFilter := ""
-	if parentID != "" {
-		parentFilter = fmt.Sprintf("AND proposal_id::text = $%d", len(args)+1)
-		args = append(args, parentID)
+	proposalIDs = normalizeProposalIDs(proposalIDs)
+	if len(proposalIDs) > 0 {
+		parentFilter = fmt.Sprintf("AND proposal_id::text = ANY($%d)", len(args)+1)
+		args = append(args, proposalIDs)
 	}
 	q := fmt.Sprintf(`
 		SELECT

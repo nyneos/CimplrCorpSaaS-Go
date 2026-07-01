@@ -39,18 +39,27 @@ type dataRequest struct {
 	// ParentID filters child sources by their parent row (e.g. bank_statement_id, run_id, proposal_id).
 	ParentID string `json:"parent_id"`
 	// Dashboard-builder filter band — populated by the frontend "Generate" button.
-	BankIDs  []string `json:"bank_ids"`
-	AsOfDate string   `json:"as_of_date"`
-	AsOnDate string   `json:"as_on_date"`
+	BankIDs        []string               `json:"bank_ids"`
+	AccountNumbers []string               `json:"account_numbers"`
+	BankAccountScope []bankAccountScopePair `json:"bank_account_scope"`
+	ProposalIDs      []string               `json:"proposal_ids"`
+	AsOfDate       string                 `json:"as_of_date"`
+	AsOnDate       string                 `json:"as_on_date"`
+}
+
+type bankAccountScopePair struct {
+	BankID        string `json:"bank_id"`
+	AccountNumber string `json:"account_number"`
 }
 
 // Context keys for dashboard-builder filter values stashed by GetDataSource so
 // that helper functions can read them without changing every query signature.
 const (
-	ctxKeyReqBankIDs       = "reqBankIDs"
-	ctxKeyReqBankNamesNorm = "reqBankNamesNorm"
-	ctxKeyReqAsOfDate      = "reqAsOfDate"
-	ctxKeyReqAsOnDate      = "reqAsOnDate"
+	ctxKeyReqBankIDs         = "reqBankIDs"
+	ctxKeyReqBankNamesNorm   = "reqBankNamesNorm"
+	ctxKeyReqAccountNumbers  = "reqAccountNumbers"
+	ctxKeyReqAsOfDate        = "reqAsOfDate"
+	ctxKeyReqAsOnDate        = "reqAsOnDate"
 )
 
 type dataSourceFn func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error)
@@ -145,10 +154,18 @@ var dataSources = map[string]dataSourceFn{
 	},
 	// ── Cash Module ────────────────────────────────────────────────────────────
 	"cashBankStatements": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashBankStatements(ctx, pool, req.EntityIDs, req.Limit)
+		pairs := resolveBankStatementScopePairs(req)
+		if len(pairs) == 0 {
+			return []map[string]any{}, nil
+		}
+		return queryCashBankStatements(ctx, pool, req.EntityIDs, req.Limit, pairs)
 	},
 	"cashBankStatementTransactions": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashBankStatementTransactions(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+		pairs := resolveBankStatementScopePairs(req)
+		if len(pairs) == 0 {
+			return []map[string]any{}, nil
+		}
+		return queryCashBankStatementTransactions(ctx, pool, req.EntityIDs, req.Limit, req.ParentID, pairs)
 	},
 	"cashPayable": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashPayable(ctx, pool, req.EntityIDs, req.Limit)
@@ -181,7 +198,11 @@ var dataSources = map[string]dataSourceFn{
 		return queryCashProjectionList(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"cashProjectionDetail": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashProjectionDetail(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+		proposalIDs := resolveProjectionProposalIDs(req)
+		if len(proposalIDs) == 0 {
+			return []map[string]any{}, nil
+		}
+		return queryCashProjectionDetail(ctx, pool, req.EntityIDs, req.Limit, proposalIDs)
 	},
 	"cashBankBalances": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashBankBalances(ctx, pool, req.EntityIDs, req.Limit)
@@ -233,7 +254,11 @@ var dataSources = map[string]dataSourceFn{
 		return queryCashSweepInitiationAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
 	},
 	"cashProjectionAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashProjectionAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+		proposalIDs := resolveProjectionProposalIDs(req)
+		if len(proposalIDs) == 0 {
+			return []map[string]any{}, nil
+		}
+		return queryCashProjectionAudit(ctx, pool, req.EntityIDs, req.Limit, proposalIDs)
 	},
 	"cashFundPlanAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashFundPlanAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
@@ -326,6 +351,13 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.Limit < 0 {
 			req.Limit = 0
 		}
+		const defaultDataLimit = 500
+		const maxDataLimit = 2000
+		if req.Limit <= 0 {
+			req.Limit = defaultDataLimit
+		} else if req.Limit > maxDataLimit {
+			req.Limit = maxDataLimit
+		}
 
 		ctx := context.WithValue(r.Context(), "reqEntityNames", reqEntityNames)
 
@@ -334,12 +366,7 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 		// bank_name strings using the prevalidation BankInfo context, so
 		// queries can filter by bank_id (where available) or bank_name
 		// (case-insensitive) without re-querying the bank master.
-		bankIDs := make([]string, 0, len(req.BankIDs))
-		for _, id := range req.BankIDs {
-			if s := strings.TrimSpace(id); s != "" {
-				bankIDs = append(bankIDs, s)
-			}
-		}
+		bankIDs := normalizeBankIDs(req.BankIDs)
 		bankNamesNorm := make([]string, 0, len(bankIDs))
 		seen := make(map[string]struct{}, len(bankIDs))
 		for _, id := range bankIDs {
@@ -352,6 +379,7 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx = context.WithValue(ctx, ctxKeyReqBankIDs, bankIDs)
 		ctx = context.WithValue(ctx, ctxKeyReqBankNamesNorm, bankNamesNorm)
+		ctx = context.WithValue(ctx, ctxKeyReqAccountNumbers, normalizeAccountNumbers(req.AccountNumbers))
 		ctx = context.WithValue(ctx, ctxKeyReqAsOfDate, strings.TrimSpace(req.AsOfDate))
 		ctx = context.WithValue(ctx, ctxKeyReqAsOnDate, strings.TrimSpace(req.AsOnDate))
 
@@ -452,6 +480,176 @@ func bankNameFilter(ctx context.Context, alias string, argOffset int) (string, [
 		return "", nil
 	}
 	return fmt.Sprintf("AND LOWER(TRIM(COALESCE(%s.bank_name,''))) = ANY($%d)", alias, argOffset), []any{names}
+}
+
+func accountNumberFilter(ctx context.Context, alias string, colName string, argOffset int) (string, []any) {
+	nums, _ := ctx.Value(ctxKeyReqAccountNumbers).([]string)
+	if len(nums) == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf("AND %s.%s = ANY($%d)", alias, colName, argOffset), []any{nums}
+}
+
+func normalizeAccountNumbers(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func normalizeBankIDs(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// bankStatementScopeFilter builds bank+account pair filters for bank statement queries.
+// Each pair is matched with AND; multiple pairs are combined with OR.
+func bankStatementScopeFilter(
+	stmtAlias string,
+	pairs []bankAccountScopePair,
+	argIdx int,
+) (clause string, args []any, nextIdx int) {
+	pairs = normalizeBankAccountScopePairs(pairs)
+	if len(pairs) == 0 {
+		return "", nil, argIdx
+	}
+
+	parts := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		if pair.BankID != "" {
+			parts = append(parts, fmt.Sprintf(`(
+				TRIM(%s.account_number) = $%d AND EXISTS (
+					SELECT 1 FROM public.masterbankaccount mba_scope
+					WHERE TRIM(mba_scope.account_number) = TRIM(%s.account_number)
+					  AND COALESCE(mba_scope.is_deleted, false) = false
+					  AND mba_scope.bank_id = $%d
+				)
+			)`, stmtAlias, argIdx, stmtAlias, argIdx+1))
+			args = append(args, pair.AccountNumber, pair.BankID)
+			argIdx += 2
+			continue
+		}
+
+		parts = append(parts, fmt.Sprintf("TRIM(%s.account_number) = $%d", stmtAlias, argIdx))
+		args = append(args, pair.AccountNumber)
+		argIdx++
+	}
+
+	return " AND (" + strings.Join(parts, " OR ") + ")", args, argIdx
+}
+
+func normalizeBankAccountScopePairs(values []bankAccountScopePair) []bankAccountScopePair {
+	out := make([]bankAccountScopePair, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		bankID := strings.TrimSpace(raw.BankID)
+		accountNumber := strings.TrimSpace(raw.AccountNumber)
+		if accountNumber == "" {
+			continue
+		}
+		key := bankID + "\x00" + accountNumber
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, bankAccountScopePair{
+			BankID:        bankID,
+			AccountNumber: accountNumber,
+		})
+	}
+	return out
+}
+
+func resolveBankStatementScopePairs(req dataRequest) []bankAccountScopePair {
+	if pairs := normalizeBankAccountScopePairs(req.BankAccountScope); len(pairs) > 0 {
+		return pairs
+	}
+
+	accountNumbers := normalizeAccountNumbers(req.AccountNumbers)
+	if len(accountNumbers) == 0 {
+		return nil
+	}
+
+	bankIDs := normalizeBankIDs(req.BankIDs)
+	if len(bankIDs) == 0 {
+		out := make([]bankAccountScopePair, 0, len(accountNumbers))
+		for _, accountNumber := range accountNumbers {
+			out = append(out, bankAccountScopePair{AccountNumber: accountNumber})
+		}
+		return out
+	}
+
+	if len(bankIDs) == len(accountNumbers) {
+		out := make([]bankAccountScopePair, 0, len(accountNumbers))
+		for i, accountNumber := range accountNumbers {
+			out = append(out, bankAccountScopePair{
+				BankID:        bankIDs[i],
+				AccountNumber: accountNumber,
+			})
+		}
+		return out
+	}
+
+	// Legacy flat arrays: match any listed account at any listed bank.
+	out := make([]bankAccountScopePair, 0, len(accountNumbers)*len(bankIDs))
+	for _, accountNumber := range accountNumbers {
+		for _, bankID := range bankIDs {
+			out = append(out, bankAccountScopePair{
+				BankID:        bankID,
+				AccountNumber: accountNumber,
+			})
+		}
+	}
+	return normalizeBankAccountScopePairs(out)
+}
+
+func normalizeProposalIDs(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func resolveProjectionProposalIDs(req dataRequest) []string {
+	if ids := normalizeProposalIDs(req.ProposalIDs); len(ids) > 0 {
+		return ids
+	}
+	if id := strings.TrimSpace(req.ParentID); id != "" {
+		return []string{id}
+	}
+	return nil
 }
 
 // dateRangeFilter appends a date range filter on the given column using the
