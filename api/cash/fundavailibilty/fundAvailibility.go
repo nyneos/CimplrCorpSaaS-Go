@@ -735,7 +735,10 @@ func fundAvailabilityEndDate(asOfDate time.Time, viewType string) time.Time {
 func CombinedFundAvailabilityRows(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate time.Time, viewType string, entityIDs, entityNames, bankNames []string) ([]map[string]any, error) {
 	viewType = strings.ToLower(strings.TrimSpace(viewType))
 	if viewType == "" {
-		viewType = "daily"
+		return []map[string]any{}, nil
+	}
+	if viewType != "daily" && viewType != "weekly" && viewType != "monthly" && viewType != "quarterly" && viewType != "yearly" {
+		return []map[string]any{}, nil
 	}
 	endDate := fundAvailabilityEndDate(asOfDate, viewType)
 

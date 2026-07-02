@@ -104,6 +104,7 @@ func NewDashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 
 	// Simple rates ticker (POST)
 	mux.Handle("/dash/ticker", midDashFull(ticker.GetTickerHandler()))
+	mux.Handle("/dash/ticker/inr-rates", midDashFull(ticker.GetInrRatesHandler()))
 	// Bank balance endpoints use the shared v2 master middleware chain.
 	mux.Handle("/dash/bank-balance/approved", midDashFull(bankbalance.GetApprovedBankBalances(pgxPool)))
 	mux.Handle("/dash/bank-balance/currency-wise", midDashFull(bankbalance.GetCurrencyWiseBalancesFromManual(pgxPool)))

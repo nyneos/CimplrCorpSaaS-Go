@@ -45,6 +45,7 @@ type dataRequest struct {
 	ProposalIDs      []string               `json:"proposal_ids"`
 	AsOfDate       string                 `json:"as_of_date"`
 	AsOnDate       string                 `json:"as_on_date"`
+	ViewType       string                 `json:"view_type"`
 }
 
 type bankAccountScopePair struct {
@@ -60,6 +61,7 @@ const (
 	ctxKeyReqAccountNumbers  = "reqAccountNumbers"
 	ctxKeyReqAsOfDate        = "reqAsOfDate"
 	ctxKeyReqAsOnDate        = "reqAsOnDate"
+	ctxKeyReqViewType        = "reqViewType"
 )
 
 type dataSourceFn func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error)
@@ -382,6 +384,7 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx = context.WithValue(ctx, ctxKeyReqAccountNumbers, normalizeAccountNumbers(req.AccountNumbers))
 		ctx = context.WithValue(ctx, ctxKeyReqAsOfDate, strings.TrimSpace(req.AsOfDate))
 		ctx = context.WithValue(ctx, ctxKeyReqAsOnDate, strings.TrimSpace(req.AsOnDate))
+		ctx = context.WithValue(ctx, ctxKeyReqViewType, strings.ToLower(strings.TrimSpace(req.ViewType)))
 
 		fn, ok := dataSources[req.Source]
 		if !ok {
@@ -404,6 +407,7 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 		if rows == nil {
 			rows = []map[string]any{}
 		}
+		rows = normalizeRowsToINR(req.Source, rows)
 		api.RespondWithPayload(w, true, "", rows)
 	}
 }
