@@ -457,42 +457,6 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 	return scanRows(r)
 }
 
-func queryCashSweepExecutionLogs(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "c", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
-
-	q := fmt.Sprintf(`
-		SELECT
-			COALESCE(l.execution_id::text, '') AS log_id,
-			COALESCE(l.sweep_id::text, '') AS config_id,
-			COALESCE(l.initiation_id::text, '') AS initiation_id,
-			COALESCE(c.entity_name, '') AS entity_name,
-			COALESCE(l.status, '') AS status,
-			l.execution_date,
-			COALESCE(l.amount_swept, 0) AS amount_swept,
-			COALESCE(l.from_account, '') AS from_account,
-			COALESCE(l.to_account, '') AS to_account,
-			COALESCE(l.balance_before, 0) AS balance_before,
-			COALESCE(l.balance_after, 0) AS balance_after,
-			COALESCE(l.error_message, '') AS error_message
-		FROM cimplrcorpsaas.sweep_execution_log l
-		LEFT JOIN cimplrcorpsaas.sweepconfiguration c ON l.sweep_id = c.sweep_id::text
-		WHERE 1=1 %s
-		ORDER BY l.execution_date DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
-	`, ef)
-
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
-}
-
-func queryCashSweepAllExecutionLogs(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	return queryCashSweepExecutionLogs(ctx, pool, entityIDs, limit)
-}
-
 func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "c", "entity_name", 2)
 	args := append([]any{limit}, efArgs...)

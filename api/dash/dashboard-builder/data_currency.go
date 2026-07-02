@@ -94,9 +94,17 @@ var sourceCurrencyConfig = map[string]currencyNormConfig{
 }
 
 func normalizeRowsToINR(source string, rows []map[string]any) []map[string]any {
-	cfg, ok := sourceCurrencyConfig[source]
-	if !ok || len(rows) == 0 {
+	if len(rows) == 0 {
 		return rows
+	}
+
+	cfg, ok := sourceCurrencyConfig[source]
+	if !ok {
+		detected := autoDetectCurrencyConfig(rows)
+		if detected == nil {
+			return rows
+		}
+		cfg = *detected
 	}
 
 	for _, row := range rows {
@@ -142,6 +150,99 @@ func normalizeRowToINR(row map[string]any, cfg currencyNormConfig) {
 		if currencyField != "" {
 			row[currencyField] = "INR"
 		}
+	}
+}
+
+// ── Auto-detection of currency columns ──────────────────────────────────────
+
+var knownCurrencyFields = map[string]bool{
+	"currency_code":      true,
+	"currency":           true,
+	"base_currency_code": true,
+}
+
+var knownCurrencyPairFields = map[string]bool{
+	"currency_pair": true,
+}
+
+var nonMonetarySuffixes = []string{
+	"rate", "_pct", "percent", "_days", "_months", "_years",
+	"_count", "_nav", "score",
+}
+
+var nonMonetaryPrefixes = []string{
+	"sequence", "precision", "run_day", "fds_", "quantity",
+}
+
+var nonMonetaryExact = map[string]bool{
+	"divisor":                true,
+	"total_records":         true,
+	"total_cashflow_events": true,
+	"total_groups":          true,
+	"horizon":               true,
+	"item_count":            true,
+}
+
+func isLikelyMonetaryField(key string) bool {
+	lower := strings.ToLower(key)
+	if nonMonetaryExact[lower] {
+		return false
+	}
+	if strings.Contains(lower, "units") {
+		return false
+	}
+	for _, suffix := range nonMonetarySuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return false
+		}
+	}
+	for _, prefix := range nonMonetaryPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+func autoDetectCurrencyConfig(rows []map[string]any) *currencyNormConfig {
+	if len(rows) == 0 {
+		return nil
+	}
+	sample := rows[0]
+
+	var currencyField, currencyPairField string
+	for key := range sample {
+		if knownCurrencyFields[key] {
+			currencyField = key
+			break
+		}
+	}
+	if currencyField == "" {
+		for key := range sample {
+			if knownCurrencyPairFields[key] {
+				currencyPairField = key
+				break
+			}
+		}
+	}
+	if currencyField == "" && currencyPairField == "" {
+		return nil
+	}
+
+	amountFields := make(map[string]struct{})
+	for key, val := range sample {
+		if _, isNum := toFloat64(val); isNum && isLikelyMonetaryField(key) {
+			amountFields[key] = struct{}{}
+		}
+	}
+	if len(amountFields) == 0 {
+		return nil
+	}
+
+	return &currencyNormConfig{
+		currencyField:     currencyField,
+		currencyPairField: currencyPairField,
+		amountFields:      amountFields,
 	}
 }
 

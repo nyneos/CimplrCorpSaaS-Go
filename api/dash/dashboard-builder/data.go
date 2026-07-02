@@ -190,12 +190,6 @@ var dataSources = map[string]dataSourceFn{
 	"cashSweepInitiation": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashSweepInitiation(ctx, pool, req.EntityIDs, req.Limit)
 	},
-	"cashSweepExecutionLogs": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashSweepExecutionLogs(ctx, pool, req.EntityIDs, req.Limit)
-	},
-	"cashSweepAllExecutionLogs": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashSweepAllExecutionLogs(ctx, pool, req.EntityIDs, req.Limit)
-	},
 	"cashProjectionList": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashProjectionList(ctx, pool, req.EntityIDs, req.Limit)
 	},
