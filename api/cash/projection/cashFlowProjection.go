@@ -345,7 +345,7 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		// Fetch latest audit per proposal_id
-		sel := `SELECT DISTINCT ON (proposal_id) action_id, proposal_id, processing_status FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = ANY($1) ORDER BY proposal_id, requested_at DESC, action_id DESC`
+		sel := `SELECT DISTINCT ON (proposal_id) action_id, proposal_id, processing_status FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = ANY($1) AND action_type IN ('CREATE','EDIT','DELETE') ORDER BY proposal_id, requested_at DESC, action_id DESC`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to fetch audit rows: "+err.Error())
@@ -453,7 +453,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}()
 
 		// Fetch latest audit per proposal_id
-		sel := `SELECT DISTINCT ON (proposal_id) action_id, proposal_id, action_type, processing_status FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = ANY($1) ORDER BY proposal_id, requested_at DESC, action_id DESC`
+		sel := `SELECT DISTINCT ON (proposal_id) action_id, proposal_id, action_type, processing_status FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = ANY($1) AND action_type IN ('CREATE','EDIT','DELETE') ORDER BY proposal_id, requested_at DESC, action_id DESC`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to fetch audit rows: "+err.Error())

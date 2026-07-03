@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -99,6 +100,10 @@ func validateTDSPlanFields(input map[string]interface{}) string {
 func getUserFriendlyTDSPlanError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 
 	errStr := strings.ToLower(err.Error())
@@ -624,7 +629,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var inputs []map[string]interface{}
 		var errorsList []map[string]interface{}
-		
+
 		seenCodesInFile := make(map[string]int)
 		seenNamesInFile := make(map[string]int)
 
@@ -645,7 +650,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				sendFail(ri+2, "Missing required columns")
 				return
 			}
-			
+
 			// in-file duplicate check
 			normCode := strings.ToUpper(strings.TrimSpace(code))
 			if prevRow, dup := seenCodesInFile[normCode]; dup {
@@ -1089,6 +1094,7 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.is_active,false) AS is_active,
 				COALESCE(l.old_is_active,false) AS old_is_active,
 				COALESCE(m.is_deleted,false) AS is_deleted,
+				COALESCE(m.upload_s3_key,'') AS upload_s3_key,
 
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_type,'') AS action_type,
@@ -1228,7 +1234,7 @@ func DeleteTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(deleteBlockers) > 0 {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,

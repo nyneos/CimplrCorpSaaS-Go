@@ -2,7 +2,9 @@ package investmentsuite
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/investment/portfolio"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
@@ -1096,7 +1098,8 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				post_trade_holding,
 				old_post_trade_holding,
 				current_holding,
-				old_current_holding
+				old_current_holding,
+				COALESCE(initiation_status, false) AS initiation_status
 			FROM investment.investment_proposal_allocation
 			WHERE proposal_id = $1
 			  AND COALESCE(is_deleted, false) = false
@@ -1278,108 +1281,90 @@ func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		entityName := strings.TrimSpace(req.EntityName)
-		if entityName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
-			return
-		}
-		if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{
-			"entity_name": entityName,
-			"amc_names":   req.AMCNames,
-		}); errMsg != "" {
-			api.RespondWithError(w, http.StatusBadRequest, errMsg)
-			return
-		}
-
 		ctx := r.Context()
-
-		// Build query with optional AMC filter
-		holdingsSQL := `
-WITH snapshot_agg AS (
-	SELECT 
-		scheme_id,
-		scheme_name,
-		SUM(current_value) AS current_holding
-	FROM investment.portfolio_snapshot
-	WHERE entity_name = $1
-	GROUP BY scheme_id, scheme_name
-),
-latest_scheme_audit AS (
-	SELECT DISTINCT ON (scheme_id)
-		scheme_id,
-		processing_status
-	FROM investment.auditactionscheme
-	ORDER BY scheme_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
-),
-latest_amc_audit AS (
-	SELECT DISTINCT ON (amc_id)
-		amc_id,
-		processing_status
-	FROM investment.auditactionamc
-	ORDER BY amc_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
-),
-all_schemes AS (
-	SELECT DISTINCT
-		COALESCE(s.scheme_id, ms.scheme_id::text) AS scheme_id,
-		COALESCE(NULLIF(s.scheme_name,''), ms.scheme_name) AS scheme_name,
-		COALESCE(ms.amc_name, '') AS amc_name,
-		COALESCE(s.current_holding, 0) AS current_holding
-	FROM snapshot_agg s
-	FULL OUTER JOIN investment.masterscheme ms
-		ON ms.scheme_id::text = s.scheme_id OR ms.scheme_name = s.scheme_name
-	JOIN latest_scheme_audit lsa ON lsa.scheme_id = ms.scheme_id::text
-	LEFT JOIN investment.masteramc ma ON ma.amc_name = ms.amc_name
-	LEFT JOIN latest_amc_audit laa ON laa.amc_id = ma.amc_id::text
-	WHERE UPPER(ms.status) = 'ACTIVE'
-		AND COALESCE(ms.is_deleted, false) = false
-		AND UPPER(lsa.processing_status) = 'APPROVED'
-		AND (ma.amc_id IS NULL OR (
-			UPPER(ma.status) = 'ACTIVE'
-			AND COALESCE(ma.is_deleted, false) = false
-			AND UPPER(laa.processing_status) = 'APPROVED'
-		))`
-
-		args := []interface{}{entityName}
-
-		// Add AMC filter if provided
-		if len(req.AMCNames) > 0 {
-			holdingsSQL += `
-		AND ms.amc_name = ANY($2)`
-			args = append(args, req.AMCNames)
+		entityName, scopeErr := suiteResolveEntityName(ctx, pool, req.EntityName)
+		if scopeErr != "" {
+			status := http.StatusBadRequest
+			if strings.Contains(scopeErr, "authorized access scope") {
+				status = http.StatusForbidden
+			}
+			api.RespondWithError(w, status, scopeErr)
+			return
 		}
 
-		holdingsSQL += `
-)
-SELECT 
-	COALESCE(scheme_id, '') AS scheme_id,
-	COALESCE(scheme_name, '') AS scheme_name,
-	COALESCE(amc_name, '') AS amc_name,
-	COALESCE(current_holding, 0) AS current_holding
-FROM all_schemes
-WHERE scheme_name IS NOT NULL AND scheme_name != ''
-ORDER BY amc_name, scheme_name
-`
+		if len(req.AMCNames) > 0 {
+			if errMsg := validation.ValidateMFMasterReferences(ctx, map[string]interface{}{
+				"amc_names": req.AMCNames,
+			}); errMsg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
+			}
+		}
 
-		rows, err := pool.Query(ctx, holdingsSQL, args...)
+		portfolioRows, err := portfolio.QueryEntityHoldings(ctx, pool, entityName)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch holdings: "+err.Error())
 			return
 		}
-		defer rows.Close()
 
-		holdings := make([]EntitySchemeHolding, 0, 16)
-		for rows.Next() {
-			var rec EntitySchemeHolding
-			if err := rows.Scan(&rec.SchemeID, &rec.SchemeName, &rec.AMCName, &rec.CurrentHolding); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to read holdings rows")
+		holdingBySchemeID := make(map[string]float64, len(portfolioRows))
+		for _, row := range portfolioRows {
+			schemeID := strings.TrimSpace(row.SchemeID)
+			if schemeID == "" {
+				continue
+			}
+			holdingBySchemeID[schemeID] += row.CurrentValue
+		}
+
+		amcFilter := make(map[string]struct{}, len(req.AMCNames))
+		for _, amc := range req.AMCNames {
+			if trimmed := strings.TrimSpace(amc); trimmed != "" {
+				amcFilter[strings.ToLower(trimmed)] = struct{}{}
+			}
+		}
+
+		scope := ctxutil.FromContext(ctx)
+		holdings := make([]EntitySchemeHolding, 0, len(scope.Schemes))
+		seenScheme := make(map[string]struct{}, len(scope.Schemes))
+
+		appendScheme := func(schemeID, schemeName, amcName string) {
+			schemeID = strings.TrimSpace(schemeID)
+			schemeName = strings.TrimSpace(schemeName)
+			if schemeID == "" || schemeName == "" {
 				return
 			}
-			holdings = append(holdings, rec)
+			if _, ok := seenScheme[schemeID]; ok {
+				return
+			}
+			if len(amcFilter) > 0 {
+				if _, ok := amcFilter[strings.ToLower(strings.TrimSpace(amcName))]; !ok {
+					return
+				}
+			}
+			seenScheme[schemeID] = struct{}{}
+			holdings = append(holdings, EntitySchemeHolding{
+				SchemeID:       schemeID,
+				SchemeName:     schemeName,
+				AMCName:        strings.TrimSpace(amcName),
+				CurrentHolding: holdingBySchemeID[schemeID],
+			})
 		}
-		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to iterate holdings rows: "+err.Error())
-			return
+
+		for _, scheme := range scope.Schemes {
+			appendScheme(scheme["scheme_id"], scheme["scheme_name"], scheme["amc_name"])
 		}
+
+		// Include held schemes that may not be in the approved-schemes cache.
+		for _, row := range portfolioRows {
+			appendScheme(row.SchemeID, row.SchemeName, row.AmcName)
+		}
+
+		sort.Slice(holdings, func(i, j int) bool {
+			if holdings[i].AMCName != holdings[j].AMCName {
+				return holdings[i].AMCName < holdings[j].AMCName
+			}
+			return holdings[i].SchemeName < holdings[j].SchemeName
+		})
 
 		api.RespondWithPayload(w, true, "", holdings)
 	}
@@ -1399,17 +1384,16 @@ func GetEntityAccounts(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		entityName := strings.TrimSpace(req.EntityName)
-		if entityName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
-			return
-		}
-		if errMsg := validation.ValidateMFMasterReferences(r.Context(), map[string]interface{}{"entity_name": entityName}); errMsg != "" {
-			api.RespondWithError(w, http.StatusBadRequest, errMsg)
-			return
-		}
-
 		ctx := r.Context()
+		entityName, scopeErr := suiteResolveEntityName(ctx, pool, req.EntityName)
+		if scopeErr != "" {
+			status := http.StatusBadRequest
+			if strings.Contains(scopeErr, "authorized access scope") {
+				status = http.StatusForbidden
+			}
+			api.RespondWithError(w, status, scopeErr)
+			return
+		}
 
 		// Fetch folios for this entity
 		entityFolios := make([]map[string]interface{}, 0)
@@ -1690,8 +1674,17 @@ func insertAllocations(ctx context.Context, tx pgx.Tx, proposalID string, alloca
 }
 
 func syncProposalAllocations(ctx context.Context, tx pgx.Tx, proposalID string, allocations []ProposalAllocationUpsertInput, deletedBy string) error {
+	_ = deletedBy
 	const (
-		fetchSQL  = `SELECT id FROM investment.investment_proposal_allocation WHERE proposal_id=$1 AND COALESCE(is_deleted, false) = false`
+		fetchSQL = `
+			SELECT id,
+				COALESCE(scheme_id, '') AS scheme_id,
+				COALESCE(scheme_internal_code, '') AS scheme_internal_code,
+				amount,
+				COALESCE(initiation_status, false) AS initiation_status
+			FROM investment.investment_proposal_allocation
+			WHERE proposal_id=$1 AND COALESCE(is_deleted, false) = false
+		`
 		updateSQL = `
 			UPDATE investment.investment_proposal_allocation
 			SET scheme_id=$1,
@@ -1716,27 +1709,57 @@ func syncProposalAllocations(ctx context.Context, tx pgx.Tx, proposalID string, 
 		`
 		deleteSQL = `
 			UPDATE investment.investment_proposal_allocation
-			SET is_deleted=true, deleted_at=now(), deleted_by=$3
-			WHERE proposal_id=$1 AND id = ANY($2)
+			SET is_deleted=true, updated_at=now()
+			WHERE proposal_id=$1 AND id = ANY($2) AND COALESCE(initiation_status, false) = false
 		`
 	)
+
+	type existingAlloc struct {
+		id               int64
+		schemeID         string
+		schemeCode       string
+		amount           float64
+		initiationStatus bool
+	}
 
 	rows, err := tx.Query(ctx, fetchSQL, proposalID)
 	if err != nil {
 		return err
 	}
-	existing := make(map[int64]struct{})
+	existingByID := make(map[int64]existingAlloc)
+	existingBySchemeKey := make(map[string]int64)
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var rec existingAlloc
+		if err := rows.Scan(&rec.id, &rec.schemeID, &rec.schemeCode, &rec.amount, &rec.initiationStatus); err != nil {
 			rows.Close()
 			return err
 		}
-		existing[id] = struct{}{}
+		existingByID[rec.id] = rec
+		for _, key := range allocationSchemeKeys(rec.schemeID, rec.schemeCode) {
+			if key != "" {
+				existingBySchemeKey[key] = rec.id
+			}
+		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
+	}
+
+	resolveAllocationID := func(alloc ProposalAllocationUpsertInput) (*int64, error) {
+		if alloc.AllocationID != nil {
+			if _, ok := existingByID[*alloc.AllocationID]; !ok {
+				return nil, fmt.Errorf("allocation_id %d does not belong to proposal %s", *alloc.AllocationID, proposalID)
+			}
+			id := *alloc.AllocationID
+			return &id, nil
+		}
+		for _, key := range allocationSchemeKeys(alloc.SchemeID, alloc.SchemeInternalCode) {
+			if id, ok := existingBySchemeKey[key]; ok {
+				return &id, nil
+			}
+		}
+		return nil, nil
 	}
 
 	for _, alloc := range allocations {
@@ -1750,39 +1773,70 @@ func syncProposalAllocations(ctx context.Context, tx pgx.Tx, proposalID string, 
 		postTradeHolding := floatOrZero(alloc.PostTradeHolding)
 		currentHolding := floatOrZero(alloc.CurrentHolding)
 
-		if alloc.AllocationID != nil {
-			if _, ok := existing[*alloc.AllocationID]; !ok {
-				return fmt.Errorf("allocation_id %d does not belong to proposal %s", *alloc.AllocationID, proposalID)
+		targetID, err := resolveAllocationID(alloc)
+		if err != nil {
+			return err
+		}
+
+		if targetID != nil {
+			existing := existingByID[*targetID]
+			if existing.initiationStatus && math.Abs(alloc.Amount-existing.amount) > amountTolerance {
+				return fmt.Errorf("allocation for scheme %s is locked because investment initiation already exists", defaultString(alloc.SchemeID, alloc.SchemeInternalCode))
 			}
-			tag, err := tx.Exec(ctx, updateSQL, schemeID, schemeCode, alloc.Amount, percent, policyStatus, postTradeHolding, currentHolding, *alloc.AllocationID, proposalID)
+
+			tag, err := tx.Exec(ctx, updateSQL, schemeID, schemeCode, alloc.Amount, percent, policyStatus, postTradeHolding, currentHolding, *targetID, proposalID)
 			if err != nil {
 				return err
 			}
 			if tag.RowsAffected() == 0 {
-				return fmt.Errorf("failed to update allocation_id %d", *alloc.AllocationID)
+				return fmt.Errorf("failed to update allocation_id %d", *targetID)
 			}
-			delete(existing, *alloc.AllocationID)
+			delete(existingByID, *targetID)
+			for key, id := range existingBySchemeKey {
+				if id == *targetID {
+					delete(existingBySchemeKey, key)
+				}
+			}
 			continue
 		}
 
-		// New allocation: do NOT set old_* fields on INSERT
 		var newID int64
 		if err := tx.QueryRow(ctx, insertSQL, proposalID, schemeID, schemeCode, alloc.Amount, percent, policyStatus, postTradeHolding, 0.0, currentHolding, 0.0).Scan(&newID); err != nil {
 			return err
 		}
 	}
 
-	if len(existing) > 0 {
-		ids := make([]int64, 0, len(existing))
-		for id := range existing {
+	if len(existingByID) > 0 {
+		ids := make([]int64, 0, len(existingByID))
+		for id, rec := range existingByID {
+			if rec.initiationStatus {
+				return fmt.Errorf("cannot remove allocation for scheme %s because investment initiation already exists", defaultString(rec.schemeID, rec.schemeCode))
+			}
 			ids = append(ids, id)
 		}
-		if _, err := tx.Exec(ctx, deleteSQL, proposalID, ids, deletedBy); err != nil {
+		if _, err := tx.Exec(ctx, deleteSQL, proposalID, ids); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func allocationSchemeKeys(schemeID, schemeCode string) []string {
+	keys := make([]string, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	for _, raw := range []string{schemeID, schemeCode} {
+		key := strings.ToUpper(strings.TrimSpace(raw))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func insertProposalAudit(ctx context.Context, tx pgx.Tx, proposalID, requestedBy, reason, actionType, processingStatus string) error {

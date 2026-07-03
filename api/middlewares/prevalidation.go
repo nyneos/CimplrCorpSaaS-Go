@@ -282,10 +282,12 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			// backward-compat single values (first mapped entity)
 			ctx = context.WithValue(ctx, "root_entity_id", validationResult.RootEntityID)
 			ctx = context.WithValue(ctx, "root_entity_name", validationResult.RootEntityName)
-			// full multi-entity lists
+			// full multi-entity lists (match prevalidatioV2 SessionMiddleware keys)
 			ctx = context.WithValue(ctx, "root_entity_ids", validationResult.RootEntityIDs)
 			ctx = context.WithValue(ctx, api.BusinessUnitsKey, entityNames)
 			ctx = context.WithValue(ctx, api.EntityIDsKey, entityIDs)
+			ctx = context.WithValue(ctx, "entity_ids", entityIDs)
+			ctx = context.WithValue(ctx, "entity_names", entityNames)
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
 
 			if prevalidationDebugEnabled() {
@@ -656,12 +658,13 @@ func loadApprovedSchemes(ctx context.Context, db *pgxpool.Pool) ([]map[string]st
 			WHERE processing_status = 'APPROVED' AND actiontype IN ('CREATE','EDIT')
 			ORDER BY scheme_id, requested_at DESC
 		)
-		SELECT 
+		SELECT
 			COALESCE(m.scheme_id::text, ''),
 			COALESCE(m.scheme_name, ''),
 			COALESCE(m.isin, ''),
 			COALESCE(m.internal_scheme_code, ''),
-			COALESCE(m.amc_name, '')
+			COALESCE(m.amc_name, ''),
+			COALESCE(m.amfi_scheme_code, '')
 		FROM investment.masterscheme m
 		JOIN latest_approved l ON l.scheme_id = m.scheme_id
 		WHERE UPPER(m.status) = 'ACTIVE'
@@ -683,14 +686,15 @@ func loadApprovedSchemes(ctx context.Context, db *pgxpool.Pool) ([]map[string]st
 
 	schemes := make([]map[string]string, 0)
 	for rows.Next() {
-		var schemeID, schemeName, isin, schemeCode, amcName string
-		if err := rows.Scan(&schemeID, &schemeName, &isin, &schemeCode, &amcName); err == nil {
+		var schemeID, schemeName, isin, schemeCode, amcName, amfiCode string
+		if err := rows.Scan(&schemeID, &schemeName, &isin, &schemeCode, &amcName, &amfiCode); err == nil {
 			schemes = append(schemes, map[string]string{
 				"scheme_id":            schemeID,
 				"scheme_name":          schemeName,
 				"isin":                 isin,
 				"internal_scheme_code": schemeCode,
 				"amc_name":             amcName,
+				"amfi_scheme_code":     amfiCode,
 			})
 		}
 	}

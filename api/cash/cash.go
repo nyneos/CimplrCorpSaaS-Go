@@ -10,8 +10,8 @@ import (
 	"CimplrCorpSaas/api/cash/payablerecievable"
 	"CimplrCorpSaas/api/cash/projection"
 	sweepconfig "CimplrCorpSaas/api/cash/sweepConfig"
+	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
-	"CimplrCorpSaas/api/travel"
 	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
@@ -78,7 +78,9 @@ func NewCashServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, error)
 	mux.Handle("/cash/download-pdf", cashChain(bankstatement.DownloadPDFHandler(pgxPool)))
 	// PDF staging endpoints (multi-PDF ZIP flow: batch → review → recalculate → commit)
 	mux.Handle("/cash/staging/batch/get", cashChain(bankstatement.GetStagingBatchHandler(pgxPool)))
+	mux.Handle("/cash/staging/batch/results", cashChain(bankstatement.GetStagingBatchResultsHandler(pgxPool)))
 	mux.Handle("/cash/staging/statement/get", cashChain(bankstatement.GetStagingStatementHandler(pgxPool)))
+	mux.Handle("/cash/staging/statement/download", cashChain(bankstatement.GetStagingFileDownloadURLHandler(pgxPool)))
 	mux.Handle("/cash/staging/statement/update", cashChain(bankstatement.UpdateStagingStatementHandler(pgxPool)))
 	mux.Handle("/cash/staging/statement/delete", cashChain(bankstatement.DeleteStagingStatementHandler(pgxPool)))
 	mux.Handle("/cash/staging/batch/delete", cashChain(bankstatement.DeleteStagingBatchHandler(pgxPool)))
@@ -115,8 +117,9 @@ func NewCashServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, error)
 	mux.Handle("/cash/smart-cat/rules/ai-suggested", cashChain(bankstatement.ListAISuggestedRulesHandler(pgxPool)))
 	mux.Handle("/cash/smart-cat/rule/approve", cashChain(bankstatement.ApproveAIRuleHandler(pgxPool)))
 	mux.Handle("/cash/smart-cat/rule/reject", cashChain(bankstatement.RejectAIRuleHandler(pgxPool)))
-	// AI Bulk Suggest — batch-classify all PENDING UNALLOCATED review queue items
+	// AI Bulk Suggest — batch-classify all PENDING UNALLOCATED review queue items (async)
 	mux.Handle("/cash/smart-cat/ai-bulk-suggest", cashChain(bankstatement.AiBulkSuggestHandler(pgxPool)))
+	mux.Handle("/cash/smart-cat/ai-bulk-suggest/status", cashChain(bankstatement.AiBulkSuggestStatusHandler(pgxPool)))
 	// Bulk Correct — apply a category to N transactions at once
 	mux.Handle("/cash/smart-cat/bulk-correct", cashChain(bankstatement.BulkCorrectHandler(pgxPool)))
 	// V2 Bank Statement APIs
@@ -344,11 +347,6 @@ func NewCashServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, error)
 	// Bank Limit Management - Limit sanctioning and tracking
 	limit.RegisterLimitRoutes(mux, pgxPool)
 
-	// Travel package endpoints
-	mux.Handle("/cash/package/create", cashChain(travel.CreatePackageHandler(pgxPool)))
-	mux.Handle("/cash/package", cashChain(travel.GetPackageHandler(pgxPool)))
-	mux.Handle("/cash/package/delete", cashChain(travel.DeletePackageHandler(pgxPool)))
-
 	mux.HandleFunc("/cash/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Cash Service is active"))
 	})
@@ -378,7 +376,7 @@ func StartCashService(db *sql.DB, port string) {
 func cashJSONActionResponses(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isCashJSONActionRoute(r.URL.Path) {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		}
 		next.ServeHTTP(w, r)
 	})

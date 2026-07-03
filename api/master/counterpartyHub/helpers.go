@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/master/mastererrors"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -20,6 +21,10 @@ import (
 func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 
 	var pgErr *pgconn.PgError

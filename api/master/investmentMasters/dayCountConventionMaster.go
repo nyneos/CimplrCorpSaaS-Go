@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -25,6 +26,10 @@ import (
 func getUserFriendlyDayCountError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 	errStr := strings.ToLower(err.Error())
 	dupKeySubstr := strings.ToLower(constants.ErrDuplicateKeyC)
@@ -259,7 +264,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			seenCodesInFile[normCode] = sheetRow
-			
+
 			normName := strings.ToUpper(strings.TrimSpace(get(row, "day_count_name")))
 			if prevRow, dup := seenNamesInFile[normName]; dup && normName != "" {
 				sendFail(sheetRow, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching day_count_name: %s)", sheetRow, prevRow, get(row, "day_count_name")))
@@ -1196,7 +1201,7 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(deleteBlockers) > 0 {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
@@ -1506,6 +1511,7 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT
 				m.day_count_id,
 				m.day_count_code,
+				COALESCE(m.upload_s3_key,'')          AS upload_s3_key,
 				COALESCE(m.day_count_name,'')         AS day_count_name,
 				COALESCE(l.old_day_count_name,'')     AS old_day_count_name,
 				COALESCE(m.convention_type,'')        AS convention_type,
@@ -1545,7 +1551,7 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.convention_type, l.old_convention_type,
 				m.description, l.old_description,
 				m.formula_example, l.old_formula_example,
-				m.is_active, l.old_is_active, m.is_deleted,
+				m.is_active, l.old_is_active, m.is_deleted, m.upload_s3_key,
 				l.processing_status, l.action_type, l.audit_id,
 				l.requested_by, l.requested_at, l.checker_by, l.checker_at,
 				l.checker_comment, l.reason,

@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/investment/uploadutil"
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	jobs "CimplrCorpSaas/internal/jobs/investment"
+	"CimplrCorpSaas/internal/logger"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -15,9 +17,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"CimplrCorpSaas/api/constants"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -300,7 +303,7 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 func decodeCreateConfirmationRequest(r *http.Request) (CreateConfirmationRequest, bool, error) {
 	var req CreateConfirmationRequest
-	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
 	if strings.HasPrefix(contentType, "multipart/form-data") {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			return req, true, err
@@ -579,6 +582,11 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
+		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
+			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
+		}
+
 		go func(cID, uID, uEmail string) {
 			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, []string{cID}, "UPDATE", uEmail)
 			catalog.TriggerNotification(
@@ -787,6 +795,11 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
+		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
+			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
+		}
+
 		go func(ids []string, uID, uEmail string) {
 			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "DELETE_REQUEST", uEmail)
 			catalog.TriggerNotification(
@@ -920,6 +933,11 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
+		}
+
+		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
+		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
+			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
 		}
 
 		// Automatically process confirmed investments (create BUY transactions and refresh snapshots)
@@ -1077,6 +1095,11 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
+		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
+			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
+		}
+
 		go func(ids []string, uID, uEmail string) {
 			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionReject, uEmail)
 			catalog.TriggerNotification(
@@ -1208,12 +1231,7 @@ func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []str
 		LEFT JOIN latest_audit l ON l.confirmation_id = m.confirmation_id
 		LEFT JOIN history h ON h.confirmation_id = m.confirmation_id
 		LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
-		LEFT JOIN investment.masterscheme s ON (
-			s.scheme_id::text = i.scheme_id OR
-			s.scheme_name = i.scheme_id OR
-			s.internal_scheme_code = i.scheme_id OR
-			s.isin = i.scheme_id
-		)
+		LEFT JOIN investment.masterscheme s ON (COALESCE(s.is_deleted, false) = false AND ((NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.scheme_id::text = TRIM(i.scheme_id)) OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.internal_scheme_code = TRIM(i.scheme_id)) OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.amfi_scheme_code = TRIM(i.scheme_id))))
 		LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
 		LEFT JOIN investment.masterdemataccount d ON (
 			d.demat_id::text = i.demat_id OR
@@ -1414,12 +1432,7 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l ON l.confirmation_id = m.confirmation_id
 			LEFT JOIN history h ON h.confirmation_id = m.confirmation_id
 			LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
-			LEFT JOIN investment.masterscheme s ON (
-				s.scheme_id::text = i.scheme_id OR
-				s.scheme_name = i.scheme_id OR
-				s.internal_scheme_code = i.scheme_id OR
-				s.isin = i.scheme_id
-			)
+			LEFT JOIN investment.masterscheme s ON (COALESCE(s.is_deleted, false) = false AND ((NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.scheme_id::text = TRIM(i.scheme_id)) OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.internal_scheme_code = TRIM(i.scheme_id)) OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.amfi_scheme_code = TRIM(i.scheme_id))))
 			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
 			LEFT JOIN investment.masterdemataccount d ON (
 				d.demat_id::text = i.demat_id OR
@@ -1565,12 +1578,7 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.investment_confirmation m
 			JOIN latest l ON l.confirmation_id = m.confirmation_id
 			LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
-			LEFT JOIN investment.masterscheme s ON (
-				s.scheme_id::text = i.scheme_id OR
-				s.scheme_name = i.scheme_id OR
-				s.internal_scheme_code = i.scheme_id OR
-				s.isin = i.scheme_id
-			)
+			LEFT JOIN investment.masterscheme s ON (COALESCE(s.is_deleted, false) = false AND ((NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.scheme_id::text = TRIM(i.scheme_id)) OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.internal_scheme_code = TRIM(i.scheme_id)) OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.amfi_scheme_code = TRIM(i.scheme_id))))
 			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
 			LEFT JOIN investment.masterdemataccount d ON (
 				d.demat_id::text = i.demat_id OR
@@ -1650,8 +1658,7 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	}
 	defer tx.Rollback(ctx)
 
-	// Use a generated transient batch ID (do not create an entry in `onboard_batch`)
-	batchID := uuid.New().String()
+	// Removed old batchID
 
 	// Fetch confirmation details with related initiation and scheme info
 	// NOTE: investment_initiation stores string identifiers in scheme_id/folio_id/demat_id, not UUIDs
@@ -1675,10 +1682,10 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			i.demat_id AS demat_identifier,
 			i.amount AS initiation_amount,
 			-- Resolve actual scheme details
-			COALESCE(s.scheme_id::text, s2.scheme_id::text, s3.scheme_id::text, s4.scheme_id::text) AS resolved_scheme_id,
-			COALESCE(s.scheme_name, s2.scheme_name, s3.scheme_name, s4.scheme_name) AS scheme_name,
-			COALESCE(s.isin, s2.isin, s3.isin, s4.isin) AS isin,
-			COALESCE(s.internal_scheme_code, s2.internal_scheme_code, s3.internal_scheme_code, s4.internal_scheme_code) AS internal_scheme_code,
+			COALESCE(s.scheme_id::text) AS resolved_scheme_id,
+			COALESCE(s.scheme_name, '') AS scheme_name,
+			COALESCE(s.isin, '') AS isin,
+			COALESCE(s.internal_scheme_code, '') AS internal_scheme_code,
 			-- Resolve actual folio details
 			f.folio_id::text AS resolved_folio_id,
 			f.folio_number,
@@ -1689,11 +1696,14 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			d.entity_name AS demat_entity_name
 		FROM investment.investment_confirmation c
 		JOIN investment.investment_initiation i ON i.initiation_id = c.initiation_id
-		-- Resolve scheme by trying multiple match strategies
-		LEFT JOIN investment.masterscheme s ON s.scheme_id::text = i.scheme_id
-		LEFT JOIN investment.masterscheme s2 ON s2.scheme_name = i.scheme_id
-		LEFT JOIN investment.masterscheme s3 ON s3.internal_scheme_code = i.scheme_id
-		LEFT JOIN investment.masterscheme s4 ON s4.isin = i.scheme_id
+		LEFT JOIN investment.masterscheme s ON (
+			COALESCE(s.is_deleted, false) = false
+			AND (
+				(NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.scheme_id::text = TRIM(i.scheme_id))
+				OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.internal_scheme_code = TRIM(i.scheme_id))
+				OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.amfi_scheme_code = TRIM(i.scheme_id))
+			)
+		)
 		-- Resolve folio by trying folio_id or folio_number
 		LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
 		-- Resolve demat by trying demat_id or demat_account_number
@@ -1741,6 +1751,9 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		DematAccountNumber  *string
 		DematEntityName     *string
 	}
+
+	// Use a generated transient batch ID (do not create an entry in onboard_batch)
+	batchID := uuid.New().String()
 
 	confirmations := []ConfirmationData{}
 	for rows.Next() {
@@ -1800,8 +1813,8 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		txInsert := `
 			INSERT INTO investment.onboard_transaction (
 				batch_id, transaction_date, transaction_type, folio_number, demat_acc_number,
-				amount, units, nav, scheme_id, folio_id, demat_id, scheme_internal_code, entity_name, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+				amount, units, nav, scheme_id, folio_id, demat_id, scheme_internal_code, entity_name, approval_status, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'APPROVED', now())
 		`
 
 		if _, err := tx.Exec(ctx, txInsert,
@@ -1835,162 +1848,6 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		processedIDs = append(processedIDs, cd.ConfirmationID)
 	}
 
-	// Refresh portfolio snapshot based on ALL transactions for affected entities
-	// Group by folio_id and demat_id (unique identifiers) instead of non-unique folio_number/demat_acc_number
-	// Delete existing snapshots for affected folio_id/demat_id combinations
-	deleteSnap := `
-		DELETE FROM investment.portfolio_snapshot
-		WHERE (folio_id IS NOT NULL AND folio_id IN (
-			SELECT DISTINCT ot.folio_id
-			FROM investment.onboard_transaction ot
-			WHERE ot.batch_id = $1 AND ot.folio_id IS NOT NULL
-		))
-		OR (demat_id IS NOT NULL AND demat_id IN (
-			SELECT DISTINCT ot.demat_id
-			FROM investment.onboard_transaction ot
-			WHERE ot.batch_id = $1 AND ot.demat_id IS NOT NULL
-		))
-	`
-	if _, err := tx.Exec(ctx, deleteSnap, batchID); err != nil {
-		return nil, fmt.Errorf("delete snapshot failed: %w", err)
-	}
-
-	// Rebuild snapshots for affected folio_id/demat_id using ALL their transactions (not just current batch)
-	snapshotQ := `
-WITH affected_folios_demats AS (
-    SELECT DISTINCT 
-        ot.folio_id,
-        ot.demat_id
-    FROM investment.onboard_transaction ot
-    WHERE ot.batch_id = $1
-        AND (ot.folio_id IS NOT NULL OR ot.demat_id IS NOT NULL)
-),
-scheme_resolved AS (
-    SELECT
-        ot.batch_id,
-        ot.transaction_date,
-        ot.transaction_type,
-        ot.amount,
-        ot.units,
-        ot.nav,
-        COALESCE(mf.entity_name, md.entity_name) AS entity_name,
-        ot.folio_number,
-        ot.demat_acc_number,
-        ot.folio_id,
-        ot.demat_id,
-        COALESCE(ot.scheme_id, fsm.scheme_id, ms2.scheme_id, ms.scheme_id) AS scheme_id,
-        COALESCE(ms2.scheme_name, ms.scheme_name) AS scheme_name,
-        COALESCE(ms2.isin, ms.isin) AS isin
-    FROM investment.onboard_transaction ot
-    LEFT JOIN investment.masterfolio mf ON mf.folio_id = ot.folio_id
-    LEFT JOIN investment.masterdemataccount md ON md.demat_id = ot.demat_id
-    LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = ot.folio_id
-    LEFT JOIN investment.masterscheme ms ON ms.scheme_id = fsm.scheme_id
-    LEFT JOIN investment.masterscheme ms2 ON ms2.scheme_id::text = ot.scheme_id OR ms2.internal_scheme_code = ot.scheme_internal_code
-    WHERE (ot.folio_id IN (SELECT folio_id FROM affected_folios_demats WHERE folio_id IS NOT NULL)
-        OR ot.demat_id IN (SELECT demat_id FROM affected_folios_demats WHERE demat_id IS NOT NULL))
-),
-transaction_summary AS (
-    SELECT
-        entity_name,
-        folio_number,
-        demat_acc_number,
-        folio_id,
-        demat_id,
-        scheme_id,
-        scheme_name,
-        isin,
-        -- Net units: BUY positive, SELL negative
-        SUM(CASE 
-            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN units
-            ELSE units
-        END) AS total_units,
-        -- Total invested: sum of BUY amounts only
-        SUM(CASE 
-            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN amount
-            ELSE 0
-        END) AS total_invested_amount,
-        -- Avg NAV: weighted average of BUY transactions only
-        CASE 
-            WHEN SUM(CASE 
-                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-                ELSE 0
-            END) = 0 THEN 0
-            ELSE SUM(CASE 
-                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN nav * units
-                ELSE 0
-            END) / SUM(CASE 
-                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-                ELSE 0
-            END)
-        END AS avg_nav
-    FROM scheme_resolved
-    GROUP BY entity_name, folio_number, demat_acc_number, folio_id, demat_id, scheme_id, scheme_name, isin
-),
-latest_nav AS (
-    SELECT DISTINCT ON (scheme_name)
-        scheme_name,
-        isin_div_payout_growth as isin,
-        nav_value,
-        nav_date
-    FROM investment.amfi_nav_staging
-    ORDER BY scheme_name, nav_date DESC
-)
-INSERT INTO investment.portfolio_snapshot (
-  batch_id,
-  entity_name,
-  folio_number,
-  demat_acc_number,
-  folio_id,
-  demat_id,
-  scheme_id,
-  scheme_name,
-  isin,
-  total_units,
-  avg_nav,
-  current_nav,
-  current_value,
-  total_invested_amount,
-  gain_loss,
-  gain_losss_percent,
-  created_at
-)
-SELECT
-  $1 AS batch_id,
-  ts.entity_name,
-  ts.folio_number,
-  ts.demat_acc_number,
-  ts.folio_id,
-  ts.demat_id,
-  ts.scheme_id,
-  ts.scheme_name,
-  ts.isin,
-  ts.total_units,
-  ts.avg_nav,
-  COALESCE(ln.nav_value, 0) AS current_nav,
-  ts.total_units * COALESCE(ln.nav_value, 0) AS current_value,
-  ts.total_invested_amount,
-  (ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount AS gain_loss,
-  CASE 
-    WHEN ts.total_invested_amount = 0 THEN 0
-    ELSE (((ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount) / ts.total_invested_amount) * 100
-  END AS gain_losss_percent,
-  NOW()
-FROM transaction_summary ts
-LEFT JOIN latest_nav ln ON (ln.scheme_name = ts.scheme_name OR ln.isin = ts.isin)
-WHERE ts.total_units > 0;
-`
-	if _, err := tx.Exec(ctx, snapshotQ, batchID); err != nil {
-		return nil, fmt.Errorf("rebuild snapshot failed: %w", err)
-	}
-
-	// Count snapshots created
-	var snapshotCount int64
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM investment.portfolio_snapshot WHERE batch_id=$1`, batchID).Scan(&snapshotCount); err != nil {
-		snapshotCount = 0
-	}
-
 	// NOTE: We no longer create or update an `onboard_batch` row.
 	// The transient `batchID` is used only to group inserted transactions and snapshots,
 	// but no entry is persisted in `investment.onboard_batch`.
@@ -2003,7 +1860,7 @@ WHERE ts.total_units > 0;
 		"batch_id":           batchID,
 		"confirmed_ids":      processedIDs,
 		"transactions_count": len(processedIDs),
-		"snapshot_count":     snapshotCount,
+		"snapshot_count":     0, // Rebuilt globally
 		"confirmed_by":       confirmedBy,
 	}, nil
 }
@@ -2061,4 +1918,31 @@ func stringOrNull(s *string) interface{} {
 		return nil
 	}
 	return *s
+}
+
+// GetConfirmationDetail returns full detail for a single investment confirmation.
+func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ConfirmationID string `json:"confirmation_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+		if strings.TrimSpace(req.ConfirmationID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "confirmation_id is required")
+			return
+		}
+		rows, err := fetchConfirmationRows(r.Context(), pgxPool, []string{req.ConfirmationID})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		if len(rows) == 0 {
+			api.RespondWithError(w, http.StatusNotFound, "confirmation not found")
+			return
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"data": rows[0]})
+	}
 }

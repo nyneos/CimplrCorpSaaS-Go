@@ -72,6 +72,7 @@ type MainUploadAuditPayload struct {
 	UploadedBy  string    `json:"uploaded_by"`
 	UploadedAt  time.Time `json:"uploaded_at"`
 	RequestedIP string    `json:"requested_ip,omitempty"`
+	IsPreview   bool      `json:"is_preview,omitempty"`
 }
 
 type Config struct {
@@ -100,8 +101,9 @@ type Config struct {
 }
 
 type downloadRequest struct {
-	UserID string `json:"user_id"`
-	FileID string `json:"file_id"`
+	UserID  string `json:"user_id"`
+	FileID  string `json:"file_id"`
+	Preview bool   `json:"preview"`
 }
 
 type downloadSelectedRequest struct {
@@ -303,7 +305,7 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		if auditEnabled(cfg) {
 			performedBy := requestedByOrFallback(r.Context(), req.UserID)
 			requestedIP := api.ClientIPFromRequest(r)
-			if err := recordDownloadAudit(r.Context(), pool, cfg, parentID, *record, performedBy, requestedIP); err != nil {
+			if err := recordDownloadAudit(r.Context(), pool, cfg, parentID, *record, downloadActorInfo{RequestedBy: performedBy, RequestedIP: requestedIP, IsPreview: req.Preview}); err != nil {
 				if !isUndefinedTableError(err) {
 					api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 					return
@@ -316,6 +318,7 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 				UploadedBy:  performedBy,
 				UploadedAt:  time.Now().UTC(),
 				RequestedIP: requestedIP,
+				IsPreview:   req.Preview,
 			}); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 				return
@@ -325,6 +328,148 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		writeSuccess(w, map[string]interface{}{
 			"download_url": downloadURL,
 			"file_id":      record.FileID,
+		})
+	}
+}
+
+
+func NewMainFileDownloadHandler(pool *pgxpool.Pool, cfg Config, loadMain func(ctx context.Context, pool *pgxpool.Pool, parentID string) (*MainPackageFile, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			return
+		}
+
+		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if strings.TrimSpace(body.UserID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			return
+		}
+		if loadMain == nil {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			return
+		}
+
+		mainFile, err := loadMain(r.Context(), pool, parentID)
+		if err != nil || mainFile == nil || strings.TrimSpace(mainFile.UploadS3Key) == "" {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), mainFile.UploadS3Key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to generate download url: "+err.Error())
+			return
+		}
+
+		if auditEnabled(cfg) {
+			fileName := strings.TrimSpace(mainFile.FileName)
+			if fileName == "" {
+				fileName = objectBaseName(mainFile.UploadS3Key)
+			}
+			if auditErr := recordMainDownloadAuditSafely(r.Context(), pool, cfg, parentID, MainUploadAuditPayload{
+				FileName:    fileName,
+				UploadS3Key: strings.TrimSpace(mainFile.UploadS3Key),
+				UploadedBy:  requestedByOrFallback(r.Context(), body.UserID),
+				UploadedAt:  time.Now().UTC(),
+				RequestedIP: api.ClientIPFromRequest(r),
+			}); auditErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, auditErr.Error())
+				return
+			}
+		}
+
+		writeSuccess(w, map[string]interface{}{"download_url": downloadURL})
+	}
+}
+
+type mainFileBulkRequest struct {
+	UserID string   `json:"user_id"`
+	IDs    []string `json:"ids"`
+}
+
+func NewMainFileBulkDownloadHandler(pool *pgxpool.Pool, cfg Config, loadMain func(ctx context.Context, pool *pgxpool.Pool, rowID string) (*MainPackageFile, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			return
+		}
+
+		var req mainFileBulkRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			return
+		}
+		if strings.TrimSpace(req.UserID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			return
+		}
+		if loadMain == nil {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			return
+		}
+
+		ids := trimStringList(req.IDs)
+		if len(ids) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "ids required")
+			return
+		}
+
+		performedBy := requestedByOrFallback(r.Context(), req.UserID)
+		requestedIP := api.ClientIPFromRequest(r)
+
+		files := make([]map[string]string, 0, len(ids))
+		failedIDs := make([]string, 0)
+		seenKeys := make(map[string]struct{}, len(ids))
+
+		for _, id := range ids {
+			mainFile, err := loadMain(r.Context(), pool, id)
+			if err != nil || mainFile == nil || strings.TrimSpace(mainFile.UploadS3Key) == "" {
+				failedIDs = append(failedIDs, id)
+				continue
+			}
+			key := strings.TrimSpace(mainFile.UploadS3Key)
+			if _, done := seenKeys[key]; done {
+				continue // same uploaded file already returned for another row
+			}
+
+			downloadURL, presignErr := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+			if presignErr != nil {
+				failedIDs = append(failedIDs, id)
+				continue
+			}
+
+			if auditEnabled(cfg) {
+				fileName := strings.TrimSpace(mainFile.FileName)
+				if fileName == "" {
+					fileName = objectBaseName(key)
+				}
+				if auditErr := recordMainDownloadAuditSafely(r.Context(), pool, cfg, id, MainUploadAuditPayload{
+					FileName:    fileName,
+					UploadS3Key: key,
+					UploadedBy:  performedBy,
+					UploadedAt:  time.Now().UTC(),
+					RequestedIP: requestedIP,
+				}); auditErr != nil {
+					failedIDs = append(failedIDs, id)
+					continue
+				}
+			}
+
+			seenKeys[key] = struct{}{}
+			files = append(files, map[string]string{
+				"id":           id,
+				"download_url": downloadURL,
+			})
+		}
+
+		writeSuccess(w, map[string]interface{}{
+			"files":      files,
+			"failed_ids": uniqueStrings(failedIDs),
 		})
 	}
 }
@@ -379,7 +524,7 @@ func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc
 				continue
 			}
 			if auditEnabled(cfg) {
-				if auditErr := recordDownloadAudit(r.Context(), pool, cfg, parentID, record, performedBy, requestedIP); auditErr != nil {
+				if auditErr := recordDownloadAudit(r.Context(), pool, cfg, parentID, record, downloadActorInfo{RequestedBy: performedBy, RequestedIP: requestedIP}); auditErr != nil {
 					if isUndefinedTableError(auditErr) {
 						files = append(files, map[string]string{
 							"file_id":      record.FileID,
@@ -472,7 +617,11 @@ func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		}
 
 		requestedBy := requestedByOrFallback(r.Context(), req.UserID)
-		if err := recordDeleteRequestAudit(r.Context(), pool, cfg, parentID, *record, requestedBy, api.ClientIPFromRequest(r), strings.TrimSpace(req.Reason)); err != nil {
+		if err := recordDeleteRequestAudit(r.Context(), pool, cfg, parentID, *record, auditActorInfo{
+			RequestedBy: requestedBy,
+			RequestedIP: api.ClientIPFromRequest(r),
+			Reason:      strings.TrimSpace(req.Reason),
+		}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -1181,32 +1330,45 @@ func recordCreateAuditTx(ctx context.Context, exec AuditExecutor, cfg Config, pa
 	})
 }
 
-func recordDownloadAudit(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, requestedIP string) error {
+func recordDownloadAudit(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, file FileRecord, actor downloadActorInfo) error {
 	requestedAt := time.Now().UTC()
-	reason, err := MainDownloadAuditReasonJSON(MainUploadAuditPayload{
-		FileID:     file.FileID,
-		FileName:   file.StoredFileName,
-		UploadedBy: requestedBy,
-		UploadedAt: requestedAt,
-	})
+
+	actionType := fileAuditDownloadAction
+	eventType := "ADDITIONAL_FILE_DOWNLOAD"
+	if actor.IsPreview {
+		actionType = "PREVIEW"
+		eventType = "ADDITIONAL_FILE_PREVIEW"
+	}
+
+	reasonPayload := map[string]interface{}{
+		"event_type":    eventType,
+		"file_name":     strings.TrimSpace(file.StoredFileName),
+		"downloaded_by": actor.RequestedBy,
+		"downloaded_at": requestedAt.UTC().Format(time.RFC3339),
+	}
+	if fileID := strings.TrimSpace(file.FileID); fileID != "" {
+		reasonPayload["file_id"] = fileID
+	}
+	reasonBytes, err := json.Marshal(reasonPayload)
 	if err != nil {
 		return err
 	}
+
 	return insertAuditEvent(ctx, exec, cfg, fileAuditEvent{
 		EntityID:         file.FileID,
 		ModuleKey:        cfg.Module,
 		ParentRecordID:   parentID,
 		FileID:           file.FileID,
-		ActionType:       fileAuditDownloadAction,
+		ActionType:       actionType,
 		ProcessingStatus: fileAuditCompletedStatus,
-		RequestedBy:      requestedBy,
+		RequestedBy:      actor.RequestedBy,
 		RequestedAt:      &requestedAt,
-		RequestedIP:      requestedIP,
-		Reason:           reason,
+		RequestedIP:      actor.RequestedIP,
+		Reason:           string(reasonBytes),
 	})
 }
 
-func recordDeleteRequestAudit(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, file FileRecord, requestedBy, requestedIP, reason string) error {
+func recordDeleteRequestAudit(ctx context.Context, exec AuditExecutor, cfg Config, parentID string, file FileRecord, actor auditActorInfo) error {
 	requestedAt := time.Now().UTC()
 	return insertAuditEvent(ctx, exec, cfg, fileAuditEvent{
 		EntityID:         file.FileID,
@@ -1215,10 +1377,10 @@ func recordDeleteRequestAudit(ctx context.Context, exec AuditExecutor, cfg Confi
 		FileID:           file.FileID,
 		ActionType:       fileAuditDeleteAction,
 		ProcessingStatus: fileAuditPendingDeleteApproval,
-		RequestedBy:      requestedBy,
+		RequestedBy:      actor.RequestedBy,
 		RequestedAt:      &requestedAt,
-		RequestedIP:      requestedIP,
-		Reason:           reason,
+		RequestedIP:      actor.RequestedIP,
+		Reason:           actor.Reason,
 	})
 }
 
@@ -1281,8 +1443,12 @@ func MainUploadAuditReasonJSON(payload MainUploadAuditPayload) (string, error) {
 }
 
 func MainDownloadAuditReasonJSON(payload MainUploadAuditPayload) (string, error) {
+	eventType := "ADDITIONAL_FILE_DOWNLOAD"
+	if payload.IsPreview {
+		eventType = "ADDITIONAL_FILE_PREVIEW"
+	}
 	reasonPayload := map[string]interface{}{
-		"event_type":    "ADDITIONAL_FILE_DOWNLOAD",
+		"event_type":    eventType,
 		"file_name":     strings.TrimSpace(payload.FileName),
 		"downloaded_by": strings.TrimSpace(payload.UploadedBy),
 		"downloaded_at": payload.UploadedAt.UTC().Format(time.RFC3339),
@@ -1320,13 +1486,18 @@ func InsertMainDownloadAudit(ctx context.Context, exec AuditExecutor, tableName,
 		return err
 	}
 
+	actionType := fileAuditDownloadAction
+	if payload.IsPreview {
+		actionType = "PREVIEW"
+	}
+
 	query := fmt.Sprintf(
 		`INSERT INTO %s (%s, %s, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		tableName,
 		parentColumn,
 		actionColumn,
 	)
-	_, err = exec.Exec(ctx, query, parentID, fileAuditDownloadAction, fileAuditApprovedStatus, reason, payload.UploadedBy, payload.UploadedAt, nullIfBlank(payload.RequestedIP))
+	_, err = exec.Exec(ctx, query, parentID, actionType, fileAuditApprovedStatus, reason, payload.UploadedBy, payload.UploadedAt, nullIfBlank(payload.RequestedIP))
 	return err
 }
 
@@ -1530,6 +1701,18 @@ func latestPendingDeleteForQuery(ctx context.Context, queryer queryRower, cfg Co
 	event.CheckerComment = strings.TrimSpace(checkerComment.String)
 	event.Reason = strings.TrimSpace(reason.String)
 	return &event, nil
+}
+
+type auditActorInfo struct {
+	RequestedBy string
+	RequestedIP string
+	Reason      string
+}
+
+type downloadActorInfo struct {
+	RequestedBy string
+	RequestedIP string
+	IsPreview   bool
 }
 
 type deleteAuditDecisionParams struct {

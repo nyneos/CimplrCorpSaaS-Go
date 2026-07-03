@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -140,6 +141,17 @@ func GetMTMReportAsOf(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		if req.EntityName != "" {
+			if _, scopeErr := accountingResolveEntityName(ctx, pgxPool, req.EntityName); scopeErr != "" {
+				status := http.StatusBadRequest
+				if strings.Contains(scopeErr, "authorized access scope") {
+					status = http.StatusForbidden
+				}
+				api.RespondWithError(w, status, scopeErr)
+				return
+			}
+		}
 
 		// Get all schemes
 		rows, err := pgxPool.Query(ctx, `SELECT scheme_id FROM investment.masterscheme`)

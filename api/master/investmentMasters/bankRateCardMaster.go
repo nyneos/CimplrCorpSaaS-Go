@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/dependency"
@@ -25,6 +26,10 @@ import (
 func getUserFriendlyRateCardError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 	errStr := strings.ToLower(err.Error())
 
@@ -1541,6 +1546,7 @@ func GetBankRateCardsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.old_premature_withdrawal_allowed,true) AS old_premature_withdrawal_allowed,
 				m.penalty_percentage,
 				l.old_penalty_percentage,
+				COALESCE(m.upload_s3_key,'') AS upload_s3_key,
 				TO_CHAR(m.effective_from,'YYYY-MM-DD')        AS effective_from,
 				COALESCE(l.old_effective_from,'')             AS old_effective_from,
 				TO_CHAR(m.effective_to,'YYYY-MM-DD')          AS effective_to,

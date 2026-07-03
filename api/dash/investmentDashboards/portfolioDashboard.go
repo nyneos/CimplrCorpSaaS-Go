@@ -45,6 +45,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/portfolio"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -265,159 +266,6 @@ func PortfolioDashboardHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // Each function contains the same business logic as the corresponding HTTP
 // handler but operates directly on the database pool (no HTTP recording).
 
-// computeKPIs mirrors GetInvestmentOverviewKPIs business logic.
-func computeKPIs(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter string, allowedEntities []string, now time.Time) (interface{}, error) {
-	fyStart := getFinancialYearStart(now)
-	prevFYStart := fyStart.AddDate(-1, 0, 0)
-	lastMonthEnd := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
-
-	var allowedParam interface{}
-	if len(allowedEntities) > 0 {
-		allowedParam = allowedEntities
-	}
-
-	kpiQuery := `
-	WITH params AS (
-		SELECT $1::text AS entity_filter, $2::date AS fy_start, $3::date AS last_month_end, $4::date AS prev_fy_start, $5::text[] AS allowed_entities
-	),
-	current_aum AS (
-		SELECT COALESCE(SUM(ps.current_value), 0)::float8 AS total_aum
-		FROM investment.portfolio_snapshot ps, params p
-		WHERE (p.entity_filter IS NULL OR ps.entity_name = p.entity_filter)
-		  AND (p.allowed_entities IS NULL OR ps.entity_name = ANY(p.allowed_entities))
-	),
-	last_month_holdings AS (
-		SELECT COALESCE(ot.scheme_id, ot.scheme_internal_code) AS scheme_ref, ms.amfi_scheme_code,
-		  SUM(CASE WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','dividend_reinvest') THEN COALESCE(ot.units,0)
-		           WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out') THEN -COALESCE(ot.units,0) ELSE 0 END) AS units
-		FROM investment.onboard_transaction ot
-		LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ot.scheme_id OR ms.internal_scheme_code=ot.scheme_internal_code OR ms.isin=ot.scheme_id), params p
-		WHERE ot.transaction_date <= p.last_month_end
-		  AND (p.entity_filter IS NULL OR COALESCE(ot.entity_name,'')=p.entity_filter)
-		  AND (p.allowed_entities IS NULL OR COALESCE(ot.entity_name,'')=ANY(p.allowed_entities))
-		GROUP BY COALESCE(ot.scheme_id,ot.scheme_internal_code), ms.amfi_scheme_code
-		HAVING SUM(CASE WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','dividend_reinvest') THEN COALESCE(ot.units,0)
-		               WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out') THEN -COALESCE(ot.units,0) ELSE 0 END) > 0
-	),
-	last_month_navs AS (
-		SELECT DISTINCT ON (scheme_code) scheme_code::text, nav_value
-		FROM investment.amfi_nav_staging, params p WHERE nav_date <= p.last_month_end ORDER BY scheme_code, nav_date DESC
-	),
-	last_month_aum AS (
-		SELECT COALESCE(SUM(h.units * COALESCE(n.nav_value,0)),0)::float8 AS aum FROM last_month_holdings h
-		LEFT JOIN last_month_navs n ON n.scheme_code = h.amfi_scheme_code::text
-	),
-	fy_start_holdings AS (
-		SELECT COALESCE(ot.scheme_id, ot.scheme_internal_code) AS scheme_ref, ms.amfi_scheme_code,
-		  SUM(CASE WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','dividend_reinvest') THEN COALESCE(ot.units,0)
-		           WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out') THEN -COALESCE(ot.units,0) ELSE 0 END) AS units
-		FROM investment.onboard_transaction ot
-		LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ot.scheme_id OR ms.internal_scheme_code=ot.scheme_internal_code OR ms.isin=ot.scheme_id), params p
-		WHERE ot.transaction_date < p.fy_start
-		  AND (p.entity_filter IS NULL OR COALESCE(ot.entity_name,'')=p.entity_filter)
-		  AND (p.allowed_entities IS NULL OR COALESCE(ot.entity_name,'')=ANY(p.allowed_entities))
-		GROUP BY COALESCE(ot.scheme_id,ot.scheme_internal_code), ms.amfi_scheme_code
-		HAVING SUM(CASE WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','dividend_reinvest') THEN COALESCE(ot.units,0)
-		               WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out') THEN -COALESCE(ot.units,0) ELSE 0 END) > 0
-	),
-	fy_start_navs AS (
-		SELECT DISTINCT ON (scheme_code) scheme_code::text, nav_value
-		FROM investment.amfi_nav_staging, params p WHERE nav_date < p.fy_start ORDER BY scheme_code, nav_date DESC
-	),
-	fy_start_aum AS (
-		SELECT COALESCE(SUM(h.units * COALESCE(n.nav_value,0)),0)::float8 AS aum FROM fy_start_holdings h
-		LEFT JOIN fy_start_navs n ON n.scheme_code = h.amfi_scheme_code::text
-	),
-	ytd_flows AS (
-		SELECT
-		  COALESCE(SUM(CASE WHEN LOWER(transaction_type) IN ('buy','purchase','subscription','switch_in') THEN amount ELSE 0 END),0)::float8 AS buys,
-		  COALESCE(SUM(CASE WHEN LOWER(transaction_type) IN ('sell','redemption','switch_out') THEN amount ELSE 0 END),0)::float8 AS sells
-		FROM investment.onboard_transaction, params p
-		WHERE transaction_date >= p.fy_start
-		  AND (p.entity_filter IS NULL OR COALESCE(entity_name,'')=p.entity_filter)
-		  AND (p.allowed_entities IS NULL OR COALESCE(entity_name,'')=ANY(p.allowed_entities))
-	),
-	cash_balances AS (
-		SELECT COALESCE(SUM(bs.closingbalance),0)::float8 AS total_cash
-		FROM bank_statement bs
-		JOIN masterbankaccount mba ON bs.account_number = mba.account_number
-		LEFT JOIN masterentity me ON mba.entity_id = me.entity_id
-		CROSS JOIN params p
-		WHERE bs.status = 'Approved'
-		  AND (p.entity_filter IS NULL OR me.entity_name = p.entity_filter)
-		  AND (p.allowed_entities IS NULL OR me.entity_name = ANY(p.allowed_entities))
-	),
-	sellable_mf AS (
-		SELECT COALESCE(SUM(current_value),0)::float8 AS total_sellable
-		FROM investment.portfolio_snapshot ps, params p
-		WHERE COALESCE(ps.total_units,0) > 0 AND COALESCE(ps.current_value,0) > 0
-		  AND (p.entity_filter IS NULL OR ps.entity_name = p.entity_filter)
-		  AND (p.allowed_entities IS NULL OR ps.entity_name = ANY(p.allowed_entities))
-	)
-	SELECT ca.total_aum, lma.aum, fsa.aum, yf.buys, yf.sells, cb.total_cash, sm.total_sellable
-	FROM current_aum ca, last_month_aum lma, fy_start_aum fsa, ytd_flows yf, cash_balances cb, sellable_mf sm
-	`
-
-	var totalAUM, lastMonthAUM, fyStartAUM, ytdBuys, ytdSells, totalCash, sellableMF float64
-	err := pgxPool.QueryRow(ctx, kpiQuery,
-		nullIfEmpty(entityFilter), fyStart.Format(constants.DateFormat),
-		lastMonthEnd.Format(constants.DateFormat), prevFYStart.Format(constants.DateFormat),
-		allowedParam,
-	).Scan(&totalAUM, &lastMonthAUM, &fyStartAUM, &ytdBuys, &ytdSells, &totalCash, &sellableMF)
-	if err != nil {
-		return nil, fmt.Errorf("kpi query: %w", err)
-	}
-
-	openingAUM := fyStartAUM
-	if openingAUM == 0 {
-		openingAUM = lastMonthAUM
-	}
-	ytdPL := totalAUM + ytdSells - ytdBuys - openingAUM
-	aumTrendPct := 0.0
-	if lastMonthAUM > 0 {
-		aumTrendPct = ((totalAUM - lastMonthAUM) / lastMonthAUM) * 100
-	}
-	monthBeforeLastEnd := lastMonthEnd.AddDate(0, -1, 0)
-	prevMonthAUM := getAUMAtDate(ctx, pgxPool, entityFilter, allowedEntities, monthBeforeLastEnd)
-	prevAumTrendPct := 0.0
-	if prevMonthAUM > 0 {
-		prevAumTrendPct = ((lastMonthAUM - prevMonthAUM) / prevMonthAUM) * 100
-	}
-	xirrVal := calculatePortfolioXIRR(ctx, pgxPool, entityFilter, allowedEntities, totalAUM, now)
-	liquidityTotal := totalCash + sellableMF
-	baselineAUM := prevMonthAUM
-	if baselineAUM == 0 {
-		baselineAUM = lastMonthAUM
-	}
-
-	aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
-	rawTransactions := fetchRawTransactionDetails(ctx, pgxPool, entityFilter, allowedEntities, fyStart)
-
-	return map[string]interface{}{
-		"cards": []KPICard{
-			KPIChartFromValues("Total AUM", totalAUM, baselineAUM),
-			{Title: "AUM Trend", Value: math.Round(aumTrendPct*100) / 100, LastValue: math.Round(prevAumTrendPct*100) / 100, Change: math.Round((aumTrendPct-prevAumTrendPct)*100) / 100},
-			{Title: "YTD P&L", Value: math.Round(ytdPL*100) / 100, LastValue: openingAUM},
-			func() KPICard {
-				pct := math.Round(xirrVal*10000) / 100
-				return KPICard{Title: "Portfolio XIRR", Value: pct, LastValue: 0}
-			}(),
-			KPIChartFromValues("Liquidity Position", liquidityTotal, baselineAUM),
-		},
-		"details": map[string]interface{}{
-			"total_aum": totalAUM, "last_month_aum": lastMonthAUM, "fy_start_aum": fyStartAUM,
-			"ytd_buys": ytdBuys, "ytd_sells": ytdSells, "ytd_pnl": ytdPL,
-			"cash_balance": totalCash, "sellable_mf": sellableMF, "liquidity_total": liquidityTotal,
-			"xirr_annualized": xirrVal * 100,
-			"financial_year":  fmt.Sprintf("FY %d-%d", fyStart.Year(), fyStart.Year()+1),
-			"period_start":    fyStart.Format(constants.DateFormat), "period_end": now.Format(constants.DateFormat),
-		},
-		"aum_detail":         aumDetails,
-		"transaction_detail": rawTransactions,
-		"generated_at":       time.Now().UTC().Format(time.RFC3339),
-	}, nil
-}
-
 // computeEntityPerformance mirrors GetEntityPerformance business logic.
 func computeEntityPerformance(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter string, allowedEntities []string, limit int) (interface{}, error) {
 	fyStart := getFinancialYearStart(time.Now())
@@ -437,8 +285,8 @@ func computeEntityPerformance(ctx context.Context, pgxPool *pgxpool.Pool, entity
 		       COALESCE(ms.amc_name,'') AS amc_name,
 		       SUM(CASE WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in') THEN COALESCE(ot.amount,0) ELSE 0 END) AS buys_since,
 		       SUM(CASE WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out') THEN COALESCE(ot.amount,0) ELSE 0 END) AS sells_since
-		FROM investment.onboard_transaction ot
-		LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ot.scheme_id OR ms.internal_scheme_code=ot.scheme_internal_code OR ms.isin=ot.scheme_id), params p
+		FROM investment.approved_onboard_transaction ot
+		LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))), params p
 		WHERE ot.transaction_date >= p.fy_start
 		  AND (p.entity_filter IS NULL OR COALESCE(ot.entity_name,'')=p.entity_filter)
 		  AND (p.allowed_entities IS NULL OR COALESCE(ot.entity_name,'')=ANY(p.allowed_entities))
@@ -480,10 +328,8 @@ func computeEntityPerformance(ctx context.Context, pgxPool *pgxpool.Pool, entity
 		}
 		out = append(out, EntityPerformanceRow{Label: name, YTD: ytd})
 	}
-	aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
-	rawTx := fetchRawTransactionDetails(ctx, pgxPool, entityFilter, allowedEntities, fyStart)
 	return map[string]interface{}{
-		"rows": out, "portfolio_detail": aumDetails, "transaction_detail": rawTx,
+		"rows": out,
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
@@ -503,7 +349,7 @@ func computeAMCPerformance(ctx context.Context, pgxPool *pgxpool.Pool, entityFil
 	       CASE WHEN SUM(COALESCE(ps.total_units::numeric,0)*COALESCE(ps.avg_nav::numeric,0))=0 THEN 0
 	            ELSE ((SUM(COALESCE(ps.total_units::numeric,0)*COALESCE(ps.current_nav::numeric,0))-SUM(COALESCE(ps.total_units::numeric,0)*COALESCE(ps.avg_nav::numeric,0)))/SUM(COALESCE(ps.total_units::numeric,0)*COALESCE(ps.avg_nav::numeric,0)))*100 END
 	FROM investment.portfolio_snapshot ps
-	LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ps.scheme_id OR ms.internal_scheme_code=ps.scheme_id OR ms.isin=ps.isin), params p
+	LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ps.scheme_id)) OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ps.scheme_id)) OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ps.scheme_id)))), params p
 	WHERE (p.entity_filter IS NULL OR ps.entity_name=p.entity_filter)
 	  AND (p.allowed_entities IS NULL OR ps.entity_name=ANY(p.allowed_entities))
 	GROUP BY COALESCE(ms.amc_name,'') ORDER BY 4 DESC
@@ -525,9 +371,8 @@ func computeAMCPerformance(ctx context.Context, pgxPool *pgxpool.Pool, entityFil
 		r.PnLPercent = &pct
 		out = append(out, r)
 	}
-	aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 	return map[string]interface{}{
-		"rows": out, "portfolio_detail": aumDetails,
+		"rows": out,
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
@@ -558,11 +403,11 @@ func computeAMCWaterfall(ctx context.Context, pgxPool *pgxpool.Pool, entityFilte
 	  ORDER BY COALESCE(ps.scheme_id,ps.isin), ps.created_at DESC
 	), start_amc AS (
 	  SELECT COALESCE(ms.amc_name,'') AS amc_name, SUM(COALESCE(s.total_units,0)*COALESCE(s.avg_nav,0))::numeric AS sv
-	  FROM start_snap s LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=s.scheme_ref OR ms.internal_scheme_code=s.scheme_ref OR ms.isin=s.scheme_ref)
+	  FROM start_snap s LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(s.scheme_ref), '') IS NOT NULL AND ms.scheme_id::text = TRIM(s.scheme_ref)) OR (NULLIF(TRIM(s.scheme_ref), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(s.scheme_ref)) OR (NULLIF(TRIM(s.scheme_ref), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(s.scheme_ref))))
 	  GROUP BY COALESCE(ms.amc_name,'')
 	), end_amc AS (
 	  SELECT COALESCE(ms.amc_name,'') AS amc_name, SUM(COALESCE(e.total_units,0)*COALESCE(e.current_nav,0))::numeric AS ev
-	  FROM end_snap e LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=e.scheme_ref OR ms.internal_scheme_code=e.scheme_ref OR ms.isin=e.scheme_ref)
+	  FROM end_snap e LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(e.scheme_ref), '') IS NOT NULL AND ms.scheme_id::text = TRIM(e.scheme_ref)) OR (NULLIF(TRIM(e.scheme_ref), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(e.scheme_ref)) OR (NULLIF(TRIM(e.scheme_ref), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(e.scheme_ref))))
 	  GROUP BY COALESCE(ms.amc_name,'')
 	), amc_delta AS (
 	  SELECT COALESCE(e.amc_name,s.amc_name) AS amc_name, COALESCE(s.sv,0)::float8 AS sv, COALESCE(e.ev,0)::float8 AS ev, (COALESCE(e.ev,0)-COALESCE(s.sv,0))::float8 AS delta
@@ -602,10 +447,9 @@ func computeAMCWaterfall(ctx context.Context, pgxPool *pgxpool.Pool, entityFilte
 		out = append(out, WaterfallRow{Label: rr.AMCName, Contribution: &d})
 	}
 	out = append(out, WaterfallRow{Label: "Closing AUM", ClosingAUM: &closingTotal})
-	aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 	return map[string]interface{}{
 		"rows": out, "opening_total": openingTotal, "closing_total": closingTotal,
-		"portfolio_detail": aumDetails, "generated_at": time.Now().UTC().Format(time.RFC3339),
+		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
 
@@ -628,8 +472,8 @@ func computeAUMMovement(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter
 		SELECT COALESCE(ot.scheme_id,ot.scheme_internal_code) AS scheme_ref, ms.amfi_scheme_code,
 		  SUM(CASE WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','merger_in','dividend_reinvest','idcw_reinvest') THEN COALESCE(ot.units,0)
 		           WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out','merger_out') THEN -COALESCE(ot.units,0) ELSE 0 END) AS total_units
-		FROM investment.onboard_transaction ot
-		LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ot.scheme_id OR ms.internal_scheme_code=ot.scheme_internal_code OR ms.isin=ot.scheme_id), params p
+		FROM investment.approved_onboard_transaction ot
+		LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))), params p
 		WHERE ot.transaction_date <= p.opening_date
 		  AND (p.entity_filter IS NULL OR COALESCE(ot.entity_name,'')=p.entity_filter)
 		  AND (p.allowed_entities IS NULL OR COALESCE(ot.entity_name,'')=ANY(p.allowed_entities))
@@ -650,7 +494,7 @@ func computeAUMMovement(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter
 		  COALESCE(SUM(CASE WHEN LOWER(transaction_type) IN ('buy','purchase','subscription','switch_in') THEN amount ELSE 0 END),0)::float8 AS inflows,
 		  COALESCE(SUM(CASE WHEN LOWER(transaction_type) IN ('sell','redemption','switch_out') THEN amount ELSE 0 END),0)::float8 AS outflows,
 		  COALESCE(SUM(CASE WHEN LOWER(transaction_type) IN ('dividend','interest','dividend_payout','idcw','idcw_payout') THEN amount ELSE 0 END),0)::float8 AS income
-		FROM investment.onboard_transaction, params p
+		FROM investment.approved_onboard_transaction, params p
 		WHERE transaction_date >= p.period_start AND transaction_date <= p.period_end
 		  AND (p.entity_filter IS NULL OR COALESCE(entity_name,'')=p.entity_filter)
 		  AND (p.allowed_entities IS NULL OR COALESCE(entity_name,'')=ANY(p.allowed_entities))
@@ -677,13 +521,10 @@ func computeAUMMovement(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter
 		{"label": "Outflows", "value": outflows, "type": "negative"},
 		{"label": "Closing Balance", "value": closingAUM, "type": "total"},
 	}
-	fyStart := getFinancialYearStart(now)
-	aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
-	rawTx := fetchRawTransactionDetails(ctx, pgxPool, entityFilter, allowedEntities, fyStart)
 	return map[string]interface{}{
 		"opening": openingAUM, "inflows": inflows, "market_gains_losses": marketGainsLosses,
 		"income": income, "outflows": outflows, "closing": closingAUM,
-		"waterfall": waterfall, "portfolio_detail": aumDetails, "transaction_detail": rawTx,
+		"waterfall": waterfall,
 		"period_start": periodStart, "period_end": periodEnd,
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}, nil
@@ -718,7 +559,7 @@ func computeAUMBreakdown(ctx context.Context, pgxPool *pgxpool.Pool, entityFilte
 		query = `WITH params AS (SELECT $1::text AS entity_filter, $2::text[] AS allowed_entities)
 		SELECT COALESCE(ms.amc_name,'Unknown'), SUM(COALESCE(ps.current_value,0))::float8
 		FROM investment.portfolio_snapshot ps
-		LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ps.scheme_id OR ms.internal_scheme_code=ps.scheme_id OR ms.isin=ps.isin), params p
+		LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ps.scheme_id)) OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ps.scheme_id)) OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ps.scheme_id)))), params p
 		WHERE COALESCE(ps.current_value,0) > 0 AND (p.entity_filter IS NULL OR ps.entity_name=p.entity_filter)
 		  AND (p.allowed_entities IS NULL OR ps.entity_name=ANY(p.allowed_entities))
 		GROUP BY COALESCE(ms.amc_name,'Unknown') ORDER BY 2 DESC`
@@ -748,10 +589,9 @@ func computeAUMBreakdown(ctx context.Context, pgxPool *pgxpool.Pool, entityFilte
 		}
 		out = append(out, map[string]interface{}{"label": item.Label, "amount": item.Amount, "percentage": pct})
 	}
-	aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 	return map[string]interface{}{
 		"breakdown": out, "total": total, "group_by": groupBy,
-		"portfolio_detail": aumDetails, "generated_at": time.Now().UTC().Format(time.RFC3339),
+		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
 
@@ -767,7 +607,7 @@ func computePerformanceAttribution(ctx context.Context, pgxPool *pgxpool.Pool, e
 	var terminalValue float64
 	_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(SUM(current_value),0) FROM investment.portfolio_snapshot WHERE ($1::text IS NULL OR entity_name=$1) AND ($2::text[] IS NULL OR entity_name=ANY($2))`, nullIfEmpty(entityFilter), allowedEntities).Scan(&terminalValue)
 	portfolioXIRR := calculatePortfolioXIRR(ctx, pgxPool, entityFilter, allowedEntities, terminalValue, fyEnd)
-	portfolioReturn := math.Round(portfolioXIRR*10000) / 100
+	portfolioReturn := clampXIRRPercent(portfolioXIRR)
 
 	benchmarkWeights := map[string]float64{"Equity Scheme": 60, "Debt Scheme": 25, "Hybrid Scheme": 10, "Solution Oriented": 3, "Other": 2}
 	benchmarkReturns := map[string]float64{"Equity Scheme": 12, "Debt Scheme": 7, "Hybrid Scheme": 9, "Solution Oriented": 8, "Other": 6}
@@ -795,13 +635,12 @@ func computePerformanceAttribution(ctx context.Context, pgxPool *pgxpool.Pool, e
 		{Name: "Other Effects", Value: otherEffects},
 		{Name: "Portfolio Return", Value: portfolioReturn},
 	}
-	aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 	return map[string]interface{}{
 		"attribution": attribution, "benchmark": benchmark,
 		"benchmark_return": benchmarkReturn, "portfolio_return": portfolioReturn,
 		"excess_return":     math.Round((portfolioReturn-benchmarkReturn)*100) / 100,
 		"allocation_effect": allocationEffect, "selection_effect": selectionEffect,
-		"other_effects": otherEffects, "portfolio_detail": aumDetails,
+		"other_effects": otherEffects,
 		"financial_year": fmt.Sprintf(constants.FormatFiscalYear, year, year+1),
 		"period_start":   fyStart.Format(constants.DateFormat), "period_end": fyEnd.Format(constants.DateFormat),
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
@@ -810,46 +649,27 @@ func computePerformanceAttribution(ctx context.Context, pgxPool *pgxpool.Pool, e
 
 // computePnLHeatmap mirrors GetDailyPnLHeatmap business logic.
 func computePnLHeatmap(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter string, allowedEntities []string, groupBy string) (interface{}, error) {
-	var allowedParam interface{}
-	if len(allowedEntities) > 0 {
-		allowedParam = allowedEntities
-	}
-	var query string
-	if groupBy == "scheme" {
-		query = `WITH params AS (SELECT $1::text AS entity_filter, $2::text[] AS allowed_entities)
-		SELECT COALESCE(ps.entity_name,'Unknown'), COALESCE(ms.amc_name,'Unknown'), COALESCE(ps.scheme_name,'Unknown'), SUM(COALESCE(ps.gain_loss,0))::float8
-		FROM investment.portfolio_snapshot ps CROSS JOIN params p
-		LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ps.scheme_id OR ms.internal_scheme_code=ps.scheme_id OR ms.isin=ps.isin)
-		WHERE COALESCE(ps.current_value,0) > 0 AND (p.entity_filter IS NULL OR ps.entity_name=p.entity_filter)
-		  AND (p.allowed_entities IS NULL OR ps.entity_name=ANY(p.allowed_entities))
-		GROUP BY ps.entity_name, ms.amc_name, ps.scheme_name HAVING SUM(COALESCE(ps.gain_loss,0)) != 0
-		ORDER BY ps.entity_name, ms.amc_name, ABS(SUM(COALESCE(ps.gain_loss,0))) DESC`
-	} else {
+	byScheme := groupBy == "scheme"
+	if !byScheme {
 		groupBy = "amc"
-		query = `WITH params AS (SELECT $1::text AS entity_filter, $2::text[] AS allowed_entities)
-		SELECT COALESCE(ps.entity_name,'Unknown'), COALESCE(ms.amc_name,'Unknown'), 'All Schemes', SUM(COALESCE(ps.gain_loss,0))::float8
-		FROM investment.portfolio_snapshot ps CROSS JOIN params p
-		LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ps.scheme_id OR ms.internal_scheme_code=ps.scheme_id OR ms.isin=ps.isin)
-		WHERE COALESCE(ps.current_value,0) > 0 AND (p.entity_filter IS NULL OR ps.entity_name=p.entity_filter)
-		  AND (p.allowed_entities IS NULL OR ps.entity_name=ANY(p.allowed_entities))
-		GROUP BY ps.entity_name, ms.amc_name HAVING SUM(COALESCE(ps.gain_loss,0)) != 0
-		ORDER BY ps.entity_name, ABS(SUM(COALESCE(ps.gain_loss,0))) DESC`
 	}
-	rows, err := pgxPool.Query(ctx, query, nullIfEmpty(entityFilter), allowedParam)
+
+	pnlRows, err := portfolio.QueryHoldingsPnLHeatmap(ctx, pgxPool, entityFilter, allowedEntities, byScheme)
 	if err != nil {
 		return nil, fmt.Errorf("pnl heatmap: %w", err)
 	}
-	defer rows.Close()
 
-	heatmap := make([]HeatmapCell, 0)
+	heatmap := make([]HeatmapCell, 0, len(pnlRows))
 	entities := map[string]bool{}
 	amcs := map[string]bool{}
 	var totalPnL, maxProfit, maxLoss float64
 	profitCount, lossCount := 0, 0
-	for rows.Next() {
-		var cell HeatmapCell
-		if err := rows.Scan(&cell.Entity, &cell.AMC, &cell.Scheme, &cell.PnL); err != nil {
-			continue
+	for _, row := range pnlRows {
+		cell := HeatmapCell{
+			Entity: row.Entity,
+			AMC:    row.AMC,
+			Scheme: row.Scheme,
+			PnL:    row.UnrealizedPnL,
 		}
 		heatmap = append(heatmap, cell)
 		entities[cell.Entity] = true
@@ -875,10 +695,8 @@ func computePnLHeatmap(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter 
 	for a := range amcs {
 		amcList = append(amcList, a)
 	}
-	aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 	return map[string]interface{}{
 		"heatmap": heatmap, "entities": entityList, "amcs": amcList, "group_by": groupBy,
-		"portfolio_detail": aumDetails,
 		"summary": map[string]interface{}{
 			"total_pnl": totalPnL, "profit_cells": profitCount, "loss_cells": lossCount,
 			"max_profit": maxProfit, "max_loss": maxLoss, "total_cells": len(heatmap),
@@ -890,111 +708,28 @@ func computePnLHeatmap(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter 
 
 // computePortfolioVsBenchmark mirrors GetPortfolioVsBenchmark business logic.
 func computePortfolioVsBenchmark(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter string, allowedEntities []string, year int, benchmark string, now time.Time) (interface{}, error) {
-	var allowedParam interface{}
-	if len(allowedEntities) > 0 {
-		allowedParam = allowedEntities
-	}
-	monthNames := []string{"Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"}
-	monthDates := make([]string, 0, 12)
-	for i := 0; i < 12; i++ {
-		var ms time.Time
-		if i < 9 {
-			ms = time.Date(year, time.Month(4+i), 1, 0, 0, 0, 0, time.UTC)
-		} else {
-			ms = time.Date(year+1, time.Month(i-8), 1, 0, 0, 0, 0, time.UTC)
-		}
-		me := ms.AddDate(0, 1, -1)
-		if ms.After(now) {
-			break
-		}
-		if me.After(now) {
-			me = now
-		}
-		monthDates = append(monthDates, me.Format(constants.DateFormat))
-	}
-	if len(monthDates) == 0 {
-		return map[string]interface{}{
-			"series":         []BenchmarkPoint{{Month: "Apr", Portfolio: 100, Benchmark: 100}},
-			"benchmark_name": benchmark, "generated_at": time.Now().UTC().Format(time.RFC3339),
-		}, nil
-	}
-	batchQ := `
-	WITH params AS (SELECT $1::text AS entity_filter, $3::text[] AS allowed_entities),
-	month_dates AS (SELECT ordinality AS month_idx, month_end::date FROM UNNEST($2::date[]) WITH ORDINALITY AS t(month_end, ordinality)),
-	monthly_invested AS (
-		SELECT md.month_idx,
-		       COALESCE(SUM(CASE WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','sip','switch_in') THEN ABS(COALESCE(ot.amount,0))
-		                        WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out') THEN -ABS(COALESCE(ot.amount,0)) ELSE 0 END),0)::float8 AS invested
-		FROM month_dates md LEFT JOIN investment.onboard_transaction ot ON ot.transaction_date <= md.month_end, params p
-		WHERE (p.entity_filter IS NULL OR COALESCE(ot.entity_name,'')=p.entity_filter)
-		  AND (p.allowed_entities IS NULL OR COALESCE(ot.entity_name,'')=ANY(p.allowed_entities))
-		GROUP BY md.month_idx
-	),
-	current_value AS (
-		SELECT COALESCE(SUM(current_value),0)::float8 AS value FROM investment.portfolio_snapshot ps, params p
-		WHERE (p.entity_filter IS NULL OR ps.entity_name=p.entity_filter)
-		  AND (p.allowed_entities IS NULL OR ps.entity_name=ANY(p.allowed_entities))
-	)
-	SELECT mi.month_idx, mi.invested, cv.value FROM monthly_invested mi, current_value cv ORDER BY mi.month_idx
-	`
-	rows, err := pgxPool.Query(ctx, batchQ, nullIfEmpty(entityFilter), monthDates, allowedParam)
+	result, err := computePortfolioVsBenchmarkSeries(ctx, pgxPool, portfolioVsBenchmarkInput{
+		EntityFilter:    entityFilter,
+		AllowedEntities: allowedEntities,
+		Year:            year,
+		Benchmark:       benchmark,
+		Now:             now,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("portfolio vs benchmark: %w", err)
-	}
-	defer rows.Close()
-
-	monthlyInvested := map[int]float64{}
-	var currentValue float64
-	for rows.Next() {
-		var idx int
-		var inv, cv float64
-		if err := rows.Scan(&idx, &inv, &cv); err != nil {
-			continue
-		}
-		monthlyInvested[idx] = inv
-		currentValue = cv
+		return nil, err
 	}
 
-	benchmarkMonthlyReturns := map[string][]float64{
-		constants.Nifty50: {0.8, 1.0, 0.6, 0.9, 1.1, 0.7, 0.5, 0.8, 1.2, 0.9, 0.6, 0.8},
-		"NIFTY 100":       {0.7, 0.9, 0.5, 0.8, 1.0, 0.6, 0.4, 0.7, 1.1, 0.8, 0.5, 0.7},
-		"SENSEX":          {0.75, 0.95, 0.55, 0.85, 1.05, 0.65, 0.45, 0.75, 1.15, 0.85, 0.55, 0.75},
-	}
-	monthlyReturns := benchmarkMonthlyReturns[benchmark]
-	if monthlyReturns == nil {
-		monthlyReturns = benchmarkMonthlyReturns[constants.Nifty50]
-	}
-
-	points := make([]BenchmarkPoint, 0, len(monthDates))
-	portfolioIndexed := 100.0
-	benchmarkIndexed := 100.0
-	for i := 0; i < len(monthDates) && i < len(monthNames); i++ {
-		if i == 0 {
-			points = append(points, BenchmarkPoint{Month: monthNames[i], Portfolio: 100.0, Benchmark: 100.0})
-			continue
-		}
-		invested := monthlyInvested[i+1]
-		if invested > 0 && currentValue > 0 {
-			totalReturn := (currentValue - invested) / invested
-			monthlyReturn := totalReturn / float64(len(monthDates)) * 100
-			portfolioIndexed = portfolioIndexed * (1 + monthlyReturn/100)
-		}
-		benchmarkIndexed = benchmarkIndexed * (1 + monthlyReturns[i%12]/100)
-		points = append(points, BenchmarkPoint{
-			Month:     monthNames[i],
-			Portfolio: math.Round(portfolioIndexed*100) / 100,
-			Benchmark: math.Round(benchmarkIndexed*100) / 100,
-		})
-	}
+	points := result.Series
 	if len(points) == 0 {
-		points = append(points, BenchmarkPoint{Month: "Apr", Portfolio: 100, Benchmark: 100})
+		points = []BenchmarkPoint{{Month: "Apr", Portfolio: 100, Benchmark: 100}}
 	}
 	latest := points[len(points)-1]
 	pRet := math.Round((latest.Portfolio-100)*100) / 100
 	bRet := math.Round((latest.Benchmark-100)*100) / 100
-	aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 	return map[string]interface{}{
-		"series": points, "benchmark_name": benchmark, "portfolio_detail": aumDetails,
+		"series": points, "benchmark_name": result.BenchmarkName,
+		"benchmark_provider": result.Provider,
+		"benchmark_source":   result.DataSource,
 		"summary": map[string]interface{}{
 			"portfolio_return": pRet, "benchmark_return": bRet,
 			"alpha": math.Round((pRet-bRet)*100) / 100, "outperforming": pRet > bRet,
@@ -1020,7 +755,7 @@ func computeMarketTicker(ctx context.Context, pgxPool *pgxpool.Pool, entityFilte
 		       COALESCE(ms.amc_name,'') AS amc_name, COALESCE(ms.internal_scheme_code,'') AS internal_code,
 		       COALESCE(ms.amfi_scheme_code::text,'') AS amfi_code
 		FROM investment.portfolio_snapshot ps
-		LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ps.scheme_id OR ms.internal_scheme_code=ps.scheme_id OR ms.isin=ps.isin), params p
+		LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ps.scheme_id)) OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ps.scheme_id)) OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ps.scheme_id)))), params p
 		WHERE COALESCE(ps.current_value,0) > 0 AND (p.entity_filter IS NULL OR ps.entity_name=p.entity_filter)
 		  AND (p.allowed_entities IS NULL OR ps.entity_name=ANY(p.allowed_entities))
 		ORDER BY ps.current_value DESC LIMIT $2
@@ -1065,9 +800,8 @@ func computeMarketTicker(ctx context.Context, pgxPool *pgxpool.Pool, entityFilte
 			losers++
 		}
 	}
-	aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 	return map[string]interface{}{
-		"mutual_funds": ticker, "portfolio_detail": aumDetails,
+		"mutual_funds": ticker,
 		"summary": map[string]interface{}{
 			"total_schemes": len(ticker), "total_value": math.Round(totalValue*100) / 100,
 			"total_mtm": math.Round(totalMTM*100) / 100, "gainers": gainers, "losers": losers,
@@ -1086,18 +820,18 @@ func computeTopPerforming(ctx context.Context, pgxPool *pgxpool.Pool, entityFilt
 	if limit <= 0 {
 		limit = 3
 	}
-	q := `
+	psScope := SQLParamsEntityScope("ps.entity_name")
+	q := fmt.Sprintf(`
 	WITH params AS (SELECT $1::text AS entity_filter, $3::text[] AS allowed_entities)
 	SELECT ps.scheme_name, COALESCE(ms.amc_name,''),
 	       (ps.total_units::numeric*ps.avg_nav::numeric)::float8,
 	       (ps.total_units::numeric*ps.current_nav::numeric)::float8,
 	       CASE WHEN ps.avg_nav=0 THEN NULL ELSE (((ps.total_units*ps.current_nav)-(ps.total_units*ps.avg_nav))/NULLIF((ps.total_units*ps.avg_nav),0))*100 END
 	FROM investment.portfolio_snapshot ps
-	LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ps.scheme_id OR ms.internal_scheme_code=ps.scheme_id OR ms.isin=ps.isin), params p
-	WHERE (p.entity_filter IS NULL OR ps.entity_name=p.entity_filter)
-	  AND (p.allowed_entities IS NULL OR ps.entity_name=ANY(p.allowed_entities))
+	LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ps.scheme_id)) OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ps.scheme_id)) OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ps.scheme_id)))), params p
+	WHERE %s
 	ORDER BY 5 DESC NULLS LAST LIMIT $2
-	`
+	`, psScope)
 	rows, err := pgxPool.Query(ctx, q, nullIfEmpty(entityFilter), limit, allowedParam)
 	if err != nil {
 		return nil, fmt.Errorf("top performing: %w", err)
@@ -1118,9 +852,8 @@ func computeTopPerforming(ctx context.Context, pgxPool *pgxpool.Pool, entityFilt
 		}
 		out = append(out, TopAssetRow{Title: name, Subtitle: amc, Pct: pctStr, Value: endV})
 	}
-	aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 	return map[string]interface{}{
-		"rows": out, "portfolio_detail": aumDetails,
+		"rows": out,
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
@@ -1171,7 +904,7 @@ func computeAUMCompositionTrend(ctx context.Context, pgxPool *pgxpool.Pool, enti
 	current_snapshot AS (
 		SELECT COALESCE(ms.amc_name,'Unknown') AS amc_name, SUM(COALESCE(ps.current_value,0))::float8 AS aum_value
 		FROM investment.portfolio_snapshot ps
-		LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ps.scheme_id OR ms.internal_scheme_code=ps.scheme_id OR ms.isin=ps.isin), params p
+		LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ps.scheme_id)) OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ps.scheme_id)) OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ps.scheme_id)))), params p
 		WHERE (p.entity_filter IS NULL OR ps.entity_name=p.entity_filter) AND (p.allowed_entities IS NULL OR ps.entity_name=ANY(p.allowed_entities))
 		GROUP BY COALESCE(ms.amc_name,'Unknown')
 	),
@@ -1187,8 +920,8 @@ func computeAUMCompositionTrend(ctx context.Context, pgxPool *pgxpool.Pool, enti
 			    THEN SUM(CASE WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','merger_in','dividend_reinvest') THEN COALESCE(ot.units,0)*COALESCE(ot.nav,0) ELSE 0 END)
 			         /SUM(CASE WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','merger_in','dividend_reinvest') THEN COALESCE(ot.units,0) ELSE 0 END)
 			    ELSE 0 END AS avg_nav
-			FROM investment.onboard_transaction ot
-			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ot.scheme_id OR ms.internal_scheme_code=ot.scheme_internal_code OR ms.isin=ot.scheme_id), params p
+			FROM investment.approved_onboard_transaction ot
+			LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))), params p
 			WHERE ot.transaction_date <= md.month_end
 			  AND (p.entity_filter IS NULL OR COALESCE(ot.entity_name,'')=p.entity_filter)
 			  AND (p.allowed_entities IS NULL OR COALESCE(ot.entity_name,'')=ANY(p.allowed_entities))
@@ -1232,6 +965,9 @@ func computeAUMCompositionTrend(ctx context.Context, pgxPool *pgxpool.Pool, enti
 		}
 		amcSet[amcName] = true
 	}
+	if len(months) > 0 {
+		overlayLiveAUMByAMCOnMonth(ctx, pgxPool, entityFilter, allowedEntities, resultMap, months[len(months)-1].MonthIdx, amcSet)
+	}
 	amcNames := make([]string, 0, len(amcSet))
 	for amc := range amcSet {
 		amcNames = append(amcNames, amc)
@@ -1250,13 +986,11 @@ func computeAUMCompositionTrend(ctx context.Context, pgxPool *pgxpool.Pool, enti
 		}
 		outRows = append(outRows, row)
 	}
-	aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 	return map[string]interface{}{
 		"rows": map[string]interface{}{
 			"amc_names":        amcNames,
 			"fy_label":         fmt.Sprintf(constants.FormatFiscalYear, year, (year+1)%100),
 			"generated_at":     time.Now().UTC().Format(time.RFC3339),
-			"portfolio_detail": aumDetails,
 			"rows":             outRows,
 		},
 		"success": true,
@@ -1269,7 +1003,8 @@ func computeConsolidatedRisk(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 	if len(allowedEntities) > 0 {
 		allowedParam = allowedEntities
 	}
-	q := `
+	psScope := SQLParamsEntityScope("ps.entity_name")
+	q := fmt.Sprintf(`
 	WITH params AS (SELECT $1::text AS entity_filter, $2::text[] AS allowed_entities)
 	SELECT
 	  COALESCE(SUM(val*(CASE LOWER(COALESCE(ms.internal_risk_rating,'medium')) WHEN 'low' THEN 15 WHEN 'medium' THEN 50 WHEN 'high' THEN 85 ELSE 50 END))/NULLIF(SUM(val),0),0)::float8,
@@ -1280,20 +1015,19 @@ func computeConsolidatedRisk(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 	FROM (
 	  SELECT COALESCE(ps.current_value::numeric,(ps.total_units::numeric*ps.current_nav::numeric),0) AS val, ps.scheme_id, ps.isin, ps.entity_name
 	  FROM investment.portfolio_snapshot ps, params p
-	  WHERE (p.entity_filter IS NULL OR ps.entity_name=p.entity_filter) AND (p.allowed_entities IS NULL OR ps.entity_name=ANY(p.allowed_entities))
+	  WHERE %s
 	) ps
-	LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=ps.scheme_id OR ms.internal_scheme_code=ps.scheme_id OR ms.isin=ps.isin)
-	`
+	LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ps.scheme_id)) OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ps.scheme_id)) OR (NULLIF(TRIM(ps.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ps.scheme_id))))
+	`, psScope)
 	var lcr, totalValue, lowValue, mediumValue, highValue float64
 	if err := pgxPool.QueryRow(ctx, q, nullIfEmpty(entityFilter), allowedParam).Scan(&lcr, &totalValue, &lowValue, &mediumValue, &highValue); err != nil {
 		return nil, fmt.Errorf("consolidated risk: %w", err)
 	}
-	aumDetails := fetchAUMDetailsWithRisk(ctx, pgxPool, entityFilter, allowedEntities)
 	return map[string]interface{}{
 		"rows": map[string]interface{}{
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
 			"high_value":   highValue, "lcr": lcr, "low_value": lowValue,
-			"medium_value": mediumValue, "portfolio_detail": aumDetails, "total_value": totalValue,
+			"medium_value": mediumValue, "total_value": totalValue,
 		},
 		"success": true,
 	}, nil
@@ -1322,7 +1056,7 @@ func computeCombinedOverview(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 	      ELSE 0 END AS avg_purchase_nav,
 	    SUM(CASE WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','dividend_reinvest','merger_in') THEN COALESCE(ABS(ot.amount),0) ELSE 0 END) -
 	    SUM(CASE WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out','merger_out') THEN COALESCE(ABS(ot.amount),0) ELSE 0 END) AS invested_amount
-	  FROM investment.onboard_transaction ot, params p
+	  FROM investment.approved_onboard_transaction ot, params p
 	  WHERE ($1::text IS NULL OR COALESCE(ot.entity_name,'')=$1) AND ($2::text[] IS NULL OR COALESCE(ot.entity_name,'')=ANY($2))
 	  GROUP BY COALESCE(ot.entity_name,''), COALESCE(ot.scheme_id,ot.scheme_internal_code)::text, ot.folio_number
 	  HAVING SUM(CASE WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','dividend_reinvest','merger_in') THEN COALESCE(ot.units,0)
@@ -1338,7 +1072,7 @@ func computeCombinedOverview(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 	       GREATEST(nh.invested_amount,0)::float8, COALESCE(ms.isin,''), nh.avg_purchase_nav::float8,
 	       COALESCE(asm.scheme_category,'Other'), COALESCE(asm.scheme_sub_category,'Other'), COALESCE(asm.scheme_type,'Other')
 	FROM net_holdings nh
-	LEFT JOIN investment.masterscheme ms ON (ms.scheme_id=nh.scheme_ref OR ms.internal_scheme_code=nh.scheme_ref OR ms.isin=nh.scheme_ref)
+	LEFT JOIN investment.masterscheme ms ON (COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(nh.scheme_ref), '') IS NOT NULL AND ms.scheme_id::text = TRIM(nh.scheme_ref)) OR (NULLIF(TRIM(nh.scheme_ref), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(nh.scheme_ref)) OR (NULLIF(TRIM(nh.scheme_ref), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(nh.scheme_ref))))
 	LEFT JOIN investment.amfi_scheme_master_staging asm ON asm.scheme_code::text=ms.amfi_scheme_code::text
 	LEFT JOIN latest_nav ln ON ln.scheme_code=COALESCE(ms.amfi_scheme_code::text,asm.scheme_code::text)
 	`
@@ -1447,12 +1181,14 @@ func computeCombinedOverview(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 	}
 
 	fyStart := getFinancialYearStart(now)
-	transactionDetail := fetchRawTransactionDetails(ctx, pgxPool, entityFilter, allowedEntities, fyStart)
+	allTransactions := fetchRawTransactionDetails(ctx, pgxPool, entityFilter, allowedEntities, fyStart)
+	ytdTransactions, transactionGroups := transactionDetailPayload(allTransactions, fyStart)
 
 	return map[string]interface{}{
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 		"kpis": map[string]interface{}{
-			"aum_detail": portfolioDetail, "transaction_detail": transactionDetail,
+			"aum_detail": portfolioDetail, "transaction_detail": ytdTransactions,
+			"transaction_groups": transactionGroups,
 		},
 		"consolidated": map[string]interface{}{
 			"generated_at": time.Now().UTC().Format(time.RFC3339),

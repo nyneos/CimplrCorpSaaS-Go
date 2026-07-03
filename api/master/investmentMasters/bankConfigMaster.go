@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -102,6 +103,10 @@ func logBankConfigDBError(err error, context string) {
 func getUserFriendlyBankConfigError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 	errStr := strings.ToLower(err.Error())
 
@@ -1477,7 +1482,7 @@ func DeleteBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(deleteBlockers) > 0 {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
@@ -1914,6 +1919,7 @@ func GetBankConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.old_grace_period_rate_type,'')              AS old_grace_period_rate_type,
 				m.minimum_compounding_period_days,
 				l.old_minimum_compounding_period_days,
+				COALESCE(m.upload_s3_key,'') AS upload_s3_key,
 				COALESCE(m.quarter_definition,'')                      AS quarter_definition,
 				COALESCE(l.old_quarter_definition,'')                  AS old_quarter_definition,
 				COALESCE(m.tds_deduction_timing,'')                    AS tds_deduction_timing,

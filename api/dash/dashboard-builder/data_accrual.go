@@ -7,6 +7,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// accrualRunVisibleStatuses mirrors the default filter in GetAccrualRuns —
+// ops-only intermediate states (DRAFT, COMPUTED, VALIDATED, …) are excluded
+// from dashboard-builder views.
+const accrualRunStatusSQL = `AND run_status = ANY(ARRAY['PENDING_APPROVAL','APPROVED','REJECTED','POSTED','POSTED_TO_GL','LOCKED'])`
+
 func queryFDAccrualRunAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
 	ef, efArgs := entityFilter(entityIDs, "r", 2)
 	args := append([]any{limit}, efArgs...)
@@ -45,9 +50,10 @@ func queryFDAccrualRunAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 			LIMIT 1
 		) a ON true
 		WHERE COALESCE(r.is_deleted, false) = false %s
+		  %s
 		ORDER BY r.run_date DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, accrualRunStatusSQL)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -56,52 +62,7 @@ func queryFDAccrualRunAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 	return scanRows(r)
 }
 
-// queryFDAccrualLedger lists ledger rows. When parentID (run_id) is non-empty it
-// returns only rows belonging to that accrual run — used for drill-down from fdAccrualRunAll.
-func queryFDAccrualLedger(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "l", 2)
-	args := append([]any{limit}, efArgs...)
-
-	runFilter := ""
-	if parentID != "" {
-		runFilter = fmt.Sprintf(" AND l.run_id = $%d", len(args)+1)
-		args = append(args, parentID)
-	}
-
-	q := fmt.Sprintf(`
-		SELECT
-			COALESCE(l.ledger_id::text, '') AS ledger_id,
-			COALESCE(l.run_id::text, '') AS run_id,
-			COALESCE(l.fd_id::text, '') AS fd_id,
-			COALESCE(l.entity_id, '') AS entity_id,
-			COALESCE(l.entity_name, '') AS entity_name,
-			COALESCE(l.bank_name, '') AS bank_name,
-			l.accrual_period_start AS accrual_date,
-			l.accrual_period_end,
-			COALESCE(l.period_interest_accrued, 0) AS accrual_amount,
-			COALESCE(l.ledger_row_status, '') AS status,
-			COALESCE(a.processing_status, '') AS processing_status
-		FROM investment.fd_accrual_ledger l
-		LEFT JOIN LATERAL (
-			SELECT processing_status
-			FROM investment.fd_accrual_ledger_audit
-			WHERE ledger_id = l.ledger_id::text
-			ORDER BY GREATEST(requested_at, checker_at) DESC NULLS LAST
-			LIMIT 1
-		) a ON true
-		WHERE COALESCE(l.is_deleted, false) = false %s %s
-		ORDER BY l.accrual_period_start DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
-	`, ef, runFilter)
-
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
-}
-
-func queryFDAccrualDetail(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryFDAccrualLedger(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
 	ef, efArgs := entityFilter(entityIDs, "l", 2)
 	args := append([]any{limit}, efArgs...)
 
@@ -130,48 +91,17 @@ func queryFDAccrualDetail(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 			COALESCE(l.ledger_row_status, '') AS ledger_row_status,
 			COALESCE(a.processing_status, '') AS processing_status
 		FROM investment.fd_accrual_ledger l
+		JOIN investment.fd_accrual_run ar ON ar.run_id = l.run_id
+			AND ar.run_status = ANY(ARRAY['PENDING_APPROVAL','APPROVED','REJECTED','POSTED','POSTED_TO_GL','LOCKED'])
 		LEFT JOIN LATERAL (
-			SELECT processing_status 
-			FROM investment.fd_accrual_ledger_audit 
+			SELECT processing_status
+			FROM investment.fd_accrual_ledger_audit
 			WHERE ledger_id = l.ledger_id::text
 			ORDER BY GREATEST(requested_at, checker_at) DESC NULLS LAST
 			LIMIT 1
 		) a ON true
 		WHERE COALESCE(l.is_deleted, false) = false %s
 		ORDER BY l.created_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
-	`, ef)
-
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
-}
-
-func queryFDAccrualFindings(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "r", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
-
-	q := fmt.Sprintf(`
-		SELECT
-			COALESCE(f.finding_id::text, '') AS finding_id,
-			COALESCE(f.run_id::text, '') AS run_id,
-			COALESCE(f.fd_id::text, '') AS fd_id,
-			COALESCE(f.fd_ref_no, '') AS fd_ref_no,
-			COALESCE(f.bank_name, '') AS bank_name,
-			COALESCE(f.issue_type, '') AS issue_type,
-			COALESCE(f.severity, '') AS severity,
-			COALESCE(f.issue_description, '') AS issue_description,
-			COALESCE(f.suggested_action, '') AS suggested_action,
-			COALESCE(f.is_resolved, false) AS is_resolved,
-			COALESCE(f.resolved_by, '') AS resolved_by,
-			f.resolved_at,
-			f.created_at
-		FROM investment.fd_accrual_validation_finding f
-		LEFT JOIN investment.fd_accrual_run r ON f.run_id = r.run_id
-		WHERE 1=1 %s
-		ORDER BY f.created_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
 	`, ef)
 
@@ -197,7 +127,8 @@ func queryFDAccrualExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityI
 			COALESCE(l.detail::text, '') AS detail,
 			l.logged_at
 		FROM investment.fd_accrual_run_execution_log l
-		LEFT JOIN investment.fd_accrual_run r ON l.run_id = r.run_id
+		JOIN investment.fd_accrual_run r ON l.run_id = r.run_id
+			AND r.run_status = ANY(ARRAY['PENDING_APPROVAL','APPROVED','REJECTED','POSTED','POSTED_TO_GL','LOCKED'])
 		WHERE 1=1 %s
 		ORDER BY l.logged_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
@@ -222,7 +153,8 @@ func queryFDAccrualRunAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 			COALESCE(a.processing_status, '') AS processing_status,
 			a.requested_at
 		FROM investment.fd_accrual_run_audit a
-		LEFT JOIN investment.fd_accrual_run r ON r.run_id::text = a.run_id::text
+		JOIN investment.fd_accrual_run r ON r.run_id::text = a.run_id::text
+			AND r.run_status = ANY(ARRAY['PENDING_APPROVAL','APPROVED','REJECTED','POSTED','POSTED_TO_GL','LOCKED'])
 		WHERE 1=1 %s
 		ORDER BY a.requested_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
@@ -247,7 +179,8 @@ func queryFDAccrualLedgerAudit(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(a.processing_status, '') AS processing_status,
 			a.requested_at
 		FROM investment.fd_accrual_ledger_audit a
-		LEFT JOIN investment.fd_accrual_run r ON r.run_id::text = a.run_id::text
+		JOIN investment.fd_accrual_run r ON r.run_id::text = a.run_id::text
+			AND r.run_status = ANY(ARRAY['PENDING_APPROVAL','APPROVED','REJECTED','POSTED','POSTED_TO_GL','LOCKED'])
 		WHERE 1=1 %s
 		ORDER BY a.requested_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
@@ -260,29 +193,6 @@ func queryFDAccrualLedgerAudit(ctx context.Context, pool *pgxpool.Pool, entityID
 	return scanRows(r)
 }
 
-func queryFDAccrualExceptions(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "r", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
-
-	q := fmt.Sprintf(`
-		SELECT
-			COALESCE(e.exception_id::text, '') AS exception_id,
-			COALESCE(e.fd_id::text, '') AS fd_id,
-			COALESCE(e.exception_type, '') AS exception_type,
-			e.created_at
-		FROM investment.fd_accrual_exception e
-		LEFT JOIN investment.fd_accrual_run r ON r.run_id::text = e.run_id::text
-		WHERE COALESCE(e.is_deleted, false) = false %s
-		ORDER BY e.created_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
-	`, ef)
-
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
-}
 
 func queryFDAccrualScheduleAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
 	ef, efArgs := entityFilter(entityIDs, "s", 2)
@@ -327,29 +237,57 @@ func queryFDAccrualScheduleAll(ctx context.Context, pool *pgxpool.Pool, entityID
 	return scanRows(r)
 }
 
-func queryFDAccrualScheduleExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "r", "entity_name", 2)
+func queryFDAccrualScheduleExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
+	ef, efArgs := entityFilter(entityIDs, "sc", 2)
 	args := append([]any{limit}, efArgs...)
 
+	parentFilter := ""
+	if parentID != "" {
+		parentFilter = fmt.Sprintf(" AND sc.config_id = $%d", len(args)+1)
+		args = append(args, parentID)
+	}
+
+	// Mirrors GetScheduleExecutionLog / loadSchedulerRunsForConfig: anchor on
+	// fd_accrual_schedule_config (active only) and left-join scheduler runs.
 	q := fmt.Sprintf(`
 		SELECT
-			COALESCE(r.run_id::text, '') AS run_id,
-			COALESCE(r.entity_id, '') AS entity_id,
-			COALESCE(r.entity_name, '') AS entity_name,
-			COALESCE(r.run_type, '') AS run_type,
-			COALESCE(r.run_mode, '') AS run_mode,
-			COALESCE(r.run_status, '') AS run_status,
-			r.run_date,
+			COALESCE(r.run_id::text, '')          AS run_id,
+			COALESCE(sc.entity_id, '')            AS entity_id,
+			COALESCE(NULLIF(r.entity_name, ''), sc.entity_name, '') AS entity_name,
+			COALESCE(r.run_mode, sc.default_run_mode, '') AS run_mode,
+			COALESCE(r.run_status, sc.last_run_status, '') AS run_status,
 			r.accrual_period_start,
 			r.accrual_period_end,
-			COALESCE(r.financial_period, '') AS financial_period,
-			COALESCE(r.total_interest_accrued, 0) AS total_accrued,
-			r.created_at
-		FROM investment.fd_accrual_run r
-		WHERE COALESCE(r.is_deleted, false) = false AND r.run_type = 'SCHEDULED' %s
-		ORDER BY r.run_date DESC NULLS LAST
+			COALESCE(r.financial_period, '')      AS financial_period,
+			COALESCE(NULLIF(r.accrual_granularity, ''), sc.accrual_granularity, '') AS accrual_granularity,
+			COALESCE(r.fds_in_scope, 0)           AS fds_in_scope,
+			COALESCE(r.fds_calculated, 0)         AS fds_calculated,
+			COALESCE(r.fds_failed, 0)             AS fds_failed,
+			COALESCE(r.total_interest_accrued, 0) AS total_interest_accrued,
+			COALESCE(sc.config_id::text, '')      AS schedule_config_id,
+			COALESCE(sc.schedule_frequency, '')   AS schedule_frequency,
+			COALESCE(sc.is_active, false)         AS schedule_is_active,
+			COALESCE(r.created_at, sc.created_at)  AS created_at
+		FROM investment.fd_accrual_schedule_config sc
+		LEFT JOIN investment.fd_accrual_run r
+			ON r.created_by = 'SCHEDULER'
+			AND COALESCE(r.is_deleted, false) = false
+			AND (
+				r.run_id::text IN (
+					SELECT DISTINCT el.run_id
+					FROM investment.fd_accrual_run_execution_log el
+					WHERE COALESCE(el.detail->>'schedule_config_id', '') = sc.config_id::text
+				)
+				OR (
+					COALESCE(sc.last_run_id, '') <> ''
+					AND sc.last_run_id = r.run_id::text
+				)
+			)
+		WHERE COALESCE(sc.is_deleted, false) = false
+		  AND COALESCE(sc.is_active, false) = true %s %s
+		ORDER BY COALESCE(r.created_at, sc.created_at) DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, ef, parentFilter)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {

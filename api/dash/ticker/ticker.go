@@ -162,6 +162,35 @@ func RateBetween(base, target string) (float64, error) {
 	return baseInr / tr, nil
 }
 
+// InrEquivalentRates returns a copy of INR-per-unit rates (same as rate.json inrEquivalentRate).
+func InrEquivalentRates() map[string]float64 {
+	if inrRates == nil {
+		return map[string]float64{"INR": 1.0}
+	}
+	out := make(map[string]float64, len(inrRates))
+	for code, rate := range inrRates {
+		out[code] = rate
+	}
+	return out
+}
+
+// ConvertAmountToINR converts amount in the given currency to INR using loaded ticker rates.
+// Empty, unknown, or INR currency returns the amount unchanged when no rate is available.
+func ConvertAmountToINR(amount float64, currency string) float64 {
+	if amount == 0 {
+		return 0
+	}
+	cur := strings.ToUpper(strings.TrimSpace(currency))
+	if cur == "" || cur == "INR" {
+		return amount
+	}
+	rate, err := RateBetween(cur, "INR")
+	if err != nil || rate == 0 {
+		return amount
+	}
+	return amount * rate
+}
+
 // ProcessTicker executes the ticker logic for a given request and returns
 // the resulting payload (already ready to encode to JSON), an HTTP status
 // code and an error (nil on success). Call this directly from other handlers.
@@ -263,6 +292,18 @@ func GetTickerHandler() http.Handler {
 			return
 		}
 		tickerHandler(w, r)
+	})
+}
+
+// GetInrRatesHandler returns INR-per-unit rates for all known currencies.
+func GetInrRatesHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
+		json.NewEncoder(w).Encode(InrEquivalentRates())
 	})
 }
 

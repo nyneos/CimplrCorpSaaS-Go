@@ -542,7 +542,7 @@ type initiateClosureRequest struct {
 func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req initiateClosureRequest
-		isMultipart := strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data")
+		isMultipart := strings.Contains(strings.ToLower(r.Header.Get(constants.ContentTypeText)), "multipart/form-data")
 		if isMultipart {
 			if err := r.ParseMultipartForm(32 << 20); err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, "Invalid multipart form: "+err.Error())

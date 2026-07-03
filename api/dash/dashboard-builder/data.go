@@ -39,18 +39,29 @@ type dataRequest struct {
 	// ParentID filters child sources by their parent row (e.g. bank_statement_id, run_id, proposal_id).
 	ParentID string `json:"parent_id"`
 	// Dashboard-builder filter band — populated by the frontend "Generate" button.
-	BankIDs  []string `json:"bank_ids"`
-	AsOfDate string   `json:"as_of_date"`
-	AsOnDate string   `json:"as_on_date"`
+	BankIDs        []string               `json:"bank_ids"`
+	AccountNumbers []string               `json:"account_numbers"`
+	BankAccountScope []bankAccountScopePair `json:"bank_account_scope"`
+	ProposalIDs      []string               `json:"proposal_ids"`
+	AsOfDate       string                 `json:"as_of_date"`
+	AsOnDate       string                 `json:"as_on_date"`
+	ViewType       string                 `json:"view_type"`
+}
+
+type bankAccountScopePair struct {
+	BankID        string `json:"bank_id"`
+	AccountNumber string `json:"account_number"`
 }
 
 // Context keys for dashboard-builder filter values stashed by GetDataSource so
 // that helper functions can read them without changing every query signature.
 const (
-	ctxKeyReqBankIDs       = "reqBankIDs"
-	ctxKeyReqBankNamesNorm = "reqBankNamesNorm"
-	ctxKeyReqAsOfDate      = "reqAsOfDate"
-	ctxKeyReqAsOnDate      = "reqAsOnDate"
+	ctxKeyReqBankIDs         = "reqBankIDs"
+	ctxKeyReqBankNamesNorm   = "reqBankNamesNorm"
+	ctxKeyReqAccountNumbers  = "reqAccountNumbers"
+	ctxKeyReqAsOfDate        = "reqAsOfDate"
+	ctxKeyReqAsOnDate        = "reqAsOnDate"
+	ctxKeyReqViewType        = "reqViewType"
 )
 
 type dataSourceFn func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error)
@@ -103,13 +114,7 @@ var dataSources = map[string]dataSourceFn{
 		return queryFDAccrualRunAll(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"fdAccrualLedger": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryFDAccrualLedger(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
-	},
-	"fdAccrualDetail": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryFDAccrualDetail(ctx, pool, req.EntityIDs, req.Limit)
-	},
-	"fdAccrualFindings": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryFDAccrualFindings(ctx, pool, req.EntityIDs, req.Limit)
+		return queryFDAccrualLedger(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"fdAccrualExecutionLog": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryFDAccrualExecutionLog(ctx, pool, req.EntityIDs, req.Limit)
@@ -120,14 +125,12 @@ var dataSources = map[string]dataSourceFn{
 	"fdAccrualLedgerAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryFDAccrualLedgerAudit(ctx, pool, req.EntityIDs, req.Limit)
 	},
-	"fdAccrualExceptions": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryFDAccrualExceptions(ctx, pool, req.EntityIDs, req.Limit)
-	},
+
 	"fdAccrualScheduleAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryFDAccrualScheduleAll(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"fdAccrualScheduleExecutionLog": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryFDAccrualScheduleExecutionLog(ctx, pool, req.EntityIDs, req.Limit)
+		return queryFDAccrualScheduleExecutionLog(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
 	},
 	// ── Portfolio & Proposal ───────────────────────────────────────────────────
 	"investmentOnboardBatch": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
@@ -153,10 +156,24 @@ var dataSources = map[string]dataSourceFn{
 	},
 	// ── Cash Module ────────────────────────────────────────────────────────────
 	"cashBankStatements": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashBankStatements(ctx, pool, req.EntityIDs, req.Limit)
+		pairs := resolveBankStatementScopePairs(req)
+		if len(pairs) == 0 {
+			return []map[string]any{}, nil
+		}
+		return queryCashBankStatements(ctx, pool, req.EntityIDs, req.Limit, pairs)
 	},
 	"cashBankStatementTransactions": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashBankStatementTransactions(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+		pairs := resolveBankStatementScopePairs(req)
+		if len(pairs) == 0 {
+			return []map[string]any{}, nil
+		}
+		return queryCashBankStatementTransactions(ctx, pool, req.EntityIDs, req.Limit, req.ParentID, pairs)
+	},
+	"cashPayable": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashPayable(ctx, pool, req.EntityIDs, req.Limit)
+	},
+	"cashReceivable": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryCashReceivable(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"cashPayableReceivable": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashPayableReceivable(ctx, pool, req.EntityIDs, req.Limit)
@@ -173,20 +190,15 @@ var dataSources = map[string]dataSourceFn{
 	"cashSweepInitiation": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashSweepInitiation(ctx, pool, req.EntityIDs, req.Limit)
 	},
-	"cashSweepExecutionLogs": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashSweepExecutionLogs(ctx, pool, req.EntityIDs, req.Limit)
-	},
-	"cashSweepAllExecutionLogs": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashSweepAllExecutionLogs(ctx, pool, req.EntityIDs, req.Limit)
-	},
-	"cashSweepStatistics": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashSweepStatistics(ctx, pool, req.EntityIDs, req.Limit)
-	},
 	"cashProjectionList": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashProjectionList(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"cashProjectionDetail": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashProjectionDetail(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+		proposalIDs := resolveProjectionProposalIDs(req)
+		if len(proposalIDs) == 0 {
+			return []map[string]any{}, nil
+		}
+		return queryCashProjectionDetail(ctx, pool, req.EntityIDs, req.Limit, proposalIDs)
 	},
 	"cashBankBalances": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashBankBalances(ctx, pool, req.EntityIDs, req.Limit)
@@ -238,7 +250,11 @@ var dataSources = map[string]dataSourceFn{
 		return queryCashSweepInitiationAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
 	},
 	"cashProjectionAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryCashProjectionAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
+		proposalIDs := resolveProjectionProposalIDs(req)
+		if len(proposalIDs) == 0 {
+			return []map[string]any{}, nil
+		}
+		return queryCashProjectionAudit(ctx, pool, req.EntityIDs, req.Limit, proposalIDs)
 	},
 	"cashFundPlanAudit": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashFundPlanAudit(ctx, pool, req.EntityIDs, req.Limit, req.ParentID)
@@ -331,6 +347,13 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.Limit < 0 {
 			req.Limit = 0
 		}
+		const defaultDataLimit = 500
+		const maxDataLimit = 2000
+		if req.Limit <= 0 {
+			req.Limit = defaultDataLimit
+		} else if req.Limit > maxDataLimit {
+			req.Limit = maxDataLimit
+		}
 
 		ctx := context.WithValue(r.Context(), "reqEntityNames", reqEntityNames)
 
@@ -339,12 +362,7 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 		// bank_name strings using the prevalidation BankInfo context, so
 		// queries can filter by bank_id (where available) or bank_name
 		// (case-insensitive) without re-querying the bank master.
-		bankIDs := make([]string, 0, len(req.BankIDs))
-		for _, id := range req.BankIDs {
-			if s := strings.TrimSpace(id); s != "" {
-				bankIDs = append(bankIDs, s)
-			}
-		}
+		bankIDs := normalizeBankIDs(req.BankIDs)
 		bankNamesNorm := make([]string, 0, len(bankIDs))
 		seen := make(map[string]struct{}, len(bankIDs))
 		for _, id := range bankIDs {
@@ -357,8 +375,10 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx = context.WithValue(ctx, ctxKeyReqBankIDs, bankIDs)
 		ctx = context.WithValue(ctx, ctxKeyReqBankNamesNorm, bankNamesNorm)
+		ctx = context.WithValue(ctx, ctxKeyReqAccountNumbers, normalizeAccountNumbers(req.AccountNumbers))
 		ctx = context.WithValue(ctx, ctxKeyReqAsOfDate, strings.TrimSpace(req.AsOfDate))
 		ctx = context.WithValue(ctx, ctxKeyReqAsOnDate, strings.TrimSpace(req.AsOnDate))
+		ctx = context.WithValue(ctx, ctxKeyReqViewType, strings.ToLower(strings.TrimSpace(req.ViewType)))
 
 		fn, ok := dataSources[req.Source]
 		if !ok {
@@ -381,6 +401,7 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 		if rows == nil {
 			rows = []map[string]any{}
 		}
+		rows = normalizeRowsToINR(req.Source, rows)
 		api.RespondWithPayload(w, true, "", rows)
 	}
 }
@@ -457,6 +478,176 @@ func bankNameFilter(ctx context.Context, alias string, argOffset int) (string, [
 		return "", nil
 	}
 	return fmt.Sprintf("AND LOWER(TRIM(COALESCE(%s.bank_name,''))) = ANY($%d)", alias, argOffset), []any{names}
+}
+
+func accountNumberFilter(ctx context.Context, alias string, colName string, argOffset int) (string, []any) {
+	nums, _ := ctx.Value(ctxKeyReqAccountNumbers).([]string)
+	if len(nums) == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf("AND %s.%s = ANY($%d)", alias, colName, argOffset), []any{nums}
+}
+
+func normalizeAccountNumbers(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func normalizeBankIDs(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// bankStatementScopeFilter builds bank+account pair filters for bank statement queries.
+// Each pair is matched with AND; multiple pairs are combined with OR.
+func bankStatementScopeFilter(
+	stmtAlias string,
+	pairs []bankAccountScopePair,
+	argIdx int,
+) (clause string, args []any, nextIdx int) {
+	pairs = normalizeBankAccountScopePairs(pairs)
+	if len(pairs) == 0 {
+		return "", nil, argIdx
+	}
+
+	parts := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		if pair.BankID != "" {
+			parts = append(parts, fmt.Sprintf(`(
+				TRIM(%s.account_number) = $%d AND EXISTS (
+					SELECT 1 FROM public.masterbankaccount mba_scope
+					WHERE TRIM(mba_scope.account_number) = TRIM(%s.account_number)
+					  AND COALESCE(mba_scope.is_deleted, false) = false
+					  AND mba_scope.bank_id = $%d
+				)
+			)`, stmtAlias, argIdx, stmtAlias, argIdx+1))
+			args = append(args, pair.AccountNumber, pair.BankID)
+			argIdx += 2
+			continue
+		}
+
+		parts = append(parts, fmt.Sprintf("TRIM(%s.account_number) = $%d", stmtAlias, argIdx))
+		args = append(args, pair.AccountNumber)
+		argIdx++
+	}
+
+	return " AND (" + strings.Join(parts, " OR ") + ")", args, argIdx
+}
+
+func normalizeBankAccountScopePairs(values []bankAccountScopePair) []bankAccountScopePair {
+	out := make([]bankAccountScopePair, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		bankID := strings.TrimSpace(raw.BankID)
+		accountNumber := strings.TrimSpace(raw.AccountNumber)
+		if accountNumber == "" {
+			continue
+		}
+		key := bankID + "\x00" + accountNumber
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, bankAccountScopePair{
+			BankID:        bankID,
+			AccountNumber: accountNumber,
+		})
+	}
+	return out
+}
+
+func resolveBankStatementScopePairs(req dataRequest) []bankAccountScopePair {
+	if pairs := normalizeBankAccountScopePairs(req.BankAccountScope); len(pairs) > 0 {
+		return pairs
+	}
+
+	accountNumbers := normalizeAccountNumbers(req.AccountNumbers)
+	if len(accountNumbers) == 0 {
+		return nil
+	}
+
+	bankIDs := normalizeBankIDs(req.BankIDs)
+	if len(bankIDs) == 0 {
+		out := make([]bankAccountScopePair, 0, len(accountNumbers))
+		for _, accountNumber := range accountNumbers {
+			out = append(out, bankAccountScopePair{AccountNumber: accountNumber})
+		}
+		return out
+	}
+
+	if len(bankIDs) == len(accountNumbers) {
+		out := make([]bankAccountScopePair, 0, len(accountNumbers))
+		for i, accountNumber := range accountNumbers {
+			out = append(out, bankAccountScopePair{
+				BankID:        bankIDs[i],
+				AccountNumber: accountNumber,
+			})
+		}
+		return out
+	}
+
+	// Legacy flat arrays: match any listed account at any listed bank.
+	out := make([]bankAccountScopePair, 0, len(accountNumbers)*len(bankIDs))
+	for _, accountNumber := range accountNumbers {
+		for _, bankID := range bankIDs {
+			out = append(out, bankAccountScopePair{
+				BankID:        bankID,
+				AccountNumber: accountNumber,
+			})
+		}
+	}
+	return normalizeBankAccountScopePairs(out)
+}
+
+func normalizeProposalIDs(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func resolveProjectionProposalIDs(req dataRequest) []string {
+	if ids := normalizeProposalIDs(req.ProposalIDs); len(ids) > 0 {
+		return ids
+	}
+	if id := strings.TrimSpace(req.ParentID); id != "" {
+		return []string{id}
+	}
+	return nil
 }
 
 // dateRangeFilter appends a date range filter on the given column using the
@@ -859,50 +1050,68 @@ func queryFDCashflows(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 
 func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
 	args := []any{limit}
-	ef, efArgs := entityFilter(entityIDs, "br", len(args)+1)
+	ef, efArgs := entityFilter(entityIDs, "ci", len(args)+1)
 	args = append(args, efArgs...)
-	bf, bfArgs := bankNameFilter(ctx, "br", len(args)+1)
+	bf, bfArgs := bankNameFilter(ctx, "ci", len(args)+1)
 	args = append(args, bfArgs...)
 	df, dfArgs := dateRangeFilter(ctx, "ci", "requested_closure_date", len(args)+1)
 	args = append(args, dfArgs...)
 
+	// latest_processing_status mirrors listCimplrRecords:
+	// - PAYOUT/ROLLOVER: fd_closure_initiate_audit
+	// - PREMATURE: approval audit lives on linked fd_closure_confirm (initiate audit is empty)
 	q := fmt.Sprintf(`
-		WITH latest_audit AS (
-			SELECT DISTINCT ON (a.closure_initiate_id)
-				a.closure_initiate_id,
-				a.processing_status,
-				a.requested_at,
-				a.checker_at
-			FROM cimplr.fd_closure_initiate_audit a
-			ORDER BY a.closure_initiate_id,
-			         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),
-			                  COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
-		)
 		SELECT
-			COALESCE(ci.closure_initiate_id::text, '')  AS closure_initiate_id,
-			COALESCE(ci.fd_id::text,               '')  AS fd_id,
-			COALESCE(m.entity_id,                  '')  AS entity_id,
-			COALESCE(br.entity_name,               '')  AS entity_name,
-			COALESCE(br.bank_name,                 '')  AS bank_name,
-			COALESCE(ci.closure_type,              '')  AS closure_type,
-			COALESCE(ci.closure_status,            '')  AS closure_status,
-			COALESCE(ci.principal_amount,           0)  AS principal_amount,
-			COALESCE(ci.accrued_interest_till_date, 0)  AS accrued_interest_till_date,
-			COALESCE(ci.tds_expected,               0)  AS tds_expected,
-			COALESCE(ci.net_expected_amount,        0)  AS net_expected_amount,
+			COALESCE(ci.closure_initiate_id::text, '') AS closure_initiate_id,
+			COALESCE(ci.fd_id::text,               '') AS fd_id,
+			COALESCE(ci.entity_id,                 '') AS entity_id,
+			COALESCE(ci.entity_name,               '') AS entity_name,
+			COALESCE(ci.bank_name,                 '') AS bank_name,
+			COALESCE(ci.closure_type,              '') AS closure_type,
+			COALESCE(ci.closure_status,            '') AS closure_status,
+			COALESCE(ci.principal_amount,           0) AS principal_amount,
+			COALESCE(ci.accrued_interest_till_date, 0) AS accrued_interest_till_date,
+			COALESCE(ci.tds_expected,               0) AS tds_expected,
+			COALESCE(ci.net_expected_amount,        0) AS net_expected_amount,
 			ci.requested_closure_date,
 			COALESCE(ci.has_variance,            FALSE) AS has_variance,
-			COALESCE(l.processing_status,          '')  AS processing_status
+			COALESCE(
+				NULLIF(ia.processing_status, ''),
+				CASE WHEN UPPER(COALESCE(ci.closure_type, '')) = 'PREMATURE' THEN
+					COALESCE(
+						CASE WHEN UPPER(COALESCE(prem_cc.closure_status, '')) = 'POSTED' THEN 'POSTED' END,
+						ca.processing_status,
+						''
+					)
+				END,
+				''
+			) AS latest_processing_status
 		FROM cimplr.fd_closure_initiate ci
-		LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
-		LEFT JOIN investment.fd_booking_request br ON br.booking_id = m.booking_id
-		LEFT JOIN latest_audit l ON l.closure_initiate_id = ci.closure_initiate_id
+		LEFT JOIN LATERAL (
+			SELECT a.processing_status
+			FROM cimplr.fd_closure_initiate_audit a
+			WHERE a.closure_initiate_id = ci.closure_initiate_id
+			ORDER BY a.requested_at DESC NULLS LAST, a.audit_id DESC
+			LIMIT 1
+		) ia ON true
+		LEFT JOIN LATERAL (
+			SELECT cc.closure_confirm_id, cc.closure_status
+			FROM cimplr.fd_closure_confirm cc
+			WHERE cc.closure_initiate_id = ci.closure_initiate_id
+			  AND COALESCE(cc.is_deleted, false) = false
+			ORDER BY cc.closure_confirm_id DESC
+			LIMIT 1
+		) prem_cc ON true
+		LEFT JOIN LATERAL (
+			SELECT a.processing_status
+			FROM cimplr.fd_closure_confirm_audit a
+			WHERE a.closure_confirm_id = prem_cc.closure_confirm_id
+			ORDER BY CASE WHEN a.action_type = 'POST' AND a.processing_status = 'POSTED' THEN 0 ELSE 1 END,
+			         a.requested_at DESC NULLS LAST, a.audit_id DESC
+			LIMIT 1
+		) ca ON true
 		WHERE COALESCE(ci.is_deleted, false) = false %s %s %s
-		ORDER BY GREATEST(
-			COALESCE(l.requested_at,'1970-01-01'::timestamp),
-			COALESCE(l.checker_at,'1970-01-01'::timestamp),
-			COALESCE(ci.requested_closure_date::timestamp,'1970-01-01'::timestamp)
-		) DESC
+		ORDER BY ci.closure_initiate_id DESC
 		LIMIT NULLIF($1, 0)
 	`, ef, bf, df)
 
@@ -910,7 +1119,44 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 	if err != nil {
 		return nil, err
 	}
-	return scanRows(r)
+	rows, err := scanRows(r)
+	if err != nil {
+		return nil, err
+	}
+	return enrichFDClosureInitiateApprovalFields(rows), nil
+}
+
+func enrichFDClosureInitiateApprovalFields(rows []map[string]any) []map[string]any {
+	for _, row := range rows {
+		latest := dashboardStr(row["latest_processing_status"])
+		closureStatus := dashboardStr(row["closure_status"])
+		effective := effectiveClosureApprovalStatus(latest, closureStatus)
+		row["approval_status"] = latest
+		row["processing_status"] = effective
+	}
+	return rows
+}
+
+func effectiveClosureApprovalStatus(latest, closureStatus string) string {
+	switch strings.ToUpper(strings.TrimSpace(latest)) {
+	case "PENDING_APPROVAL", "PENDING_EDIT_APPROVAL", "PENDING_DELETE_APPROVAL", "APPROVED", "REJECTED", "POSTED":
+		return strings.ToUpper(strings.TrimSpace(latest))
+	}
+	return strings.ToUpper(strings.TrimSpace(closureStatus))
+}
+
+func dashboardStr(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	case time.Time:
+		return t.Format("2006-01-02")
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
 }
 
 // ─── fdClosureConfirmAll ──────────────────────────────────────────────────────

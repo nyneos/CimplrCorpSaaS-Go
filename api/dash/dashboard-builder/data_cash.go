@@ -3,14 +3,36 @@ package dashboardbuilder
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
+
+	fundavailibilty "CimplrCorpSaas/api/cash/fundavailibilty"
+	payablerecievable "CimplrCorpSaas/api/cash/payablerecievable"
+	cashlimit "CimplrCorpSaas/api/cash/limit"
+	cashprojection "CimplrCorpSaas/api/cash/projection"
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/validation"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ── Bank Statements ────────────────────────────────────────────────────────
-func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "b", 2)
-	args := append([]any{limit}, efArgs...)
+func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, scopePairs []bankAccountScopePair) ([]map[string]any, error) {
+	args := []any{limit}
+	argIdx := 2
+	extraFilters := ""
+
+	ef, efArgs := entityFilter(entityIDs, "b", argIdx)
+	if ef != "" {
+		extraFilters += " " + ef
+		args = append(args, efArgs...)
+		argIdx += len(efArgs)
+	}
+
+	sf, sfArgs, _ := bankStatementScopeFilter("b", scopePairs, argIdx)
+	extraFilters += sf
+	args = append(args, sfArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -44,7 +66,7 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 		WHERE COALESCE(b.is_deleted, false) = false %s
 		ORDER BY b.uploaded_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`, ef)
+	`, extraFilters)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -54,13 +76,26 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 }
 
 // parentID = bank_statement_id to drill into a specific statement's transactions.
-func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
-	ef, efArgs := entityFilter(entityIDs, "s", 2)
-	args := append([]any{limit}, efArgs...)
+func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string, scopePairs []bankAccountScopePair) ([]map[string]any, error) {
+	args := []any{limit}
+	argIdx := 2
+	extraFilters := ""
+
+	ef, efArgs := entityFilter(entityIDs, "s", argIdx)
+	if ef != "" {
+		extraFilters += " " + ef
+		args = append(args, efArgs...)
+		argIdx += len(efArgs)
+	}
+
+	sf, sfArgs, nextIdx := bankStatementScopeFilter("s", scopePairs, argIdx)
+	extraFilters += sf
+	args = append(args, sfArgs...)
+	argIdx = nextIdx
 
 	stmtFilter := ""
 	if parentID != "" {
-		stmtFilter = fmt.Sprintf(" AND t.bank_statement_id = $%d", len(args)+1)
+		stmtFilter = fmt.Sprintf(" AND t.bank_statement_id = $%d", argIdx)
 		args = append(args, parentID)
 	}
 
@@ -87,10 +122,11 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 		FROM cimplrcorpsaas.bank_statement_transactions t
 		JOIN cimplrcorpsaas.bank_statements s ON t.bank_statement_id = s.bank_statement_id
 		LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
-		WHERE 1=1 %s %s
+		LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND COALESCE(mba.is_deleted, false) = false
+		WHERE COALESCE(s.is_deleted, false) = false %s %s
 		ORDER BY t.value_date DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`, ef, stmtFilter)
+	`, extraFilters, stmtFilter)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -100,49 +136,170 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 }
 
 // ── Payable / Receivable ───────────────────────────────────────────────────
-func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	_ = entityIDs // entity filtering via entity_name handled in query if needed
-	args := []any{limit}
+func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+	ef, efArgs := entityNameFilter(ctx, "p", "entity_name", 2)
+	args := append([]any{limit}, efArgs...)
 
-	q := `
-		WITH pr AS (
-			SELECT
-				payable_id::text             AS transaction_id,
-				COALESCE(entity_name, '')    AS entity_name,
-				'PAYABLE'                    AS type,
-				COALESCE(amount, 0)          AS amount,
-				due_date,
-				COALESCE(counterparty_name, '') AS counterparty_name
-			FROM public.tr_payables
-			WHERE COALESCE(is_deleted, false) = false
-			UNION ALL
-			SELECT
-				receivable_id::text               AS transaction_id,
-				COALESCE(entity_name, '')         AS entity_name,
-				'RECEIVABLE'                      AS type,
-				COALESCE(invoice_amount, 0)       AS amount,
-				due_date,
-				COALESCE(counterparty_name, '')   AS counterparty_name
-			FROM public.tr_receivables
-			WHERE COALESCE(is_deleted, false) = false
-		)
+	q := fmt.Sprintf(`
 		SELECT
-			COALESCE(pr.transaction_id,   '') AS transaction_id,
-			COALESCE(pr.entity_name,      '') AS entity_name,
-			COALESCE(pr.type,             '') AS type,
-			COALESCE(pr.amount,            0) AS amount,
-			pr.due_date,
-			COALESCE(pr.counterparty_name,'') AS counterparty_name
-		FROM pr
-		ORDER BY pr.due_date ASC NULLS LAST
+			COALESCE(p.payable_id::text, '')         AS payable_id,
+			COALESCE(e.entity_id::text, '')           AS entity_id,
+			COALESCE(p.entity_name, '')               AS entity_name,
+			COALESCE(c.counterparty_id::text, '')     AS counterparty_id,
+			COALESCE(p.counterparty_name, '')         AS counterparty_name,
+			COALESCE(p.invoice_number, '')            AS invoice_number,
+			p.invoice_date,
+			p.due_date,
+			COALESCE(p.amount, 0)                     AS amount,
+			COALESCE(p.currency_code, '')             AS currency_code
+		FROM public.tr_payables p
+		LEFT JOIN public.masterentitycash e
+			ON LOWER(TRIM(e.entity_name)) = LOWER(TRIM(p.entity_name))
+			AND COALESCE(e.is_deleted, false) = false
+		LEFT JOIN public.mastercounterparty c
+			ON LOWER(TRIM(c.counterparty_name)) = LOWER(TRIM(p.counterparty_name))
+			AND COALESCE(c.is_deleted, false) = false
+		WHERE COALESCE(p.is_deleted, false) = false %s
+		ORDER BY p.due_date ASC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`
+	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
-	return scanRows(r)
+	rows, err := scanRows(r)
+	if err != nil {
+		return nil, err
+	}
+	rows = enrichPayRecDatasetRows(ctx, pool, rows)
+	return filterPayRecScopeRows(ctx, rows), nil
+}
+
+func queryCashReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+	ef, efArgs := entityNameFilter(ctx, "r", "entity_name", 2)
+	args := append([]any{limit}, efArgs...)
+
+	q := fmt.Sprintf(`
+		SELECT
+			COALESCE(r.receivable_id::text, '')       AS receivable_id,
+			COALESCE(e.entity_id::text, '')           AS entity_id,
+			COALESCE(r.entity_name, '')               AS entity_name,
+			COALESCE(c.counterparty_id::text, '')     AS counterparty_id,
+			COALESCE(r.counterparty_name, '')         AS counterparty_name,
+			COALESCE(r.invoice_number, '')            AS invoice_number,
+			r.invoice_date,
+			r.due_date,
+			COALESCE(r.invoice_amount, 0)             AS invoice_amount,
+			COALESCE(r.currency_code, '')             AS currency_code
+		FROM public.tr_receivables r
+		LEFT JOIN public.masterentitycash e
+			ON LOWER(TRIM(e.entity_name)) = LOWER(TRIM(r.entity_name))
+			AND COALESCE(e.is_deleted, false) = false
+		LEFT JOIN public.mastercounterparty c
+			ON LOWER(TRIM(c.counterparty_name)) = LOWER(TRIM(r.counterparty_name))
+			AND COALESCE(c.is_deleted, false) = false
+		WHERE COALESCE(r.is_deleted, false) = false %s
+		ORDER BY r.due_date ASC NULLS LAST
+		LIMIT NULLIF($1, 0)
+	`, ef)
+
+	r, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := scanRows(r)
+	if err != nil {
+		return nil, err
+	}
+	rows = enrichPayRecDatasetRows(ctx, pool, rows)
+	return filterPayRecScopeRows(ctx, rows), nil
+}
+
+func enrichPayRecDatasetRows(ctx context.Context, pool *pgxpool.Pool, rows []map[string]any) []map[string]any {
+	if len(rows) == 0 {
+		return rows
+	}
+	idMaps := payablerecievable.LoadPayRecMasterIDMaps(ctx, pool)
+	out := make([]map[string]any, len(rows))
+	for i, row := range rows {
+		entityName := dashboardStr(row["entity_name"])
+		counterpartyName := dashboardStr(row["counterparty_name"])
+		entityID, counterpartyID := payablerecievable.EnrichPayRecRowIDs(
+			idMaps,
+			entityName,
+			counterpartyName,
+			dashboardStr(row["entity_id"]),
+			dashboardStr(row["counterparty_id"]),
+		)
+		next := make(map[string]any, len(row)+2)
+		for k, v := range row {
+			next[k] = v
+		}
+		next["entity_id"] = entityID
+		next["counterparty_id"] = counterpartyID
+		out[i] = next
+	}
+	return out
+}
+
+func filterPayRecScopeRows(ctx context.Context, rows []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		if validation.ValidateCashMasterReferences(ctx, map[string]interface{}{
+			"entity_name":       dashboardStr(row["entity_name"]),
+			"counterparty_name": dashboardStr(row["counterparty_name"]),
+			"currency_code":     dashboardStr(row["currency_code"]),
+		}) != "" {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// queryCashPayableReceivable is the combined legacy source (payables + receivables).
+func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+	payables, err := queryCashPayable(ctx, pool, entityIDs, 0)
+	if err != nil {
+		return nil, err
+	}
+	receivables, err := queryCashReceivable(ctx, pool, entityIDs, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]map[string]any, 0, len(payables)+len(receivables))
+	for _, row := range payables {
+		out = append(out, map[string]any{
+			"transaction_id":    row["payable_id"],
+			"entity_id":         row["entity_id"],
+			"entity_name":       row["entity_name"],
+			"type":              "PAYABLE",
+			"amount":            row["amount"],
+			"due_date":          row["due_date"],
+			"counterparty_id":   row["counterparty_id"],
+			"counterparty_name": row["counterparty_name"],
+			"currency_code":     row["currency_code"],
+		})
+	}
+	for _, row := range receivables {
+		out = append(out, map[string]any{
+			"transaction_id":    row["receivable_id"],
+			"entity_id":         row["entity_id"],
+			"entity_name":       row["entity_name"],
+			"type":              "RECEIVABLE",
+			"amount":            row["invoice_amount"],
+			"due_date":          row["due_date"],
+			"counterparty_id":   row["counterparty_id"],
+			"counterparty_name": row["counterparty_name"],
+			"currency_code":     row["currency_code"],
+		})
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // ── Fund Planning ──────────────────────────────────────────────────────────
@@ -158,13 +315,21 @@ func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs
 			COALESCE(s.direction,      '') AS direction,
 			COALESCE(s.total_amount,    0) AS total_amount,
 			COALESCE(s.horizon,         0) AS horizon,
+			1 AS total_groups,
 			COALESCE((
 				SELECT processing_status FROM public.auditaction_fund_plan_groups
 				WHERE group_id::text = s.group_id::text
 				ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp),
 				                  COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
 				LIMIT 1
-			), '') AS processing_status
+			), '') AS processing_status,
+			COALESCE((
+				SELECT requested_at FROM public.auditaction_fund_plan_groups
+				WHERE group_id::text = s.group_id::text
+				ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp),
+				                  COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
+				LIMIT 1
+			), NULL) AS requested_at
 		FROM public.fund_plan_groups s
 		ORDER BY s.group_id DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
@@ -273,8 +438,10 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 			COALESCE(c.sweep_type,          '') AS sweep_type,
 			COALESCE(i.initiated_by,        '') AS initiated_by,
 			i.initiation_time,
-			COALESCE(i.overridden_amount,    0) AS overridden_amount,
-			COALESCE(a.processing_status,   '') AS processing_status
+			COALESCE(a.processing_status,   '') AS processing_status,
+			COALESCE(c.buffer_amount,         0) AS buffer_amount,
+			COALESCE(c.sweep_amount,          0) AS sweep_amount,
+			COALESCE(i.overridden_amount,     0) AS overridden_amount
 		FROM cimplrcorpsaas.sweep_initiation i
 		JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id::text = i.sweep_id::text
 		LEFT JOIN latest_audit a ON a.initiation_id = i.initiation_id::text
@@ -289,42 +456,6 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		return nil, err
 	}
 	return scanRows(r)
-}
-
-func queryCashSweepExecutionLogs(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "c", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
-
-	q := fmt.Sprintf(`
-		SELECT
-			COALESCE(l.execution_id::text, '') AS log_id,
-			COALESCE(l.sweep_id::text, '') AS config_id,
-			COALESCE(l.initiation_id::text, '') AS initiation_id,
-			COALESCE(c.entity_name, '') AS entity_name,
-			COALESCE(l.status, '') AS status,
-			l.execution_date,
-			COALESCE(l.amount_swept, 0) AS amount_swept,
-			COALESCE(l.from_account, '') AS from_account,
-			COALESCE(l.to_account, '') AS to_account,
-			COALESCE(l.balance_before, 0) AS balance_before,
-			COALESCE(l.balance_after, 0) AS balance_after,
-			COALESCE(l.error_message, '') AS error_message
-		FROM cimplrcorpsaas.sweep_execution_log l
-		LEFT JOIN cimplrcorpsaas.sweepconfiguration c ON l.sweep_id = c.sweep_id::text
-		WHERE 1=1 %s
-		ORDER BY l.execution_date DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
-	`, ef)
-
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
-}
-
-func queryCashSweepAllExecutionLogs(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	return queryCashSweepExecutionLogs(ctx, pool, entityIDs, limit)
 }
 
 func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
@@ -356,74 +487,47 @@ func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs
 
 // ── Projections ────────────────────────────────────────────────────────────
 func queryCashProjectionList(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	q := `
-		WITH latest_audit AS (
-			SELECT DISTINCT ON (proposal_id)
-				proposal_id,
-				processing_status,
-				requested_at,
-				checker_at
-			FROM cimplrcorpsaas.audit_action_cashflow_proposal
-			ORDER BY proposal_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
-		)
-		SELECT
-			COALESCE(p.proposal_id::text, '') AS proposal_id,
-			COALESCE(p.proposal_name, '') AS proposal_name,
-			COALESCE(p.base_currency_code, '') AS base_currency_code,
-			p.effective_date,
-			COALESCE(p.upload_s3_key, '') AS upload_s3_key,
-			COALESCE(a.processing_status, 'N/A') AS processing_status,
-			COUNT(DISTINCT i.item_id) AS item_count
-		FROM cimplrcorpsaas.cashflow_proposal p
-		LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i
-			ON p.proposal_id = i.proposal_id
-		   AND COALESCE(i.is_deleted, false) = false
-		LEFT JOIN latest_audit a ON a.proposal_id = p.proposal_id::text
-		WHERE COALESCE(p.is_deleted, false) = false
-		GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, p.upload_s3_key, a.processing_status, a.requested_at, a.checker_at
-		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
-	`
-
-	r, err := pool.Query(ctx, q, limit)
+	rows, err := cashprojection.QueryProposalListV2(ctx, pool, limit)
 	if err != nil {
 		return nil, err
 	}
-	return scanRows(r)
+	out := make([]map[string]any, len(rows))
+	for i, row := range rows {
+		out[i] = row
+	}
+	return out, nil
 }
 
-// parentID = proposal_id to drill into a specific proposal's line items.
-func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
+// proposalIDs filters line items to the selected cashflow proposals.
+func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, proposalIDs []string) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", 2)
 	args := append([]any{limit}, efArgs...)
 
 	proposalFilter := ""
-	if parentID != "" {
-		proposalFilter = fmt.Sprintf(" AND i.proposal_id = $%d", len(args)+1)
-		args = append(args, parentID)
+	proposalIDs = normalizeProposalIDs(proposalIDs)
+	if len(proposalIDs) > 0 {
+		proposalFilter = fmt.Sprintf(" AND i.proposal_id::text = ANY($%d)", len(args)+1)
+		args = append(args, proposalIDs)
 	}
 
 	q := fmt.Sprintf(`
 		SELECT
 			COALESCE(i.item_id::text, '')         AS item_id,
-			COALESCE(i.proposal_id::text, '')     AS proposal_id,
 			COALESCE(i.entity_name, '')           AS entity_name,
 			COALESCE(i.description, '')           AS description,
 			COALESCE(i.cashflow_type, '')         AS cashflow_type,
 			COALESCE(i.category_id::text, '')     AS category_id,
-			COALESCE(i.currency_code, '')         AS currency_code,
-			COALESCE(i.department_id::text, '')   AS department_id,
-			COALESCE(i.counterparty_name, '')     AS counterparty_name,
+			COALESCE(NULLIF(TRIM(i.currency_code), ''), NULLIF(TRIM(p.base_currency_code), '')) AS currency_code,
 			COALESCE(i.expected_amount, 0)        AS expected_amount,
 			COALESCE(i.is_recurring, false)       AS is_recurring,
 			COALESCE(i.recurrence_frequency, '')  AS recurrence_frequency,
-			i.start_date,
-			i.end_date,
 			i.maturity_date,
 			COALESCE(i.bank_name, '')             AS bank_name,
 			COALESCE(i.bank_account_number, '')   AS bank_account_number
 		FROM cimplrcorpsaas.cashflow_proposal_item i
-		WHERE COALESCE(i.is_deleted, false) = false %s %s
+		JOIN cimplrcorpsaas.cashflow_proposal p ON p.proposal_id = i.proposal_id
+		WHERE i.is_deleted IS NOT TRUE
+		  AND p.is_deleted IS NOT TRUE %s %s
 		ORDER BY i.created_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
 	`, ef, proposalFilter)
@@ -476,9 +580,39 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 }
 
 func queryCashFundAvailability(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	// Return a dummy/empty set because this is a complex aggregate API (from GetFundAvailability) that aggregates bank statement actuals and cashflow projections across dates.
-	// It doesn't have a single table we can just SELECT from. We will provide a minimal struct.
-	return []map[string]any{}, nil
+	asOfDate := time.Now()
+	if asOf, ok := ctx.Value(ctxKeyReqAsOfDate).(string); ok {
+		if parsed, err := time.Parse(constants.DateFormat, strings.TrimSpace(asOf)); err == nil {
+			asOfDate = parsed
+		}
+	}
+
+	viewType := ""
+	if vt, ok := ctx.Value(ctxKeyReqViewType).(string); ok {
+		viewType = strings.ToLower(strings.TrimSpace(vt))
+	}
+	if viewType == "" {
+		return []map[string]any{}, nil
+	}
+	if viewType != "daily" && viewType != "weekly" && viewType != "monthly" && viewType != "quarterly" && viewType != "yearly" {
+		return []map[string]any{}, nil
+	}
+	entityNames := api.GetEntityNamesFromCtx(ctx)
+	bankNames := api.GetBankNamesFromCtx(ctx)
+	if names, ok := ctx.Value(ctxKeyReqBankNamesNorm).([]string); ok && len(names) > 0 {
+		bankNames = names
+	}
+
+	rows, err := fundavailibilty.CombinedFundAvailabilityRows(
+		ctx, pool, asOfDate, viewType, entityIDs, entityNames, bankNames,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
 }
 
 func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
@@ -526,40 +660,84 @@ func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 	return scanRows(r)
 }
 
-func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "l", "entity_name", 2) // via JOIN with bank_limit
-	args := append([]any{limit}, efArgs...)
+// Dashboard builder exposes only these utilization columns (see CI_DSAHBOARD dataSourceFields cashUtilizations).
+var cashUtilizationDashboardFields = []string{
+	"currency_code",
+	"entry_mode",
+	"limit_action_type",
+	"limit_available",
+	"limit_bank_name",
+	"limit_core_limit_type",
+	"limit_currency_code",
+	"limit_effective_date",
+	"limit_entity_name",
+	"limit_fungibility_pct",
+	"limit_fungibility_type",
+	"limit_initial_utilization",
+	"limit_limit_sub_type",
+	"limit_limit_type",
+	"limit_processing_status",
+	"limit_remarks",
+	"limit_requested_at",
+	"limit_requested_by",
+	"limit_sanction_date",
+	"limit_sanctioned_amount",
+	"limit_security_type",
+	"limit_utilization_pct",
+	"remarks",
+	"utilization_date",
+	"utilized_amount",
+}
 
-	q := fmt.Sprintf(`
-		WITH latest_audit AS (
-			SELECT DISTINCT ON (utilization_id)
-				utilization_id,
-				processing_status,
-				requested_at,
-				checker_at
-			FROM cimplrcorpsaas.auditactionbanklimitutilization
-			ORDER BY utilization_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
-		)
-		SELECT 
-			COALESCE(u.utilization_id::text, '') AS utilization_id,
-			COALESCE(u.limit_id::text, '') AS limit_id,
-			COALESCE(l.entity_name, '') AS entity_name,
-			COALESCE(l.bank_name, '') AS bank_name,
-			u.utilization_date,
-			COALESCE(u.utilized_amount, 0) AS utilized_amount,
-			COALESCE(u.remarks, '') AS remarks,
-			COALESCE(a.processing_status, '') AS processing_status
-		FROM cimplrcorpsaas.bank_limit_utilization u
-		LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
-		LEFT JOIN latest_audit a ON a.utilization_id = u.utilization_id::text
-		WHERE COALESCE(u.is_deleted, false) = false %s
-		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
-	`, ef)
+func projectUtilizationRow(row map[string]interface{}) map[string]any {
+	out := make(map[string]any, len(cashUtilizationDashboardFields))
+	for _, key := range cashUtilizationDashboardFields {
+		if v, ok := row[key]; ok {
+			out[key] = v
+		}
+	}
+	return out
+}
 
-	r, err := pool.Query(ctx, q, args...)
+func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, rowLimit int) ([]map[string]any, error) {
+	// Reuse the cash module query for scope validation and KPI columns; project to dashboard schema.
+	rows, err := cashlimit.QueryAllUtilizations(ctx, pool, rowLimit)
 	if err != nil {
 		return nil, err
 	}
-	return scanRows(r)
+
+	if names, _ := ctx.Value("reqEntityNames").([]string); len(names) > 0 {
+		rows = filterUtilizationRowsByEntityNames(rows, names)
+		if rowLimit > 0 && len(rows) > rowLimit {
+			rows = rows[:rowLimit]
+		}
+	}
+
+	out := make([]map[string]any, len(rows))
+	for i, row := range rows {
+		out[i] = projectUtilizationRow(row)
+	}
+	return out, nil
+}
+
+func filterUtilizationRowsByEntityNames(rows []map[string]interface{}, names []string) []map[string]interface{} {
+	allowed := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		n := strings.ToLower(strings.TrimSpace(name))
+		if n != "" {
+			allowed[n] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		return rows
+	}
+
+	filtered := make([]map[string]interface{}, 0, len(rows))
+	for _, row := range rows {
+		entityName, _ := row["limit_entity_name"].(string)
+		if _, ok := allowed[strings.ToLower(strings.TrimSpace(entityName))]; ok {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
 }

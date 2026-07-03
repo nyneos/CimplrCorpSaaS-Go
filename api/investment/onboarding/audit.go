@@ -137,7 +137,8 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.checker_comment,'') AS checker_comment
 			FROM investment.auditactiondp a
 			LEFT JOIN investment.masterdepositoryparticipant m ON m.dp_id = a.dp_id
-			JOIN investment.masterdepositoryparticipant mdp ON mdp.dp_id = a.dp_id AND mdp.batch_id = $BATCH_PLACEHOLDER
+			JOIN investment.portfolio_onboarding_map pom ON pom.entity_name = m.dp_name
+				AND pom.folio_id IS NULL AND pom.demat_id IS NULL AND pom.amc_id IS NULL AND pom.scheme_id IS NULL
 
 			UNION ALL
 
@@ -260,7 +261,9 @@ func GetOnboardingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(a.checker_comment,'') AS checker_comment
 				FROM investment.auditactiondp a
 				LEFT JOIN investment.masterdepositoryparticipant m ON m.dp_id = a.dp_id
-				JOIN investment.masterdepositoryparticipant dp2 ON dp2.dp_id = a.dp_id AND dp2.batch_id::text = $1
+				JOIN investment.portfolio_onboarding_map pom ON pom.entity_name = m.dp_name
+					AND pom.batch_id::text = $1
+					AND pom.folio_id IS NULL AND pom.demat_id IS NULL AND pom.amc_id IS NULL AND pom.scheme_id IS NULL
 
 				UNION ALL
 

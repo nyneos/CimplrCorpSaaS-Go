@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"CimplrCorpSaas/api/investment/schemejoin"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -155,14 +157,22 @@ func queryInvestmentPortfolioGet(ctx context.Context, pool *pgxpool.Pool, entity
 			COALESCE(p.isin, '') AS isin,
 			COALESCE(p.total_units, 0) AS total_units,
 			COALESCE(p.avg_nav, 0) AS avg_nav,
-			COALESCE(p.current_nav, 0) AS current_nav,
-			COALESCE(p.current_value, 0) AS current_value,
+			COALESCE(ln.nav_value, 0) AS current_nav,
+			COALESCE(p.total_units, 0) * COALESCE(ln.nav_value, 0) AS current_value,
 			COALESCE(p.total_invested_amount, 0) AS total_invested_amount,
-			COALESCE(p.gain_loss, 0) AS gain_loss,
-			COALESCE(p.gain_losss_percent, 0) AS gain_loss_percent,
+			(COALESCE(p.total_units, 0) * COALESCE(ln.nav_value, 0)) - COALESCE(p.total_invested_amount, 0) AS gain_loss,
+			CASE WHEN COALESCE(p.total_invested_amount, 0) > 0
+				THEN (((COALESCE(p.total_units, 0) * COALESCE(ln.nav_value, 0)) - COALESCE(p.total_invested_amount, 0)) / COALESCE(p.total_invested_amount, 0)) * 100
+				ELSE 0 END AS gain_loss_percent,
 			p.created_at
-		FROM investment.portfolio_snapshot p
-		WHERE 1=1 %s
+		FROM (
+			SELECT DISTINCT ON (entity_name, folio_number, COALESCE(demat_acc_number, ''), scheme_id)
+				p.*
+			FROM investment.portfolio_snapshot p
+			WHERE 1=1 %s
+			ORDER BY entity_name, folio_number, COALESCE(demat_acc_number, ''), scheme_id, created_at DESC, id DESC
+		) p
+		`+schemejoin.NavLateralJoin("p", "")+`
 		ORDER BY p.created_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
 	`, ef)

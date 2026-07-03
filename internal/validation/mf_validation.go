@@ -10,12 +10,17 @@ import (
 // ValidateMFMasterReferences cross-references incoming request fields against the active master data loaded into the context by InvestmentMFMiddleware.
 // It returns an error message string if any validation fails, or an empty string if everything is valid.
 func ValidateMFMasterReferences(ctx context.Context, fields map[string]interface{}) string {
-	// 1. Validate Entity Scope
+	// 1. Validate Entity Scope (accept entity name or entity_id in entity_name field)
 	if allowedEntities, ok := ctx.Value("entity_names").([]string); ok {
+		allowedEntityIDs, _ := ctx.Value("entity_ids").([]string)
 		for _, entityName := range mfFieldStrings(fields, "entity_name", "entity_names") {
-			if !stringInSlice(entityName, allowedEntities) {
-				return fmt.Sprintf("Entity '%s' is not within your authorized access scope.", entityName)
+			if stringInSlice(entityName, allowedEntities) {
+				continue
 			}
+			if len(allowedEntityIDs) > 0 && stringInSlice(entityName, allowedEntityIDs) {
+				continue
+			}
+			return fmt.Sprintf("Entity '%s' is not within your authorized access scope.", entityName)
 		}
 	}
 	if allowedEntityIDs, ok := ctx.Value("entity_ids").([]string); ok {

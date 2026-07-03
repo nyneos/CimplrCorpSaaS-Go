@@ -511,6 +511,7 @@ func GetDividendsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.accounting_dividend d
 			JOIN investment.accounting_activity act ON act.activity_id = d.activity_id
 			LEFT JOIN latest_audit l ON l.activity_id = d.activity_id
+			LEFT JOIN investment.masterfolio fol ON fol.folio_id::text = d.folio_id
 			WHERE COALESCE(d.is_deleted, false) = false
 				AND COALESCE(act.is_deleted, false) = false
 		`
@@ -522,6 +523,12 @@ func GetDividendsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if folioRefs := accountingMFFolioRefs(ctx); len(folioRefs) > 0 {
 			q += fmt.Sprintf(" AND (COALESCE(d.folio_id::text,'') = '' OR d.folio_id::text = ANY($%d::text[]))", pos)
 			args = append(args, folioRefs)
+			pos++
+		}
+		if frag, fragArgs, newPos := accountingFolioEntityScopeClause(ctx, "fol", pos); frag != "" {
+			q += frag
+			args = append(args, fragArgs...)
+			pos = newPos
 		}
 		q += " ORDER BY d.updated_at DESC, d.dividend_id"
 

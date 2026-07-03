@@ -46,6 +46,7 @@ const (
 	ErrDateInterval                  = "'::date + INTERVAL '1 day'"
 	ErrParentLookupFailed            = "parent lookup failed: "
 	ErruploadMetaFail                = "file upload metadata failed: "
+	ErrFailedToResolveStagingFiles   = "failed to resolve staging files"
 )
 
 // General internal/server/upload error messages
@@ -111,6 +112,7 @@ const (
 	// ErrFailedToDeleteStagedStatements              = "failed to delete staged statements"
 	ErrFailedToReadTransactionDownloadAuditHistory = "failed to read transaction download audit history"
 	ErrMissingLatestAuditForTransaction            = "missing latest audit for transaction: "
+	ErrBankStatementIDRequired                     = "bank_statement_id is required"
 )
 
 // Additional common messages used across handlers
@@ -157,6 +159,14 @@ const (
 	ErrMasterCounterparty                 = "master-counterparty"
 	ErrMasterEntityCash                   = "master-entity-cash"
 	ErrMasterGLAccount                    = "master-gl-account"
+)
+
+// Master unique violation messages (PostgreSQL 23505).
+const (
+	ErrAMCNameAlreadyExists          = "AMC name already exists. Please use a different name."
+	ErrInternalAMCCodeAlreadyExists  = "Internal AMC code already exists. Please use a different code."
+	ErrSEBIRegistrationAlreadyExists = "SEBI registration number already exists."
+	ErrEntityNameAlreadyExists       = "Entity name already exists. Please use a different name."
 )
 
 // DB / SQL error templates
@@ -530,10 +540,35 @@ const (
 	ErrConfirmedPrincipalAndInterest      = "confirmed_principal_amount and confirmed_interest_rate must be positive"
 	FDAccrualEngine                       = "fd-accrual-engine"
 	ExposureHeaders                       = "public.exposure_headers"
+	UnionAll                              = "\nUNION ALL\n"
+	ErrInvalidCrossStageModule            = "module %q is not a cross-stage FX exposure module"
+	ErrInvalidCrossStageForwardModule     = "module %q is not a cross-stage FX forward module"
+	ErrFailedToUploadFileMetadata         = "file upload metadata failed: %w"
+	ErrFailedToDeleteItem                 = "delete %s failed: %s"
+	AMCName                               = "s.amc_name"
+	SchemeName                            = "s.scheme_name"
 )
 
 var (
-	Nifty50 = "NIFTY 50"
+	Nifty50  = "NIFTY 50"
+	Nifty100 = "NIFTY 100"
+	NiftyBank = "NIFTY BANK"
+	NiftyIT  = "NIFTY IT"
+)
+
+// Investment source/suite labels
+const (
+	InvestmentSuite = "Investment Suite"
+	RedemptionSuite = "Redemption Suite"
+)
+
+// Investment workflow error and log format strings
+const (
+	ErrHoldingsFetchFailed                = "Holdings fetch failed: "
+	ErrPortfolioRefreshInvestmentApproval = "Failed to run global portfolio refresh after investment confirmation approval: %v"
+	ErrPortfolioRefreshRedemptionApproval = "Failed to run global portfolio refresh after redemption confirmation approval: %v"
+	ErrParseFmt                           = "parse: %w"
+	ColTAAmfiSchemeCode                   = "ta.amfi_scheme_code"
 )
 
 const (

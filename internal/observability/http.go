@@ -11,7 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
+
 	"github.com/google/uuid"
 )
 
@@ -96,7 +98,7 @@ func WrapHTTP(service string, next http.Handler) http.Handler {
 		recordMetric(service, r.Method, r.URL.Path, rw.statusCode, rw.bytes, duration)
 		logger.LogInfoCtx(
 			r.Context(),
-			"[HTTP] service=%s method=%s path=%s status=%d duration_ms=%d bytes=%d request_id=%s remote=%s",
+			"[HTTP] service=%s method=%s path=%s status=%d duration_ms=%d bytes=%d request_id=%s trace_id=%s remote=%s",
 			service,
 			r.Method,
 			r.URL.Path,
@@ -112,7 +114,7 @@ func WrapHTTP(service string, next http.Handler) http.Handler {
 
 func MetricsHandler(service string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		payload := map[string]any{
 			"service": service,
 			"metrics": snapshot(service),

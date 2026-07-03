@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"CimplrCorpSaas/api"
@@ -19,6 +21,183 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var tenureTypeBackfillOnce sync.Once
+
+// deriveTenureType resolves DAYS | MONTHS | YEARS when tenure_type is blank.
+func deriveTenureType(tenureType string, tenureYears, tenureMonths, tenureDays int) string {
+	if v := strings.ToUpper(strings.TrimSpace(tenureType)); v != "" {
+		return v
+	}
+	if tenureYears > 0 {
+		return "YEARS"
+	}
+	if tenureMonths > 0 {
+		return "MONTHS"
+	}
+	if tenureDays > 0 {
+		return "DAYS"
+	}
+	return ""
+}
+
+func mapRowInt(row map[string]interface{}, keys ...string) int {
+	for _, key := range keys {
+		raw, ok := row[key]
+		if !ok || raw == nil {
+			continue
+		}
+		switch v := raw.(type) {
+		case int:
+			return v
+		case int32:
+			return int(v)
+		case int64:
+			return int(v)
+		case float64:
+			return int(v)
+		case float32:
+			return int(v)
+		case string:
+			if i, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+				return i
+			}
+		}
+	}
+	return 0
+}
+
+func enrichTenureFields(row map[string]interface{}) {
+	if mapRowInt(row, "tenure_months") == 0 {
+		if v := mapRowInt(row, "tenor_months"); v > 0 {
+			row["tenure_months"] = v
+		}
+	}
+	if mapRowInt(row, "tenure_days") == 0 {
+		if v := mapRowInt(row, "tenor_days"); v > 0 {
+			row["tenure_days"] = v
+		}
+	}
+	if mapRowInt(row, "tenure_years") == 0 {
+		if v := mapRowInt(row, "tenor_years"); v > 0 {
+			row["tenure_years"] = v
+		}
+	}
+
+	current := ""
+	if v, ok := row["tenure_type"]; ok && v != nil {
+		current = strings.TrimSpace(fmt.Sprintf("%v", v))
+	}
+	if current == "" {
+		if v, ok := row["tenor_type"]; ok && v != nil {
+			current = strings.TrimSpace(fmt.Sprintf("%v", v))
+		}
+	}
+	derived := deriveTenureType(
+		current,
+		mapRowInt(row, "tenure_years", "tenor_years"),
+		mapRowInt(row, "tenure_months", "tenor_months"),
+		mapRowInt(row, "tenure_days", "tenor_days"),
+	)
+	if derived != "" {
+		row["tenure_type"] = derived
+	}
+}
+
+func mapRowString(row map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		raw, ok := row[key]
+		if !ok || raw == nil {
+			continue
+		}
+		if s := strings.TrimSpace(fmt.Sprintf("%v", raw)); s != "" && s != "<nil>" {
+			return s
+		}
+	}
+	return ""
+}
+
+// enrichBankReferenceFields fills bank_reference_number from fd_confirmation when
+// the master row does not already carry a value (older activations).
+func enrichBankReferenceFields(ctx context.Context, pool *pgxpool.Pool, rows []map[string]interface{}) {
+	if len(rows) == 0 {
+		return
+	}
+
+	confCols, err := loadTableColumns(ctx, pool, "investment", "fd_confirmation")
+	if err != nil || !confCols["bank_reference_number"] {
+		return
+	}
+
+	confirmationIDs := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, row := range rows {
+		if mapRowString(row, "bank_reference_number") != "" {
+			continue
+		}
+		cid := mapRowString(row, "confirmation_id")
+		if cid == "" {
+			continue
+		}
+		if _, ok := seen[cid]; ok {
+			continue
+		}
+		seen[cid] = struct{}{}
+		confirmationIDs = append(confirmationIDs, cid)
+	}
+	if len(confirmationIDs) == 0 {
+		return
+	}
+
+	lookup := make(map[string]string, len(confirmationIDs))
+	qRows, qErr := pool.Query(ctx, `
+		SELECT
+			confirmation_id::text,
+			COALESCE(NULLIF(BTRIM(bank_reference_number::text), ''), bank_fd_ref_no, '') AS bank_reference_number
+		FROM investment.fd_confirmation
+		WHERE confirmation_id = ANY($1::text[])
+		  AND COALESCE(is_deleted, false) = false`, confirmationIDs)
+	if qErr != nil {
+		return
+	}
+	defer qRows.Close()
+	for qRows.Next() {
+		var cid, ref string
+		if scanErr := qRows.Scan(&cid, &ref); scanErr != nil {
+			continue
+		}
+		lookup[strings.TrimSpace(cid)] = strings.TrimSpace(ref)
+	}
+
+	for _, row := range rows {
+		if mapRowString(row, "bank_reference_number") != "" {
+			continue
+		}
+		cid := mapRowString(row, "confirmation_id")
+		if ref, ok := lookup[cid]; ok && ref != "" {
+			row["bank_reference_number"] = ref
+		}
+	}
+}
+
+func backfillEmptyTenureTypes(ctx context.Context, pool *pgxpool.Pool) {
+	tenureTypeBackfillOnce.Do(func() {
+		_, _ = pool.Exec(ctx, `
+			UPDATE investment.fd_master
+			SET tenure_type = CASE
+				WHEN COALESCE(tenure_years, 0) > 0 THEN 'YEARS'
+				WHEN COALESCE(tenure_months, 0) > 0 THEN 'MONTHS'
+				WHEN COALESCE(tenure_days, 0) > 0 THEN 'DAYS'
+				ELSE tenure_type
+			END
+			WHERE COALESCE(tenure_type, '') = ''
+			  AND (
+				COALESCE(tenure_years, 0) > 0
+				OR COALESCE(tenure_months, 0) > 0
+				OR COALESCE(tenure_days, 0) > 0
+			  )`)
+	})
+}
 
 type queryExecutor interface {
 	QueryRow(ctx context.Context, sql string, arguments ...interface{}) pgx.Row
@@ -462,8 +641,8 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 		"tenor_days":    rec.TenorDays, // fallback old name
 		"tenure_months": rec.TenorMonths,
 		"tenor_months":  rec.TenorMonths, // fallback old name
-		"tenure_type":   rec.TenureType,
-		"tenor_type":    rec.TenureType, // fallback old name
+		"tenure_type":   deriveTenureType(rec.TenureType, rec.TenureYears, rec.TenorMonths, rec.TenorDays),
+		"tenor_type":    deriveTenureType(rec.TenureType, rec.TenureYears, rec.TenorMonths, rec.TenorDays), // fallback old name
 		"tenure_years":  rec.TenureYears,
 		"tenor_years":   rec.TenureYears, // fallback old name
 		// optional
@@ -1329,6 +1508,7 @@ func GetFDMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		fdMaster := fdMaps[0]
+		enrichTenureFields(fdMaster)
 		if entityID := strings.TrimSpace(fmt.Sprint(fdMaster["entity_id"])); entityID != "" && !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
 			api.RespondWithError(w, http.StatusForbidden,
 				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
@@ -1438,6 +1618,7 @@ func refColForSelfHeal(masterCols map[string]bool) string {
 func GetFDMasterWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		backfillEmptyTenureTypes(ctx, pgxPool)
 		masterCols, err := loadTableColumns(ctx, pgxPool, "investment", "fd_master")
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
@@ -1587,6 +1768,11 @@ func GetFDMasterWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
 			return
 		}
+
+		for i := range payload {
+			enrichTenureFields(payload[i])
+		}
+		enrichBankReferenceFields(ctx, pgxPool, payload)
 
 		// ── Enrich each FD row with its latest activation audit processing_status ──
 		if auditTable != "" && auditRefCol != "" {

@@ -2050,10 +2050,9 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
                         'optional_code_value', COALESCE(c.optional_code_value, ''),
                         'old_code_type', COALESCE(c.old_code_type, ''),
                         'old_code_value', COALESCE(c.old_code_value, '')
-                    ))
+                    ) ORDER BY c.clearing_id)
                     FROM masterclearingcode c
                     WHERE c.account_id = a.account_id AND COALESCE(c.is_deleted, false) = false
-                    ORDER BY c.clearing_id
                 ), '[]'::json
             ) AS clearing_codes,
             b.bank_id,
@@ -2512,6 +2511,7 @@ func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
     ent.entity_name,
     b.bank_name, 
     a.account_nickname,
+    COALESCE(a.upload_s3_key, '') AS upload_s3_key,
     COALESCE(aa.processing_status, '') AS processing_status,
     COALESCE(aa.actiontype, '') AS action_type,
     COALESCE(aa.action_id::text, '') AS action_id,
@@ -2580,6 +2580,7 @@ WHERE COALESCE(a.is_deleted, false) = false`
 			EntityName      *string
 			BankName        *string
 			AccountNickname *string
+			UploadS3Key     string
 			ProcStatus      string
 			ActionType      string
 			ActionID        string
@@ -2595,7 +2596,7 @@ WHERE COALESCE(a.is_deleted, false) = false`
 		var accountIDs []string
 		for rows.Next() {
 			var row AccountRow
-			if err := rows.Scan(&row.AccountID, &row.AccountNumber, &row.AccountStatus, &row.EntityID, &row.EntityName, &row.BankName, &row.AccountNickname, &row.ProcStatus, &row.ActionType, &row.ActionID, &row.RequestedBy, &row.RequestedAt, &row.CheckerBy, &row.CheckerAt, &row.CheckerComment, &row.Reason); err != nil {
+			if err := rows.Scan(&row.AccountID, &row.AccountNumber, &row.AccountStatus, &row.EntityID, &row.EntityName, &row.BankName, &row.AccountNickname, &row.UploadS3Key, &row.ProcStatus, &row.ActionType, &row.ActionID, &row.RequestedBy, &row.RequestedAt, &row.CheckerBy, &row.CheckerAt, &row.CheckerComment, &row.Reason); err != nil {
 				continue
 			}
 			accountRows = append(accountRows, row)
@@ -2640,7 +2641,8 @@ WHERE COALESCE(a.is_deleted, false) = false`
 		for _, row := range accountRows {
 			auditInfo := auditDetailMap[row.AccountID]
 			out = append(out, map[string]interface{}{
-				"account_id": row.AccountID,
+				"account_id":    row.AccountID,
+				"upload_s3_key": row.UploadS3Key,
 				"account_number": func() string {
 					if row.AccountNumber != nil {
 						return *row.AccountNumber

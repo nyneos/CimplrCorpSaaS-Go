@@ -14,12 +14,17 @@ import (
 
 // SchemeData represents the scheme information returned from the database
 type SchemeData struct {
-	ID         int64  `json:"id"`
-	SchemeCode int64  `json:"schemeCode"`
-	SchemeName string `json:"schemeName"`
-	AMCName    string `json:"amcName"`
-	Category   string `json:"category"`
-	ISIN       string `json:"isin"`
+	ID            int64    `json:"id"`
+	SchemeCode    int64    `json:"schemeCode"`
+	SchemeName    string   `json:"schemeName"`    // official name from amfi_scheme_master_staging
+	SchemeNavName string   `json:"schemeNavName"` // scheme_nav_name from master (matches nav table scheme_name)
+	AMCName       string   `json:"amcName"`
+	Category      string   `json:"category"`
+	ISIN          string   `json:"isin"`
+	LatestNAV     *float64 `json:"latestNav"`
+	LatestNAVDate string   `json:"latestNavDate"`
+	PrevNAV       *float64 `json:"prevNav"`
+	PrevNAVDate   string   `json:"prevNavDate"`
 }
 
 // SchemeDataRequest represents the request body for filtering schemes
@@ -40,7 +45,8 @@ type SchemeDataResponse struct {
 	Message string       `json:"message,omitempty"`
 }
 
-// GetSchemeDataHandler retrieves scheme data from amfi_scheme_master_staging
+// GetSchemeDataHandler retrieves scheme data from amfi_scheme_master_staging joined with
+// amfi_nav_staging. Returns the two most recent NAV dates available for each scheme.
 func GetSchemeDataHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -54,117 +60,141 @@ func GetSchemeDataHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		var req SchemeDataRequest
 		if r.Body != nil && r.ContentLength > 0 {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				response := SchemeDataResponse{
+				json.NewEncoder(w).Encode(SchemeDataResponse{
 					Success: false,
 					Data:    []SchemeData{},
 					Message: fmt.Sprintf("Invalid request body: %v", err),
-				}
-				json.NewEncoder(w).Encode(response)
+				})
 				return
 			}
 		}
 
-		// Set default pagination
 		if req.Limit == 0 {
 			req.Limit = 100000
 		}
 		if req.Limit > 100000 {
-			req.Limit = 100000 // Max limit
+			req.Limit = 100000
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		// Build dynamic query
-		query := `
-			SELECT id, scheme_code, scheme_name, amc_name, 
-				   COALESCE(scheme_category, '') as category,
-				   COALESCE(
-					   NULLIF(isin_div_payout_growth, ''),
-					   NULLIF(isin_div_reinvestment, ''),
-					   ''
-				   ) as isin
-			FROM investment.amfi_scheme_master_staging
-			WHERE 1=1`
+		// ── build WHERE clause for master staging filters ──────────────────────
+		where := " WHERE 1=1"
+		filterArgs := []interface{}{}
+		argIdx := 1
 
-		args := []interface{}{}
-		argCount := 1
-
-		// Add filters
 		if len(req.AMCNames) > 0 {
-			query += fmt.Sprintf(" AND amc_name = ANY($%d)", argCount)
-			args = append(args, req.AMCNames)
-			argCount++
+			where += fmt.Sprintf(" AND sm.amc_name = ANY($%d)", argIdx)
+			filterArgs = append(filterArgs, req.AMCNames)
+			argIdx++
 		}
-
 		if len(req.Categories) > 0 {
-			query += fmt.Sprintf(" AND scheme_category = ANY($%d)", argCount)
-			args = append(args, req.Categories)
-			argCount++
+			where += fmt.Sprintf(" AND sm.scheme_category = ANY($%d)", argIdx)
+			filterArgs = append(filterArgs, req.Categories)
+			argIdx++
 		}
-
 		if len(req.SchemeCodes) > 0 {
-			query += fmt.Sprintf(" AND scheme_code = ANY($%d)", argCount)
-			args = append(args, req.SchemeCodes)
-			argCount++
+			where += fmt.Sprintf(" AND sm.scheme_code = ANY($%d)", argIdx)
+			filterArgs = append(filterArgs, req.SchemeCodes)
+			argIdx++
 		}
-
 		if req.SearchText != "" {
-			query += fmt.Sprintf(" AND (scheme_name ILIKE $%d OR amc_name ILIKE $%d)", argCount, argCount)
-			args = append(args, "%"+req.SearchText+"%")
-			argCount++
+			where += fmt.Sprintf(
+				" AND (sm.scheme_name ILIKE $%d OR sm.amc_name ILIKE $%d OR sm.scheme_nav_name ILIKE $%d)",
+				argIdx, argIdx, argIdx,
+			)
+			filterArgs = append(filterArgs, "%"+req.SearchText+"%")
+			argIdx++
 		}
 
-		// Get total count
-		countQuery := "SELECT COUNT(*) FROM (" + query + ") as count_query"
+		// ── count: hit master staging only — no NAV join needed ────────────────
+		// This avoids running the expensive window-function CTE twice.
+		countSQL := "SELECT COUNT(*) FROM investment.amfi_scheme_master_staging sm" + where
 		var total int
-		err := pool.QueryRow(ctx, countQuery, args...).Scan(&total)
-		if err != nil {
-			response := SchemeDataResponse{
+		if err := pool.QueryRow(ctx, countSQL, filterArgs...).Scan(&total); err != nil {
+			json.NewEncoder(w).Encode(SchemeDataResponse{
 				Success: false,
 				Data:    []SchemeData{},
 				Message: fmt.Sprintf("Failed to get count: %v", err),
-			}
-			json.NewEncoder(w).Encode(response)
+			})
 			return
 		}
 
-		// Add pagination
-		query += fmt.Sprintf(" ORDER BY scheme_name LIMIT $%d OFFSET $%d", argCount, argCount+1)
-		args = append(args, req.Limit, req.Offset)
+		// ── data query: single-pass nav aggregation (rn≤2) ────────────────────
+		// The inner sub-query is pruned to at most 2 rows per scheme_code, then
+		// pivoted with conditional MAX so the join is cheap.
+		dataArgs := append(filterArgs, req.Limit, req.Offset)
+		limitArg := argIdx
+		offsetArg := argIdx + 1
 
-		// Execute query
-		rows, err := pool.Query(ctx, query, args...)
+		dataSQL := fmt.Sprintf(`
+WITH nav_agg AS (
+    SELECT
+        scheme_code,
+        MAX(CASE WHEN rn = 1 THEN nav_value  END) AS latest_nav,
+        MAX(CASE WHEN rn = 1 THEN nav_date_s END) AS latest_nav_date,
+        MAX(CASE WHEN rn = 2 THEN nav_value  END) AS prev_nav,
+        MAX(CASE WHEN rn = 2 THEN nav_date_s END) AS prev_nav_date
+    FROM (
+        SELECT
+            scheme_code,
+            nav_value,
+            TO_CHAR(nav_date, 'YYYY-MM-DD') AS nav_date_s,
+            ROW_NUMBER() OVER (PARTITION BY scheme_code ORDER BY nav_date DESC) AS rn
+        FROM investment.amfi_nav_staging
+    ) ranked
+    WHERE rn <= 2
+    GROUP BY scheme_code
+)
+SELECT
+    sm.id,
+    sm.scheme_code,
+    sm.scheme_name,
+    COALESCE(sm.scheme_nav_name, '')                                   AS scheme_nav_name,
+    sm.amc_name,
+    COALESCE(sm.scheme_category, '')                                   AS category,
+    COALESCE(NULLIF(sm.isin_div_payout_growth,''), NULLIF(sm.isin_div_reinvestment,''), '') AS isin,
+    na.latest_nav,
+    COALESCE(na.latest_nav_date, '')                                   AS latest_nav_date,
+    na.prev_nav,
+    COALESCE(na.prev_nav_date, '')                                     AS prev_nav_date
+FROM investment.amfi_scheme_master_staging sm
+LEFT JOIN nav_agg na ON na.scheme_code = sm.scheme_code
+%s
+ORDER BY sm.scheme_name
+LIMIT $%d OFFSET $%d`, where, limitArg, offsetArg)
+
+		rows, err := pool.Query(ctx, dataSQL, dataArgs...)
 		if err != nil {
-			response := SchemeDataResponse{
+			json.NewEncoder(w).Encode(SchemeDataResponse{
 				Success: false,
 				Data:    []SchemeData{},
 				Message: fmt.Sprintf("Database query failed: %v", err),
-			}
-			json.NewEncoder(w).Encode(response)
+			})
 			return
 		}
 		defer rows.Close()
 
-		// Parse results
 		schemes := []SchemeData{}
 		for rows.Next() {
-			var scheme SchemeData
-			err := rows.Scan(&scheme.ID, &scheme.SchemeCode, &scheme.SchemeName,
-				&scheme.AMCName, &scheme.Category, &scheme.ISIN)
-			if err != nil {
+			var s SchemeData
+			if err := rows.Scan(
+				&s.ID, &s.SchemeCode, &s.SchemeName, &s.SchemeNavName,
+				&s.AMCName, &s.Category, &s.ISIN,
+				&s.LatestNAV, &s.LatestNAVDate,
+				&s.PrevNAV, &s.PrevNAVDate,
+			); err != nil {
 				continue
 			}
-			schemes = append(schemes, scheme)
+			schemes = append(schemes, s)
 		}
 
-		// Return response
-		response := SchemeDataResponse{
+		json.NewEncoder(w).Encode(SchemeDataResponse{
 			Success: true,
 			Data:    schemes,
 			Total:   total,
 			Message: "Success",
-		}
-		json.NewEncoder(w).Encode(response)
+		})
 	}
 }

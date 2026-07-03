@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -82,6 +83,10 @@ func bankCodeFromName(ctx context.Context, name string) (string, bool) {
 func getUserFriendlyPenaltyError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 
 	// Unwrap pgconn.PgError first â€” most specific handler
@@ -1111,7 +1116,7 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(deleteBlockers) > 0 {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
@@ -1562,6 +1567,7 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.is_active,false) AS is_active,
 				COALESCE(l.old_is_active,false) AS old_is_active,
 				COALESCE(m.is_deleted,false) AS is_deleted,
+				COALESCE(m.upload_s3_key,'') AS upload_s3_key,
 
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_type,'') AS action_type,
@@ -1816,22 +1822,30 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Check unique constraint pre-insert to provide friendly error
-			
+
 			// in-file duplicate check
 			minAmtVal, maxAmtVal := "null", "null"
-			if input.MinAmountRange != nil { minAmtVal = fmt.Sprintf("%v", *input.MinAmountRange) }
-			if input.MaxAmountRange != nil { maxAmtVal = fmt.Sprintf("%v", *input.MaxAmountRange) }
+			if input.MinAmountRange != nil {
+				minAmtVal = fmt.Sprintf("%v", *input.MinAmountRange)
+			}
+			if input.MaxAmountRange != nil {
+				maxAmtVal = fmt.Sprintf("%v", *input.MaxAmountRange)
+			}
 			minHeldVal, maxHeldVal := "null", "null"
-			if input.MinHeldDays != nil { minHeldVal = fmt.Sprintf("%v", *input.MinHeldDays) }
-			if input.MaxHeldDays != nil { maxHeldVal = fmt.Sprintf("%v", *input.MaxHeldDays) }
-			
+			if input.MinHeldDays != nil {
+				minHeldVal = fmt.Sprintf("%v", *input.MinHeldDays)
+			}
+			if input.MaxHeldDays != nil {
+				maxHeldVal = fmt.Sprintf("%v", *input.MaxHeldDays)
+			}
+
 			key := fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%s|%f|%s", input.BankCode, minAmtVal, maxAmtVal, input.MinTenorDays, input.MaxTenorDays, minHeldVal, maxHeldVal, strings.ToUpper(input.PenaltyType), input.PenaltyValue, input.CalculationMethod)
 			if prevRow, dup := seenKeysInFile[key]; dup {
 				sendFail(rowIdx+2, fmt.Sprintf("duplicate data in file: row %d conflicts with row %d (matching unique keys)", rowIdx+2, prevRow))
 				return
 			}
 			seenKeysInFile[key] = rowIdx + 2
-			
+
 			if conflict, err := penaltyStructureFindConflict(ctx, pgxPool, input); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 				return
@@ -1943,6 +1957,14 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, status, msg)
 				api.LogError("Upload: audit insert failed: %v", err)
 				return
+			}
+		}
+
+		// Persist the uploaded file's S3 key on each created penalty row so the
+		// listing API can surface a download link (mirrors the other FD masters).
+		if s3Key != "" && len(penaltyIDs) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE investment.fd_penalty_structure_master SET upload_s3_key = $1 WHERE penalty_id = ANY($2)`, s3Key, penaltyIDs); err != nil {
+				api.LogError("Failed to store upload_s3_key: %v", err)
 			}
 		}
 

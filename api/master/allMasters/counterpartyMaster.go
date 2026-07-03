@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -28,6 +29,10 @@ import (
 func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 
 	errStr := err.Error()
@@ -331,7 +336,7 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY counterparty_id, requested_at DESC
 			)
-	     SELECT m.counterparty_id, m.input_method, m.counterparty_name, m.old_counterparty_name, m.counterparty_code, m.old_counterparty_code, m.counterparty_type, m.old_counterparty_type, m.address, m.old_address, m.status, m.old_status, m.country, m.old_country, m.contact, m.old_contact, m.email, m.old_email, m.eff_from, m.old_eff_from, m.eff_to, m.old_eff_to, m.tags, m.old_tags, m.is_deleted,
+	     SELECT m.counterparty_id, m.input_method, m.counterparty_name, m.old_counterparty_name, m.counterparty_code, m.old_counterparty_code, m.counterparty_type, m.old_counterparty_type, m.address, m.old_address, m.status, m.old_status, m.country, m.old_country, m.contact, m.old_contact, m.email, m.old_email, m.eff_from, m.old_eff_from, m.eff_to, m.old_eff_to, m.tags, m.old_tags, m.is_deleted, m.upload_s3_key,
 				   l.processing_status, l.requested_by, l.requested_at, l.actiontype, l.action_id, l.checker_by, l.checker_at, l.checker_comment, l.reason
 			FROM mastercounterparty m
 			LEFT JOIN latest l ON l.counterparty_id = m.counterparty_id
@@ -384,9 +389,10 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				checkerComment   interface{}
 				reason           interface{}
 				isDeleted        bool
+				uploadS3Key      interface{}
 			)
 
-			if err := rows.Scan(&id, &inputMethod, &name, &oldName, &code, &oldCode, &ctype, &oldCtype, &addr, &oldAddr, &status, &oldStatus, &country, &oldCountry, &contact, &oldContact, &email, &oldEmail, &effFrom, &oldEffFrom, &effTo, &oldEffTo, &tags, &oldTags, &isDeleted, &processingStatus, &requestedBy, &requestedAt, &actionType, &actionID, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+			if err := rows.Scan(&id, &inputMethod, &name, &oldName, &code, &oldCode, &ctype, &oldCtype, &addr, &oldAddr, &status, &oldStatus, &country, &oldCountry, &contact, &oldContact, &email, &oldEmail, &effFrom, &oldEffFrom, &effTo, &oldEffTo, &tags, &oldTags, &isDeleted, &uploadS3Key, &processingStatus, &requestedBy, &requestedAt, &actionType, &actionID, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
 				continue
 			}
 
@@ -400,6 +406,7 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			order = append(order, id)
 			outMap[id] = map[string]interface{}{
 				"counterparty_id":       id,
+				"upload_s3_key":         ifaceToString(uploadS3Key),
 				"input_method":          ifaceToString(inputMethod),
 				"counterparty_name":     ifaceToString(name),
 				"old_counterparty_name": ifaceToString(oldName),

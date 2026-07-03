@@ -10,14 +10,18 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/investment/portfolio"
+	"CimplrCorpSaas/api/investment/schemejoin"
 	_ "CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/validation"
@@ -57,6 +61,7 @@ type SchemeInput struct {
 	InternalRiskRating string `json:"internal_risk_rating,omitempty"`
 	ErpGlAccount       string `json:"erp_gl_account,omitempty"`
 	Status             string `json:"status,omitempty"`
+	Method             string `json:"method,omitempty"`
 }
 
 type DPInput struct {
@@ -123,51 +128,224 @@ func defaultIfEmpty(val, def string) string {
 	return val
 }
 
-func validateOnboardingUploadScope(ctx context.Context, w http.ResponseWriter, amcs []AMCInput, schemes []SchemeInput, demats []DematInput, folios []FolioInput) bool {
-	rows := make([]map[string]interface{}, 0, len(amcs)+len(schemes)+len(demats)+len(folios))
-	for _, a := range amcs {
-		if a.Enriched || strings.TrimSpace(a.AmcID) != "" {
-			rows = append(rows, map[string]interface{}{
-				"amc_id":   a.AmcID,
-				"amc_name": a.AmcName,
-			})
+// Validation helpers (mirrors amcMaster package, kept local to avoid cross-package coupling)
+func isAlphanumericOnboard(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+			return false
 		}
 	}
+	return true
+}
+
+func isValidIFSCOnboard(s string) bool {
+	if len(s) != 11 {
+		return false
+	}
+	for i, c := range s {
+		switch {
+		case i < 4:
+			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+				return false
+			}
+		case i == 4:
+			if c != '0' {
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isValidEmailOnboard(s string) bool {
+	at := strings.Index(s, "@")
+	if at < 1 {
+		return false
+	}
+	domain := s[at+1:]
+	return strings.Contains(domain, ".") && len(domain) > 2
+}
+
+// isBlankRecord returns true when every meaningful string field is empty (UI placeholder rows).
+func isBlankAMC(a AMCInput) bool {
+	return strings.TrimSpace(a.AmcName) == "" && strings.TrimSpace(a.InternalAmcCode) == ""
+}
+func isBlankScheme(s SchemeInput) bool {
+	return strings.TrimSpace(s.SchemeName) == "" && strings.TrimSpace(s.AmcName) == ""
+}
+func isBlankFolio(f FolioInput) bool {
+	return strings.TrimSpace(f.FolioNumber) == "" && strings.TrimSpace(f.EntityName) == ""
+}
+func isBlankDP(d DPInput) bool {
+	return strings.TrimSpace(d.DPName) == "" && strings.TrimSpace(d.DPCode) == ""
+}
+func isBlankDemat(dm DematInput) bool {
+	return strings.TrimSpace(dm.EntityName) == "" && strings.TrimSpace(dm.DematAccountNumber) == ""
+}
+
+// resolveFolioAmcName picks AMC for a folio when the upload row leaves amc_name blank.
+// Prefers AMC from new (non-enriched) schemes in the same batch upload.
+func resolveFolioAmcName(f FolioInput, schemes []SchemeInput, amcMap map[string]string) string {
+	if name := strings.TrimSpace(f.AmcName); name != "" {
+		return name
+	}
+	seen := make(map[string]struct{})
+	var candidates []string
 	for _, s := range schemes {
-		if s.Enriched || strings.TrimSpace(s.SchemeID) != "" {
-			rows = append(rows, map[string]interface{}{
-				"scheme_id":            s.SchemeID,
-				"scheme_internal_code": s.InternalSchemeCode,
-				"amc_name":             s.AmcName,
-			})
+		if s.Enriched {
+			continue
+		}
+		if name := strings.TrimSpace(s.AmcName); name != "" {
+			if _, ok := seen[name]; !ok {
+				seen[name] = struct{}{}
+				candidates = append(candidates, name)
+			}
 		}
 	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	if len(candidates) > 1 {
+		sort.Strings(candidates)
+		return candidates[0]
+	}
+	var amcNames []string
+	for k := range amcMap {
+		amcNames = append(amcNames, k)
+	}
+	sort.Strings(amcNames)
+	if len(amcNames) > 0 {
+		return amcNames[0]
+	}
+	return "Unknown AMC"
+}
+
+// validateAMCRequired mirrors the AMC master create validations for new (non-enriched) AMCs.
+func validateAMCRequired(i int, a AMCInput) string {
+	if strings.TrimSpace(a.AmcName) == "" {
+		return fmt.Sprintf("AMC #%d: amc_name is required", i+1)
+	}
+	if a.Enriched {
+		return "" // enriched AMCs already exist in the system; skip further validation
+	}
+	code := strings.TrimSpace(a.InternalAmcCode)
+	if code == "" {
+		return fmt.Sprintf("AMC #%d '%s': internal_amc_code is required", i+1, a.AmcName)
+	}
+	if !isAlphanumericOnboard(code) {
+		return fmt.Sprintf("AMC #%d '%s': internal_amc_code must be alphanumeric, got '%s'", i+1, a.AmcName, code)
+	}
+	if mfu := strings.TrimSpace(a.MfuAmcCode); mfu != "" && !isAlphanumericOnboard(mfu) {
+		return fmt.Sprintf("AMC #%d '%s': mfu_amc_code must be alphanumeric, got '%s'", i+1, a.AmcName, mfu)
+	}
+	if cams := strings.TrimSpace(a.CamsAmcCode); cams != "" && !isAlphanumericOnboard(cams) {
+		return fmt.Sprintf("AMC #%d '%s': cams_amc_code must be alphanumeric, got '%s'", i+1, a.AmcName, cams)
+	}
+	if ifsc := strings.ToUpper(strings.TrimSpace(a.AmcBankIfsc)); ifsc != "" && ifsc != "DEFAULT0000" && !isValidIFSCOnboard(ifsc) {
+		return fmt.Sprintf("AMC #%d '%s': amc_bank_ifsc '%s' is not a valid IFSC code (format: 4 letters + 0 + 6 alphanumeric)", i+1, a.AmcName, ifsc)
+	}
+	if email := strings.TrimSpace(a.PrimaryContactEmail); email != "" && !isValidEmailOnboard(email) {
+		return fmt.Sprintf("AMC #%d '%s': primary_contact_email '%s' is not a valid email address", i+1, a.AmcName, email)
+	}
+	return ""
+}
+
+// validateSchemeRequired mirrors the scheme master: scheme_name + amc_name + internal_scheme_code required for new.
+func validateSchemeRequired(i int, s SchemeInput) string {
+	if strings.TrimSpace(s.SchemeName) == "" {
+		return fmt.Sprintf("Scheme #%d: scheme_name is required", i+1)
+	}
+	if strings.TrimSpace(s.AmcName) == "" {
+		return fmt.Sprintf("Scheme #%d '%s': amc_name is required", i+1, s.SchemeName)
+	}
+	if !s.Enriched && strings.TrimSpace(s.InternalSchemeCode) == "" {
+		return fmt.Sprintf("Scheme #%d '%s': internal_scheme_code is required for new schemes", i+1, s.SchemeName)
+	}
+	if !s.Enriched && strings.TrimSpace(s.Method) != "" {
+		m := strings.ToUpper(strings.TrimSpace(s.Method))
+		if m != "FIFO" && m != "LIFO" && m != "WEIGHTED_AVERAGE" {
+			return fmt.Sprintf("Scheme #%d '%s': method must be FIFO, LIFO, or WEIGHTED_AVERAGE", i+1, s.SchemeName)
+		}
+	}
+	return ""
+}
+
+// validateFolioRequired: entity_name + folio_number required; subscription/redemption accounts required for new folios.
+func validateFolioRequired(i int, f FolioInput) string {
+	if strings.TrimSpace(f.EntityName) == "" {
+		return fmt.Sprintf("Folio #%d: entity_name is required", i+1)
+	}
+	if strings.TrimSpace(f.FolioNumber) == "" {
+		return fmt.Sprintf("Folio #%d (entity: %s): folio_number is required", i+1, f.EntityName)
+	}
+	if !f.Enriched && strings.TrimSpace(f.FolioID) == "" {
+		if strings.TrimSpace(f.DefaultSubscriptionAccount) == "" {
+			return fmt.Sprintf("Folio #%d '%s': default_subscription_account is required", i+1, f.FolioNumber)
+		}
+		if strings.TrimSpace(f.DefaultRedemptionAccount) == "" {
+			return fmt.Sprintf("Folio #%d '%s': default_redemption_account is required", i+1, f.FolioNumber)
+		}
+	}
+	return ""
+}
+
+// validateDPRequired: dp_name + dp_code + depository required.
+func validateDPRequired(i int, d DPInput) string {
+	if strings.TrimSpace(d.DPName) == "" {
+		return fmt.Sprintf("DP #%d: dp_name is required", i+1)
+	}
+	if strings.TrimSpace(d.DPCode) == "" {
+		return fmt.Sprintf("DP #%d '%s': dp_code is required", i+1, d.DPName)
+	}
+	if strings.TrimSpace(d.Depository) == "" {
+		return fmt.Sprintf("DP #%d '%s': depository is required", i+1, d.DPName)
+	}
+	return ""
+}
+
+// validateDematRequired: entity_name + demat_account_number + settlement account required for new demats.
+func validateDematRequired(i int, dm DematInput) string {
+	if strings.TrimSpace(dm.EntityName) == "" {
+		return fmt.Sprintf("Demat #%d: entity_name is required", i+1)
+	}
+	if strings.TrimSpace(dm.DematAccountNumber) == "" {
+		return fmt.Sprintf("Demat #%d (entity: %s): demat_account_number is required", i+1, dm.EntityName)
+	}
+	if !dm.Enriched && strings.TrimSpace(dm.DefaultSettlementAccount) == "" {
+		return fmt.Sprintf("Demat #%d '%s': default_settlement_account is required", i+1, dm.DematAccountNumber)
+	}
+	return ""
+}
+
+func validateOnboardingUploadScope(ctx context.Context, w http.ResponseWriter, amcs []AMCInput, schemes []SchemeInput, demats []DematInput, folios []FolioInput) bool {
+	// AMC, Scheme, DP: identity is NOT validated against the Approved* context here.
+	//   - enriched=true  → entity exists in system but may be PENDING_APPROVAL; Approved* check would block it
+	//   - enriched=false → being created fresh; not in system yet, Approved* check would always fail
+	//   Field/format validation for these is handled by validateAMCRequired / validateSchemeRequired / validateDPRequired.
+	//
+	// Demat + Folio: always check entity scope (entity_name) so the upload can't reference
+	// entities outside the user's authorized scope.
+	//   - enriched=true  → skip Demat/Folio identity check (may be PENDING_APPROVAL)
+	//   - enriched=false + has ID → also skip; field validation handles it separately
+	//   - scheme_ids on folios: never validated here; schemes may be freshly enriched (PENDING_APPROVAL)
+	rows := make([]map[string]interface{}, 0, len(demats)+len(folios))
 	for _, d := range demats {
-		row := map[string]interface{}{
+		rows = append(rows, map[string]interface{}{
 			"entity_name": d.EntityName,
-		}
-		if d.Enriched || strings.TrimSpace(d.DematID) != "" {
-			row["demat_id"] = d.DematID
-			row["demat_acc_number"] = d.DematAccountNumber
-		}
-		rows = append(rows, row)
+		})
 	}
 	for _, f := range folios {
-		row := map[string]interface{}{
+		rows = append(rows, map[string]interface{}{
 			"entity_name": f.EntityName,
-		}
-		if f.Enriched || strings.TrimSpace(f.FolioID) != "" {
-			row["folio_id"] = f.FolioID
-			row["folio_number"] = f.FolioNumber
-		}
-		if len(f.SchemeRefs) > 0 {
-			row["scheme_ids"] = f.SchemeRefs
-		}
-		rows = append(rows, row)
+		})
 	}
 	for _, row := range rows {
 		if msg := validation.ValidateMFMasterReferences(ctx, row); msg != "" {
-			api.RespondWithError(w, http.StatusForbidden, msg)
+			api.RespondWithError(w, http.StatusBadRequest, msg)
 			return false
 		}
 	}
@@ -195,11 +373,28 @@ func parseTransactionsCSV(r io.Reader) ([]TxCSVRow, error) {
 	cr := csv.NewReader(r)
 	cr.TrimLeadingSpace = true
 	rows := []TxCSVRow{}
+	
 	hdr, err := cr.Read()
 	if err != nil {
 		return nil, err
 	}
-	_ = hdr
+
+	// Build a map of normalized column name to index
+	colIdx := make(map[string]int)
+	for i, h := range hdr {
+		normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(h, " ", ""), "_", ""))
+		colIdx[normalized] = i
+	}
+
+	getVal := func(rec []string, possibleNames ...string) string {
+		for _, name := range possibleNames {
+			if idx, ok := colIdx[name]; ok && idx < len(rec) {
+				return strings.TrimSpace(rec[idx])
+			}
+		}
+		return ""
+	}
+
 	for {
 		rec, err := cr.Read()
 		if err == io.EOF {
@@ -208,11 +403,23 @@ func parseTransactionsCSV(r io.Reader) ([]TxCSVRow, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(rec) < 7 {
-			return nil, fmt.Errorf("csv: expected >=7 cols, got %d", len(rec))
+
+		// Check if row is entirely empty
+		isEmpty := true
+		for _, v := range rec {
+			if strings.TrimSpace(v) != "" {
+				isEmpty = false
+				break
+			}
 		}
-		// parse date using NormalizeDate
-		dtStr := strings.TrimSpace(rec[0])
+		if isEmpty {
+			continue
+		}
+
+		dtStr := getVal(rec, "transactiondate", "date")
+		if dtStr == "" {
+			return nil, fmt.Errorf("transaction date is missing")
+		}
 		normalizedDate, err := NormalizeDate(dtStr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid date %s: %v", dtStr, err)
@@ -221,22 +428,28 @@ func parseTransactionsCSV(r io.Reader) ([]TxCSVRow, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse normalized date %s: %v", normalizedDate, err)
 		}
-		// Handle both folio and demat
-		// CSV format: TransactionDate,TransactionType,SchemeInternalCode,FolioNumber,Amount,Units,NAV,DematAccNumber
-		// So: rec[0]=date, rec[1]=type, rec[2]=scheme, rec[3]=folio, rec[4]=amount, rec[5]=units, rec[6]=nav, rec[7]=demat (if present)
-		folioNumber := strings.TrimSpace(rec[3])
-		dematAccNumber := ""
-		if len(rec) >= 8 {
-			dematAccNumber = strings.TrimSpace(rec[7]) // DematAccNumber is at the END of the row
-		}
-		// Validate: either folio or demat must be present
+
+		folioNumber := getVal(rec, "folionumber", "folio")
+		dematAccNumber := getVal(rec, "demataccountnumber", "demataccnumber", "demat")
+
 		if folioNumber == "" && dematAccNumber == "" {
 			return nil, fmt.Errorf("either folio_number or demat_acc_number must be provided")
 		}
-		amount, _ := strconv.ParseFloat(strings.TrimSpace(rec[4]), 64)
-		units, _ := strconv.ParseFloat(strings.TrimSpace(rec[5]), 64)
-		nav, _ := strconv.ParseFloat(strings.TrimSpace(rec[6]), 64)
-		rows = append(rows, TxCSVRow{TransactionDate: dt, TransactionType: strings.TrimSpace(rec[1]), SchemeInternalCode: strings.TrimSpace(rec[2]), FolioNumber: folioNumber, DematAccNumber: dematAccNumber, Amount: amount, Units: units, Nav: nav})
+
+		amount, _ := strconv.ParseFloat(getVal(rec, "amount"), 64)
+		units, _ := strconv.ParseFloat(getVal(rec, "units"), 64)
+		nav, _ := strconv.ParseFloat(getVal(rec, "nav"), 64)
+
+		rows = append(rows, TxCSVRow{
+			TransactionDate:    dt,
+			TransactionType:    getVal(rec, "transactiontype", "type"),
+			SchemeInternalCode: getVal(rec, "schemeinternalcode", "scheme"),
+			FolioNumber:        folioNumber,
+			DematAccNumber:     dematAccNumber,
+			Amount:             amount,
+			Units:              units,
+			Nav:                nav,
+		})
 	}
 	return rows, nil
 }
@@ -403,6 +616,14 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Process AMCs
 		logger.LogInfo("[bulk] starting AMC processing, found %d AMCs", len(amcs))
 		for i, a := range amcs {
+			if isBlankAMC(a) {
+				logger.LogInfo("[bulk] amc[%d] skipped: blank placeholder row", i)
+				continue
+			}
+			if msg := validateAMCRequired(i, a); msg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, msg)
+				return
+			}
 			logger.LogInfo("[bulk] processing amc[%d]: %+v", i, a)
 			// lookup by internal code or name
 			var existing string
@@ -437,7 +658,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			// insert
 			var amcID string
-			q := `INSERT INTO investment.masteramc (amc_name, internal_amc_code, status, primary_contact_name, primary_contact_email, sebi_registration_no, amc_beneficiary_name, amc_bank_account_no, amc_bank_name, amc_bank_ifsc, mfu_amc_code, cams_amc_code, erp_vendor_code, source, batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'Manual',$14) RETURNING amc_id`
+			q := `INSERT INTO investment.masteramc (amc_name, internal_amc_code, status, primary_contact_name, primary_contact_email, sebi_registration_no, amc_beneficiary_name, amc_bank_account_no, amc_bank_name, amc_bank_ifsc, mfu_amc_code, cams_amc_code, erp_vendor_code, source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'Manual') RETURNING amc_id`
 			if err := tx.QueryRow(ctx, q,
 				a.AmcName,
 				a.InternalAmcCode,
@@ -451,8 +672,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				defaultIfEmpty(a.AmcBankIfsc, "DEFAULT0000"),
 				defaultIfEmpty(a.MfuAmcCode, "MFU000"),
 				defaultIfEmpty(a.CamsAmcCode, "CAM000"),
-				defaultIfEmpty(a.ErpVendorCode, "ERP000"),
-				batchID).Scan(&amcID); err != nil {
+				defaultIfEmpty(a.ErpVendorCode, "ERP000")).Scan(&amcID); err != nil {
 				logger.LogError("[bulk] insert amc failed: %v", err)
 				api.RespondWithError(w, 500, "insert amc failed: "+err.Error())
 				return
@@ -478,7 +698,15 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		logger.LogInfo("[bulk] AMC processing completed. Total processed: %d, Total created: %d", len(amcs), counts["amc"])
 
 		// Process DP
-		for _, d := range dps {
+		for i, d := range dps {
+			if isBlankDP(d) {
+				logger.LogInfo("[bulk] dp[%d] skipped: blank placeholder row", i)
+				continue
+			}
+			if msg := validateDPRequired(i, d); msg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, msg)
+				return
+			}
 			logger.LogInfo("[bulk] processing dp: %+v", d)
 			var existing string
 			if d.DPCode != "" {
@@ -499,7 +727,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			var dpID string
-			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterdepositoryparticipant (dp_name, dp_code, depository, status, source, batch_id) VALUES ($1,$2,$3,$4,'Manual',$5) RETURNING dp_id`, d.DPName, d.DPCode, defaultIfEmpty(d.Depository, "NSDL"), defaultIfEmpty(d.Status, "Active"), batchID).Scan(&dpID); err != nil {
+			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterdepositoryparticipant (dp_name, dp_code, depository, status, source) VALUES ($1,$2,$3,$4,'Manual') RETURNING dp_id`, d.DPName, d.DPCode, defaultIfEmpty(d.Depository, "NSDL"), defaultIfEmpty(d.Status, "Active")).Scan(&dpID); err != nil {
 				logger.LogError("[bulk] insert dp failed: %v", err)
 				api.RespondWithError(w, 500, "insert dp failed: "+err.Error())
 				return
@@ -520,7 +748,15 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Process Demat
-		for _, dm := range demats {
+		for i, dm := range demats {
+			if isBlankDemat(dm) {
+				logger.LogInfo("[bulk] demat[%d] skipped: blank placeholder row", i)
+				continue
+			}
+			if msg := validateDematRequired(i, dm); msg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, msg)
+				return
+			}
 			logger.LogInfo("[bulk] processing demat: %+v", dm)
 			var existing string
 			if dm.DematAccountNumber != "" {
@@ -541,7 +777,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			var dematID string
-			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterdemataccount (entity_name, dp_id, depository, demat_account_number, depository_participant, client_id, default_settlement_account, status, source, batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Manual',$9) RETURNING demat_id`, dm.EntityName, dm.DPID, defaultIfEmpty(dm.Depository, "NSDL"), dm.DematAccountNumber, dm.DepositoryParticipant, dm.ClientID, defaultIfEmpty(dm.DefaultSettlementAccount, "SYSTEM"), defaultIfEmpty(dm.Status, "Active"), batchID).Scan(&dematID); err != nil {
+			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterdemataccount (entity_name, dp_id, depository, demat_account_number, depository_participant, client_id, default_settlement_account, status, source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Manual') RETURNING demat_id`, dm.EntityName, dm.DPID, defaultIfEmpty(dm.Depository, "NSDL"), dm.DematAccountNumber, dm.DepositoryParticipant, dm.ClientID, defaultIfEmpty(dm.DefaultSettlementAccount, "SYSTEM"), defaultIfEmpty(dm.Status, "Active")).Scan(&dematID); err != nil {
 				logger.LogError("[bulk] insert demat failed: %v", err)
 				api.RespondWithError(w, 500, "insert demat failed: "+err.Error())
 				return
@@ -562,7 +798,18 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Process Folios
-		for _, f := range folios {
+		for i, f := range folios {
+			if isBlankFolio(f) {
+				logger.LogInfo("[bulk] folio[%d] skipped: blank placeholder row", i)
+				continue
+			}
+			if msg := validateFolioRequired(i, f); msg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, msg)
+				return
+			}
+			f.EntityName = strings.TrimSpace(f.EntityName)
+			f.FolioNumber = strings.TrimSpace(f.FolioNumber)
+			f.AmcName = strings.TrimSpace(f.AmcName)
 			logger.LogInfo("[bulk] processing folio: %+v", f)
 			if f.Enriched && f.FolioID != "" {
 				logger.LogInfo("[bulk] folio is enriched with ID, using: %s", f.FolioID)
@@ -577,23 +824,14 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				enrichedFolios[f.FolioNumber] = true
 				continue
 			}
-			// Resolve amc_name if empty - try to lookup from entity_name or use a default
-			folioAmcName := f.AmcName
-			if folioAmcName == "" {
-				// Try to find an AMC for this entity or use first available
-				for amcKey, _ := range amcMap {
-					folioAmcName = amcKey
-					break
-				}
-				if folioAmcName == "" {
-					folioAmcName = "Unknown AMC"
-				}
+			folioAmcName := resolveFolioAmcName(f, schemes, amcMap)
+			if f.AmcName == "" {
 				logger.LogInfo("[bulk] folio amc_name was empty, using: %s", folioAmcName)
 			}
 			var existing string
 			if f.FolioNumber != "" && f.EntityName != "" {
 				logger.LogInfo("[bulk] folio checking existing: folio=%s, entity=%s, amc=%s", f.FolioNumber, f.EntityName, folioAmcName)
-				_ = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND entity_name=$2 AND COALESCE(is_deleted,false)=false LIMIT 1`, f.FolioNumber, f.EntityName).Scan(&existing)
+				_ = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND TRIM(entity_name)=TRIM($2) AND COALESCE(is_deleted,false)=false LIMIT 1`, f.FolioNumber, f.EntityName).Scan(&existing)
 			}
 			if existing != "" {
 				logger.LogInfo("[bulk] folio found existing: %s", existing)
@@ -612,7 +850,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			var folioID string
-			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterfolio (entity_name, amc_name, folio_number, first_holder_name, default_subscription_account, default_redemption_account, status, source, batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7,'Manual',$8) RETURNING folio_id`, f.EntityName, folioAmcName, f.FolioNumber, f.FirstHolderName, defaultIfEmpty(f.DefaultSubscriptionAccount, "SYSTEM"), defaultIfEmpty(f.DefaultRedemptionAccount, "SYSTEM"), defaultIfEmpty(f.Status, "Active"), batchID).Scan(&folioID); err != nil {
+			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterfolio (entity_name, amc_name, folio_number, first_holder_name, default_subscription_account, default_redemption_account, status, source) VALUES ($1,$2,$3,$4,$5,$6,$7,'Manual') RETURNING folio_id`, f.EntityName, folioAmcName, f.FolioNumber, f.FirstHolderName, defaultIfEmpty(f.DefaultSubscriptionAccount, "SYSTEM"), defaultIfEmpty(f.DefaultRedemptionAccount, "SYSTEM"), defaultIfEmpty(f.Status, "Active")).Scan(&folioID); err != nil {
 				logger.LogError("[bulk] insert folio failed: %v", err)
 				api.RespondWithError(w, 500, "insert folio failed: "+err.Error())
 				return
@@ -648,7 +886,15 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Process Schemes (after AMCs so amc exists)
-		for _, s := range schemes {
+		for i, s := range schemes {
+			if isBlankScheme(s) {
+				logger.LogInfo("[bulk] scheme[%d] skipped: blank placeholder row", i)
+				continue
+			}
+			if msg := validateSchemeRequired(i, s); msg != "" {
+				api.RespondWithError(w, http.StatusBadRequest, msg)
+				return
+			}
 			logger.LogInfo("[bulk] processing scheme: %+v", s)
 			var existing string
 
@@ -704,7 +950,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			var schemeID string
 			enrichedSchemes[defaultIfEmpty(s.InternalSchemeCode, s.SchemeName)] = true
-			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterscheme (scheme_name, isin, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, status, source, batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7,'Manual',$8) RETURNING scheme_id`,
+			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterscheme (scheme_name, isin, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, status, method, source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Manual') RETURNING scheme_id`,
 				s.SchemeName,
 				s.ISIN,
 				s.AmcName,
@@ -712,7 +958,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				defaultIfEmpty(s.InternalRiskRating, "Medium"),
 				defaultIfEmpty(s.ErpGlAccount, "GL000"),
 				defaultIfEmpty(s.Status, "Active"),
-				batchID).Scan(&schemeID); err != nil {
+				defaultIfEmpty(strings.ToUpper(strings.TrimSpace(s.Method)), "FIFO")).Scan(&schemeID); err != nil {
 				logger.LogError("[bulk] insert scheme failed: %v", err)
 				api.RespondWithError(w, 500, "insert scheme failed: "+err.Error())
 				return
@@ -730,6 +976,34 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			schemeMap[s.InternalSchemeCode] = schemeID
 			counts["scheme"]++
+		}
+
+		// Link schemes from this batch to folios (new or existing) when AMC matches.
+		for folioNum, folioID := range folioMap {
+			var folioAmc sql.NullString
+			_ = tx.QueryRow(ctx, `SELECT amc_name FROM investment.masterfolio WHERE folio_id=$1`, folioID).Scan(&folioAmc)
+			for _, s := range schemes {
+				if isBlankScheme(s) {
+					continue
+				}
+				key := defaultIfEmpty(s.InternalSchemeCode, s.SchemeName)
+				sid := schemeMap[key]
+				if sid == "" && s.SchemeName != "" {
+					sid = schemeMap[s.SchemeName]
+				}
+				if sid == "" {
+					continue
+				}
+				schemeAmc := strings.TrimSpace(s.AmcName)
+				if folioAmc.Valid && schemeAmc != "" && !strings.EqualFold(folioAmc.String, schemeAmc) {
+					continue
+				}
+				if _, err := tx.Exec(ctx, `INSERT INTO investment.folioschememapping (folio_id, scheme_id, status) VALUES ($1,$2,'Active') ON CONFLICT DO NOTHING`, folioID, sid); err != nil {
+					logger.LogError("[bulk] folio-scheme map failed folio=%s scheme=%s: %v", folioNum, key, err)
+					api.RespondWithError(w, 500, "folio-scheme map failed: "+err.Error())
+					return
+				}
+			}
 		}
 
 		// Insert onboard_mapping for all created or enriched entries
@@ -914,20 +1188,37 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// Insert transactions with validation and enrichment
-			for _, tr := range txRows {
-				// Validate transaction against enriched data if provided
+			// Insert transactions with strict validation
+			for rowNum, tr := range txRows {
+				// ── Amount validations ───────────────────────────────────────────────
+				if tr.Amount < 0 {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+						"Transaction row %d: amount cannot be negative (%.2f). Use TransactionType to indicate direction (Purchase/Sell).",
+						rowNum+1, tr.Amount))
+					return
+				}
+				if tr.Nav > 0 && tr.Units > 0 {
+					expected := tr.Nav * tr.Units
+					if math.Abs(tr.Amount-expected) > expected*0.01 { // 1% tolerance for rounding
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+							"Transaction row %d: amount (%.2f) must equal NAV (%.4f) × Units (%.4f) = %.2f (difference exceeds 1%% rounding tolerance).",
+							rowNum+1, tr.Amount, tr.Nav, tr.Units, expected))
+						return
+					}
+				}
+
+				// Log enrichment lookups (informational only — resolution happens below)
 				if enrichedScheme, exists := enrichedSchemesByCode[tr.SchemeInternalCode]; exists {
-					logger.LogInfo("[bulk] transaction scheme %s validated against enriched scheme: %s", tr.SchemeInternalCode, enrichedScheme.SchemeName)
+					logger.LogInfo("[bulk] tx row %d: scheme '%s' found in batch as '%s'", rowNum+1, tr.SchemeInternalCode, enrichedScheme.SchemeName)
 				}
 				if tr.FolioNumber != "" {
 					if enrichedFolio, exists := enrichedFoliosByNumber[tr.FolioNumber]; exists {
-						logger.LogInfo("[bulk] transaction folio %s validated against enriched folio for entity: %s", tr.FolioNumber, enrichedFolio.EntityName)
+						logger.LogInfo("[bulk] tx row %d: folio '%s' found in batch for entity '%s'", rowNum+1, tr.FolioNumber, enrichedFolio.EntityName)
 					}
 				}
 				if tr.DematAccNumber != "" {
 					if enrichedDemat, exists := enrichedDematsByNumber[tr.DematAccNumber]; exists {
-						logger.LogInfo("[bulk] transaction demat %s validated against enriched demat for entity: %s", tr.DematAccNumber, enrichedDemat.EntityName)
+						logger.LogInfo("[bulk] tx row %d: demat '%s' found in batch for entity '%s'", rowNum+1, tr.DematAccNumber, enrichedDemat.EntityName)
 					}
 				}
 
@@ -943,7 +1234,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					// If not found, query DB
 					if entityName == "" {
-						_ = tx.QueryRow(ctx, `SELECT entity_name FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false`, tr.FolioNumber).Scan(&entityName)
+						_ = tx.QueryRow(ctx, `SELECT entity_name FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.FolioNumber).Scan(&entityName)
 					}
 				} else if tr.DematAccNumber != "" {
 					// Try from demats map first
@@ -955,9 +1246,22 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					// If not found, query DB
 					if entityName == "" {
-						_ = tx.QueryRow(ctx, `SELECT entity_name FROM investment.masterdemataccount WHERE demat_account_number=$1 AND COALESCE(is_deleted,false)=false`, tr.DematAccNumber).Scan(&entityName)
+						_ = tx.QueryRow(ctx, `SELECT entity_name FROM investment.masterdemataccount WHERE demat_account_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.DematAccNumber).Scan(&entityName)
 					}
 				}
+
+				// Normalise transaction type
+				rawType := strings.TrimSpace(tr.TransactionType)
+				normType := "Purchase"
+				if strings.EqualFold(rawType, "purchase") || strings.EqualFold(rawType, "buy") || strings.EqualFold(rawType, "subscription") {
+					normType = "Purchase"
+				} else if strings.EqualFold(rawType, "sell") || strings.EqualFold(rawType, "redemption") || strings.EqualFold(rawType, "redeem") {
+					normType = "Redemption"
+				} else {
+					// Fallback to titlecase if unknown
+					normType = strings.Title(strings.ToLower(rawType))
+				}
+				tr.TransactionType = normType
 
 				// Resolve scheme_id (prioritize from enriched data, fallback to DB)
 				var schemeID string
@@ -993,10 +1297,33 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 
+				// ── Strict cross-reference checks ───────────────────────────────────
+				// scheme_internal_code MUST resolve to a scheme in this batch or in masterscheme
+				if tr.SchemeInternalCode != "" && schemeID == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+						"Transaction row %d: scheme_internal_code '%s' was not found in this batch or in approved schemes. Transactions must reference schemes included in this upload.",
+						rowNum+1, tr.SchemeInternalCode))
+					return
+				}
+				// folio_number MUST resolve when provided
+				if tr.FolioNumber != "" && folioID == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+						"Transaction row %d: folio_number '%s' was not found in this batch or in master folios.",
+						rowNum+1, tr.FolioNumber))
+					return
+				}
+				// demat_account_number MUST resolve when provided
+				if tr.DematAccNumber != "" && dematID == "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(
+						"Transaction row %d: demat_account_number '%s' was not found in this batch or in master demat accounts.",
+						rowNum+1, tr.DematAccNumber))
+					return
+				}
+
 				// Insert transaction with resolved IDs and entity_name
 				// Note: Store all values as POSITIVE. Transaction type ('Purchase', 'Sell', etc.)
 				// determines direction in snapshot calculations.
-				if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_transaction (batch_id, transaction_date, transaction_type, scheme_internal_code, folio_number, demat_acc_number, amount, units, nav, scheme_id, folio_id, demat_id, entity_name, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())`, batchID, tr.TransactionDate, tr.TransactionType, tr.SchemeInternalCode, nullableString(tr.FolioNumber), nullableString(tr.DematAccNumber), tr.Amount, tr.Units, tr.Nav, nullableString(schemeID), nullableString(folioID), nullableString(dematID), nullableString(entityName)); err != nil {
+				if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_transaction (batch_id, transaction_date, transaction_type, scheme_internal_code, folio_number, demat_acc_number, amount, units, nav, scheme_id, folio_id, demat_id, entity_name, created_at, approval_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now(),'PENDING')`, batchID, tr.TransactionDate, tr.TransactionType, tr.SchemeInternalCode, nullableString(tr.FolioNumber), nullableString(tr.DematAccNumber), tr.Amount, tr.Units, tr.Nav, nullableString(schemeID), nullableString(folioID), nullableString(dematID), nullableString(entityName)); err != nil {
 					logger.LogError("[bulk] insert onboard_transaction failed: %v", err)
 					api.RespondWithError(w, 500, "insert transaction failed: "+err.Error())
 					return
@@ -1030,25 +1357,22 @@ WITH scheme_resolved AS (
         ot.folio_id,
         ot.demat_id,
         -- Prioritize scheme_id from transaction, then resolve via internal_code or folio mapping
-        COALESCE(ot.scheme_id, ms_direct.scheme_id, ms_code.scheme_id, ms_folio.scheme_id) AS scheme_id,
-        COALESCE(ms_direct.scheme_name, ms_code.scheme_name, ms_folio.scheme_name) AS scheme_name,
-        COALESCE(ms_direct.isin, ms_code.isin, ms_folio.isin) AS isin
+        COALESCE(ot.scheme_id, resolved_scheme.scheme_id::text) AS scheme_id,
+        resolved_scheme.scheme_name,
+        resolved_scheme.isin
     FROM investment.onboard_transaction ot
     LEFT JOIN investment.masterfolio mf 
         ON mf.folio_id = ot.folio_id
     LEFT JOIN investment.masterdemataccount md
         ON md.demat_id = ot.demat_id
-    -- Direct scheme_id lookup
-    LEFT JOIN investment.masterscheme ms_direct
-        ON ms_direct.scheme_id = ot.scheme_id
-    -- Lookup by internal_scheme_code
-    LEFT JOIN investment.masterscheme ms_code
-        ON ms_code.internal_scheme_code = ot.scheme_internal_code
-    -- Lookup via folio scheme mapping
-    LEFT JOIN investment.folioschememapping fsm 
-        ON fsm.folio_id = ot.folio_id
-    LEFT JOIN investment.masterscheme ms_folio
-        ON ms_folio.scheme_id = fsm.scheme_id
+    LEFT JOIN LATERAL (
+        SELECT scheme_id, scheme_name, isin
+        FROM investment.masterscheme
+        WHERE scheme_id::text = ot.scheme_id 
+           OR internal_scheme_code = ot.scheme_internal_code
+        ORDER BY created_at DESC 
+        LIMIT 1
+    ) AS resolved_scheme ON true
     WHERE ot.batch_id = $1
 ),
 transaction_summary AS (
@@ -1061,43 +1385,9 @@ transaction_summary AS (
         scheme_id,
         scheme_name,
         isin,
-        SUM(CASE 
-            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
-            ELSE units
-        END) AS total_units,
-        SUM(CASE 
-            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN amount
-            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -amount
-            ELSE amount
-        END) AS total_invested_amount,
-        CASE 
-            WHEN SUM(CASE 
-                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
-                ELSE units
-            END) = 0 THEN 0
-            ELSE SUM(CASE 
-                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN nav * units
-                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -nav * units
-                ELSE nav * units
-            END) / SUM(CASE 
-                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
-                ELSE units
-            END)
-        END AS avg_nav
+` + portfolio.TransactionSummaryMetrics + `
     FROM scheme_resolved
     GROUP BY entity_name, folio_number, demat_acc_number, folio_id, demat_id, scheme_id, scheme_name, isin
-),
-latest_nav AS (
-    SELECT DISTINCT ON (scheme_name)
-        scheme_name,
-        isin_div_payout_growth as isin,
-        nav_value,
-        nav_date
-    FROM investment.amfi_nav_staging
-    ORDER BY scheme_name, nav_date DESC
 )
 INSERT INTO investment.portfolio_snapshot (
   batch_id,
@@ -1140,7 +1430,7 @@ SELECT
   END AS gain_losss_percent,
   NOW()
 FROM transaction_summary ts
-LEFT JOIN latest_nav ln ON (ln.scheme_name = ts.scheme_name OR ln.isin = ts.isin)
+` + schemejoin.NavLateralJoin("ts", "") + `
 WHERE ts.total_units > 0;
 `
 
@@ -1568,20 +1858,25 @@ WITH scheme_resolved AS (
         COALESCE(mf.entity_name, md.entity_name) AS entity_name,
         ot.folio_number,
         ot.demat_acc_number,
-        COALESCE(ot.scheme_id, fsm.scheme_id, ms2.scheme_id) AS scheme_id,
-        COALESCE(ms2.scheme_name, ms.scheme_name) AS scheme_name,
-        COALESCE(ms2.isin, ms.isin) AS isin
+        ot.folio_id,
+        ot.demat_id,
+        COALESCE(ms.scheme_id::text, ot.scheme_id) AS scheme_id,
+        COALESCE(ms.scheme_name, '') AS scheme_name,
+        COALESCE(ms.isin, '') AS isin,
+        COALESCE(ms.amfi_scheme_code, '') AS amfi_scheme_code
     FROM investment.onboard_transaction ot
     LEFT JOIN investment.masterfolio mf 
         ON mf.folio_id = ot.folio_id
     LEFT JOIN investment.masterdemataccount md
         ON md.demat_id = ot.demat_id
-    LEFT JOIN investment.folioschememapping fsm 
-        ON fsm.folio_id = ot.folio_id
-    LEFT JOIN investment.masterscheme ms 
-        ON ms.scheme_id = fsm.scheme_id
-    LEFT JOIN investment.masterscheme ms2
-        ON ms2.internal_scheme_code = ot.scheme_internal_code
+    LEFT JOIN investment.masterscheme ms ON (
+        COALESCE(ms.is_deleted, false) = false
+        AND (
+            (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id))
+            OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code))
+            OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id))
+        )
+    )
     WHERE ot.batch_id = $1
 ),
 transaction_summary AS (
@@ -1589,48 +1884,15 @@ transaction_summary AS (
         entity_name,
         folio_number,
         demat_acc_number,
-        ot.folio_id,
-        ot.demat_id,
+        folio_id,
+        demat_id,
         scheme_id,
         scheme_name,
         isin,
-        SUM(CASE 
-            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
-            ELSE units
-        END) AS total_units,
-        SUM(CASE 
-            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN amount
-            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -amount
-            ELSE amount
-        END) AS total_invested_amount,
-        CASE 
-            WHEN SUM(CASE 
-                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
-                ELSE units
-            END) = 0 THEN 0
-            ELSE SUM(CASE 
-                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN nav * units
-                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -nav * units
-                ELSE nav * units
-            END) / SUM(CASE 
-                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
-                ELSE units
-            END)
-        END AS avg_nav
+        MAX(amfi_scheme_code) AS amfi_scheme_code,
+` + portfolio.TransactionSummaryMetrics + `
     FROM scheme_resolved
     GROUP BY entity_name, folio_number, demat_acc_number, folio_id, demat_id, scheme_id, scheme_name, isin
-),
-latest_nav AS (
-    SELECT DISTINCT ON (scheme_name)
-        scheme_name,
-        isin_div_payout_growth as isin,
-        nav_value,
-        nav_date
-    FROM investment.amfi_nav_staging
-    ORDER BY scheme_name, nav_date DESC
 )
 INSERT INTO investment.portfolio_snapshot (
   batch_id,
@@ -1673,7 +1935,7 @@ SELECT
   END AS gain_losss_percent,
   NOW()
 FROM transaction_summary ts
-LEFT JOIN latest_nav ln ON (ln.scheme_name = ts.scheme_name OR ln.isin = ts.isin)
+` + schemejoin.NavLateralJoin("ts", "ts.amfi_scheme_code") + `
 WHERE ts.total_units > 0;
 `
 
@@ -1727,33 +1989,26 @@ func PostPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		batchID := req.BatchID
 
 		summaryQ := `
-        WITH latest_nav AS (
-            SELECT DISTINCT ON (scheme_name)
-                scheme_name,
-                nav_value,
-                raw_category_header
-            FROM investment.amfi_nav_staging
-            ORDER BY scheme_name, nav_date DESC
-        ),
-        tx_agg AS (
+        WITH tx_agg AS (
             SELECT 
                 ot.folio_number,
-                COALESCE(fsm.scheme_id, ms.scheme_id) AS scheme_id,
-                ms.scheme_name,
+                COALESCE(ms.scheme_id::text, ot.scheme_id) AS scheme_id,
+                COALESCE(ms.scheme_name, '') AS scheme_name,
+                COALESCE(ms.isin, '') AS isin,
                 SUM(ot.amount) AS total_investment,
-                SUM(ot.units) AS total_units
+                SUM(ot.units) AS total_units,
+                MAX(COALESCE(ms.amfi_scheme_code, '')) AS amfi_scheme_code
             FROM investment.onboard_transaction ot
             LEFT JOIN investment.masterfolio mf ON mf.folio_number = ot.folio_number
-            LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = mf.folio_id
-            LEFT JOIN investment.masterscheme ms ON ms.scheme_id = fsm.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code
+            LEFT JOIN investment.masterscheme ms ON (` + schemejoin.JoinOnboardTx + `)
             WHERE ot.batch_id = $1
-            GROUP BY ot.folio_number, COALESCE(fsm.scheme_id, ms.scheme_id), ms.scheme_name
+            GROUP BY ot.folio_number, COALESCE(ms.scheme_id::text, ot.scheme_id), COALESCE(ms.scheme_name, ''), COALESCE(ms.isin, '')
         )
         SELECT 
             COALESCE(SUM(total_investment),0) AS total_investment,
             COALESCE(SUM(total_units * COALESCE(ln.nav_value,0)),0) AS current_value
         FROM tx_agg ta
-        LEFT JOIN latest_nav ln ON ln.scheme_name = ta.scheme_name;
+        ` + schemejoin.NavLateralJoin("ta", constants.ColTAAmfiSchemeCode) + `;
         `
 
 		var totalInv, currVal float64
@@ -1770,33 +2025,26 @@ func PostPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		allocQ := `
-        WITH latest_nav AS (
-            SELECT DISTINCT ON (scheme_name)
-                scheme_name,
-                nav_value,
-                raw_category_header
-            FROM investment.amfi_nav_staging
-            ORDER BY scheme_name, nav_date DESC
-        ),
-        tx_agg AS (
+        WITH tx_agg AS (
             SELECT 
                 ot.folio_number,
-                COALESCE(fsm.scheme_id, ms.scheme_id) AS scheme_id,
-                ms.scheme_name,
+                COALESCE(ms.scheme_id::text, ot.scheme_id) AS scheme_id,
+                COALESCE(ms.scheme_name, '') AS scheme_name,
+                COALESCE(ms.isin, '') AS isin,
+                MAX(COALESCE(ms.amfi_scheme_code, '')) AS amfi_scheme_code,
                 SUM(ot.units) AS total_units
             FROM investment.onboard_transaction ot
-            LEFT JOIN investment.masterfolio mf ON mf.folio_number = ot.folio_number
-            LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = mf.folio_id
-            LEFT JOIN investment.masterscheme ms ON ms.scheme_id = fsm.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code
+            LEFT JOIN investment.masterfolio mf ON mf.folio_id = ot.folio_id
+            LEFT JOIN investment.masterscheme ms ON (` + schemejoin.JoinOnboardTx + `)
             WHERE ot.batch_id = $1
-            GROUP BY ot.folio_number, COALESCE(fsm.scheme_id, ms.scheme_id), ms.scheme_name
+            GROUP BY ot.folio_number, COALESCE(ms.scheme_id::text, ot.scheme_id), COALESCE(ms.scheme_name, ''), COALESCE(ms.isin, '')
         )
         SELECT 
             COALESCE(ln.raw_category_header, 'Uncategorized') AS category,
             SUM(ta.total_units * COALESCE(ln.nav_value,0)) AS value
         FROM tx_agg ta
-        LEFT JOIN latest_nav ln ON ln.scheme_name = ta.scheme_name
-        GROUP BY ln.raw_category_header;
+        ` + schemejoin.NavLateralJoin("ta", constants.ColTAAmfiSchemeCode) + `
+        GROUP BY COALESCE(ln.raw_category_header, 'Uncategorized');
         `
 
 		allocRows, err := pgxPool.Query(ctx, allocQ, batchID)
@@ -1819,25 +2067,19 @@ func PostPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		allocRows.Close()
 
 		holdingsQ := `
-        WITH latest_nav AS (
-            SELECT DISTINCT ON (scheme_name)
-                scheme_name,
-                nav_value
-            FROM investment.amfi_nav_staging
-            ORDER BY scheme_name, nav_date DESC
-        ),
-        tx_agg AS (
+        WITH tx_agg AS (
             SELECT 
                 ot.folio_number,
-                COALESCE(fsm.scheme_id, ms.scheme_id) AS scheme_id,
-                ms.scheme_name,
+                COALESCE(ms.scheme_id::text, ot.scheme_id) AS scheme_id,
+                COALESCE(ms.scheme_name, '') AS scheme_name,
+                COALESCE(ms.isin, '') AS isin,
+                MAX(COALESCE(ms.amfi_scheme_code, '')) AS amfi_scheme_code,
                 SUM(ot.units) AS total_units
             FROM investment.onboard_transaction ot
-            LEFT JOIN investment.masterfolio mf ON mf.folio_number = ot.folio_number
-            LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = mf.folio_id
-            LEFT JOIN investment.masterscheme ms ON ms.scheme_id = fsm.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code
+            LEFT JOIN investment.masterfolio mf ON mf.folio_id = ot.folio_id
+            LEFT JOIN investment.masterscheme ms ON (` + schemejoin.JoinOnboardTx + `)
             WHERE ot.batch_id = $1
-            GROUP BY ot.folio_number, COALESCE(fsm.scheme_id, ms.scheme_id), ms.scheme_name
+            GROUP BY ot.folio_number, COALESCE(ms.scheme_id::text, ot.scheme_id), COALESCE(ms.scheme_name, ''), COALESCE(ms.isin, '')
         )
         SELECT 
             ta.scheme_name,
@@ -1846,7 +2088,7 @@ func PostPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
             COALESCE(ln.nav_value,0) AS current_nav,
             ta.total_units * COALESCE(ln.nav_value,0) AS current_value
         FROM tx_agg ta
-        LEFT JOIN latest_nav ln ON ln.scheme_name = ta.scheme_name
+        ` + schemejoin.NavLateralJoin("ta", constants.ColTAAmfiSchemeCode) + `
         ORDER BY current_value DESC;
         `
 

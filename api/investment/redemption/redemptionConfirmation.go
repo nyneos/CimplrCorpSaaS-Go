@@ -6,11 +6,14 @@ import (
 	"CimplrCorpSaas/api/investment/uploadutil"
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	jobs "CimplrCorpSaas/internal/jobs/investment"
+	"CimplrCorpSaas/internal/logger"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -18,7 +21,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -240,7 +242,7 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateRedemptionConfirmationRequest
 		var statementHeader *multipart.FileHeader
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "multipart/form-data") {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText))), "multipart/form-data") {
 			if err := r.ParseMultipartForm(32 << 20); err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort+": "+err.Error())
 				return
@@ -679,6 +681,11 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
+		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
+			logger.LogError(constants.ErrPortfolioRefreshRedemptionApproval, err)
+		}
+
 		go func() {
 			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, []string{req.RedemptionConfirmID}, "UPDATE", userEmail)
 			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/update", req.RedemptionConfirmID, payload.ToMap())
@@ -878,6 +885,11 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
+		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
+			logger.LogError(constants.ErrPortfolioRefreshRedemptionApproval, err)
+		}
+
 		go func() {
 			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, req.RedemptionConfirmIDs, "DELETE_REQUEST", requestedBy)
 			corID := ""
@@ -1026,7 +1038,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 						ms.scheme_id = ri.scheme_id OR
 						ms.scheme_name = ri.scheme_id OR
 						ms.internal_scheme_code = ri.scheme_id OR
-						ms.isin = ri.scheme_id
+						ms.amfi_scheme_code = ri.scheme_id
 					)
 					WHERE ri.redemption_id = $1
 				`, redemptionID).Scan(&folioID, &dematID, &schemeID, &method, &entityName); err != nil {
@@ -1051,20 +1063,16 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 									CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC,
 									ot.id ASC
 							) AS row_num
-						FROM investment.onboard_transaction ot
+						FROM investment.approved_onboard_transaction ot
 						LEFT JOIN investment.masterscheme ms ON (
-							ms.scheme_id = ot.scheme_id OR
-							ms.internal_scheme_code = ot.scheme_internal_code OR
-							ms.isin = ot.scheme_id
+							COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))
 						)
 						WHERE 
 							LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
 							AND (
 								ms.scheme_id = $1 OR
-								ms.scheme_name = $1 OR
-								ms.internal_scheme_code = $1 OR
-								ms.isin = $1 OR
-								ot.scheme_id = $1 OR
+																ms.internal_scheme_code = $1 OR
+																ot.scheme_id = $1 OR
 								ot.scheme_internal_code = $1
 							)
 							AND (
@@ -1129,6 +1137,11 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
+		}
+
+		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
+		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
+			logger.LogError(constants.ErrPortfolioRefreshRedemptionApproval, err)
 		}
 
 		// Automatically process confirmed redemptions (create SELL transactions and refresh snapshots)
@@ -1259,6 +1272,11 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
+		}
+
+		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
+		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
+			logger.LogError(constants.ErrPortfolioRefreshRedemptionApproval, err)
 		}
 
 		if len(req.RedemptionConfirmIDs) > 0 {
@@ -1415,9 +1433,9 @@ func fetchRedemptionConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool,
 		LEFT JOIN investment.redemption_initiation i ON i.redemption_id = m.redemption_id
 		LEFT JOIN investment.masterscheme s ON (
 		    s.scheme_id::text = i.scheme_id
-		 OR s.scheme_name = i.scheme_id
+		
 		 OR s.internal_scheme_code = i.scheme_id
-		 OR s.isin = i.scheme_id
+		
 		)
 		LEFT JOIN resolved_folio rf ON rf.redemption_id = i.redemption_id
 		LEFT JOIN resolved_demat rd ON rd.redemption_id = i.redemption_id
@@ -1591,9 +1609,6 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	}
 	defer tx.Rollback(ctx)
 
-	// Use a transient batch ID (do not persist an `onboard_batch` row)
-	batchID := uuid.New().String()
-
 	// Fetch redemption confirmation details with related redemption initiation and resolved master data.
 	// Important: initiation folio_id/demat_id/scheme_id are string identifiers and may be non-unique (e.g. folio_number="1").
 	// We must resolve deterministically (prefer exact IDs; otherwise constrain by entity_name) to avoid cross-entity fanout.
@@ -1641,17 +1656,18 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 				COALESCE(ms.method, 'FIFO') AS method
 			FROM investment.masterscheme ms
 			WHERE
-				ms.scheme_id::text = mr.scheme_id
-				OR ms.scheme_name = mr.scheme_id
-				OR ms.internal_scheme_code = mr.scheme_id
-				OR ms.isin = mr.scheme_id
+				COALESCE(ms.is_deleted, false) = false
+				AND (
+					ms.scheme_id::text = mr.scheme_id
+					OR ms.internal_scheme_code = mr.scheme_id
+					OR ms.amfi_scheme_code = mr.scheme_id
+				)
 			ORDER BY
 				CASE
 					WHEN ms.scheme_id::text = mr.scheme_id THEN 0
-					WHEN ms.scheme_name = mr.scheme_id THEN 1
-					WHEN ms.internal_scheme_code = mr.scheme_id THEN 2
-					WHEN ms.isin = mr.scheme_id THEN 3
-					ELSE 4
+					WHEN ms.internal_scheme_code = mr.scheme_id THEN 1
+					WHEN ms.amfi_scheme_code = mr.scheme_id THEN 2
+					ELSE 3
 				END
 			LIMIT 1
 		) s ON TRUE
@@ -1702,6 +1718,9 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		return nil, fmt.Errorf("Fetch confirmations failed: %w", err)
 	}
 	defer rows.Close()
+
+	// Use a generated transient batch ID (do not create an entry in onboard_batch)
+	batchID := uuid.New().String()
 
 	type confirmationData struct {
 		RedemptionConfirmID string
@@ -1810,16 +1829,16 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		txInsert := `
 			INSERT INTO investment.onboard_transaction (
 				batch_id, transaction_date, transaction_type, folio_number, demat_acc_number,
-				amount, units, nav, scheme_id, folio_id, demat_id, scheme_internal_code, entity_name, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+				amount, units, nav, scheme_id, folio_id, demat_id, scheme_internal_code, entity_name, approval_status, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'APPROVED', now())
 		`
 
 		// Insert SELL transaction with POSITIVE values
-		// Transaction type 'SELL' indicates this reduces holdings
+		// Transaction type 'Redemption' indicates this reduces holdings
 		if _, err := tx.Exec(ctx, txInsert,
 			batchID,
 			cd.RequestedDate,
-			"SELL",
+			"Redemption",
 			folioNumber,
 			dematAccNumber,
 			cd.GrossProceeds, // positive amount (proceeds received)
@@ -1849,20 +1868,16 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 							CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC,
 							ot.id ASC
 					) AS row_num
-				FROM investment.onboard_transaction ot
+				FROM investment.approved_onboard_transaction ot
 				LEFT JOIN investment.masterscheme ms ON (
-					ms.scheme_id = ot.scheme_id OR
-					ms.internal_scheme_code = ot.scheme_internal_code OR
-					ms.isin = ot.scheme_id
+					COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))
 				)
 				WHERE 
 					LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
 					AND (
 						ms.scheme_id = $1 OR
-						ms.scheme_name = $1 OR
-						ms.internal_scheme_code = $1 OR
-						ms.isin = $1 OR
-						ot.scheme_id = $1 OR
+												ms.internal_scheme_code = $1 OR
+												ot.scheme_id = $1 OR
 						ot.scheme_internal_code = $1
 					)
 					AND (
@@ -1928,171 +1943,13 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		}
 	}
 
-	// Refresh portfolio snapshot based on ALL transactions for affected folio_id/demat_id
-	// Group by folio_id and demat_id (unique identifiers) instead of non-unique folio_number/demat_acc_number
-	// Delete existing snapshots for affected folio_id/demat_id combinations
-	deleteSnap := `
-		DELETE FROM investment.portfolio_snapshot
-		WHERE (folio_id IS NOT NULL AND folio_id IN (
-			SELECT DISTINCT ot.folio_id
-			FROM investment.onboard_transaction ot
-			WHERE ot.batch_id = $1 AND ot.folio_id IS NOT NULL
-		))
-		OR (demat_id IS NOT NULL AND demat_id IN (
-			SELECT DISTINCT ot.demat_id
-			FROM investment.onboard_transaction ot
-			WHERE ot.batch_id = $1 AND ot.demat_id IS NOT NULL
-		))
-	`
-	if _, err := tx.Exec(ctx, deleteSnap, batchID); err != nil {
-		return nil, fmt.Errorf("delete snapshot failed: %w", err)
-	}
-
-	// Rebuild snapshots for affected folio_id/demat_id using ALL their transactions (not just current batch)
-	snapshotQ := `
-WITH affected_folios_demats AS (
-    SELECT DISTINCT 
-        ot.folio_id,
-        ot.demat_id
-    FROM investment.onboard_transaction ot
-    WHERE ot.batch_id = $1
-        AND (ot.folio_id IS NOT NULL OR ot.demat_id IS NOT NULL)
-),
-scheme_resolved AS (
-    SELECT
-        ot.batch_id,
-        ot.transaction_date,
-        ot.transaction_type,
-        ot.amount,
-        ot.units,
-        ot.nav,
-        COALESCE(mf.entity_name, md.entity_name) AS entity_name,
-        ot.folio_number,
-        ot.demat_acc_number,
-        ot.folio_id,
-        ot.demat_id,
-        COALESCE(ot.scheme_id, fsm.scheme_id, ms2.scheme_id, ms.scheme_id) AS scheme_id,
-        COALESCE(ms2.scheme_name, ms.scheme_name) AS scheme_name,
-        COALESCE(ms2.isin, ms.isin) AS isin
-    FROM investment.onboard_transaction ot
-    LEFT JOIN investment.masterfolio mf ON mf.folio_id = ot.folio_id
-    LEFT JOIN investment.masterdemataccount md ON md.demat_id = ot.demat_id
-    LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = ot.folio_id
-    LEFT JOIN investment.masterscheme ms ON ms.scheme_id = fsm.scheme_id
-    LEFT JOIN investment.masterscheme ms2 ON ms2.scheme_id::text = ot.scheme_id OR ms2.internal_scheme_code = ot.scheme_internal_code
-    WHERE (ot.folio_id IN (SELECT folio_id FROM affected_folios_demats WHERE folio_id IS NOT NULL)
-        OR ot.demat_id IN (SELECT demat_id FROM affected_folios_demats WHERE demat_id IS NOT NULL))
-),
-transaction_summary AS (
-    SELECT
-        entity_name,
-        folio_number,
-        demat_acc_number,
-        folio_id,
-        demat_id,
-        scheme_id,
-        scheme_name,
-        isin,
-        -- Net units: BUY positive, SELL negative
-        SUM(CASE 
-            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN units
-            ELSE units
-        END) AS total_units,
-        -- Total invested: sum of BUY amounts only
-        SUM(CASE 
-            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN amount
-            ELSE 0
-        END) AS total_invested_amount,
-        -- Avg NAV: weighted average of BUY transactions only
-        CASE 
-            WHEN SUM(CASE 
-                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-                ELSE 0
-            END) = 0 THEN 0
-            ELSE SUM(CASE 
-                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN nav * units
-                ELSE 0
-            END) / SUM(CASE 
-                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-                ELSE 0
-            END)
-        END AS avg_nav
-    FROM scheme_resolved
-    GROUP BY entity_name, folio_number, demat_acc_number, folio_id, demat_id, scheme_id, scheme_name, isin
-),
-latest_nav AS (
-    SELECT DISTINCT ON (scheme_name)
-        scheme_name,
-        isin_div_payout_growth as isin,
-        nav_value,
-        nav_date
-    FROM investment.amfi_nav_staging
-    ORDER BY scheme_name, nav_date DESC
-)
-INSERT INTO investment.portfolio_snapshot (
-  batch_id,
-  entity_name,
-  folio_number,
-  demat_acc_number,
-  folio_id,
-  demat_id,
-  scheme_id,
-  scheme_name,
-  isin,
-  total_units,
-  avg_nav,
-  current_nav,
-  current_value,
-  total_invested_amount,
-  gain_loss,
-  gain_losss_percent,
-  created_at
-)
-SELECT
-  $1 AS batch_id,
-  ts.entity_name,
-  ts.folio_number,
-  ts.demat_acc_number,
-  ts.folio_id,
-  ts.demat_id,
-  ts.scheme_id,
-  ts.scheme_name,
-  ts.isin,
-  ts.total_units,
-  ts.avg_nav,
-  COALESCE(ln.nav_value, 0) AS current_nav,
-  ts.total_units * COALESCE(ln.nav_value, 0) AS current_value,
-  ts.total_invested_amount,
-  (ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount AS gain_loss,
-  CASE 
-    WHEN ts.total_invested_amount = 0 THEN 0
-    ELSE (((ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount) / ts.total_invested_amount) * 100
-  END AS gain_losss_percent,
-  NOW()
-FROM transaction_summary ts
-LEFT JOIN latest_nav ln ON (ln.scheme_name = ts.scheme_name OR ln.isin = ts.isin)
-WHERE ts.total_units > 0;
-`
-	if _, err := tx.Exec(ctx, snapshotQ, batchID); err != nil {
-		return nil, fmt.Errorf("rebuild snapshot failed: %w", err)
-	}
-
-	// Count snapshots created
-	var snapshotCount int64
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM investment.portfolio_snapshot WHERE batch_id=$1`, batchID).Scan(&snapshotCount); err != nil {
-		snapshotCount = 0
-	}
-
 	// We do not persist an onboard_batch row here; commit the tx and return transient batch info
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit failed: %w", err)
 	}
 
 	return map[string]any{
-		"batch_id":                         batchID,
 		"total_redemption_transactions":    totalTransactions,
-		"portfolio_snapshots_refreshed":    snapshotCount,
 		"confirmed_by":                     confirmedBy,
 		"processed_redemption_confirm_ids": redemptionConfirmationIDs,
 	}, nil
@@ -2141,5 +1998,32 @@ func ConfirmRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		api.RespondWithPayload(w, true, "", result)
+	}
+}
+
+// GetRedemptionConfirmationDetail returns full detail for a single redemption confirmation.
+func GetRedemptionConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			RedemptionConfirmID string `json:"redemption_confirm_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+		if strings.TrimSpace(req.RedemptionConfirmID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "redemption_confirm_id is required")
+			return
+		}
+		rows, err := fetchRedemptionConfirmationRows(r.Context(), pgxPool, []string{req.RedemptionConfirmID})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		if len(rows) == 0 {
+			api.RespondWithError(w, http.StatusNotFound, "redemption confirmation not found")
+			return
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"data": rows[0]})
 	}
 }

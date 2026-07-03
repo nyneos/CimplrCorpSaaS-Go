@@ -5,6 +5,10 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/ctxutil"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,10 +16,12 @@ import (
 	// "log"
 	"CimplrCorpSaas/internal/dependency"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -27,6 +33,10 @@ import (
 func getUserFriendlyFolioError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
+	}
+
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
 	}
 
 	errMsg := err.Error()
@@ -97,16 +107,45 @@ func getUserFriendlyFolioError(err error, context string) (string, int) {
 		return "Required field is missing.", http.StatusOK
 	}
 
+	// Value too long — field-specific messages
+	if strings.Contains(errMsg, "value too long") || strings.Contains(errMsg, "character varying") {
+		if strings.Contains(errMsg, "entity_name") {
+			return "Entity name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "amc_name") {
+			return "AMC name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "folio_number") {
+			return "Folio number is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "first_holder_name") {
+			return "First holder name is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "default_subscription_account") {
+			return "Subscription account value is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "default_redemption_account") {
+			return "Redemption account value is too long.", http.StatusBadRequest
+		}
+		if strings.Contains(errMsg, "status") {
+			return "Status value is too long.", http.StatusBadRequest
+		}
+		return "A field value is too long. Please check your data.", http.StatusBadRequest
+	}
+
 	// Connection errors (HTTP 503 Service Unavailable)
 	if strings.Contains(errMsg, "connection") || strings.Contains(errMsg, "timeout") {
 		return "Database connection error. Please try again.", http.StatusServiceUnavailable
 	}
 
-	// Return original error with context (HTTP 500)
-	if context != "" {
-		return context + ": " + errMsg, http.StatusInternalServerError
+	// Unknown error — expose details only in dev mode
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("DEVEL_MODE")), "true") {
+		if context != "" {
+			return context + " (dev): " + errMsg, http.StatusInternalServerError
+		}
+		return errMsg, http.StatusInternalServerError
 	}
-	return errMsg, http.StatusInternalServerError
+	return "Failed to process folio request. Please try again.", http.StatusInternalServerError
 }
 
 func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -169,6 +208,16 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
 
+			
+			sum := sha256.Sum256(fileBytes)
+			fileHash := hex.EncodeToString(sum[:])
+			if dup, derr := bulkuploadaudit.ExistsByHash(ctx, pgxPool, "master-folio", fileHash); derr != nil {
+				api.LogError("folio duplicate-file check failed: %v", derr)
+			} else if dup {
+				api.RespondWithError(w, http.StatusConflict, "This file has already been uploaded. Please upload a different file.")
+				return
+			}
+
 			records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 			if err != nil || len(records) < 2 {
 				api.RespondWithError(w, 400, "invalid csv")
@@ -200,7 +249,46 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			approvedSchemes, _ := ctx.Value("ApprovedSchemes").([]map[string]string)
 
 			// Validate entities, AMCs, and bank accounts from uploaded data
-			for _, r := range dataRows {
+			for idx, r := range dataRows {
+				rowNum := idx + 2 // 1-indexed; +1 for header row
+
+				// Required field checks — mirror CreateFolioSingle validation
+				for _, rf := range []struct{ col, label string }{
+					{"entity_name", "entity_name"},
+					{"amc_name", "amc_name"},
+					{"folio_number", "folio_number"},
+					{"first_holder_name", "first_holder_name"},
+					{"default_subscription_account", "default_subscription_account"},
+					{"default_redemption_account", "default_redemption_account"},
+				} {
+					val := ""
+					if pos, ok := headerPos[rf.col]; ok && pos < len(r) {
+						val = strings.TrimSpace(r[pos])
+					}
+					if val == "" {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: %s is required", rowNum, rf.label))
+						return
+					}
+				}
+
+				// folio_number must be numeric only
+				if pos, ok := headerPos["folio_number"]; ok && pos < len(r) {
+					folioNum := strings.TrimSpace(r[pos])
+					if folioNum != "" && !isAllDigits(folioNum) {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: folio_number must contain digits only, got '%s'", rowNum, folioNum))
+						return
+					}
+				}
+
+				// first_holder_name must be letters and spaces only
+				if pos, ok := headerPos["first_holder_name"]; ok && pos < len(r) {
+					name := strings.TrimSpace(r[pos])
+					if name != "" && !isAlphaSpace(name) {
+						api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: first_holder_name must contain only letters and spaces, got '%s'", rowNum, name))
+						return
+					}
+				}
+
 				// Validate entity
 				entityName := strings.TrimSpace(r[headerPos["entity_name"]])
 				entityFound := false
@@ -211,7 +299,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !entityFound {
-					api.RespondWithError(w, 403, "Access denied. Entity '"+entityName+"' not in your accessible entities")
+					api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Row %d: Entity '%s' not in your accessible entities", rowNum, entityName))
 					return
 				}
 
@@ -225,7 +313,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !amcFound {
-					api.RespondWithError(w, 400, constants.ErrAMCNotFoundOrNotApprovedActive+amcName)
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: %s", rowNum, constants.ErrAMCNotFoundOrNotApprovedActive+amcName))
 					return
 				}
 
@@ -239,7 +327,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !subAcctFound {
-					api.RespondWithError(w, 400, "Subscription account not found or not approved/active: "+subAcct)
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Subscription account '%s' not found or not approved/active", rowNum, subAcct))
 					return
 				}
 
@@ -253,7 +341,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !redAcctFound {
-					api.RespondWithError(w, 400, "Redemption account not found or not approved/active: "+redAcct)
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Redemption account '%s' not found or not approved/active", rowNum, redAcct))
 					return
 				}
 			}
@@ -369,9 +457,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		status = COALESCE(t.status, m.status),
 		source = COALESCE(t.source, m.source)
 	FROM tmp_folio t
-	WHERE m.entity_name = t.entity_name
-	  AND m.amc_name = t.amc_name
-	  AND m.folio_number = t.folio_number
+	WHERE m.folio_number = t.folio_number
 	  AND m.is_deleted = false;
 `
 			if _, err := tx.Exec(ctx, updateSQL); err != nil {
@@ -392,9 +478,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	FROM tmp_folio t
 	WHERE NOT EXISTS (
 		SELECT 1 FROM investment.masterfolio m
-		WHERE m.entity_name = t.entity_name
-		  AND m.amc_name = t.amc_name
-		  AND m.folio_number = t.folio_number
+		WHERE m.folio_number = t.folio_number
 		  AND m.is_deleted = false
 	);
 `
@@ -468,11 +552,26 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 			}
+
+			
+			if s3Key != "" {
+				if _, err := tx.Exec(ctx, `
+					UPDATE investment.masterfolio m
+					SET upload_s3_key = $1
+					FROM tmp_folio t
+					WHERE m.folio_number = t.folio_number
+					  AND COALESCE(m.is_deleted, false) = false
+				`, s3Key); err != nil {
+					api.LogError("Failed to store folio upload_s3_key: %v", err)
+				}
+			}
+
 			if err := tx.Commit(ctx); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "commit")
 				api.RespondWithError(w, status, msg)
 				return
 			}
+			committed = true 
 			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
 				ModuleKey:        "master-folio",
 				OriginalFileName: fh.Filename,
@@ -486,6 +585,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Status:           bulkuploadaudit.StatusCompleted,
 				UploadedBy:       userEmail,
 				UploadedAt:       time.Now().UTC(),
+				FileHash:         fileHash,
 			})
 
 			results = append(results, map[string]interface{}{
@@ -601,34 +701,6 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
 				FROM public.masterclearingcode c
 				GROUP BY c.account_id
-			),
-			sub_ac AS (
-				SELECT 
-					ba.account_number,
-					ba.account_nickname,
-					ba.account_id,
-					b.bank_name,
-					COALESCE(e.entity_name, ec.entity_name) AS entity_name,
-					cl.clearing_codes
-				FROM public.masterbankaccount ba
-				LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
-				LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
-				LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
-				LEFT JOIN clearing cl ON cl.account_id = ba.account_id
-			),
-			red_ac AS (
-				SELECT 
-					ba.account_number,
-					ba.account_nickname,
-					ba.account_id,
-					b.bank_name,
-					COALESCE(e.entity_name, ec.entity_name) AS entity_name,
-					cl.clearing_codes
-				FROM public.masterbankaccount ba
-				LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
-				LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
-				LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
-				LEFT JOIN clearing cl ON cl.account_id = ba.account_id
 			)
 			SELECT
 				m.folio_id,
@@ -649,6 +721,7 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.source,
 				m.old_source,
 				m.is_deleted,
+				COALESCE(m.upload_s3_key,'') AS upload_s3_key,
 
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
@@ -684,8 +757,40 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		FROM investment.masterfolio m
 		LEFT JOIN latest_audit l ON l.folio_id = m.folio_id
 		LEFT JOIN history h ON h.folio_id = m.folio_id
-		LEFT JOIN sub_ac sub ON (sub.account_number = m.default_subscription_account OR sub.account_id = m.default_subscription_account)
-		LEFT JOIN red_ac red ON (red.account_number = m.default_redemption_account OR red.account_id = m.default_redemption_account)
+		LEFT JOIN LATERAL (
+			SELECT 
+				ba.account_number,
+				ba.account_nickname,
+				ba.account_id,
+				b.bank_name,
+				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
+				cl.clearing_codes
+			FROM public.masterbankaccount ba
+			LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
+			LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
+			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
+			LEFT JOIN clearing cl ON cl.account_id = ba.account_id
+			WHERE (ba.account_number = m.default_subscription_account OR ba.account_id = m.default_subscription_account)
+			  AND COALESCE(e.entity_name, ec.entity_name) = m.entity_name
+			LIMIT 1
+		) sub ON true
+		LEFT JOIN LATERAL (
+			SELECT 
+				ba.account_number,
+				ba.account_nickname,
+				ba.account_id,
+				b.bank_name,
+				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
+				cl.clearing_codes
+			FROM public.masterbankaccount ba
+			LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
+			LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
+			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
+			LEFT JOIN clearing cl ON cl.account_id = ba.account_id
+			WHERE (ba.account_number = m.default_redemption_account OR ba.account_id = m.default_redemption_account)
+			  AND COALESCE(e.entity_name, ec.entity_name) = m.entity_name
+			LIMIT 1
+		) red ON true
 		LEFT JOIN schemes sch ON sch.folio_id = m.folio_id
 		WHERE COALESCE(m.is_deleted,false)=false
 		  AND m.entity_name = ANY($1)
@@ -731,15 +836,167 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+
+func insertFolioDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, folioID, userID, requestedIP string) {
+	folioID = strings.TrimSpace(folioID)
+	if folioID == "" {
+		return
+	}
+	requestedBy := ""
+	for _, s := range auth.GetActiveSessions() {
+		if s.UserID == userID {
+			requestedBy = s.Email
+			break
+		}
+	}
+	if requestedBy == "" {
+		requestedBy = strings.TrimSpace(userID)
+	}
+	if _, err := pgxPool.Exec(ctx, `
+		INSERT INTO investment.auditactionfolio
+			(folio_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+		VALUES ($1, 'DOWNLOAD', 'APPROVED', 'File downloaded', $2, now(), $3)
+	`, folioID, requestedBy, requestedIP); err != nil {
+		api.LogError("failed to insert folio download audit for %s: %v", folioID, err)
+	}
+}
+
+func GetFolioDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID  string `json:"user_id"`
+			FolioID string `json:"folio_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.FolioID) == "" {
+			api.RespondWithResult(w, false, "folio_id required")
+			return
+		}
+
+		ctx := r.Context()
+		var uploadS3Key string
+		err := pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(upload_s3_key, '')
+			FROM investment.masterfolio
+			WHERE folio_id = $1 AND COALESCE(is_deleted, false) = false
+		`, req.FolioID).Scan(&uploadS3Key)
+		if err != nil {
+			api.RespondWithResult(w, false, "folio_id not found")
+			return
+		}
+
+		key := strings.TrimSpace(uploadS3Key)
+		if key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to generate download url")
+			return
+		}
+
+		insertFolioDownloadAudit(ctx, pgxPool, req.FolioID, req.UserID, api.ClientIPFromRequest(r))
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+
+func GetFolioBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string   `json:"user_id"`
+			FolioIDs []string `json:"folio_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.FolioIDs) == 0 {
+			api.RespondWithResult(w, false, "folio_ids required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(req.FolioIDs))
+		failedIDs := make([]string, 0)
+
+		for _, rawID := range req.FolioIDs {
+			folioID := strings.TrimSpace(rawID)
+			if folioID == "" {
+				continue
+			}
+
+			var uploadS3Key string
+			err := pgxPool.QueryRow(ctx, `
+				SELECT COALESCE(upload_s3_key, '')
+				FROM investment.masterfolio
+				WHERE folio_id = $1 AND COALESCE(is_deleted, false) = false
+			`, folioID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, folioID)
+				continue
+			}
+
+			key := strings.TrimSpace(uploadS3Key)
+			if key == "" {
+				failedIDs = append(failedIDs, folioID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, folioID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"folio_id":     folioID,
+				"download_url": downloadURL,
+			})
+			insertFolioDownloadAudit(ctx, pgxPool, folioID, req.UserID, api.ClientIPFromRequest(r))
+		}
+
+		if len(files) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: false,
+				"message":              "no downloadable files found",
+				"data": map[string]interface{}{
+					"files":      []map[string]string{},
+					"failed_ids": failedIDs,
+				},
+			})
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
+	}
+}
+
 func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		// Get user's accessible entities from context
-		approvedEntities := api.GetEntityNamesFromCtx(ctx)
-		if len(approvedEntities) == 0 {
+		// Get user's accessible entities from context (trim to handle trailing spaces in DB)
+		rawEntities := api.GetEntityNamesFromCtx(ctx)
+		if len(rawEntities) == 0 {
 			api.RespondWithError(w, http.StatusForbidden, "No accessible entities found")
 			return
+		}
+		approvedEntities := make([]string, len(rawEntities))
+		for i, e := range rawEntities {
+			approvedEntities[i] = strings.TrimSpace(e)
 		}
 
 		// Get approved AMCs from context
@@ -751,12 +1008,13 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Get approved bank accounts from context
+		// Get approved bank account numbers from context
+		// masterfolio stores account_number (not account_id) in default_subscription/redemption_account
 		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
-		accountIdentifiers := make([]string, 0, len(approvedBankAccounts))
+		accountNumbers := make([]string, 0, len(approvedBankAccounts))
 		for _, acc := range approvedBankAccounts {
 			if acc["account_number"] != "" {
-				accountIdentifiers = append(accountIdentifiers, acc["account_number"])
+				accountNumbers = append(accountNumbers, acc["account_number"])
 			}
 		}
 
@@ -779,17 +1037,21 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.default_redemption_account
 			FROM investment.masterfolio m
 			JOIN latest l ON l.folio_id = m.folio_id
-			WHERE 
+			WHERE
 				UPPER(l.processing_status) = 'APPROVED'
 				AND UPPER(m.status) = 'ACTIVE'
 				AND COALESCE(m.is_deleted,false)=false
-				AND m.entity_name = ANY($1)
+				AND TRIM(m.entity_name) = ANY($1)
 				AND m.amc_name = ANY($2)
-				AND (m.default_subscription_account = ANY($3) OR m.default_redemption_account = ANY($3))
+				AND (
+					array_length($3::text[], 1) IS NULL
+					OR m.default_subscription_account = ANY($3)
+					OR m.default_redemption_account = ANY($3)
+				)
 			ORDER BY m.entity_name, m.folio_number;
 		`
 
-		rows, err := pgxPool.Query(ctx, q, approvedEntities, amcNames, accountIdentifiers)
+		rows, err := pgxPool.Query(ctx, q, approvedEntities, amcNames, accountNumbers)
 		if err != nil {
 			msg, status := getUserFriendlyFolioError(err, "query")
 			api.RespondWithError(w, status, msg)
@@ -860,65 +1122,36 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		scope := ctxutil.FromContext(ctx)
 
-		// Validate entity access
-		approvedEntities := api.GetEntityNamesFromCtx(ctx)
-		if len(approvedEntities) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, "No accessible entities found in context")
-			return
-		}
-		entityFound := false
-		for _, e := range approvedEntities {
-			if strings.EqualFold(e, req.EntityName) {
-				entityFound = true
-				break
-			}
-		}
-		if !entityFound {
-			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Access denied. Entity '%s' not in your accessible entities: %v", req.EntityName, approvedEntities))
+		// Entity check — admin override bypasses entity scoping
+		if !scope.HasEntityNameAccess(req.EntityName) {
+			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf("Access denied. Entity '%s' not in your accessible entities", req.EntityName))
 			return
 		}
 
-		// Validate AMC
+		// AMC check — skipped when context has no restrictions (admin)
 		approvedAMCs, _ := ctx.Value("ApprovedAMCs").([]map[string]string)
-		amcFound := false
-		for _, amc := range approvedAMCs {
-			if strings.EqualFold(amc["amc_name"], req.AMCName) {
-				amcFound = true
-				break
+		if len(approvedAMCs) > 0 {
+			amcFound := false
+			for _, amc := range approvedAMCs {
+				if strings.EqualFold(amc["amc_name"], req.AMCName) {
+					amcFound = true
+					break
+				}
 			}
-		}
-		if !amcFound {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+req.AMCName)
-			return
+			if !amcFound {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+req.AMCName)
+				return
+			}
 		}
 
-		// Validate bank accounts
-		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
-		if len(approvedBankAccounts) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, "No approved bank accounts found in context")
+		// Bank account checks — admin override bypasses
+		if !scope.HasApprovedBankAccount(req.DefaultSubscriptionAcct) {
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Subscription account '%s' not found or not approved/active", req.DefaultSubscriptionAcct))
 			return
 		}
-		subAcctFound := false
-		for _, acc := range approvedBankAccounts {
-			if acc["account_number"] == req.DefaultSubscriptionAcct || acc["account_id"] == req.DefaultSubscriptionAcct {
-				subAcctFound = true
-				break
-			}
-		}
-		if !subAcctFound {
-			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Subscription account '%s' not found or not approved/active. Available accounts: %d", req.DefaultSubscriptionAcct, len(approvedBankAccounts)))
-			return
-		}
-
-		redAcctFound := false
-		for _, acc := range approvedBankAccounts {
-			if acc["account_number"] == req.DefaultRedemptionAcct || acc["account_id"] == req.DefaultRedemptionAcct {
-				redAcctFound = true
-				break
-			}
-		}
-		if !redAcctFound {
+		if !scope.HasApprovedBankAccount(req.DefaultRedemptionAcct) {
 			api.RespondWithError(w, http.StatusBadRequest, "Redemption account not found or not approved/active: "+req.DefaultRedemptionAcct)
 			return
 		}
@@ -933,8 +1166,8 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// uniqueness check
 		var existing string
-		err = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE entity_name=$1 AND amc_name=$2 AND folio_number=$3 AND COALESCE(is_deleted,false)=false LIMIT 1`,
-			req.EntityName, req.AMCName, req.FolioNumber).Scan(&existing)
+		err = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
+			req.FolioNumber).Scan(&existing)
 		if err == nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFolioAlreadyExistsUser)
 			return
@@ -968,7 +1201,8 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if scheme["scheme_id"] == refTrimmed ||
 						strings.EqualFold(scheme["scheme_name"], refTrimmed) ||
 						scheme["isin"] == refTrimmed ||
-						scheme["internal_scheme_code"] == refTrimmed {
+						scheme["internal_scheme_code"] == refTrimmed ||
+						scheme["amfi_scheme_code"] == refTrimmed {
 						mappingRows = append(mappingRows, []interface{}{folioID, scheme["scheme_id"], "Active", nil})
 						break
 					}
@@ -1062,8 +1296,8 @@ func CreateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// uniqueness
 			var exists string
-			err = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE entity_name=$1 AND amc_name=$2 AND folio_number=$3 AND COALESCE(is_deleted,false)=false LIMIT 1`,
-				row.EntityName, row.AMCName, row.FolioNumber).Scan(&exists)
+			err = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
+				row.FolioNumber).Scan(&exists)
 			if err == nil {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "entity": row.EntityName, "folio_number": row.FolioNumber, constants.ValueError: "duplicate"})
 				continue
@@ -1209,10 +1443,10 @@ func UpdateFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					newVal := strings.TrimSpace(fmt.Sprint(v))
 					if newVal != "" && newVal != ifaceToString(oldVals[2]) {
 						var exists string
-						err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND entity_name=$2 AND amc_name=$3 AND COALESCE(is_deleted,false)=false LIMIT 1`,
-							newVal, ifaceToString(oldVals[0]), ifaceToString(oldVals[1])).Scan(&exists)
+						err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
+							newVal).Scan(&exists)
 						if err == nil {
-							api.RespondWithError(w, http.StatusBadRequest, "folio_number already exists for this entity+amc")
+							api.RespondWithError(w, http.StatusBadRequest, "folio_number already exists")
 							return
 						}
 					}
@@ -1329,8 +1563,8 @@ func UpdateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						newVal := strings.TrimSpace(fmt.Sprint(v))
 						if newVal != "" && newVal != ifaceToString(oldVals[2]) {
 							var exists string
-							err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND entity_name=$2 AND amc_name=$3 AND COALESCE(is_deleted,false)=false LIMIT 1`,
-								newVal, ifaceToString(oldVals[0]), ifaceToString(oldVals[1])).Scan(&exists)
+							err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
+								newVal).Scan(&exists)
 							if err == nil {
 								results = append(results, map[string]interface{}{constants.ValueSuccess: false, "folio_id": row.FolioID, constants.ValueError: "folio_number already exists"})
 								continue

@@ -3,6 +3,7 @@ package allMaster
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -30,6 +31,10 @@ func getUserFriendlyBankError(err error, context string) (string, int) {
 		return "", http.StatusOK
 	}
 
+	if msg, ok := mastererrors.TryUniqueViolation(err); ok {
+		return msg, http.StatusOK
+	}
+
 	errStr := err.Error()
 
 	// Duplicate bank name - Known error, return 200 for frontend to show message
@@ -38,8 +43,8 @@ func getUserFriendlyBankError(err error, context string) (string, int) {
 	}
 
 	// Generic duplicate key - Known error, return 200
-	if strings.Contains(errStr, constants.ErrDuplicateKey) || strings.Contains(errStr, "unique") {
-		return "This bank already exists in the system.", http.StatusOK
+	if strings.Contains(errStr, constants.ErrDuplicateKey) {
+		return "Duplicate entry — this value already exists.", http.StatusOK
 	}
 
 	// Foreign key violations - Known error, return 200
@@ -242,7 +247,7 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   m.state_province, m.postal_code,
 				   m.old_bank_name, m.old_bank_short_name, m.old_swift_bic_code, m.old_country_of_headquarters, m.old_connectivity_type, m.old_active_status,
 				   m.old_contact_person_name, m.old_contact_person_email, m.old_contact_person_phone, m.old_address_line1, m.old_address_line2, m.old_city,
-				   m.old_state_province, m.old_postal_code
+				   m.old_state_province, m.old_postal_code, m.upload_s3_key
 			FROM masterbank m
 			LEFT JOIN LATERAL (
 				SELECT requested_at, checker_at
@@ -276,6 +281,7 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				oldContactPersonName, oldContactPersonEmail                   *string
 				oldContactPersonPhone, oldAddressLine1, oldAddressLine2       *string
 				oldCity, oldStateProvince, oldPostalCode                      *string
+				uploadS3Key                                                   *string
 			)
 
 			if err := rows.Scan(
@@ -283,6 +289,7 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&contactPersonName, &contactPersonEmail, &contactPersonPhone, &addressLine1, &addressLine2, &city, &stateProvince, &postalCode,
 				&oldBankName, &oldBankShortName, &oldSwiftBicCode, &oldCountryOfHQ, &oldConnectivityType, &oldActiveStatus,
 				&oldContactPersonName, &oldContactPersonEmail, &oldContactPersonPhone, &oldAddressLine1, &oldAddressLine2, &oldCity, &oldStateProvince, &oldPostalCode,
+				&uploadS3Key,
 			); err != nil {
 				errMsg, _ := getUserFriendlyBankError(err, "")
 				anyError = fmt.Errorf("Failed to process data: %v", errMsg)
@@ -327,6 +334,12 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			banks = append(banks, map[string]interface{}{
 				"bank_id":   bankID,
+				"upload_s3_key": func() string {
+					if uploadS3Key != nil {
+						return *uploadS3Key
+					}
+					return ""
+				}(),
 				"bank_name": bankName,
 				"bank_short_name": func() string {
 					if bankShortName != nil {
@@ -1190,23 +1203,94 @@ func BulkRejectBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if checkerBy == "" {
 			checkerBy = session.Name
 		}
-		// checkerBy := session.Name
-		query := `UPDATE auditactionbank SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE bank_id = ANY($3) RETURNING action_id,bank_id`
-		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.BankIDs))
+
+		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyBankError(err, constants.ErrTxBeginFailedCapitalized)
+			api.RespondWithError(w, statusCode, errMsg)
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		// Look at the latest action per bank so we only reject what is actually
+		// pending and can revert an EDIT that was applied immediately on request.
+		sel := `
+			SELECT DISTINCT ON (bank_id) action_id, bank_id, actiontype, processing_status
+			FROM auditactionbank
+			WHERE bank_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
+			ORDER BY bank_id, requested_at DESC`
+		rows, err := tx.Query(ctx, sel, req.BankIDs)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyBankError(err, "Failed to reject audit actions")
 			api.RespondWithError(w, statusCode, errMsg)
 			return
 		}
-		defer rows.Close()
+		actionIDs := []string{}
+		editBankIDs := []string{}
 		var updated []string
 		for rows.Next() {
-			var id, bankID string
-			if err := rows.Scan(&id, &bankID); err != nil {
+			var aid, bankID, at, ps string
+			if err := rows.Scan(&aid, &bankID, &at, &ps); err != nil {
 				logger.LogError("BulkRejectBankAuditActions: scan failed: %v", err)
+				continue
 			}
-			updated = append(updated, id, bankID)
+			if strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusApproved {
+				continue // already approved — nothing to reject
+			}
+			actionIDs = append(actionIDs, aid)
+			updated = append(updated, aid, bankID)
+			// A rejected EDIT must roll the master row back to its pre-edit
+			// values (the proposed change was applied immediately on edit).
+			if strings.EqualFold(at, "EDIT") && strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusPendingEditApproval {
+				editBankIDs = append(editBankIDs, bankID)
+			}
 		}
+		rows.Close()
+
+		if len(actionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE auditactionbank
+				SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
+				WHERE action_id = ANY($3)`, checkerBy, req.Comment, actionIDs); err != nil {
+				errMsg, statusCode := getUserFriendlyBankError(err, "Failed to reject audit actions")
+				api.RespondWithError(w, statusCode, errMsg)
+				return
+			}
+		}
+
+		// Revert the proposed edit on rejection: restore each field from its old_* snapshot.
+		if len(editBankIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE masterbank
+				SET
+					bank_name               = CASE WHEN old_bank_name IS NOT NULL THEN old_bank_name ELSE bank_name END,
+					bank_short_name         = CASE WHEN old_bank_short_name IS NOT NULL THEN old_bank_short_name ELSE bank_short_name END,
+					swift_bic_code          = CASE WHEN old_swift_bic_code IS NOT NULL THEN old_swift_bic_code ELSE swift_bic_code END,
+					country_of_headquarters = CASE WHEN old_country_of_headquarters IS NOT NULL THEN old_country_of_headquarters ELSE country_of_headquarters END,
+					connectivity_type       = CASE WHEN old_connectivity_type IS NOT NULL THEN old_connectivity_type ELSE connectivity_type END,
+					active_status           = CASE WHEN old_active_status IS NOT NULL THEN old_active_status ELSE active_status END,
+					contact_person_name     = CASE WHEN old_contact_person_name IS NOT NULL THEN old_contact_person_name ELSE contact_person_name END,
+					contact_person_email    = CASE WHEN old_contact_person_email IS NOT NULL THEN old_contact_person_email ELSE contact_person_email END,
+					contact_person_phone    = CASE WHEN old_contact_person_phone IS NOT NULL THEN old_contact_person_phone ELSE contact_person_phone END,
+					address_line1           = CASE WHEN old_address_line1 IS NOT NULL THEN old_address_line1 ELSE address_line1 END,
+					address_line2           = CASE WHEN old_address_line2 IS NOT NULL THEN old_address_line2 ELSE address_line2 END,
+					city                    = CASE WHEN old_city IS NOT NULL THEN old_city ELSE city END,
+					state_province          = CASE WHEN old_state_province IS NOT NULL THEN old_state_province ELSE state_province END,
+					postal_code             = CASE WHEN old_postal_code IS NOT NULL THEN old_postal_code ELSE postal_code END
+				WHERE bank_id = ANY($1)`, editBankIDs); err != nil {
+				errMsg, statusCode := getUserFriendlyBankError(err, "Failed to revert rejected edit")
+				api.RespondWithError(w, statusCode, errMsg)
+				return
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			errMsg, statusCode := getUserFriendlyBankError(err, constants.ErrCommitFailed)
+			api.RespondWithError(w, statusCode, errMsg)
+			return
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,

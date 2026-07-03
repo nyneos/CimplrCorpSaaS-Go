@@ -698,9 +698,12 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		idMaps := LoadPayRecMasterIDMaps(ctx, pgxPool)
 		type Payable struct {
 			PayableID        string  `json:"payable_id"`
+			EntityID         string  `json:"entity_id"`
 			EntityName       string  `json:"entity_name"`
+			CounterpartyID   string  `json:"counterparty_id"`
 			CounterpartyName string  `json:"counterparty_name"`
 			InvoiceNo        string  `json:"invoice_number"`
 			InvoiceDate      string  `json:"invoice_date"`
@@ -726,7 +729,9 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		type Receivable struct {
 			ReceivableID     string  `json:"receivable_id"`
+			EntityID         string  `json:"entity_id"`
 			EntityName       string  `json:"entity_name"`
+			CounterpartyID   string  `json:"counterparty_id"`
 			CounterpartyName string  `json:"counterparty_name"`
 			InvoiceNo        string  `json:"invoice_number"`
 			InvoiceDate      string  `json:"invoice_date"`
@@ -752,7 +757,34 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// 1. Fetch all payables (new table tr_payables)
-		payableRows, err := pgxPool.Query(ctx, `SELECT payable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code, upload_s3_key, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_amount, old_currency_code FROM tr_payables WHERE is_deleted != TRUE`)
+		payableRows, err := pgxPool.Query(ctx, `
+			SELECT
+				p.payable_id,
+				COALESCE(e.entity_id::text, ''),
+				COALESCE(p.entity_name, ''),
+				COALESCE(c.counterparty_id::text, ''),
+				COALESCE(p.counterparty_name, ''),
+				p.invoice_number,
+				p.invoice_date,
+				p.due_date,
+				p.amount,
+				p.currency_code,
+				p.upload_s3_key,
+				p.old_entity_name,
+				p.old_counterparty_name,
+				p.old_invoice_number,
+				p.old_invoice_date,
+				p.old_due_date,
+				p.old_amount,
+				p.old_currency_code
+			FROM tr_payables p
+			LEFT JOIN masterentitycash e
+				ON LOWER(TRIM(e.entity_name)) = LOWER(TRIM(p.entity_name))
+				AND COALESCE(e.is_deleted, false) = false
+			LEFT JOIN mastercounterparty c
+				ON LOWER(TRIM(c.counterparty_name)) = LOWER(TRIM(p.counterparty_name))
+				AND COALESCE(c.is_deleted, false) = false
+			WHERE COALESCE(p.is_deleted, false) != TRUE`)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
@@ -769,11 +801,12 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var oldInvoiceDate, oldDueDate *time.Time
 			var oldAmountPtr *float64
 			var oldCurrencyPtr *string
-			if err := payableRows.Scan(&p.PayableID, &p.EntityName, &p.CounterpartyName, &p.InvoiceNo, &invoiceDate, &dueDate, &p.Amount, &p.CurrencyCode, &uploadS3Key, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
+			if err := payableRows.Scan(&p.PayableID, &p.EntityID, &p.EntityName, &p.CounterpartyID, &p.CounterpartyName, &p.InvoiceNo, &invoiceDate, &dueDate, &p.Amount, &p.CurrencyCode, &uploadS3Key, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
 				return
 			}
+			p.EntityID, p.CounterpartyID = EnrichPayRecRowIDs(idMaps, p.EntityName, p.CounterpartyName, p.EntityID, p.CounterpartyID)
 			if uploadS3Key != nil {
 				p.UploadS3Key = *uploadS3Key
 			} else {
@@ -831,7 +864,34 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// 2. Fetch all receivables (new table tr_receivables)
-		receivableRows, err := pgxPool.Query(ctx, `SELECT receivable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code, upload_s3_key, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_invoice_amount, old_currency_code FROM tr_receivables WHERE is_deleted != TRUE`)
+		receivableRows, err := pgxPool.Query(ctx, `
+			SELECT
+				r.receivable_id,
+				COALESCE(e.entity_id::text, ''),
+				COALESCE(r.entity_name, ''),
+				COALESCE(c.counterparty_id::text, ''),
+				COALESCE(r.counterparty_name, ''),
+				r.invoice_number,
+				r.invoice_date,
+				r.due_date,
+				r.invoice_amount,
+				r.currency_code,
+				r.upload_s3_key,
+				r.old_entity_name,
+				r.old_counterparty_name,
+				r.old_invoice_number,
+				r.old_invoice_date,
+				r.old_due_date,
+				r.old_invoice_amount,
+				r.old_currency_code
+			FROM tr_receivables r
+			LEFT JOIN masterentitycash e
+				ON LOWER(TRIM(e.entity_name)) = LOWER(TRIM(r.entity_name))
+				AND COALESCE(e.is_deleted, false) = false
+			LEFT JOIN mastercounterparty c
+				ON LOWER(TRIM(c.counterparty_name)) = LOWER(TRIM(r.counterparty_name))
+				AND COALESCE(c.is_deleted, false) = false
+			WHERE COALESCE(r.is_deleted, false) != TRUE`)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
@@ -848,11 +908,12 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var oldInvoiceDate, oldDueDate *time.Time
 			var oldAmountPtr *float64
 			var oldCurrencyPtr *string
-			if err := receivableRows.Scan(&rcv.ReceivableID, &rcv.EntityName, &rcv.CounterpartyName, &rcv.InvoiceNo, &invoiceDate, &dueDate, &rcv.Amount, &rcv.CurrencyCode, &uploadS3Key, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
+			if err := receivableRows.Scan(&rcv.ReceivableID, &rcv.EntityID, &rcv.EntityName, &rcv.CounterpartyID, &rcv.CounterpartyName, &rcv.InvoiceNo, &invoiceDate, &dueDate, &rcv.Amount, &rcv.CurrencyCode, &uploadS3Key, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
 				return
 			}
+			rcv.EntityID, rcv.CounterpartyID = EnrichPayRecRowIDs(idMaps, rcv.EntityName, rcv.CounterpartyName, rcv.EntityID, rcv.CounterpartyID)
 			if uploadS3Key != nil {
 				rcv.UploadS3Key = *uploadS3Key
 			} else {
@@ -1193,7 +1254,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(payIDs) > 0 {
 			for _, pid := range payIDs {
 				var aid, atype, status string
-				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`, pid).Scan(&aid, &atype, &status); err != nil {
+				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionpayable WHERE payable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1`, pid).Scan(&aid, &atype, &status); err != nil {
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + pid})
 					return
 				}
@@ -1216,7 +1277,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(recIDs) > 0 {
 			for _, rid := range recIDs {
 				var aid, atype, status string
-				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC, action_id DESC LIMIT 1`, rid).Scan(&aid, &atype, &status); err != nil {
+				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionreceivable WHERE receivable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1`, rid).Scan(&aid, &atype, &status); err != nil {
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrMissingLatestAuditForTransaction + rid})
 					return
 				}
@@ -1351,7 +1412,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := pgxPool.QueryRow(ctx, `
 				SELECT action_id, actiontype, processing_status
 				FROM auditactionpayable
-				WHERE payable_id = $1
+				WHERE payable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, pid).Scan(&aid, &atype, &status); err != nil {
@@ -1378,7 +1439,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := pgxPool.QueryRow(ctx, `
 				SELECT action_id, actiontype, processing_status
 				FROM auditactionreceivable
-				WHERE receivable_id = $1
+				WHERE receivable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, rid).Scan(&aid, &atype, &status); err != nil {

@@ -268,7 +268,7 @@ var (
 
 		// More variants
 		"debit (inr)", "withdrawal (inr)",
-		"amount debited", "amount withdrawn",
+		"amount debited", "amount withdrawn", "amount subtracted",
 		"payment", "payments",
 		"sent", "transfer out",
 		"expense", "expenses",
@@ -284,7 +284,7 @@ var (
 
 		// More variants
 		"credit (inr)", "deposit (inr)",
-		"amount credited", "amount deposited",
+		"amount credited", "amount deposited", "amount added",
 		"received", "received amount",
 		"incoming", "inward",
 		"transfer in",
@@ -412,10 +412,10 @@ var nonTxnKeywords = []string{
 	"please do not share", "computer generated", "does not require",
 	"power of attorney",
 
-	// Balance summary rows
+	// Balance summary rows (use longer phrases — bare "avl" false-matches narrations like "HEATING-SAVLI")
 	"closing balance", "opening balance",
 	"new balance", "new val",
-	"avl balance", "available balance", "avl", "avil",
+	"avl balance", "available balance",
 
 	// Page / statement totals (skipped as they are summation rows, not transactions)
 	"page total", "statement total", "grand total",
@@ -423,7 +423,7 @@ var nonTxnKeywords = []string{
 	"cumulative total", "cumulative totals",
 
 	// Statement summary section (SBI / UBI / other banks)
-	"statement summary", "brought forward",
+	"statement summary",
 
 	// SBI-specific
 	"page no.", "page no ", "powappsrv4",
@@ -446,6 +446,21 @@ var nonTxnKeywords = []string{
 	"miv/st/bank", "banking &financial services",
 }
 
+// nonTxnKeywordMatches returns true when kw appears in cell as a phrase, not a
+// substring inside unrelated words (e.g. "avl" inside "HEATING-SAVLI").
+func nonTxnKeywordMatches(cell, kw string) bool {
+	lc := strings.ToLower(strings.TrimSpace(cell))
+	if lc == "" {
+		return false
+	}
+	if len(kw) <= 4 {
+		pattern := `(?i)(?:^|[^a-z0-9])` + regexp.QuoteMeta(kw) + `(?:[^a-z0-9]|$)`
+		matched, _ := regexp.MatchString(pattern, lc)
+		return matched
+	}
+	return strings.Contains(lc, kw)
+}
+
 // IsNonTransactionRow checks whether any of the given candidate cell values
 // (lower-cased, trimmed) contain a non-transaction keyword. This covers footer,
 // summary, informational, and page-break rows across all bank formats.
@@ -456,7 +471,7 @@ func IsNonTransactionRow(candidateCells ...string) bool {
 			continue
 		}
 		for _, kw := range nonTxnKeywords {
-			if strings.Contains(lc, kw) {
+			if nonTxnKeywordMatches(lc, kw) {
 				return true
 			}
 		}
@@ -627,6 +642,198 @@ func MergeMultiLineDescriptions(rows [][]string, dateColIdx, descColIdx int) [][
 	return result
 }
 
+// scanOpeningBalanceFromRows finds labelled opening balance in statement header/meta rows
+// (above or including the transaction header). Mirrors V2 / extractOpeningBalanceFromCSV.
+func scanOpeningBalanceFromRows(rows [][]string) *float64 {
+	labels := []string{
+		"openingbalance", "openbal", "op.bal", "op bal",
+		"openingavailable", "openingavailablebalance", "openingledger",
+		"openingledgerbalance", "ledgerbalance",
+	}
+	replacer := strings.NewReplacer(" ", "", "\t", "", ".", "")
+	for _, row := range rows {
+		for i, cell := range row {
+			norm := strings.ToLower(replacer.Replace(cell))
+			for _, lbl := range labels {
+				if !strings.Contains(norm, lbl) {
+					continue
+				}
+				for j := i + 1; j < len(row); j++ {
+					// Require a non-zero value: an empty cell parses as (0, nil) and would otherwise
+					// lock in a spurious opening balance of 0, suppressing the correct first-row
+					// derivation (e.g. a summary "Opening Balance" header with no figure beside it).
+					if val, err := parseAmount(cleanAmount(row[j])); err == nil && val != 0 {
+						v := val
+						return &v
+					}
+				}
+				if idx := strings.Index(cell, ":"); idx >= 0 {
+					if val, err := parseAmount(cleanAmount(cell[idx+1:])); err == nil && val != 0 {
+						v := val
+						return &v
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// isBalanceDrOverdraft checks if a raw string signifies an overdraft balance.
+func isBalanceDrOverdraft(raw string) bool {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	return strings.HasSuffix(s, "dr") || strings.HasSuffix(s, "od") || strings.HasPrefix(s, "-")
+}
+
+// scanDeclaredClosingBalance extracts the statement's own declared closing balance from a summary,
+// "Closing Balance", or totals ("Page Total" / "Total" / "Grand Total") row. Unlike the running
+// balances on transaction rows, this is an INDEPENDENT anchor for the FINAL balance: the last
+// transaction has no following row, so a wrong closing balance escapes both running-chain
+// reconciliation and the ghost-balance repair — especially when the wrong value coincidentally
+// equals a balance from earlier in the statement and so still "appears in source".
+//
+// Zero is a valid closing balance (an account can be swept to nil), so — unlike
+// scanOpeningBalanceFromRows — a 0.00 figure is accepted. Returns ok=false when no declared
+// closing could be confidently located.
+func scanDeclaredClosingBalance(rows [][]string) (float64, bool) {
+	replacer := strings.NewReplacer(" ", "", "\t", "", ".", "")
+
+	rightmostNumeric := func(row []string) (float64, bool) {
+		for j := len(row) - 1; j >= 0; j-- {
+			if v, ok := parseStrictAmount(row[j]); ok {
+				if isBalanceDrOverdraft(row[j]) {
+					v = -v
+				}
+				return v, true
+			}
+		}
+		return 0, false
+	}
+
+	// A multi-page statement repeats its "Page Total" band (and may repeat a "Closing Balance" line)
+	// once per page, so the FINAL match — not the first — is the statement-level closing. Both passes
+	// therefore keep the last match rather than returning early. An explicit "Closing Balance" label
+	// still wins over a generic totals row when both are present.
+	var closingVal float64
+	var closingFound bool
+	var totalVal float64
+	var totalFound bool
+
+	for _, row := range rows {
+		// Pass 1: explicit "closing balance" label with an adjacent (or packed) value.
+		for i, cell := range row {
+			norm := strings.ToLower(replacer.Replace(cell))
+			if !(strings.Contains(norm, "closingbalance") || strings.Contains(norm, "closingbal") ||
+				strings.Contains(norm, "closingavailable") || strings.Contains(norm, "closingledger")) {
+				continue
+			}
+			matched := false
+			for j := i + 1; j < len(row); j++ {
+				if v, ok := parseStrictAmount(row[j]); ok {
+					if isBalanceDrOverdraft(row[j]) {
+						v = -v
+					}
+					closingVal, closingFound, matched = v, true, true
+					break
+				}
+			}
+			// Label and value packed into one cell ("Closing Balance: 0.00 Cr").
+			if !matched {
+				if idx := strings.Index(cell, ":"); idx >= 0 {
+					if v, ok := parseStrictAmount(cell[idx+1:]); ok {
+						if isBalanceDrOverdraft(cell[idx+1:]) {
+							v = -v
+						}
+						closingVal, closingFound = v, true
+					}
+				}
+			}
+		}
+
+		// Pass 2: a totals row carries the closing balance in its rightmost numeric (the Balance
+		// column sits last in these statements, e.g. ICICI "Page Total: ... 0.00 Cr").
+		for _, cell := range row {
+			norm := strings.ToLower(replacer.Replace(cell))
+			isTotalsLabel := strings.HasPrefix(norm, "pagetotal") ||
+				strings.HasPrefix(norm, "grandtotal") || norm == "total" || norm == "total:"
+			if isTotalsLabel {
+				if v, ok := rightmostNumeric(row); ok {
+					totalVal, totalFound = v, true
+				}
+				break
+			}
+		}
+	}
+
+	if closingFound {
+		return closingVal, true
+	}
+	if totalFound {
+		return totalVal, true
+	}
+	return 0, false
+}
+
+// countCompleteTransactionRows counts source rows that are self-contained transactions: a row that
+// carries BOTH a parseable date and a parseable amount/balance figure (header, separator, summary,
+// total and opening/closing-carry rows excluded). On a cleanly-converted multi-column statement
+// (aligned Date/…/Balance columns) this closely equals the true transaction count, so it is a
+// reliable lower bound on how many transactions any extractor must return. On a messy PDF→CSV where
+// a single transaction is split across several rows (date on one, amount on another) very few rows
+// are "complete", so the count stays low and callers can safely ignore it.
+func countCompleteTransactionRows(rows [][]string) int {
+	count := 0
+	for _, row := range rows {
+		if len(row) == 0 || IsSeparatorRow(row) || IsPageBreakRow(row) {
+			continue
+		}
+		hasDate := false
+		hasAmount := false
+		for _, cell := range row {
+			c := strings.TrimSpace(cell)
+			if c == "" {
+				continue
+			}
+			if !hasDate {
+				if t, err := parseDate(c); err == nil && !t.IsZero() {
+					hasDate = true
+				}
+			}
+			if !hasAmount {
+				if _, ok := parseStrictAmount(c); ok {
+					hasAmount = true
+				}
+			}
+		}
+		if !hasDate || !hasAmount {
+			continue
+		}
+		joined := strings.Join(row, " ")
+		if IsNonTransactionRow(joined) || IsStatementOpeningCarryRow(joined) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+// summaryRowBalance pulls the balance figure from a summary/non-transaction row such as
+// "Opening Balance ... 17.91 CR". It prefers the mapped Balance column and falls back to the
+// rightmost parseable non-zero cell, since summary rows carry the figure in the balance column.
+func summaryRowBalance(row []string, balIdx int) (float64, bool) {
+	if balIdx >= 0 && balIdx < len(row) {
+		if v, err := parseAmount(cleanAmount(row[balIdx])); err == nil && v != 0 {
+			return v, true
+		}
+	}
+	for j := len(row) - 1; j >= 0; j-- {
+		if v, err := parseAmount(cleanAmount(row[j])); err == nil && v != 0 {
+			return v, true
+		}
+	}
+	return 0, false
+}
+
 // IsStatementOpeningCarryRow identifies narration that marks opening/closing carry-over
 // (yesterday's closing = today's opening). Banks emit this as a non-transaction line;
 // it must seed opening_balance but must not be inserted as a ledger transaction.
@@ -684,6 +891,12 @@ func userFriendlyUploadError(err error) string {
 	}
 	if errors.Is(err, ErrAllTransactionsDuplicate) {
 		return "This statement has already been uploaded. All transactions in this statement already exist in the system."
+	}
+	if errors.Is(err, ErrNoTransactionsInFile) {
+		return "The uploaded statement does not contain any transactions."
+	}
+	if errors.Is(err, ErrStatementSummaryOnly) {
+		return "This statement has no transaction rows — only a balance summary (e.g. available/closing balance). Upload the full transaction export from your bank, or a file that includes the balance summary row with amount and date."
 	}
 
 	msg := err.Error()
