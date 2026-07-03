@@ -526,35 +526,30 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			parentName := entity.ParentEntityName
 			childName := entity.EntityName
 
-			var exists int
-			err := pgxPool.QueryRow(r.Context(),
-				`SELECT 1 FROM cashentityrelationships WHERE parent_entity_name = $1 AND child_entity_name = $2`,
-				parentName, childName,
-			).Scan(&exists)
-
-			if err == pgx.ErrNoRows {
-				relQuery := `
+			// Atomic insert-if-absent: single statement avoids the check-then-insert race and duplicate rows.
+			relQuery := `
 			INSERT INTO cashentityrelationships (parent_entity_name, child_entity_name, status)
-			VALUES ($1, $2, 'Active')
+			SELECT $1, $2, 'Active'
+			WHERE NOT EXISTS (SELECT 1 FROM cashentityrelationships WHERE parent_entity_name = $1 AND child_entity_name = $2)
 			RETURNING relationship_id
 		`
-				var relID int
-				relErr := pgxPool.QueryRow(r.Context(), relQuery, parentName, childName).Scan(&relID)
-				if relErr == nil {
-					relationshipsAdded = append(relationshipsAdded, map[string]interface{}{
-						constants.ValueSuccess: true,
-						"relationship_id":      relID,
-						"parent_entity_name":   parentName,
-						"child_entity_name":    childName,
-					})
-				} else {
-					relationshipsAdded = append(relationshipsAdded, map[string]interface{}{
-						constants.ValueSuccess: false,
-						constants.ValueError:   relErr.Error(),
-						"parent_entity_name":   parentName,
-						"child_entity_name":    childName,
-					})
-				}
+			var relID int
+			relErr := pgxPool.QueryRow(r.Context(), relQuery, parentName, childName).Scan(&relID)
+			if relErr == nil {
+				relationshipsAdded = append(relationshipsAdded, map[string]interface{}{
+					constants.ValueSuccess: true,
+					"relationship_id":      relID,
+					"parent_entity_name":   parentName,
+					"child_entity_name":    childName,
+				})
+			} else if relErr != pgx.ErrNoRows {
+				// ErrNoRows => relationship already existed (no-op); any other error is a real failure
+				relationshipsAdded = append(relationshipsAdded, map[string]interface{}{
+					constants.ValueSuccess: false,
+					constants.ValueError:   relErr.Error(),
+					"parent_entity_name":   parentName,
+					"child_entity_name":    childName,
+				})
 			}
 		}
 
@@ -1505,15 +1500,15 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if parentProvided != "" {
 					parentId := parentProvided
 					if parentId != "" {
-						var exists int
-						err := pgxPool.QueryRow(ctx, `SELECT 1 FROM cashentityrelationships WHERE parent_entity_name = $1 AND child_entity_name = $2`, parentId, updatedEntityID).Scan(&exists)
-						if err == pgx.ErrNoRows {
-							relQuery := `INSERT INTO cashentityrelationships (parent_entity_name, child_entity_name, status) VALUES ($1, $2, 'Active') RETURNING relationship_id`
-							var relID int
-							relErr := pgxPool.QueryRow(ctx, relQuery, parentId, updatedEntityID).Scan(&relID)
-							if relErr == nil {
-								relationshipsAdded = append(relationshipsAdded, map[string]interface{}{constants.ValueSuccess: true, "relationship_id": relID, "parent_entity_name": parentId, "child_entity_name": updatedEntityID})
-							}
+						// Atomic insert-if-absent: single statement avoids the check-then-insert race and duplicate rows.
+						relQuery := `INSERT INTO cashentityrelationships (parent_entity_name, child_entity_name, status)
+							SELECT $1, $2, 'Active'
+							WHERE NOT EXISTS (SELECT 1 FROM cashentityrelationships WHERE parent_entity_name = $1 AND child_entity_name = $2)
+							RETURNING relationship_id`
+						var relID int
+						relErr := pgxPool.QueryRow(ctx, relQuery, parentId, updatedEntityID).Scan(&relID)
+						if relErr == nil {
+							relationshipsAdded = append(relationshipsAdded, map[string]interface{}{constants.ValueSuccess: true, "relationship_id": relID, "parent_entity_name": parentId, "child_entity_name": updatedEntityID})
 						}
 					}
 				}
@@ -2675,15 +2670,14 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if parent == "" {
 						continue
 					}
-					// check existence
-					var exists int
-					err = tx.QueryRow(ctx, `SELECT 1 FROM cashentityrelationships WHERE parent_entity_name=$1 AND child_entity_name=$2`, parent, eid).Scan(&exists)
-					if err == pgx.ErrNoRows {
-						var relID int
-						err2 := tx.QueryRow(ctx, `INSERT INTO cashentityrelationships (parent_entity_name, child_entity_name, status) VALUES ($1, $2, 'Active') RETURNING relationship_id`, parent, eid).Scan(&relID)
-						if err2 == nil {
-							relationshipsAdded = append(relationshipsAdded, map[string]interface{}{constants.ValueSuccess: true, "relationship_id": relID, "parent_entity_name": parent, "child_entity_name": eid})
-						}
+					// Atomic insert-if-absent: single statement avoids the check-then-insert race and duplicate rows.
+					var relID int
+					err2 := tx.QueryRow(ctx, `INSERT INTO cashentityrelationships (parent_entity_name, child_entity_name, status)
+						SELECT $1, $2, 'Active'
+						WHERE NOT EXISTS (SELECT 1 FROM cashentityrelationships WHERE parent_entity_name=$1 AND child_entity_name=$2)
+						RETURNING relationship_id`, parent, eid).Scan(&relID)
+					if err2 == nil {
+						relationshipsAdded = append(relationshipsAdded, map[string]interface{}{constants.ValueSuccess: true, "relationship_id": relID, "parent_entity_name": parent, "child_entity_name": eid})
 					}
 				}
 				relRows2.Close()

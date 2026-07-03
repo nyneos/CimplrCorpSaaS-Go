@@ -266,10 +266,11 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 
-			var exists int
-			err := db.QueryRow(`SELECT 1 FROM entityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentEntityID, childEntityID).Scan(&exists)
-			if err == sql.ErrNoRows {
-				if _, err := db.Exec(`INSERT INTO entityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, $3)`, parentEntityID, childEntityID, "Active"); err == nil {
+			// Atomic insert-if-absent: single statement avoids the check-then-insert race and duplicate rows.
+			if res, err := db.Exec(`INSERT INTO entityrelationships (parent_entity_id, child_entity_id, status)
+				SELECT $1, $2, $3
+				WHERE NOT EXISTS (SELECT 1 FROM entityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2)`, parentEntityID, childEntityID, "Active"); err == nil {
+				if n, _ := res.RowsAffected(); n > 0 {
 					relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"parent_id": parentEntityID, "child_id": childEntityID})
 				}
 			}

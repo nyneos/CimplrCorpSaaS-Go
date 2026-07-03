@@ -497,13 +497,10 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			ctx := context.Background()
-			var exists bool
-			// relationships are now stored by names
-			err := pgxPool.QueryRow(ctx, `SELECT true FROM cashflowcategoryrelationships WHERE parent_category_name=$1 AND child_category_name=$2`, parentName, cat.CategoryName).Scan(&exists)
-			if err == nil && exists {
-				continue
-			}
-			if _, err := pgxPool.Exec(ctx, `INSERT INTO cashflowcategoryrelationships (parent_category_name, child_category_name, status) VALUES ($1,$2,'Active')`, parentName, cat.CategoryName); err == nil {
+			// Atomic insert-if-absent: single statement avoids the check-then-insert race and duplicate rows.
+			if tag, err := pgxPool.Exec(ctx, `INSERT INTO cashflowcategoryrelationships (parent_category_name, child_category_name, status)
+				SELECT $1, $2, 'Active'
+				WHERE NOT EXISTS (SELECT 1 FROM cashflowcategoryrelationships WHERE parent_category_name=$1 AND child_category_name=$2)`, parentName, cat.CategoryName); err == nil && tag.RowsAffected() > 0 {
 				relAdded++
 			}
 		}
@@ -1272,13 +1269,13 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 				if parentProvided != "" {
-					var exists bool
-					err := tx.QueryRow(ctx, `SELECT true FROM cashflowcategoryrelationships WHERE parent_category_name=$1 AND child_category_name=$2`, parentProvided, ifaceToString(existingCategoryNameI)).Scan(&exists)
-					// Insert only when the query returned an error or the relationship does not exist
-					if err != nil || !exists {
-						if _, err := tx.Exec(ctx, `INSERT INTO cashflowcategoryrelationships (parent_category_name, child_category_name, status) VALUES ($1,$2,'Active')`, parentProvided, ifaceToString(existingCategoryNameI)); err == nil {
-							relationshipsAdded = append(relationshipsAdded, map[string]interface{}{constants.ValueSuccess: true, "parent_category_name": parentProvided, "child_category_name": ifaceToString(existingCategoryNameI)})
-						}
+					childName := ifaceToString(existingCategoryNameI)
+					// Atomic insert-if-absent: single statement avoids the check-then-insert race and duplicate rows.
+					tag, err := tx.Exec(ctx, `INSERT INTO cashflowcategoryrelationships (parent_category_name, child_category_name, status)
+						SELECT $1, $2, 'Active'
+						WHERE NOT EXISTS (SELECT 1 FROM cashflowcategoryrelationships WHERE parent_category_name=$1 AND child_category_name=$2)`, parentProvided, childName)
+					if err == nil && tag.RowsAffected() > 0 {
+						relationshipsAdded = append(relationshipsAdded, map[string]interface{}{constants.ValueSuccess: true, "parent_category_name": parentProvided, "child_category_name": childName})
 					}
 				}
 
