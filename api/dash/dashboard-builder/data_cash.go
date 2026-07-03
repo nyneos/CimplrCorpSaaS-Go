@@ -9,6 +9,7 @@ import (
 	fundavailibilty "CimplrCorpSaas/api/cash/fundavailibilty"
 	payablerecievable "CimplrCorpSaas/api/cash/payablerecievable"
 	cashlimit "CimplrCorpSaas/api/cash/limit"
+	cashprojection "CimplrCorpSaas/api/cash/projection"
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/validation"
@@ -486,110 +487,13 @@ func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs
 
 // ── Projections ────────────────────────────────────────────────────────────
 func queryCashProjectionList(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	q := `
-		WITH latest_audit AS (
-			SELECT DISTINCT ON (proposal_id)
-				proposal_id,
-				processing_status,
-				requested_at,
-				checker_at
-			FROM cimplrcorpsaas.audit_action_cashflow_proposal
-			ORDER BY proposal_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
-		)
-		SELECT
-			COALESCE(p.proposal_id::text, '') AS proposal_id,
-			COALESCE(p.proposal_name, '') AS proposal_name,
-			COALESCE(p.base_currency_code, '') AS base_currency_code,
-			p.effective_date,
-			COALESCE(p.upload_s3_key, '') AS upload_s3_key,
-			COALESCE(a.processing_status, 'N/A') AS processing_status,
-			COUNT(DISTINCT i.item_id) AS item_count
-		FROM cimplrcorpsaas.cashflow_proposal p
-		LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i
-			ON p.proposal_id = i.proposal_id
-		   AND COALESCE(i.is_deleted, false) = false
-		LEFT JOIN latest_audit a ON a.proposal_id = p.proposal_id::text
-		WHERE COALESCE(p.is_deleted, false) = false
-		GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, p.upload_s3_key, a.processing_status, a.requested_at, a.checker_at
-		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
-	`
-
-	r, err := pool.Query(ctx, q, limit)
+	rows, err := cashprojection.QueryProposalListV2(ctx, pool, limit)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := scanRows(r)
-	if err != nil {
-		return nil, err
-	}
-	return filterProjectionProposalRows(ctx, pool, rows)
-}
-
-func filterProjectionProposalRows(ctx context.Context, pool *pgxpool.Pool, rows []map[string]any) ([]map[string]any, error) {
-	if len(rows) == 0 {
-		return rows, nil
-	}
-
-	ids := make([]string, 0, len(rows))
-	for _, row := range rows {
-		if id := dashboardStr(row["proposal_id"]); id != "" {
-			ids = append(ids, id)
-		}
-	}
-	if len(ids) == 0 {
-		return []map[string]any{}, nil
-	}
-
-	r, err := pool.Query(ctx, `
-		SELECT
-			COALESCE(i.proposal_id::text, '')     AS proposal_id,
-			COALESCE(i.entity_name, '')           AS entity_name,
-			COALESCE(i.category_id::text, '')     AS category_id,
-			COALESCE(i.currency_code, '')         AS currency_code,
-			COALESCE(i.bank_name, '')             AS bank_name,
-			COALESCE(i.bank_account_number, '')   AS bank_account_number
-		FROM cimplrcorpsaas.cashflow_proposal_item i
-		WHERE COALESCE(i.is_deleted, false) = false
-		  AND i.proposal_id::text = ANY($1)
-	`, ids)
-	if err != nil {
-		return nil, err
-	}
-	itemRows, err := scanRows(r)
-	if err != nil {
-		return nil, err
-	}
-
-	scopedCounts := make(map[string]int, len(ids))
-	for _, item := range itemRows {
-		if validation.ValidateCashMasterReferences(ctx, map[string]interface{}{
-			"entity_name":         dashboardStr(item["entity_name"]),
-			"category_id":         dashboardStr(item["category_id"]),
-			"currency_code":       dashboardStr(item["currency_code"]),
-			"bank_name":           dashboardStr(item["bank_name"]),
-			"bank_account_number": dashboardStr(item["bank_account_number"]),
-		}) != "" {
-			continue
-		}
-		proposalID := dashboardStr(item["proposal_id"])
-		scopedCounts[proposalID]++
-	}
-
-	out := make([]map[string]any, 0, len(rows))
-	for _, row := range rows {
-		proposalID := dashboardStr(row["proposal_id"])
-		if validation.ValidateCashMasterReferences(ctx, map[string]interface{}{
-			"currency_code": dashboardStr(row["base_currency_code"]),
-		}) != "" {
-			continue
-		}
-		count := scopedCounts[proposalID]
-		if count == 0 {
-			continue
-		}
-		row["item_count"] = count
-		out = append(out, row)
+	out := make([]map[string]any, len(rows))
+	for i, row := range rows {
+		out[i] = row
 	}
 	return out, nil
 }
@@ -613,7 +517,7 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(i.description, '')           AS description,
 			COALESCE(i.cashflow_type, '')         AS cashflow_type,
 			COALESCE(i.category_id::text, '')     AS category_id,
-			COALESCE(i.currency_code, '')         AS currency_code,
+			COALESCE(NULLIF(TRIM(i.currency_code), ''), NULLIF(TRIM(p.base_currency_code), '')) AS currency_code,
 			COALESCE(i.expected_amount, 0)        AS expected_amount,
 			COALESCE(i.is_recurring, false)       AS is_recurring,
 			COALESCE(i.recurrence_frequency, '')  AS recurrence_frequency,
@@ -756,9 +660,47 @@ func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 	return scanRows(r)
 }
 
+// Dashboard builder exposes only these utilization columns (see CI_DSAHBOARD dataSourceFields cashUtilizations).
+var cashUtilizationDashboardFields = []string{
+	"currency_code",
+	"entry_mode",
+	"limit_action_type",
+	"limit_available",
+	"limit_bank_name",
+	"limit_core_limit_type",
+	"limit_currency_code",
+	"limit_effective_date",
+	"limit_entity_name",
+	"limit_fungibility_pct",
+	"limit_fungibility_type",
+	"limit_initial_utilization",
+	"limit_limit_sub_type",
+	"limit_limit_type",
+	"limit_processing_status",
+	"limit_remarks",
+	"limit_requested_at",
+	"limit_requested_by",
+	"limit_sanction_date",
+	"limit_sanctioned_amount",
+	"limit_security_type",
+	"limit_utilization_pct",
+	"remarks",
+	"utilization_date",
+	"utilized_amount",
+}
+
+func projectUtilizationRow(row map[string]interface{}) map[string]any {
+	out := make(map[string]any, len(cashUtilizationDashboardFields))
+	for _, key := range cashUtilizationDashboardFields {
+		if v, ok := row[key]; ok {
+			out[key] = v
+		}
+	}
+	return out
+}
+
 func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, rowLimit int) ([]map[string]any, error) {
-	// Reuse the cash module query so dashboard rows match /cash/utilization/all:
-	// full utilization + limit fields, cash-scope validation, and KPI columns.
+	// Reuse the cash module query for scope validation and KPI columns; project to dashboard schema.
 	rows, err := cashlimit.QueryAllUtilizations(ctx, pool, rowLimit)
 	if err != nil {
 		return nil, err
@@ -773,7 +715,7 @@ func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 
 	out := make([]map[string]any, len(rows))
 	for i, row := range rows {
-		out[i] = row
+		out[i] = projectUtilizationRow(row)
 	}
 	return out, nil
 }

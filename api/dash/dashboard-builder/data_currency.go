@@ -39,10 +39,6 @@ var sourceCurrencyConfig = map[string]currencyNormConfig{
 			"allocated_amount": {},
 		},
 	},
-	"cashProjectionDetail": {
-		currencyField: "currency_code",
-		amountFields:  map[string]struct{}{"expected_amount": {}},
-	},
 	"cashFundAvailability": {
 		currencyField: "currency_code",
 		amountFields:  map[string]struct{}{"total_amount": {}},
@@ -52,20 +48,6 @@ var sourceCurrencyConfig = map[string]currencyNormConfig{
 		amountFields: map[string]struct{}{
 			"sanctioned_amount":   {},
 			"initial_utilization": {},
-		},
-	},
-	"cashUtilizations": {
-		currencyField: "currency_code",
-		fieldCurrencyMap: map[string]string{
-			"limit_sanctioned_amount":   "limit_currency_code",
-			"limit_initial_utilization":   "limit_currency_code",
-			"limit_available":             "limit_currency_code",
-		},
-		amountFields: map[string]struct{}{
-			"utilized_amount":           {},
-			"limit_sanctioned_amount":   {},
-			"limit_initial_utilization": {},
-			"limit_available":           {},
 		},
 	},
 	"fxExposureHeadersLineItems": {
@@ -93,23 +75,16 @@ var sourceCurrencyConfig = map[string]currencyNormConfig{
 	},
 }
 
+// Sources that must return raw DB values; INR conversion runs in the dashboard frontend.
+var currencyNormalizationExcluded = map[string]struct{}{
+	"cashUtilizations":     {},
+	"cashProjectionDetail": {},
+}
+
 func normalizeRowsToINR(source string, rows []map[string]any) []map[string]any {
-	if len(rows) == 0 {
-		return rows
-	}
-
-	cfg, ok := sourceCurrencyConfig[source]
-	if !ok {
-		detected := autoDetectCurrencyConfig(rows)
-		if detected == nil {
-			return rows
-		}
-		cfg = *detected
-	}
-
-	for _, row := range rows {
-		normalizeRowToINR(row, cfg)
-	}
+	// INR normalization is performed on the dashboard frontend using live ticker rates
+	// (/dash/ticker/inr-rates). Return raw DB currency + amounts from the API.
+	_ = source
 	return rows
 }
 
@@ -119,6 +94,7 @@ func normalizeRowToINR(row map[string]any, cfg currencyNormConfig) {
 		defaultCurrency = baseCurrencyFromPair(rowString(row, cfg.currencyPairField))
 	}
 
+	convertedForeign := false
 	for field := range cfg.amountFields {
 		currencyField := cfg.currencyField
 		if override, ok := cfg.fieldCurrencyMap[field]; ok && override != "" {
@@ -129,17 +105,24 @@ func normalizeRowToINR(row map[string]any, cfg currencyNormConfig) {
 		if currency == "" {
 			currency = defaultCurrency
 		}
-		if currency == "" {
-			currency = "INR"
+		if currency == "" || currency == "INR" {
+			continue
 		}
 
 		amount, ok := toFloat64(row[field])
 		if !ok {
 			continue
 		}
-		row[field] = ticker.ConvertAmountToINR(amount, currency)
+		converted := ticker.ConvertAmountToINR(amount, currency)
+		row[field] = converted
+		if converted != amount {
+			convertedForeign = true
+		}
 	}
 
+	if !convertedForeign {
+		return
+	}
 	if cfg.currencyField != "" {
 		row[cfg.currencyField] = "INR"
 	}

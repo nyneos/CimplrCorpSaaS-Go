@@ -1018,6 +1018,72 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// QueryProposalListV2 returns proposal summaries scoped to the user's cash access.
+// Rows match POST /cash/projection/v2/list. limit 0 means no row cap.
+func QueryProposalListV2(ctx context.Context, pgxPool *pgxpool.Pool, limit int) ([]map[string]interface{}, error) {
+	limitClause := ""
+	args := []any{}
+	if limit > 0 {
+		limitClause = " LIMIT $1"
+		args = append(args, limit)
+	}
+
+	q := `
+			SELECT
+				p.proposal_id,
+				p.proposal_name,
+				p.base_currency_code,
+				p.effective_date,
+				p.upload_s3_key,
+				COALESCE(a.processing_status, 'N/A') AS processing_status,
+				COUNT(DISTINCT i.item_id) AS item_count
+			FROM cimplrcorpsaas.cashflow_proposal p
+			LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i
+				ON p.proposal_id = i.proposal_id
+			   AND COALESCE(i.is_deleted, false) = false
+			LEFT JOIN LATERAL (
+				SELECT processing_status
+				FROM cimplrcorpsaas.audit_action_cashflow_proposal a2
+				WHERE a2.proposal_id = p.proposal_id
+				  AND a2.action_type IN ('CREATE', 'EDIT', 'DELETE')
+				ORDER BY requested_at DESC, action_id DESC
+				LIMIT 1
+			) a ON TRUE
+			WHERE COALESCE(p.is_deleted, false) = false
+			GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, p.upload_s3_key, a.processing_status
+			ORDER BY COALESCE((SELECT GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = p.proposal_id AND action_type IN ('CREATE', 'EDIT', 'DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1), '1970-01-01'::timestamp) DESC` + limitClause
+
+	rows, err := pgxPool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	proposals := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var proposalID, proposalName, baseCurrency, status string
+		var uploadS3Key interface{}
+		var effectiveDate time.Time
+		var itemCount int
+		if err := rows.Scan(&proposalID, &proposalName, &baseCurrency, &effectiveDate, &uploadS3Key, &status, &itemCount); err != nil {
+			return nil, fmt.Errorf("read proposals: %w", err)
+		}
+		if err := validateProjectionProposalScope(ctx, pgxPool, proposalID, baseCurrency); err != nil {
+			continue
+		}
+		proposals = append(proposals, map[string]interface{}{
+			"proposal_id":        proposalID,
+			"proposal_name":      proposalName,
+			"base_currency_code": baseCurrency,
+			"effective_date":     effectiveDate.Format(constants.DateFormat),
+			"upload_s3_key":      strings.TrimSpace(ifaceToString(uploadS3Key)),
+			"processing_status":  status,
+			"item_count":         itemCount,
+		})
+	}
+	return proposals, rows.Err()
+}
+
 // ListProposalsV2 lists all proposals with summary info (V2 schema)
 func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1043,62 +1109,10 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// List all proposals with latest audit status
-		q := `
-			SELECT
-				p.proposal_id,
-				p.proposal_name,
-				p.base_currency_code,
-				p.effective_date,
-				p.upload_s3_key,
-				COALESCE(a.processing_status, 'N/A') AS processing_status,
-				COUNT(DISTINCT i.item_id) AS item_count
-			FROM cimplrcorpsaas.cashflow_proposal p
-			LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i
-				ON p.proposal_id = i.proposal_id
-			   AND COALESCE(i.is_deleted, false) = false
-			LEFT JOIN LATERAL (
-				SELECT processing_status
-				FROM cimplrcorpsaas.audit_action_cashflow_proposal a2
-				WHERE a2.proposal_id = p.proposal_id
-				  AND a2.action_type IN ('CREATE', 'EDIT', 'DELETE')
-				ORDER BY requested_at DESC, action_id DESC
-				LIMIT 1
-			) a ON TRUE
-			WHERE COALESCE(p.is_deleted, false) = false
-			GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, p.upload_s3_key, a.processing_status
-			ORDER BY COALESCE((SELECT GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = p.proposal_id AND action_type IN ('CREATE', 'EDIT', 'DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1), '1970-01-01'::timestamp) DESC
-		`
-
-		rows, err := pgxPool.Query(ctx, q)
+		proposals, err := QueryProposalListV2(ctx, pgxPool, 0)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
-		}
-		defer rows.Close()
-
-		proposals := make([]map[string]interface{}, 0)
-		for rows.Next() {
-			var proposalID, proposalName, baseCurrency, status string
-			var uploadS3Key interface{}
-			var effectiveDate time.Time
-			var itemCount int
-			if err := rows.Scan(&proposalID, &proposalName, &baseCurrency, &effectiveDate, &uploadS3Key, &status, &itemCount); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read proposals: "+err.Error())
-				return
-			}
-			if err := validateProjectionProposalScope(ctx, pgxPool, proposalID, baseCurrency); err != nil {
-				continue
-			}
-			proposals = append(proposals, map[string]interface{}{
-				"proposal_id":        proposalID,
-				"proposal_name":      proposalName,
-				"base_currency_code": baseCurrency,
-				"effective_date":     effectiveDate.Format(constants.DateFormat),
-				"upload_s3_key":      strings.TrimSpace(ifaceToString(uploadS3Key)),
-				"processing_status":  status,
-				"item_count":         itemCount,
-			})
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
