@@ -417,20 +417,22 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Insert to master table (ignore duplicates) — use WHERE NOT EXISTS to avoid relying on unique indexes
+		// Insert to master table, deduping on (calendar_id, holiday_date, holiday_type):
+		// DISTINCT ON collapses duplicates within this batch; NOT EXISTS skips ones already saved.
 		_, err = tx.Exec(ctx, `
 			INSERT INTO investment.masterholiday
 			(calendar_id, holiday_date, holiday_name, holiday_type, recurrence_rule, notes, ingestion_source, status)
-			SELECT th.calendar_id, th.holiday_date, th.holiday_name, th.holiday_type, th.recurrence_rule, th.notes, th.ingestion_source, 'Active'
+			SELECT DISTINCT ON (th.calendar_id, th.holiday_date, th.holiday_type)
+			       th.calendar_id, th.holiday_date, th.holiday_name, th.holiday_type, th.recurrence_rule, th.notes, th.ingestion_source, 'Active'
 			FROM tmp_holiday th
 			WHERE NOT EXISTS (
 				SELECT 1 FROM investment.masterholiday mh
 				WHERE mh.calendar_id = th.calendar_id
 				  AND mh.holiday_date = th.holiday_date
-				  AND mh.holiday_name = th.holiday_name
 				  AND mh.holiday_type = th.holiday_type
 				  AND COALESCE(mh.is_deleted,false)=false
-			);
+			)
+			ORDER BY th.calendar_id, th.holiday_date, th.holiday_type;
 		`)
 		if err != nil {
 			api.RespondWithError(w, 500, "insert error: "+err.Error())
@@ -441,7 +443,7 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 	INSERT INTO investment.auditactioncalendar
 	(calendar_id, actiontype, processing_status, reason, requested_by, requested_at)
-	SELECT DISTINCT calendar_id, 'EDIT', 'PENDING_EDIT_APPROVAL', 'Holidays Inserted', $1, now()
+	SELECT DISTINCT calendar_id, 'CREATE', 'PENDING_APPROVAL', 'Holidays Inserted', $1, now()
 	FROM tmp_holiday
 `, userEmail)
 
@@ -909,7 +911,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, err = tx.Exec(ctx, `
 				INSERT INTO investment.auditactioncalendar
 				(calendar_id, actiontype, processing_status, reason, requested_by, requested_at)
-				SELECT DISTINCT calendar_id, 'EDIT','PENDING_EDIT_APPROVAL','Holidays Inserted (Bulk)', $1, now()
+				SELECT DISTINCT calendar_id, 'CREATE','PENDING_APPROVAL','Holidays Inserted (Bulk)', $1, now()
 				FROM tmp_holiday_upload
 			`, userEmail)
 			if err != nil {
@@ -2122,6 +2124,34 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			strings.Join(sets, ", "), pos)
 		args = append(args, req.HolidayID)
 
+		oldValuesMap := map[string]interface{}{}
+		newValuesMap := map[string]interface{}{}
+		for k, v := range req.Fields {
+			field := strings.ToLower(k)
+			if !allowed[field] {
+				continue
+			}
+			var oldStr, newStr string
+			if field == "holiday_date" {
+				oldStr = toDateStr(oldVals[field])
+				newStr = toDateStr(v)
+			} else {
+				if oldVals[field] != nil {
+					oldStr = strings.TrimSpace(fmt.Sprint(oldVals[field]))
+				}
+				if v != nil {
+					newStr = strings.TrimSpace(fmt.Sprint(v))
+				}
+			}
+			if oldStr == newStr {
+				continue
+			}
+			oldValuesMap[field] = oldStr
+			newValuesMap[field] = newStr
+		}
+		oldValuesJSON, _ := json.Marshal(oldValuesMap)
+		newValuesJSON, _ := json.Marshal(newValuesMap)
+
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			tx.Rollback(ctx)
 			api.RespondWithError(w, 500, constants.ErrUpdateFailed+err.Error())
@@ -2130,9 +2160,9 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		_, err = tx.Exec(ctx, `
 			INSERT INTO investment.auditactioncalendar
-			(calendar_id, actiontype, processing_status, reason, requested_by, requested_at)
-			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
-		`, calendarID, req.Reason, userEmail)
+			(calendar_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
+			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)
+		`, calendarID, req.Reason, userEmail, string(oldValuesJSON), string(newValuesJSON))
 		if err != nil {
 			tx.Rollback(ctx)
 			api.RespondWithError(w, 500, constants.ErrAuditInsertFailed+err.Error())
