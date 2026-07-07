@@ -98,6 +98,21 @@ const llmHeaderRowSpan = 12
 // accurate and faster than gpt-4o-mini on the long, split-row statements this extractor sees.
 const llmTxnDefaultModel = "gpt-4.1"
 
+// llmInferenceConfig holds the endpoint credentials for one LLM extraction call.
+type llmInferenceConfig struct {
+	url   string
+	key   string
+	model string
+}
+
+// llmTxnChunkInput is the per-chunk context passed into the LLM extractor.
+type llmTxnChunkInput struct {
+	chunk       [][]string
+	headerRows  [][]string
+	isFirst     bool
+	prevBalance *float64
+}
+
 // resolveLLMTxnModel picks the extraction model: the BANK_STATEMENT_LLM_MODEL env var when set,
 // otherwise the gpt-4.1 default. The legacy bound model (bindref.BrG3) is intentionally NOT used
 // here — it is pinned to gpt-4o-mini, which is too weak for these statements.
@@ -123,6 +138,7 @@ func extractTransactionsWithLLM(ctx context.Context, rows [][]string) (*llmTxnRe
 	// debit/balance disambiguation that depends on it) does not reset across boundaries.
 	out := &llmTxnResponse{}
 	headerRows := rows[:min(llmHeaderRowSpan, len(rows))]
+	cfg := llmInferenceConfig{url: inferURL, key: inferKey, model: model}
 	var prevBalance *float64
 	for start := 0; start < len(rows); start += llmTxnChunkSize {
 		end := min(start+llmTxnChunkSize, len(rows))
@@ -131,7 +147,8 @@ func extractTransactionsWithLLM(ctx context.Context, rows [][]string) (*llmTxnRe
 		if !isFirst {
 			hdr = headerRows
 		}
-		resp, err := callLLMTxnChunkAdaptive(ctx, inferURL, inferKey, model, rows[start:end], hdr, isFirst, prevBalance)
+		in := llmTxnChunkInput{chunk: rows[start:end], headerRows: hdr, isFirst: isFirst, prevBalance: prevBalance}
+		resp, err := callLLMTxnChunkAdaptive(ctx, cfg, in)
 		if err != nil {
 			return nil, fmt.Errorf("llm-txn: chunk [%d:%d]: %w", start, end, err)
 		}
@@ -154,33 +171,37 @@ func extractTransactionsWithLLM(ctx context.Context, rows [][]string) (*llmTxnRe
 // each half, threading the running balance and repeating the header context, until the pieces fit or
 // the floor (llmMinAdaptiveChunk) is reached. This is what guarantees every row is returned on large
 // multi-page statements instead of silently losing the rows that overran the output budget.
-func callLLMTxnChunkAdaptive(ctx context.Context, inferURL, inferKey, model string, chunk, headerRows [][]string, isFirst bool, prevBalance *float64) (*llmTxnResponse, error) {
-	resp, truncated, err := callLLMTxnChunk(ctx, inferURL, inferKey, model, chunk, headerRows, isFirst, prevBalance)
+func callLLMTxnChunkAdaptive(ctx context.Context, cfg llmInferenceConfig, in llmTxnChunkInput) (*llmTxnResponse, error) {
+	resp, truncated, err := callLLMTxnChunk(ctx, cfg, in)
 	if err != nil {
 		return nil, err
 	}
-	if !truncated || len(chunk) <= llmMinAdaptiveChunk {
+	if !truncated || len(in.chunk) <= llmMinAdaptiveChunk {
 		return resp, nil
 	}
 
-	logger.LogInfo("[LLM-TXN] chunk of %d rows truncated (finish_reason=length) — splitting and retrying", len(chunk))
-	mid := len(chunk) / 2
-	left, lerr := callLLMTxnChunkAdaptive(ctx, inferURL, inferKey, model, chunk[:mid], headerRows, isFirst, prevBalance)
+	logger.LogInfo("[LLM-TXN] chunk of %d rows truncated (finish_reason=length) — splitting and retrying", len(in.chunk))
+	mid := len(in.chunk) / 2
+	left, lerr := callLLMTxnChunkAdaptive(ctx, cfg, llmTxnChunkInput{
+		chunk: in.chunk[:mid], headerRows: in.headerRows, isFirst: in.isFirst, prevBalance: in.prevBalance,
+	})
 	if lerr != nil {
 		return nil, lerr
 	}
 	// Thread the left half's closing balance into the right half so the chain continues; on the right
 	// half the header rows are always supplied as context (it is never the statement's first chunk).
-	nextPrev := prevBalance
+	nextPrev := in.prevBalance
 	if n := len(left.Transactions); n > 0 {
 		b := float64(left.Transactions[n-1].Balance)
 		nextPrev = &b
 	}
-	rightHeader := headerRows
+	rightHeader := in.headerRows
 	if rightHeader == nil {
-		rightHeader = chunk[:min(llmHeaderRowSpan, len(chunk))]
+		rightHeader = in.chunk[:min(llmHeaderRowSpan, len(in.chunk))]
 	}
-	right, rerr := callLLMTxnChunkAdaptive(ctx, inferURL, inferKey, model, chunk[mid:], rightHeader, false, nextPrev)
+	right, rerr := callLLMTxnChunkAdaptive(ctx, cfg, llmTxnChunkInput{
+		chunk: in.chunk[mid:], headerRows: rightHeader, isFirst: false, prevBalance: nextPrev,
+	})
 	if rerr != nil {
 		return nil, rerr
 	}
@@ -194,11 +215,11 @@ func callLLMTxnChunkAdaptive(ctx context.Context, inferURL, inferKey, model stri
 // stopped because it hit the output-token cap (finish_reason="length") — the signal that some
 // transactions were cut off — so the caller can split the chunk and retry instead of silently
 // accepting a short result.
-func callLLMTxnChunk(ctx context.Context, inferURL, inferKey, model string, chunk, headerRows [][]string, isFirst bool, prevBalance *float64) (*llmTxnResponse, bool, error) {
+func callLLMTxnChunk(ctx context.Context, cfg llmInferenceConfig, in llmTxnChunkInput) (*llmTxnResponse, bool, error) {
 	var sb strings.Builder
-	if len(headerRows) > 0 {
+	if len(in.headerRows) > 0 {
 		sb.WriteString("Header/context rows (for column meaning only — do NOT extract transactions from these):\n")
-		for _, row := range headerRows {
+		for _, row := range in.headerRows {
 			sb.WriteString("Header:")
 			for _, cell := range row {
 				sb.WriteString(" | ")
@@ -208,7 +229,7 @@ func callLLMTxnChunk(ctx context.Context, inferURL, inferKey, model string, chun
 		}
 		sb.WriteString("Transaction rows:\n")
 	}
-	for i, row := range chunk {
+	for i, row := range in.chunk {
 		sb.WriteString(fmt.Sprintf("Row %d:", i))
 		for _, cell := range row {
 			sb.WriteString(" | ")
@@ -276,17 +297,17 @@ Return ONLY valid JSON in exactly this shape:
 
 Rows:
 `
-	if !isFirst {
+	if !in.isFirst {
 		prompt += "(This is a continuation chunk; opening_balance may be null.)\n"
 	}
-	if prevBalance != nil {
+	if in.prevBalance != nil {
 		prompt += fmt.Sprintf("(The balance AFTER the last transaction of the previous chunk was %.2f; "+
-			"the first transaction below must continue the running balance from there.)\n", *prevBalance)
+			"the first transaction below must continue the running balance from there.)\n", *in.prevBalance)
 	}
 	prompt += sb.String()
 
 	reqBody := map[string]interface{}{
-		"model": model,
+		"model": cfg.model,
 		"messages": []map[string]interface{}{
 			{"role": "user", "content": prompt},
 		},
@@ -313,12 +334,12 @@ Rows:
 	const maxAttempts = 5
 	for attempt := 1; ; attempt++ {
 		httpCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
-		req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, inferURL, bytes.NewReader(bodyBytes))
+		req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, cfg.url, bytes.NewReader(bodyBytes))
 		if err != nil {
 			cancel()
 			return nil, false, fmt.Errorf("build request: %w", err)
 		}
-		req.Header.Set("Authorization", "Bearer "+inferKey)
+		req.Header.Set("Authorization", "Bearer "+cfg.key)
 		req.Header.Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 		resp, err := http.DefaultClient.Do(req)
@@ -794,4 +815,3 @@ func llmChainContinues(startBal float64, rows []amtRow, idx int) bool {
 	}
 	return false
 }
-

@@ -732,10 +732,14 @@ func fundAvailabilityEndDate(asOfDate time.Time, viewType string) time.Time {
 }
 
 // CombinedFundAvailabilityRows mirrors /cash/fund-availability/combined as flat dashboard rows.
+// Each row keeps its "periods" map intact (one row per source record).
 func CombinedFundAvailabilityRows(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate time.Time, viewType string, entityIDs, entityNames, bankNames []string) ([]map[string]any, error) {
 	viewType = strings.ToLower(strings.TrimSpace(viewType))
 	if viewType == "" {
-		viewType = "daily"
+		return []map[string]any{}, nil
+	}
+	if viewType != "daily" && viewType != "weekly" && viewType != "monthly" && viewType != "quarterly" && viewType != "yearly" {
+		return []map[string]any{}, nil
 	}
 	endDate := fundAvailabilityEndDate(asOfDate, viewType)
 
@@ -772,6 +776,7 @@ func flattenFundAvailabilityRow(item map[string]interface{}, recordType string) 
 		"category_name": item["category_name"],
 		"description":   item["description"],
 		"total_amount":  item["total_amount"],
+		"periods":       item["periods"],
 	}
 	if recordType == "PROJECTION" {
 		row["is_recurring"] = item["is_recurring"]
@@ -779,10 +784,12 @@ func flattenFundAvailabilityRow(item map[string]interface{}, recordType string) 
 		row["recurrence_frequency"] = item["recurrence_frequency"]
 	}
 	row["row_id"] = fmt.Sprintf(
-		"%s|%s|%s|%s|%s",
+		"%s|%s|%s|%s|%s|%s|%s",
 		recordType,
 		fmt.Sprint(item["entity_id"]),
+		fmt.Sprint(item["bank_name"]),
 		fmt.Sprint(item["bank_account"]),
+		fmt.Sprint(item["flow"]),
 		fmt.Sprint(item["category_id"]),
 		fmt.Sprint(item["description"]),
 	)
