@@ -534,6 +534,8 @@ func NewMasterServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, erro
 
 	// AMC Master
 	amcMF := investmentMasters.AMCMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/amc/download", midInvestMF(amcMF.DownloadMain))
+	mux.Handle("/master/amc/download-bulk", midInvestMF(amcMF.DownloadMainBulk))
 	mux.Handle("/master/amc/additional-files/list", midInvestMF(amcMF.List))
 	mux.Handle("/master/amc/additional-files/upload", midInvestMF(amcMF.Upload))
 	mux.Handle("/master/amc/additional-files/download", midInvestMF(amcMF.Download))
@@ -545,6 +547,8 @@ func NewMasterServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, erro
 
 	// Scheme Master
 	schemeMF := investmentMasters.SchemeMasterFilesHandlers(pgxPool)
+	mux.Handle("/master/scheme/download", midInvestMF(schemeMF.DownloadMain))
+	mux.Handle("/master/scheme/download-bulk", midInvestMF(schemeMF.DownloadMainBulk))
 	mux.Handle("/master/scheme/additional-files/list", midInvestMF(schemeMF.List))
 	mux.Handle("/master/scheme/additional-files/upload", midInvestMF(schemeMF.Upload))
 	mux.Handle("/master/scheme/additional-files/download", midInvestMF(schemeMF.Download))

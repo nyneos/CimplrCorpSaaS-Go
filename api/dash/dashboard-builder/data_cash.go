@@ -23,50 +23,83 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 	argIdx := 2
 	extraFilters := ""
 
-	ef, efArgs := entityFilter(entityIDs, "b", argIdx)
+	ef, efArgs := entityFilter(entityIDs, "s", argIdx)
 	if ef != "" {
 		extraFilters += " " + ef
 		args = append(args, efArgs...)
 		argIdx += len(efArgs)
 	}
 
-	sf, sfArgs, _ := bankStatementScopeFilter("b", scopePairs, argIdx)
+	sf, sfArgs, _ := bankStatementScopeFilter("s", scopePairs, argIdx)
 	extraFilters += sf
 	args = append(args, sfArgs...)
 
 	q := fmt.Sprintf(`
-		WITH latest_audit AS (
-			SELECT DISTINCT ON (bankstatementid)
-				bankstatementid,
-				processing_status,
-				requested_at,
-				checker_at
-			FROM cimplrcorpsaas.auditactionbankstatement
-			ORDER BY bankstatementid,
-			         GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp),
-			                  COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
+		WITH scoped_statements AS (
+			SELECT
+				s.bank_statement_id,
+				s.entity_id,
+				e.entity_name,
+				s.account_number,
+				s.statement_period_start,
+				s.statement_period_end,
+				s.opening_balance,
+				s.closing_balance,
+				s.uploaded_at,
+				COALESCE(mb.bank_name, '') AS bank_name,
+				mba.account_nickname AS account_nickname
+			FROM cimplrcorpsaas.bank_statements s
+			JOIN public.masterentitycash e ON s.entity_id = e.entity_id
+			LEFT JOIN public.masterbankaccount mba
+				ON mba.account_number = s.account_number AND COALESCE(mba.is_deleted, false) = false
+			LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+			WHERE COALESCE(s.is_deleted, false) = false %s
+		),
+		prioritized_audit AS (
+			SELECT a.*,
+				ROW_NUMBER() OVER(PARTITION BY a.bankstatementid ORDER BY
+					CASE WHEN a.actiontype = '%s' AND a.processing_status = '%s' THEN 1
+					WHEN a.processing_status IN ('PENDING_APPROVAL', '%s') AND a.actiontype IN ('CREATE', 'EDIT', 'RECAT') THEN 2
+					WHEN a.actiontype IN ('CREATE', 'EDIT', 'RECAT', '%s') THEN 3
+					ELSE 4 END,
+					a.requested_at DESC,
+					a.action_id DESC
+				) AS rn
+			FROM cimplrcorpsaas.auditactionbankstatement a
+			JOIN scoped_statements ss ON a.bankstatementid = ss.bank_statement_id
+			WHERE COALESCE(a.actiontype, '') NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
+		),
+		latest_audit AS (
+			SELECT * FROM prioritized_audit WHERE rn = 1
 		)
 		SELECT
-			COALESCE(b.bank_statement_id::text, '')     AS statement_id,
-			COALESCE(b.entity_id, '')                   AS entity_id,
-			COALESCE(e.entity_name, '')                 AS entity_name,
-			COALESCE(b.account_number, '')              AS account_number,
-			COALESCE(mb.bank_name, '')                  AS bank_name,
-			b.statement_period_start,
-			b.statement_period_end,
-			b.uploaded_at,
-			COALESCE(b.opening_balance, 0)              AS opening_balance,
-			COALESCE(b.closing_balance, 0)              AS closing_balance,
-			COALESCE(a.processing_status, '')           AS processing_status
-		FROM cimplrcorpsaas.bank_statements b
-		LEFT JOIN public.masterentitycash e ON e.entity_id = b.entity_id
-		LEFT JOIN public.masterbankaccount mba ON mba.account_number = b.account_number AND COALESCE(mba.is_deleted, false) = false
-		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-		LEFT JOIN latest_audit a ON a.bankstatementid = b.bank_statement_id
-		WHERE COALESCE(b.is_deleted, false) = false %s
-		ORDER BY b.uploaded_at DESC NULLS LAST
+			COALESCE(ss.bank_statement_id::text, '') AS statement_id,
+			COALESCE(ss.bank_statement_id::text, '') AS bank_statement_id,
+			COALESCE(ss.entity_id, '')               AS entity_id,
+			COALESCE(ss.entity_name, '')             AS entity_name,
+			COALESCE(ss.account_number, '')          AS account_number,
+			COALESCE(ss.bank_name, '')               AS bank_name,
+			COALESCE(ss.account_nickname, '')        AS account_nickname,
+			ss.statement_period_start,
+			ss.statement_period_end,
+			ss.uploaded_at,
+			COALESCE(ss.opening_balance, 0)          AS opening_balance,
+			COALESCE(ss.closing_balance, 0)          AS closing_balance,
+			CASE
+				WHEN la.actiontype = 'RECAT' AND la.processing_status = '%s' THEN 'APPROVED'
+				ELSE COALESCE(la.processing_status, '')
+			END AS processing_status
+		FROM scoped_statements ss
+		LEFT JOIN latest_audit la ON la.bankstatementid = ss.bank_statement_id
+		ORDER BY GREATEST(COALESCE(la.requested_at, ss.uploaded_at), COALESCE(la.checker_at, ss.uploaded_at)) DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`, extraFilters)
+	`, extraFilters,
+		constants.AuditActionDelete,
+		constants.StatusPendingDeleteApproval,
+		constants.StatusPendingEditApproval,
+		constants.AuditActionDelete,
+		constants.StatusPendingEditApproval,
+	)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -113,6 +146,7 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 			COALESCE(t.deposit_amount, 0)           AS deposit_amount,
 			COALESCE(t.balance, 0)                  AS balance,
 			COALESCE(t.category_id::text, '')       AS category_id,
+			COALESCE(mcc.category_name, '')         AS category_name,
 			COALESCE(t.misclassified_flag, false)   AS misclassified_flag,
 			COALESCE(t.narration_clean, '')         AS narration_clean,
 			COALESCE(t.narration_ref, '')           AS narration_ref,
@@ -123,6 +157,7 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 		JOIN cimplrcorpsaas.bank_statements s ON t.bank_statement_id = s.bank_statement_id
 		LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
 		LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND COALESCE(mba.is_deleted, false) = false
+		LEFT JOIN public.mastercashflowcategory mcc ON mcc.category_id = t.category_id
 		WHERE COALESCE(s.is_deleted, false) = false %s %s
 		ORDER BY t.value_date DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
@@ -249,7 +284,6 @@ func filterPayRecScopeRows(ctx context.Context, rows []map[string]any) []map[str
 		if validation.ValidateCashMasterReferences(ctx, map[string]interface{}{
 			"entity_name":       dashboardStr(row["entity_name"]),
 			"counterparty_name": dashboardStr(row["counterparty_name"]),
-			"currency_code":     dashboardStr(row["currency_code"]),
 		}) != "" {
 			continue
 		}
@@ -304,37 +338,49 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 
 // ── Fund Planning ──────────────────────────────────────────────────────────
 func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	// fund_plan_groups has entity_name (not entity_id), and group_id is integer.
-	// Avoid CTE join on group_id to prevent implicit integer cast from empty strings.
-	q := `
+	ef, efArgs := entityNameFilter(ctx, "fpg", "entity_name", 2)
+	args := append([]any{limit}, efArgs...)
+
+	q := fmt.Sprintf(`
 		SELECT
-			COALESCE(s.group_id::text, '') AS plan_id,
-			COALESCE(s.entity_name,    '') AS entity_name,
-			COALESCE(s.entity_name,    '') AS entity_id,
-			COALESCE(s.currency,       '') AS currency,
-			COALESCE(s.direction,      '') AS direction,
-			COALESCE(s.total_amount,    0) AS total_amount,
-			COALESCE(s.horizon,         0) AS horizon,
-			1 AS total_groups,
-			COALESCE((
-				SELECT processing_status FROM public.auditaction_fund_plan_groups
-				WHERE group_id::text = s.group_id::text
-				ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp),
-				                  COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
+			COALESCE(fpg.plan_id, '') AS plan_id,
+			COALESCE(fpg.entity_name, '') AS entity_name,
+			COALESCE(fpg.horizon, 0) AS horizon,
+			COUNT(*) AS total_groups,
+			COALESCE(SUM(fpg.total_amount), 0) AS total_amount,
+			COALESCE(STRING_AGG(DISTINCT fpg.currency, ', ' ORDER BY fpg.currency), '') AS currency,
+			COALESCE(STRING_AGG(DISTINCT fpg.primary_key, ', '), '') AS primary_types,
+			COALESCE(STRING_AGG(DISTINCT fpg.primary_value, ', '), '') AS primary_values,
+			COALESCE(aa.actiontype, '') AS action_type,
+			COALESCE(aa.processing_status, '') AS processing_status,
+			COALESCE(aa.requested_by, '') AS requested_by,
+			aa.requested_at,
+			COALESCE(aa.requested_ip, '') AS requested_ip,
+			COALESCE(aa.checker_by, '') AS checker_by,
+			aa.checker_at,
+			COALESCE(aa.checker_ip, '') AS checker_ip,
+			COALESCE(aa.checker_comment, '') AS checker_comment,
+			COALESCE(aa.reason, '') AS reason
+		FROM public.fund_plan_groups fpg
+		LEFT JOIN LATERAL (
+			SELECT actiontype, processing_status, requested_by, requested_at, requested_ip,
+				   checker_by, checker_at, checker_ip, checker_comment, reason
+			FROM public.auditaction_fund_plan_groups aafpg
+			WHERE aafpg.group_id IN (
+				SELECT group_id FROM public.fund_plan_groups fpg2
+				WHERE fpg2.plan_id = fpg.plan_id
 				LIMIT 1
-			), '') AS processing_status,
-			COALESCE((
-				SELECT requested_at FROM public.auditaction_fund_plan_groups
-				WHERE group_id::text = s.group_id::text
-				ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp),
-				                  COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
-				LIMIT 1
-			), NULL) AS requested_at
-		FROM public.fund_plan_groups s
-		ORDER BY s.group_id DESC NULLS LAST
+			)
+			ORDER BY requested_at DESC, action_id DESC
+			LIMIT 1
+		) aa ON TRUE
+		WHERE 1=1 %s
+		GROUP BY fpg.plan_id, fpg.entity_name, fpg.horizon,
+				 aa.actiontype, aa.processing_status, aa.requested_by, aa.requested_at,
+				 aa.requested_ip, aa.checker_by, aa.checker_at, aa.checker_ip, aa.checker_comment, aa.reason
+		ORDER BY fpg.plan_id DESC
 		LIMIT NULLIF($1, 0)
-	`
-	args := []any{limit}
+	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -662,6 +708,7 @@ func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 
 // Dashboard builder exposes only these utilization columns (see CI_DSAHBOARD dataSourceFields cashUtilizations).
 var cashUtilizationDashboardFields = []string{
+	"utilization_id",
 	"currency_code",
 	"entry_mode",
 	"limit_action_type",
@@ -684,6 +731,8 @@ var cashUtilizationDashboardFields = []string{
 	"limit_sanctioned_amount",
 	"limit_security_type",
 	"limit_utilization_pct",
+	"processing_status",
+	"reference_doc",
 	"remarks",
 	"utilization_date",
 	"utilized_amount",

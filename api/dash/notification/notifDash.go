@@ -165,7 +165,7 @@ WHERE o.created_at BETWEEN $1 AND $2
                OR o.recipient_phone ILIKE '%' || $7 || '%')
   AND o.retry_count BETWEEN $8 AND $9
 `
-		row := pool.QueryRow(context.Background(), q,
+		row := pool.QueryRow(r.Context(), q,
 			start, end,
 			f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
 			f.MinRetry, f.MaxRetry,
@@ -492,7 +492,7 @@ WHERE o.created_at BETWEEN $1 AND $2
 GROUP BY o.channel
 ORDER BY total DESC
 `
-		rows, err := pool.Query(context.Background(), q,
+		rows, err := pool.Query(r.Context(), q,
 			start, end, f.Status, f.CorrelationID, f.MinRetry, f.MaxRetry,
 		)
 		if err != nil {
@@ -558,7 +558,7 @@ WHERE created_at >= $1
 GROUP BY 1
 ORDER BY 1 ASC
 `
-		rows, err := pool.Query(context.Background(), q, windowStart, f.Channel)
+		rows, err := pool.Query(r.Context(), q, windowStart, f.Channel)
 		if err != nil {
 			errResp(w, http.StatusInternalServerError, err.Error())
 			return
@@ -627,7 +627,7 @@ WHERE o.created_at BETWEEN $1 AND $2
 GROUP BY o.event_id, e.event_display_name, e.source_route
 ORDER BY total DESC
 `
-		rows, err := pool.Query(context.Background(), q, start, end, f.Channel, f.Status)
+		rows, err := pool.Query(r.Context(), q, start, end, f.Channel, f.Status)
 		if err != nil {
 			errResp(w, http.StatusInternalServerError, err.Error())
 			return
@@ -706,7 +706,7 @@ LEFT JOIN notification_svc.event e ON e.event_id = o.event_id
 WHERE o.correlation_id = $1
 ORDER BY o.created_at ASC
 `
-		rows, err := pool.Query(context.Background(), outboxQ, body.CorrelationID)
+		rows, err := pool.Query(r.Context(), outboxQ, body.CorrelationID)
 		if err != nil {
 			errResp(w, http.StatusInternalServerError, err.Error())
 			return
@@ -797,7 +797,7 @@ FROM notification_svc.send_history sh
 WHERE sh.correlation_id = $1
 ORDER BY sh.attempted_at ASC
 `
-		histRows, err := pool.Query(context.Background(), histQ, body.CorrelationID)
+		histRows, err := pool.Query(r.Context(), histQ, body.CorrelationID)
 		if err == nil {
 			defer histRows.Close()
 			for histRows.Next() {
@@ -904,7 +904,7 @@ FROM notification_svc.outbox
 WHERE created_at BETWEEN $1 AND $2
   AND ($3 = '' OR channel = $3)
 `
-		if err := pool.QueryRow(context.Background(), summaryQ, start, end, f.Channel).Scan(
+		if err := pool.QueryRow(r.Context(), summaryQ, start, end, f.Channel).Scan(
 			&deadCount, &maxRetry, &avgRetry,
 		); err != nil {
 			errResp(w, http.StatusInternalServerError, err.Error())
@@ -924,7 +924,7 @@ WHERE created_at BETWEEN $1 AND $2
 GROUP BY retry_count
 ORDER BY retry_count ASC
 `
-		distribRows, err := pool.Query(context.Background(), distribQ, start, end, f.Channel)
+		distribRows, err := pool.Query(r.Context(), distribQ, start, end, f.Channel)
 		if err != nil {
 			errResp(w, http.StatusInternalServerError, err.Error())
 			return
@@ -950,7 +950,7 @@ WHERE created_at BETWEEN $1 AND $2
 GROUP BY channel
 ORDER BY avg_retry DESC
 `
-		chRows, err := pool.Query(context.Background(), chQ, start, end)
+		chRows, err := pool.Query(r.Context(), chQ, start, end)
 		if err != nil {
 			errResp(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1039,7 +1039,7 @@ WHERE ($1 = '' OR sh.outbox_id = $1)
   AND ($2 = '' OR sh.correlation_id = $2)
 ORDER BY sh.attempted_at ASC
 `
-		rows, err := pool.Query(context.Background(), q, body.OutboxID, body.CorrelationID)
+		rows, err := pool.Query(r.Context(), q, body.OutboxID, body.CorrelationID)
 		if err != nil {
 			errResp(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1261,7 +1261,7 @@ WHERE sh.attempted_at BETWEEN $1 AND $2
 GROUP BY sh.channel
 ORDER BY total_attempts DESC
 `
-		rows, err := pool.Query(context.Background(), q, start, end, f.Channel, f.Status)
+		rows, err := pool.Query(r.Context(), q, start, end, f.Channel, f.Status)
 		if err != nil {
 			errResp(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1327,7 +1327,7 @@ FROM notification_svc.event e
 LEFT JOIN notification_svc.notification_config nc ON nc.event_id = e.event_id
 ORDER BY e.event_id, nc.channel
 `
-		rows, err := pool.Query(context.Background(), q)
+		rows, err := pool.Query(r.Context(), q)
 		if err != nil {
 			errResp(w, http.StatusInternalServerError, err.Error())
 			return

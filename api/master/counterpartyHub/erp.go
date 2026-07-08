@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -198,7 +199,8 @@ func CreateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		go func(id, uID, uEmail string) {
 			defer func() { recover() }()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "ERP_SYSTEM_CREATE",
 				RecordID: id, RecordTable: "apibox.erp_system_master",

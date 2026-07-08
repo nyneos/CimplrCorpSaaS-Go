@@ -553,7 +553,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDBooking] CaptureConfirmation engine panic for %s: %v", cID, rec)
 				}
 			}()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       eID,
@@ -1136,7 +1137,8 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fire approval engine
 		go func(cID, uID, uEmail, eID string, amount float64, update bool) {
 			defer func() { recover() }() //nolint:errcheck
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", cID, uEmail)
 			txType := "FD_CONFIRMATION_CREATE"
 			actionType := "CREATE"
@@ -1663,7 +1665,8 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── Trigger approval engine sequence ────────────────────────────────
 		go func(cID, uID, uEmail, eID string, amount float64) {
 			defer func() { recover() }() //nolint:errcheck
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", cID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "FIXED_DEPOSIT", EntityCode: eID,
@@ -1889,7 +1892,8 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		go func(cID, uID, uEmail, eID string, amount float64) {
 			defer func() { recover() }() //nolint:errcheck
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", cID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "FIXED_DEPOSIT", EntityCode: eID,
@@ -3287,7 +3291,8 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						api.LogError("[FDBooking] DeleteConfirmation engine goroutine panic for confirmation %s: %v", cID, rec)
 					}
 				}()
-				bgCtx := context.Background()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 				// Cancel any in-flight approval chain before submitting DELETE
 				if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", cID, uEmail); err != nil {
 					api.LogError("[FDBooking] CancelPendingInstances(DELETE) failed for confirmation %s: %v", cID, err)

@@ -101,7 +101,7 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 		currencyCodes := scopeValues(scope.Currencies, "currency_code")
 		rows, err := pool.Query(ctx, `
 										WITH scoped_statements AS (
-											SELECT s.bank_statement_id, e.entity_name, s.account_number, s.statement_period_start, s.statement_period_end, s.opening_balance, s.closing_balance, s.uploaded_at,
+											SELECT s.bank_statement_id, s.entity_id, e.entity_name, s.account_number, s.statement_period_start, s.statement_period_end, s.opening_balance, s.closing_balance, s.uploaded_at,
 														COALESCE(mb.bank_name, '') AS bank_name,
 														mba.account_nickname AS account_nickname,
 														s.upload_s3_key
@@ -132,7 +132,7 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 										latest_audit AS (
 											SELECT * FROM prioritized_audit WHERE rn = 1
 										)
-										SELECT ss.bank_statement_id, ss.entity_name, ss.account_number, ss.statement_period_start, ss.statement_period_end, ss.opening_balance, ss.closing_balance, ss.uploaded_at,
+										SELECT ss.bank_statement_id, ss.entity_id, ss.entity_name, ss.account_number, ss.statement_period_start, ss.statement_period_end, ss.opening_balance, ss.closing_balance, ss.uploaded_at,
 													 la.actiontype,
 													 CASE
 													     WHEN la.actiontype = 'RECAT' AND la.processing_status = 'PENDING_EDIT_APPROVAL' THEN 'APPROVED'
@@ -153,7 +153,7 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 		defer rows.Close()
 		resp := []map[string]interface{}{}
 		for rows.Next() {
-			var id, entityName, acc string
+			var id, entityID, entityName, acc string
 			var start, end, uploaded time.Time
 			var open, close float64
 			var actionType, processingStatus, actionID, requestedBy, checkerBy, checkerComment, reason sql.NullString
@@ -161,7 +161,7 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 			var accountNickname sql.NullString
 			var uploadS3Key sql.NullString
 			var requestedAt, checkerAt sql.NullTime
-			if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded,
+			if err := rows.Scan(&id, &entityID, &entityName, &acc, &start, &end, &open, &close, &uploaded,
 				&actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &bankName, &accountNickname, &uploadS3Key); err != nil {
 				continue
 			}
@@ -170,7 +170,9 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 				isDeletePending = true
 			}
 			resp = append(resp, map[string]interface{}{
+				"statement_id":               id,
 				"bank_statement_id":          id,
+				"entity_id":                  entityID,
 				"entity_name":                entityName,
 				"account_number":             acc,
 				"statement_period_start":     start,

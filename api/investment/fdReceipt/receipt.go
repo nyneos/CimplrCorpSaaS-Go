@@ -570,7 +570,8 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		api.LogInfo("[FDReceipt] Created receipt_id=%s fd=%s gross=%.4f tds=%.4f", receiptID, req.FdID, req.GrossInterestReceived, req.TdsAmountDeducted)
 
 		go func(rID, eID, uEmail string, amount float64) {
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       eID,
@@ -903,7 +904,8 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func() {
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       entityID,
@@ -1009,7 +1011,8 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			for _, rid := range validIDs {
 				rid := rid
 				go func() {
-					bgCtx := context.Background()
+					bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 					// Fetch entity_id for this receipt
 					var eID string
 					var amount float64
@@ -2565,7 +2568,9 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDReceipt] IngestReconciliation panic run=%s: %v", rID, rec)
-					if _, err := pool.Exec(context.Background(),
+					panicCtx, panicCancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer panicCancel()
+					if _, err := pool.Exec(panicCtx,
 						`UPDATE investment.fd_receipt_reconcile_run
 						 SET run_status='FAILED', error_message=$1, completed_at=now()
 						 WHERE reconcile_run_id=$2`,
@@ -2574,7 +2579,8 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 			}()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			defer bgCancel()
 			if rErr := runReconciliation(bgCtx, pool, rID, filterReceiptIDs, filterTDSIDs); rErr != nil {
 				api.LogError("[FDReceipt] IngestReconciliation failed run=%s: %v", rID, rErr)
 				if _, err := pool.Exec(bgCtx,
@@ -2592,7 +2598,8 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDReceipt] IngestReconciliation engine panic run=%s: %v", rID, rec)
 				}
 			}()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       eID,
@@ -4117,7 +4124,8 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDReceipt] UpdateTDS engine panic for %s: %v", tID, rec)
 				}
 			}()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			var eID string
 			_ = pool.QueryRow(bgCtx,
 				`SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, tID,

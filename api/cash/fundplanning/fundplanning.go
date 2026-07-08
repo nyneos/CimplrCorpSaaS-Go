@@ -1411,6 +1411,7 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				fpg.horizon,
 				COUNT(*) as total_groups,
 				SUM(fpg.total_amount) as total_amount,
+				STRING_AGG(DISTINCT fpg.currency, ', ' ORDER BY fpg.currency) as currency,
 				STRING_AGG(DISTINCT fpg.primary_key, ', ') as primary_types,
 				STRING_AGG(DISTINCT fpg.primary_value, ', ') as primary_values,
 				aa.actiontype,
@@ -1449,7 +1450,7 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var results []map[string]interface{}
 
 		for rows.Next() {
-			var planID, entityName, primaryTypes, primaryValues string
+			var planID, entityName, primaryTypes, primaryValues, currency string
 			var horizon, totalGroups int
 			var totalAmount float64
 			var actionType, processingStatus sql.NullString
@@ -1457,7 +1458,7 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var requestedAt, checkerAt sql.NullTime
 
 			err := rows.Scan(&planID, &entityName, &horizon, &totalGroups, &totalAmount,
-				&primaryTypes, &primaryValues, &actionType, &processingStatus,
+				&currency, &primaryTypes, &primaryValues, &actionType, &processingStatus,
 				&requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason)
 
 			if err != nil {
@@ -1474,6 +1475,7 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"horizon":           horizon,
 				"total_groups":      totalGroups,
 				"total_amount":      roundToDecimal(totalAmount, 2),
+				"currency":          currency,
 				"primary_types":     primaryTypes,
 				"primary_values":    primaryValues,
 				"action_type":       nullableToString(actionType),

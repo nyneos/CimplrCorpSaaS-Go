@@ -120,7 +120,7 @@ func GetForecastVsActualRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, msg, http.StatusForbidden)
 			return
 		}
-		rows, err := GetForecastVsActualRows(pgxPool, req.Horizon, scope)
+		rows, err := GetForecastVsActualRows(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -156,7 +156,7 @@ func GetForecastVsActualKPIHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, msg, http.StatusForbidden)
 			return
 		}
-		k, err := GetForecastVsActualKPIs(pgxPool, req.Horizon, scope)
+		k, err := GetForecastVsActualKPIs(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -191,7 +191,7 @@ func GetForecastVsActualByDateHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, msg, http.StatusForbidden)
 			return
 		}
-		rows, err := GetForecastVsActualByDateRows(pgxPool, req.Horizon, scope)
+		rows, err := GetForecastVsActualByDateRows(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -228,7 +228,7 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, msg, http.StatusForbidden)
 			return
 		}
-		rows, err := GetForecastVsActualByMonthRows(pgxPool, req.Horizon, scope, req.AccountID)
+		rows, err := GetForecastVsActualByMonthRows(r.Context(), pgxPool, req.Horizon, scope, req.AccountID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -239,7 +239,7 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func GetForecastVsActualRows(pgxPool *pgxpool.Pool, horizon int, scope requestScope) ([]CatRow, error) {
+func GetForecastVsActualRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope requestScope) ([]CatRow, error) {
 
 	today := time.Now().UTC()
 	end := today.AddDate(0, 0, horizon-1)
@@ -257,7 +257,7 @@ func GetForecastVsActualRows(pgxPool *pgxpool.Pool, horizon int, scope requestSc
 	actualQ += constants.ErrCurrencyFilter
 	actualQ += constants.ErrEntityNameFilterAlt
 
-	arows, err := pgxPool.Query(context.Background(), actualQ, aargs...)
+	arows, err := pgxPool.Query(ctx, actualQ, aargs...)
 	if err != nil {
 		return nil, fmt.Errorf("actuals (fund plan) query: %w", err)
 	}
@@ -329,7 +329,7 @@ func GetForecastVsActualRows(pgxPool *pgxpool.Pool, horizon int, scope requestSc
 	fargs = append(fargs, scope.Entities, scope.Currencies)
 	forecastQ += " GROUP BY cpi.category_id, cpi.cashflow_type, cp.currency_code"
 
-	frows, err := pgxPool.Query(context.Background(), forecastQ, fargs...)
+	frows, err := pgxPool.Query(ctx, forecastQ, fargs...)
 	if err != nil {
 		return nil, fmt.Errorf("forecast query: %w", err)
 	}
@@ -387,7 +387,7 @@ func GetForecastVsActualRows(pgxPool *pgxpool.Pool, horizon int, scope requestSc
 	return out, nil
 }
 
-func GetForecastVsActualByDateRows(pgxPool *pgxpool.Pool, horizon int, scope requestScope) ([]DateCatRow, error) {
+func GetForecastVsActualByDateRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope requestScope) ([]DateCatRow, error) {
 	today := time.Now().UTC()
 	end := today.AddDate(0, 0, horizon-1)
 
@@ -405,7 +405,7 @@ func GetForecastVsActualByDateRows(pgxPool *pgxpool.Pool, horizon int, scope req
 	actualQ += constants.ErrCurrencyFilter
 	actualQ += constants.ErrEntityNameFilterAlt
 
-	arows, err := pgxPool.Query(context.Background(), actualQ, aargs...)
+	arows, err := pgxPool.Query(ctx, actualQ, aargs...)
 	if err != nil {
 		return nil, fmt.Errorf("actuals (fund plan) query: %w", err)
 	}
@@ -482,7 +482,7 @@ func GetForecastVsActualByDateRows(pgxPool *pgxpool.Pool, horizon int, scope req
 	fargs = append(fargs, scope.Entities, scope.Currencies)
 	forecastQ += " GROUP BY cpm.year, cpm.month, cpi.category_id, cpi.cashflow_type, cpi.start_date, cp.currency_code ORDER BY cpm.year, cpm.month"
 
-	frows, err := pgxPool.Query(context.Background(), forecastQ, fargs...)
+	frows, err := pgxPool.Query(ctx, forecastQ, fargs...)
 	if err != nil {
 		return nil, fmt.Errorf("forecast query: %w", err)
 	}
@@ -547,9 +547,9 @@ func GetForecastVsActualByDateRows(pgxPool *pgxpool.Pool, horizon int, scope req
 	return out, nil
 }
 
-func GetForecastVsActualKPIs(pgxPool *pgxpool.Pool, horizon int, scope requestScope) (KPIs, error) {
+func GetForecastVsActualKPIs(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope requestScope) (KPIs, error) {
 	var k KPIs
-	rows, err := GetForecastVsActualRows(pgxPool, horizon, scope)
+	rows, err := GetForecastVsActualRows(ctx, pgxPool, horizon, scope)
 	if err != nil {
 		return k, err
 	}
@@ -595,6 +595,7 @@ func findLast(s, sub string) int {
 }
 
 func GetForecastVsActualByMonthRows(
+	ctx context.Context,
 	pgxPool *pgxpool.Pool,
 	horizon int,
 	scope requestScope,
@@ -636,7 +637,7 @@ func GetForecastVsActualByMonthRows(
 		args = append(args, accountID)
 	}
 
-	rows, err := pgxPool.Query(context.Background(), q, args...)
+	rows, err := pgxPool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query fund plan lines: %w", err)
 	}
