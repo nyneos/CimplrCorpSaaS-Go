@@ -338,37 +338,49 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 
 // ── Fund Planning ──────────────────────────────────────────────────────────
 func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	// fund_plan_groups has entity_name (not entity_id), and group_id is integer.
-	// Avoid CTE join on group_id to prevent implicit integer cast from empty strings.
-	q := `
+	ef, efArgs := entityNameFilter(ctx, "fpg", "entity_name", 2)
+	args := append([]any{limit}, efArgs...)
+
+	q := fmt.Sprintf(`
 		SELECT
-			COALESCE(s.group_id::text, '') AS plan_id,
-			COALESCE(s.entity_name,    '') AS entity_name,
-			COALESCE(s.entity_name,    '') AS entity_id,
-			COALESCE(s.currency,       '') AS currency,
-			COALESCE(s.direction,      '') AS direction,
-			COALESCE(s.total_amount,    0) AS total_amount,
-			COALESCE(s.horizon,         0) AS horizon,
-			1 AS total_groups,
-			COALESCE((
-				SELECT processing_status FROM public.auditaction_fund_plan_groups
-				WHERE group_id::text = s.group_id::text
-				ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp),
-				                  COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
+			COALESCE(fpg.plan_id, '') AS plan_id,
+			COALESCE(fpg.entity_name, '') AS entity_name,
+			COALESCE(fpg.horizon, 0) AS horizon,
+			COUNT(*) AS total_groups,
+			COALESCE(SUM(fpg.total_amount), 0) AS total_amount,
+			COALESCE(STRING_AGG(DISTINCT fpg.currency, ', ' ORDER BY fpg.currency), '') AS currency,
+			COALESCE(STRING_AGG(DISTINCT fpg.primary_key, ', '), '') AS primary_types,
+			COALESCE(STRING_AGG(DISTINCT fpg.primary_value, ', '), '') AS primary_values,
+			COALESCE(aa.actiontype, '') AS action_type,
+			COALESCE(aa.processing_status, '') AS processing_status,
+			COALESCE(aa.requested_by, '') AS requested_by,
+			aa.requested_at,
+			COALESCE(aa.requested_ip, '') AS requested_ip,
+			COALESCE(aa.checker_by, '') AS checker_by,
+			aa.checker_at,
+			COALESCE(aa.checker_ip, '') AS checker_ip,
+			COALESCE(aa.checker_comment, '') AS checker_comment,
+			COALESCE(aa.reason, '') AS reason
+		FROM public.fund_plan_groups fpg
+		LEFT JOIN LATERAL (
+			SELECT actiontype, processing_status, requested_by, requested_at, requested_ip,
+				   checker_by, checker_at, checker_ip, checker_comment, reason
+			FROM public.auditaction_fund_plan_groups aafpg
+			WHERE aafpg.group_id IN (
+				SELECT group_id FROM public.fund_plan_groups fpg2
+				WHERE fpg2.plan_id = fpg.plan_id
 				LIMIT 1
-			), '') AS processing_status,
-			COALESCE((
-				SELECT requested_at FROM public.auditaction_fund_plan_groups
-				WHERE group_id::text = s.group_id::text
-				ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp),
-				                  COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
-				LIMIT 1
-			), NULL) AS requested_at
-		FROM public.fund_plan_groups s
-		ORDER BY s.group_id DESC NULLS LAST
+			)
+			ORDER BY requested_at DESC, action_id DESC
+			LIMIT 1
+		) aa ON TRUE
+		WHERE 1=1 %s
+		GROUP BY fpg.plan_id, fpg.entity_name, fpg.horizon,
+				 aa.actiontype, aa.processing_status, aa.requested_by, aa.requested_at,
+				 aa.requested_ip, aa.checker_by, aa.checker_at, aa.checker_ip, aa.checker_comment, aa.reason
+		ORDER BY fpg.plan_id DESC
 		LIMIT NULLIF($1, 0)
-	`
-	args := []any{limit}
+	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
