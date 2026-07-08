@@ -669,6 +669,13 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				copyRows[i] = vals
 			}
 
+			// Append the uploaded file's S3 key as the last column so every new scheme row
+			// stores it — the main-table download reads investment.masterscheme.upload_s3_key.
+			validCols = append(validCols, "upload_s3_key")
+			for i := range copyRows {
+				copyRows[i] = append(copyRows[i], s3Key)
+			}
+
 			// transaction: COPY -> set source -> audit insert
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {

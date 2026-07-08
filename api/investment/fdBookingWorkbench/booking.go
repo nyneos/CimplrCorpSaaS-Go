@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -267,7 +268,8 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDBooking] CreateInstance goroutine panic for booking %s: %v", bID, rec)
 				}
 			}()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       entityID,
@@ -600,7 +602,8 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						api.LogError("[FDBooking] CreateInstance goroutine panic for booking %s: %v", bID, rec)
 					}
 				}()
-				bgCtx := context.Background()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "FIXED_DEPOSIT", EntityCode: entityID,
 					TransactionType: "FD_BOOKING", RecordID: bID,
@@ -891,7 +894,8 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDBooking] UpdateBooking engine goroutine panic for booking %s: %v", bID, rec)
 				}
 			}()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			// Cancel any in-flight approval so the edit resets all previous approvals.
 			if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", bID, uEmail); err != nil {
 				api.LogError("[FDBooking] CancelPendingInstances failed for booking %s: %v", bID, err)
@@ -1069,7 +1073,8 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						api.LogError("[FDBooking] DeleteBooking engine goroutine panic for booking %s: %v", bID, rec)
 					}
 				}()
-				bgCtx := context.Background()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 				// Cancel any in-flight approval chain before submitting DELETE
 				if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", bID, uEmail); err != nil {
 					api.LogError("[FDBooking] CancelPendingInstances(DELETE) failed for booking %s: %v", bID, err)

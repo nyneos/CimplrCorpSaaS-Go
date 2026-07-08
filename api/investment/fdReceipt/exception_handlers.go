@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
@@ -101,7 +102,8 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDReceipt] EditVariance engine panic for %s: %v", eID, rec)
 				}
 			}()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", eID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
@@ -222,7 +224,8 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDReceipt] ResolveException engine panic for %s: %v", eID, rec)
 				}
 			}()
-			bgCtx := context.Background()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", eID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
@@ -451,7 +454,8 @@ func closeOneVariance(ctx context.Context, pool *pgxpool.Pool, exceptionID, user
 				api.LogError("[FDReceipt] CloseException engine panic for %s: %v", eID, rec)
 			}
 		}()
-		bgCtx := context.Background()
+		bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer bgCancel()
 		_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 			ModuleCode:       "FIXED_DEPOSIT",
 			TransactionType:  "FD_EXCEPTION_CLOSE",

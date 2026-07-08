@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api/cash/additionalfiles"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -132,6 +133,9 @@ func buildInvestmentFilesConfig(moduleKey, parentField, parentTable, parentCol, 
 			}
 			return files, missingInvestmentFileIDs(trimmed, files), nil
 		},
+		DuplicateExists: func(ctx context.Context, pool *pgxpool.Pool, parentID, fileHash string) (bool, error) {
+			return investmentDuplicateFileExists(ctx, pool, parentCol, filesTable, parentID, fileHash)
+		},
 		SoftDelete: func(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, deletedBy string, deletedAt time.Time) (bool, error) {
 			return deleteInvestmentAdditionalFile(ctx, pool, investmentDeleteFileParams{ParentID: parentID, FileID: fileID, DeletedBy: deletedBy, DeletedAt: deletedAt, ParentCol: parentCol, FilesTable: filesTable})
 		},
@@ -152,7 +156,64 @@ func createInvestmentAdditionalFile(ctx context.Context, tx pgx.Tx, input additi
 		`SELECT %s AS parent_id FROM %s WHERE %s = $8`,
 		parentCol, parentTable, parentCol,
 	)
-	return additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, filesTable, parentCol, input, parentScope, input.ParentID)
+	fileID, err := additionalfiles.InsertAdditionalFileRowReturningID(ctx, tx, filesTable, parentCol, input, parentScope, input.ParentID)
+	if err != nil {
+		return "", err
+	}
+	
+	if err := storeParentUploadKeyIfEmpty(ctx, tx, parentTable, parentCol, input.ParentID, input.UploadS3Key); err != nil {
+		return "", err
+	}
+	return fileID, nil
+}
+
+func storeParentUploadKeyIfEmpty(ctx context.Context, tx pgx.Tx, parentTable, parentCol, parentID, s3Key string) error {
+	if strings.TrimSpace(s3Key) == "" {
+		return nil
+	}
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	q := fmt.Sprintf(
+		`UPDATE %s SET upload_s3_key = $1 WHERE %s = $2 AND COALESCE(upload_s3_key, '') = ''`,
+		parentTable, parentCol,
+	)
+	if _, err := sp.Exec(ctx, q, s3Key, parentID); err != nil {
+		_ = sp.Rollback(ctx)
+		if isUndefinedColumnError(err) {
+			return nil
+		}
+		return err
+	}
+	return sp.Commit(ctx)
+}
+
+// isUndefinedColumnError reports whether err is a PostgreSQL "undefined column"
+// (SQLSTATE 42703) error, raised when a parent table has no upload_s3_key column.
+func isUndefinedColumnError(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "42703"
+	}
+	return false
+}
+
+// investmentDuplicateFileExists reports whether an active (non-deleted) file with
+// the same content hash is already attached to the given parent record.
+func investmentDuplicateFileExists(ctx context.Context, pool *pgxpool.Pool, parentCol, filesTable, parentID, fileHash string) (bool, error) {
+	if strings.TrimSpace(fileHash) == "" {
+		return false, nil
+	}
+	q := `SELECT EXISTS (
+	          SELECT 1 FROM ` + filesTable + `
+	          WHERE ` + parentCol + ` = $1 AND file_hash = $2 AND COALESCE(is_deleted, FALSE) = FALSE
+	      )`
+	var exists bool
+	if err := pool.QueryRow(ctx, q, parentID, fileHash).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 func getInvestmentAdditionalFile(ctx context.Context, pool *pgxpool.Pool, parentID, fileID, parentCol, filesTable string, includeDeleted bool) (*additionalfiles.FileRecord, error) {

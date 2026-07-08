@@ -19,7 +19,8 @@ import (
 )
 
 func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UUID, userName string) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
 	startTime := time.Now()
 
 	mappingRows, err := pool.Query(ctx, `
@@ -266,41 +267,55 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 		}
 	}
 
-	// Insert audit actions for payables
-	if len(payableIDs) > 0 {
-		_, auditErr := pool.Exec(ctx, `
-			INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
-			SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
-		`, payableIDs, userName, transactionNullIfEmpty(api.ClientIPFromContext(ctx)))
-		if auditErr != nil {
-			logger.LogError("Error inserting audit actions for payables: %v", auditErr)
-		}
-	}
+	// Audit inserts and staging update must be atomic: either all commit or none do.
+	auditTx, auditTxErr := pool.Begin(ctx)
+	if auditTxErr != nil {
+		logger.LogError("Error beginning audit transaction: %v", auditTxErr)
+	} else {
+		auditTxOk := false
+		defer func() {
+			if !auditTxOk {
+				auditTx.Rollback(ctx) //nolint:errcheck
+			}
+		}()
 
-	// Insert audit actions for receivables
-	if len(receivableIDs) > 0 {
-		_, auditErr := pool.Exec(ctx, `
-			INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
-			SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
-		`, receivableIDs, userName, transactionNullIfEmpty(api.ClientIPFromContext(ctx)))
-		if auditErr != nil {
-			logger.LogError("Error inserting audit actions for receivables: %v", auditErr)
-		}
-	}
-
-	if len(processedIDs) > 0 {
-		// Convert UUIDs to strings for PostgreSQL compatibility
-		processedIDStrings := make([]string, len(processedIDs))
-		for i, id := range processedIDs {
-			processedIDStrings[i] = id.String()
+		if len(payableIDs) > 0 {
+			_, auditErr := auditTx.Exec(ctx, `
+				INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+				SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
+			`, payableIDs, userName, transactionNullIfEmpty(api.ClientIPFromContext(ctx)))
+			if auditErr != nil {
+				logger.LogError("Error inserting audit actions for payables: %v", auditErr)
+			}
 		}
 
-		_, err = pool.Exec(ctx, `
-			UPDATE public.staging_transactions 
-			SET status = 'processed' 
-			WHERE staging_id = ANY($1)`, processedIDStrings)
-		if err != nil {
-			logger.LogError("Error updating staging record status: %v", err)
+		if len(receivableIDs) > 0 {
+			_, auditErr := auditTx.Exec(ctx, `
+				INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+				SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
+			`, receivableIDs, userName, transactionNullIfEmpty(api.ClientIPFromContext(ctx)))
+			if auditErr != nil {
+				logger.LogError("Error inserting audit actions for receivables: %v", auditErr)
+			}
+		}
+
+		if len(processedIDs) > 0 {
+			processedIDStrings := make([]string, len(processedIDs))
+			for i, id := range processedIDs {
+				processedIDStrings[i] = id.String()
+			}
+			if _, err = auditTx.Exec(ctx, `
+				UPDATE public.staging_transactions
+				SET status = 'processed'
+				WHERE staging_id = ANY($1)`, processedIDStrings); err != nil {
+				logger.LogError("Error updating staging record status: %v", err)
+			}
+		}
+
+		if commitErr := auditTx.Commit(ctx); commitErr != nil {
+			logger.LogError("Error committing audit transaction: %v", commitErr)
+		} else {
+			auditTxOk = true
 		}
 	}
 

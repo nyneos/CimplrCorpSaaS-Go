@@ -172,7 +172,9 @@ func (s *CronService) cleanupIdleConnections() {
 		  AND now() - state_change > interval '5 minutes';
 	`
 
-	tag, err := s.db.Exec(context.Background(), query)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tag, err := s.db.Exec(ctx, query)
 	if err != nil {
 		logger.LogError("DB cleanup error: %v", err)
 		if logger.GlobalLogger != nil {
