@@ -337,6 +337,9 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 }
 
 // ── Fund Planning ──────────────────────────────────────────────────────────
+// Group-grain rows so charts can use Currency / Direction / Horizon as X or stack fields.
+// Plan-level aggregation collapses those dimensions (STRING_AGG / no direction), so stacking
+// by them would be empty or incorrect.
 func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "fpg", "entity_name", 2)
 	args := append([]any{limit}, efArgs...)
@@ -344,13 +347,18 @@ func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs
 	q := fmt.Sprintf(`
 		SELECT
 			COALESCE(fpg.plan_id, '') AS plan_id,
+			COALESCE(fpg.group_id::text, '') AS group_id,
 			COALESCE(fpg.entity_name, '') AS entity_name,
-			COALESCE(fpg.horizon, 0) AS horizon,
-			COUNT(*) AS total_groups,
-			COALESCE(SUM(fpg.total_amount), 0) AS total_amount,
-			COALESCE(STRING_AGG(DISTINCT fpg.currency, ', ' ORDER BY fpg.currency), '') AS currency,
-			COALESCE(STRING_AGG(DISTINCT fpg.primary_key, ', '), '') AS primary_types,
-			COALESCE(STRING_AGG(DISTINCT fpg.primary_value, ', '), '') AS primary_values,
+			CASE
+				WHEN lower(COALESCE(fpg.direction, '')) = 'inflow' THEN 'Inflow'
+				WHEN lower(COALESCE(fpg.direction, '')) = 'outflow' THEN 'Outflow'
+				ELSE COALESCE(fpg.direction, '')
+			END AS direction,
+			COALESCE(fpg.currency, '') AS currency,
+			COALESCE(fpg.horizon::text, '') AS horizon,
+			COALESCE(fpg.primary_key, '') AS primary_types,
+			COALESCE(fpg.primary_value, '') AS primary_values,
+			COALESCE(fpg.total_amount, 0) AS total_amount,
 			COALESCE(aa.actiontype, '') AS action_type,
 			COALESCE(aa.processing_status, '') AS processing_status,
 			COALESCE(aa.requested_by, '') AS requested_by,
@@ -366,19 +374,12 @@ func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs
 			SELECT actiontype, processing_status, requested_by, requested_at, requested_ip,
 				   checker_by, checker_at, checker_ip, checker_comment, reason
 			FROM public.auditaction_fund_plan_groups aafpg
-			WHERE aafpg.group_id IN (
-				SELECT group_id FROM public.fund_plan_groups fpg2
-				WHERE fpg2.plan_id = fpg.plan_id
-				LIMIT 1
-			)
+			WHERE aafpg.group_id = fpg.group_id
 			ORDER BY requested_at DESC, action_id DESC
 			LIMIT 1
 		) aa ON TRUE
 		WHERE 1=1 %s
-		GROUP BY fpg.plan_id, fpg.entity_name, fpg.horizon,
-				 aa.actiontype, aa.processing_status, aa.requested_by, aa.requested_at,
-				 aa.requested_ip, aa.checker_by, aa.checker_at, aa.checker_ip, aa.checker_comment, aa.reason
-		ORDER BY fpg.plan_id DESC
+		ORDER BY fpg.plan_id DESC, fpg.group_id DESC
 		LIMIT NULLIF($1, 0)
 	`, ef)
 
@@ -389,21 +390,22 @@ func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs
 	return scanRows(r)
 }
 
-// parentID = group_id to drill into a specific fund plan's line items.
+// parentID = plan_id from /cash/fund-planning/summary (e.g. "plan-1783403924162").
 func queryCashFundPlanDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "g", "entity_name", 2)
 	args := append([]any{limit}, efArgs...)
 
-	groupFilter := ""
+	planFilter := ""
 	if parentID != "" {
-		groupFilter = fmt.Sprintf(" AND d.group_id = $%d", len(args)+1)
+		planFilter = fmt.Sprintf(" AND g.plan_id = $%d", len(args)+1)
 		args = append(args, parentID)
 	}
 
 	q := fmt.Sprintf(`
 		SELECT
 			COALESCE(d.line_id::text, '')    AS detail_id,
-			COALESCE(d.group_id::text, '')   AS plan_id,
+			COALESCE(g.plan_id, '')          AS plan_id,
+			COALESCE(d.group_id::text, '')   AS group_id,
 			COALESCE(g.entity_name, '')      AS entity_name,
 			COALESCE(d.category, '')         AS category,
 			COALESCE(d.amount, 0)            AS amount,
@@ -414,7 +416,7 @@ func queryCashFundPlanDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		WHERE 1=1 %s %s
 		ORDER BY d.line_id DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`, ef, groupFilter)
+	`, ef, planFilter)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -428,26 +430,27 @@ func queryCashSweepConfig(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 	ef, efArgs := entityNameFilter(ctx, "c", "entity_name", 2)
 	args := append([]any{limit}, efArgs...)
 
+	// Mirrors /cash/sweep-config-v2/all:
+	// - entity_name / frequency / source bank from sweepconfiguration (V2 has no active_status)
+	// - processing_status from latest CREATE/EDIT/DELETE audit (covers PENDING_DELETE_APPROVAL)
 	q := fmt.Sprintf(`
-		WITH latest_audit AS (
-			SELECT DISTINCT ON (sweep_id)
-				sweep_id,
-				processing_status,
-				requested_at,
-				checker_at
-			FROM cimplrcorpsaas.auditactionsweepconfiguration
-			ORDER BY sweep_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
-		)
 		SELECT
 			COALESCE(c.sweep_id::text, '') AS config_id,
-			COALESCE(c.entity_name, '') AS entity_id,
+			COALESCE(c.entity_name, '') AS entity_name,
 			COALESCE(c.source_bank_name, '') AS bank_name,
 			COALESCE(c.sweep_type, '') AS sweep_type,
 			COALESCE(c.frequency, '') AS frequency,
 			c.updated_at,
 			COALESCE(a.processing_status, '') AS processing_status
 		FROM cimplrcorpsaas.sweepconfiguration c
-		LEFT JOIN latest_audit a ON a.sweep_id = c.sweep_id::text
+		LEFT JOIN LATERAL (
+			SELECT processing_status, requested_at, action_id
+			FROM cimplrcorpsaas.auditactionsweepconfiguration
+			WHERE sweep_id = c.sweep_id::text
+			  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+			ORDER BY requested_at DESC, action_id DESC
+			LIMIT 1
+		) a ON true
 		WHERE COALESCE(c.is_deleted, false) = false %s
 		ORDER BY c.updated_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
@@ -464,33 +467,41 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 	ef, efArgs := entityNameFilter(ctx, "c", "entity_name", 2)
 	args := append([]any{limit}, efArgs...)
 
+	// Mirrors /cash/sweep-initiation/with-details:
+	// - latest CREATE/EDIT/DELETE audit by requested_at (so PENDING_* statuses surface)
+	// - buffer/sweep amounts resolve to overridden_amount when present (same as UI)
 	q := fmt.Sprintf(`
-		WITH latest_audit AS (
-			SELECT DISTINCT ON (initiation_id::text)
-				initiation_id::text     AS initiation_id,
-				processing_status,
-				requested_at,
-				checker_at
-			FROM cimplrcorpsaas.auditactionsweepinitiation
-			WHERE actiontype IN ('CREATE', 'EDIT', 'DELETE')
-			ORDER BY initiation_id::text, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
-		)
 		SELECT
 			COALESCE(i.initiation_id::text, '') AS initiation_id,
 			COALESCE(i.sweep_id::text,      '') AS config_id,
 			COALESCE(c.entity_name,         '') AS entity_name,
 			COALESCE(c.source_bank_name,    '') AS source_bank_name,
+			COALESCE(c.source_bank_account, '') AS source_bank_account,
 			COALESCE(c.target_bank_name,    '') AS target_bank_name,
+			COALESCE(c.target_bank_account, '') AS target_bank_account,
 			COALESCE(c.sweep_type,          '') AS sweep_type,
-			COALESCE(i.initiated_by,        '') AS initiated_by,
+			COALESCE(NULLIF(TRIM(i.initiated_by), ''), NULLIF(TRIM(a.requested_by), ''), '') AS initiated_by,
 			i.initiation_time,
 			COALESCE(a.processing_status,   '') AS processing_status,
-			COALESCE(c.buffer_amount,         0) AS buffer_amount,
-			COALESCE(c.sweep_amount,          0) AS sweep_amount,
-			COALESCE(i.overridden_amount,     0) AS overridden_amount
+			COALESCE(
+				CASE WHEN i.overridden_amount IS NOT NULL THEN i.overridden_amount ELSE c.buffer_amount END,
+				0
+			) AS buffer_amount,
+			COALESCE(
+				CASE WHEN i.overridden_amount IS NOT NULL THEN i.overridden_amount ELSE c.sweep_amount END,
+				0
+			) AS sweep_amount,
+			COALESCE(i.overridden_amount, 0) AS overridden_amount
 		FROM cimplrcorpsaas.sweep_initiation i
-		JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id::text = i.sweep_id::text
-		LEFT JOIN latest_audit a ON a.initiation_id = i.initiation_id::text
+		JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = i.sweep_id
+		LEFT JOIN LATERAL (
+			SELECT processing_status, requested_by, requested_at, action_id
+			FROM cimplrcorpsaas.auditactionsweepinitiation
+			WHERE initiation_id = i.initiation_id
+			  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+			ORDER BY requested_at DESC, action_id DESC
+			LIMIT 1
+		) a ON true
 		WHERE COALESCE(c.is_deleted, false) = false
 		  AND COALESCE(i.is_deleted, false) = false %s
 		ORDER BY i.initiation_time DESC NULLS LAST
@@ -559,14 +570,19 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 	q := fmt.Sprintf(`
 		SELECT
 			COALESCE(i.item_id::text, '')         AS item_id,
+			COALESCE(i.proposal_id::text, '')     AS proposal_id,
 			COALESCE(i.entity_name, '')           AS entity_name,
 			COALESCE(i.description, '')           AS description,
 			COALESCE(i.cashflow_type, '')         AS cashflow_type,
 			COALESCE(i.category_id::text, '')     AS category_id,
+			COALESCE(i.department_id, '')         AS department_id,
 			COALESCE(NULLIF(TRIM(i.currency_code), ''), NULLIF(TRIM(p.base_currency_code), '')) AS currency_code,
+			COALESCE(i.counterparty_name, '')     AS counterparty_name,
 			COALESCE(i.expected_amount, 0)        AS expected_amount,
 			COALESCE(i.is_recurring, false)       AS is_recurring,
 			COALESCE(i.recurrence_frequency, '')  AS recurrence_frequency,
+			i.start_date,
+			i.end_date,
 			i.maturity_date,
 			COALESCE(i.bank_name, '')             AS bank_name,
 			COALESCE(i.bank_account_number, '')   AS bank_account_number

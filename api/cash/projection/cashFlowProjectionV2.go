@@ -857,11 +857,12 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"deleted_by":         deletedByStr,
 		}
 
-		// Get items
+		// Get items (include all Projection Items dashboard fields)
 		itemQ := `
 			SELECT 
-				item_id, description, cashflow_type, category_id, currency_code, expected_amount,
-				is_recurring, recurrence_frequency, maturity_date, bank_name, bank_account_number, entity_name,
+				item_id, proposal_id, description, cashflow_type, category_id, currency_code, expected_amount,
+				is_recurring, recurrence_frequency, start_date, end_date, maturity_date,
+				bank_name, bank_account_number, entity_name, department_id, counterparty_name,
 				old_cashflow_type, old_category_id, old_currency_code, old_expected_amount,
 				old_is_recurring, old_recurrence_frequency, old_maturity_date, old_entity_name,
 				old_bank_name, old_bank_account_number
@@ -883,10 +884,11 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for rows.Next() {
 			var (
-				itemID, description, cashflowType, categoryID, currencyCode                              string
+				itemID, itemProposalID, description, cashflowType, categoryID, currencyCode              string
 				expectedAmount                                                                           float64
 				isRecurring                                                                              bool
-				recurrenceFrequency, maturityDate, bankName, bankAccountNumber, entityName               interface{}
+				recurrenceFrequency, startDate, endDate, maturityDate                                    interface{}
+				bankName, bankAccountNumber, entityName, departmentID, counterpartyName                  interface{}
 				oldCashflowType, oldCategoryID, oldCurrencyCode, oldRecurrenceFrequency, oldMaturityDate interface{}
 				oldEntityName, oldBankName, oldBankAccountNumber                                         interface{}
 				oldExpectedAmount                                                                        interface{}
@@ -894,8 +896,9 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 
 			if err := rows.Scan(
-				&itemID, &description, &cashflowType, &categoryID, &currencyCode, &expectedAmount,
-				&isRecurring, &recurrenceFrequency, &maturityDate, &bankName, &bankAccountNumber, &entityName,
+				&itemID, &itemProposalID, &description, &cashflowType, &categoryID, &currencyCode, &expectedAmount,
+				&isRecurring, &recurrenceFrequency, &startDate, &endDate, &maturityDate,
+				&bankName, &bankAccountNumber, &entityName, &departmentID, &counterpartyName,
 				&oldCashflowType, &oldCategoryID, &oldCurrencyCode, &oldExpectedAmount,
 				&oldIsRecurring, &oldRecurrenceFrequency, &oldMaturityDate, &oldEntityName,
 				&oldBankName, &oldBankAccountNumber,
@@ -916,17 +919,22 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			itemIDs = append(itemIDs, itemID)
 			items = append(items, map[string]interface{}{
 				"item_id":                  itemID,
+				"proposal_id":              itemProposalID,
 				"description":              description,
 				"cashflow_type":            cashflowType,
 				"category_id":              categoryID,
+				"department_id":            ifaceToString(departmentID),
 				"currency_code":            currencyCode,
 				"expected_amount":          expectedAmount,
 				"is_recurring":             isRecurring,
 				"recurrence_frequency":     ifaceToString(recurrenceFrequency),
+				"start_date":               ifaceToTimeString(startDate),
+				"end_date":                 ifaceToTimeString(endDate),
 				"maturity_date":            ifaceToTimeString(maturityDate),
 				"bank_name":                ifaceToString(bankName),
 				"bank_account_number":      ifaceToString(bankAccountNumber),
 				"entity_name":              ifaceToString(entityName),
+				"counterparty_name":        ifaceToString(counterpartyName),
 				"old_cashflow_type":        ifaceToString(oldCashflowType),
 				"old_category_id":          ifaceToString(oldCategoryID),
 				"old_currency_code":        ifaceToString(oldCurrencyCode),

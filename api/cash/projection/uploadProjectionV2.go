@@ -47,11 +47,15 @@ type itemInfoV2 struct {
 // - categoryname (required: category_id)
 // - entity (required)
 // - expectedamount (required)
+// - department (optional: department_id)
 // - recurring (optional: true/false, defaults to false)
 // - frequency (optional: Monthly/Quarterly/Yearly, defaults to Yearly)
+// - start_date (optional: YYYY-MM-DD)
+// - end_date (optional: YYYY-MM-DD)
 // - maturity_date (optional: YYYY-MM-DD)
 // - bank_name (optional)
 // - bank_account_number (optional)
+// - counterparty_name (optional)
 // - currency_code (optional: per-item currency, defaults to base_currency_code)
 //
 // Monthly projections are AUTO-CALCULATED based on recurring + frequency
@@ -232,8 +236,8 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		itemCols := []string{
 			"proposal_id", "description", "cashflow_type", "category_id",
 			"expected_amount", "is_recurring", "recurrence_frequency",
-			"maturity_date", "entity_name",
-			"currency_code", "bank_name", "bank_account_number",
+			"start_date", "end_date", "maturity_date", "entity_name", "department_id",
+			"currency_code", "bank_name", "bank_account_number", "counterparty_name",
 		}
 
 		copyRows := make([][]interface{}, 0, len(dataRows))
@@ -270,10 +274,14 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Optional V2 fields
+			startDate := get("start_date")
+			endDate := get("end_date")
 			maturityDate := get("maturity_date")
 			bankName := get("bank_name")
 			bankAccountNumber := get("bank_account_number")
 			entityName := get("entity")
+			departmentID := get("department")
+			counterpartyName := get("counterparty_name")
 			if err := validateProjectionCashScope(ctx, map[string]interface{}{
 				"entity_name":         entityName,
 				"category_id":         categoryID,
@@ -288,16 +296,22 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Use bank name as-is (pre-validation can handle bank lookups if needed)
 			bankID := bankName
 
-			var maturityDateVal interface{}
+			var startDateVal, endDateVal, maturityDateVal interface{}
+			if startDate != "" {
+				startDateVal = startDate
+			}
+			if endDate != "" {
+				endDateVal = endDate
+			}
 			if maturityDate != "" {
 				maturityDateVal = maturityDate
 			}
 
 			copyRows = append(copyRows, []interface{}{
 				proposalID, get("description"), cfType, categoryID, amount,
-				recurring, frequency, maturityDateVal,
-				entityName, itemCurrency,
-				nullStringV2(bankID), nullStringV2(bankAccountNumber),
+				recurring, frequency, startDateVal, endDateVal, maturityDateVal,
+				entityName, nullStringV2(departmentID), itemCurrency,
+				nullStringV2(bankID), nullStringV2(bankAccountNumber), nullStringV2(counterpartyName),
 			})
 
 			itemInfos = append(itemInfos, itemInfoV2{

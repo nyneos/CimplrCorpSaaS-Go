@@ -194,11 +194,8 @@ var dataSources = map[string]dataSourceFn{
 		return queryCashProjectionList(ctx, pool, req.EntityIDs, req.Limit)
 	},
 	"cashProjectionDetail": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		proposalIDs := resolveProjectionProposalIDs(req)
-		if len(proposalIDs) == 0 {
-			return []map[string]any{}, nil
-		}
-		return queryCashProjectionDetail(ctx, pool, req.EntityIDs, req.Limit, proposalIDs)
+		// Empty proposal_ids = all projections (optional filter when IDs are provided).
+		return queryCashProjectionDetail(ctx, pool, req.EntityIDs, req.Limit, resolveProjectionProposalIDs(req))
 	},
 	"cashBankBalances": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryCashBankBalances(ctx, pool, req.EntityIDs, req.Limit)

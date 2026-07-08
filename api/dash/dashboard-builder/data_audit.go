@@ -192,9 +192,43 @@ func queryCashProjectionAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs
 }
 
 // ── Fund Plan Audit ───────────────────────────────────────────────────────────
+// parentID is plan_id from /cash/fund-planning/summary (e.g. "plan-1783403924162").
+// Audit rows are keyed by group_id, so we join fund_plan_groups to resolve plan_id.
 func queryCashFundPlanAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
-	return stdAuditQuery(ctx, pool, entityIDs, limit,
-		"public.auditaction_fund_plan_groups", "group_id", parentID)
+	_ = entityIDs
+	args := []any{limit}
+
+	planFilter := ""
+	if parentID != "" {
+		planFilter = fmt.Sprintf("AND g.plan_id = $%d", len(args)+1)
+		args = append(args, parentID)
+	}
+
+	q := fmt.Sprintf(`
+		SELECT
+			COALESCE(a.action_id::text, '') AS audit_id,
+			COALESCE(g.plan_id, '')         AS parent_id,
+			COALESCE(a.group_id::text, '')  AS group_id,
+			COALESCE(a.actiontype, '')      AS action_type,
+			COALESCE(a.processing_status, '') AS processing_status,
+			COALESCE(a.reason, '')          AS reason,
+			COALESCE(a.requested_by, '')    AS requested_by,
+			a.requested_at,
+			COALESCE(a.checker_by, '')      AS checker_by,
+			a.checker_at,
+			COALESCE(a.checker_comment, '') AS checker_comment
+		FROM public.auditaction_fund_plan_groups a
+		JOIN public.fund_plan_groups g ON g.group_id = a.group_id
+		WHERE 1=1 %s
+		ORDER BY a.requested_at DESC NULLS LAST
+		LIMIT NULLIF($1, 0)
+	`, planFilter)
+
+	r, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanRows(r)
 }
 
 // ── Investment Proposal Audit ─────────────────────────────────────────────────

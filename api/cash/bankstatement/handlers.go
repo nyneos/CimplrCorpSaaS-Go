@@ -235,6 +235,7 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 		rows, err := pool.Query(ctx, `
 			SELECT
 				t.transaction_id,
+				COALESCE(s.entity_id, '') AS entity_id,
 				e.entity_name,
 				t.tran_id,
 				t.value_date,
@@ -319,6 +320,7 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 		for rows.Next() {
 			var (
 				tid                 int64
+				entityID            string
 				entityName          string
 				tranID              sql.NullString
 				desc                string
@@ -344,6 +346,7 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 
 			if err := rows.Scan(
 				&tid,
+				&entityID,
 				&entityName,
 				&tranID,
 				&vdate,
@@ -397,6 +400,7 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 
 			resp = append(resp, map[string]interface{}{
 				"transaction_id":     tid,
+				"entity_id":          entityID,
 				"entity_name":        entityName,
 				"tran_id":            tranID.String,
 				"value_date":         vdate,
