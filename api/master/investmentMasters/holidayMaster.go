@@ -417,22 +417,20 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Insert to master table, deduping on (calendar_id, holiday_date, holiday_type):
-		// DISTINCT ON collapses duplicates within this batch; NOT EXISTS skips ones already saved.
+		
 		_, err = tx.Exec(ctx, `
 			INSERT INTO investment.masterholiday
 			(calendar_id, holiday_date, holiday_name, holiday_type, recurrence_rule, notes, ingestion_source, status)
-			SELECT DISTINCT ON (th.calendar_id, th.holiday_date, th.holiday_type)
+			SELECT DISTINCT ON (th.calendar_id, lower(btrim(th.holiday_name)))
 			       th.calendar_id, th.holiday_date, th.holiday_name, th.holiday_type, th.recurrence_rule, th.notes, th.ingestion_source, 'Active'
 			FROM tmp_holiday th
 			WHERE NOT EXISTS (
 				SELECT 1 FROM investment.masterholiday mh
 				WHERE mh.calendar_id = th.calendar_id
-				  AND mh.holiday_date = th.holiday_date
-				  AND mh.holiday_type = th.holiday_type
+				  AND lower(btrim(mh.holiday_name)) = lower(btrim(th.holiday_name))
 				  AND COALESCE(mh.is_deleted,false)=false
 			)
-			ORDER BY th.calendar_id, th.holiday_date, th.holiday_type;
+			ORDER BY th.calendar_id, lower(btrim(th.holiday_name));
 		`)
 		if err != nil {
 			api.RespondWithError(w, 500, "insert error: "+err.Error())
@@ -889,19 +887,21 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
+			// Dedupe on holiday name only (case-insensitive) within the calendar: DISTINCT ON
+			// collapses same-name rows in this file; NOT EXISTS skips names already saved.
 			_, err = tx.Exec(ctx, `
 				INSERT INTO investment.masterholiday
 				(calendar_id, holiday_date, holiday_name, holiday_type, recurrence_rule, notes, ingestion_source, status)
-				SELECT thu.calendar_id, thu.holiday_date, thu.holiday_name, thu.holiday_type, thu.recurrence_rule, thu.notes, thu.ingestion_source, 'Active'
+				SELECT DISTINCT ON (thu.calendar_id, lower(btrim(thu.holiday_name)))
+				       thu.calendar_id, thu.holiday_date, thu.holiday_name, thu.holiday_type, thu.recurrence_rule, thu.notes, thu.ingestion_source, 'Active'
 				FROM tmp_holiday_upload thu
 				WHERE NOT EXISTS (
 					SELECT 1 FROM investment.masterholiday mh
 					WHERE mh.calendar_id = thu.calendar_id
-					  AND mh.holiday_date = thu.holiday_date
-					  AND mh.holiday_name = thu.holiday_name
-					  AND mh.holiday_type = thu.holiday_type
+					  AND lower(btrim(mh.holiday_name)) = lower(btrim(thu.holiday_name))
 					  AND COALESCE(mh.is_deleted,false)=false
 				)
+				ORDER BY thu.calendar_id, lower(btrim(thu.holiday_name));
 			`)
 			if err != nil {
 				api.RespondWithError(w, 500, "insert: "+err.Error())
@@ -2096,6 +2096,7 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, 400, "no valid editable fields")
 			return
 		}
+		
 		if toDateStr(newDateVal) != toDateStr(oldVals["holiday_date"]) ||
 			newName != fmt.Sprint(oldVals["holiday_name"]) ||
 			newType != fmt.Sprint(oldVals["holiday_type"]) {
@@ -2103,14 +2104,14 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var exists string
 			err := tx.QueryRow(ctx, `
 				SELECT holiday_id FROM investment.masterholiday
-				WHERE calendar_id=$1 AND holiday_date=$2 AND holiday_name=$3 AND holiday_type=$4
-				AND holiday_id <> $5 AND COALESCE(is_deleted,false)=false
+				WHERE calendar_id=$1 AND lower(btrim(holiday_name))=lower(btrim($2))
+				AND holiday_id <> $3 AND COALESCE(is_deleted,false)=false
 				LIMIT 1
-			`, calendarID, newDateVal, newName, newType, req.HolidayID).Scan(&exists)
+			`, calendarID, newName, req.HolidayID).Scan(&exists)
 
 			if err == nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, 400, "duplicate holiday date+name+type for this calendar")
+				api.RespondWithError(w, 400, "a holiday with this name already exists for this calendar")
 				return
 			}
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
