@@ -10,6 +10,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/cash"
 	"CimplrCorpSaas/api/dash"
+	"CimplrCorpSaas/api/email"
 	"CimplrCorpSaas/api/fx"
 	"CimplrCorpSaas/api/investment"
 	"CimplrCorpSaas/api/master"
@@ -78,6 +79,9 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 	},
 	"notification": func(cfg map[string]interface{}) serviceiface.Service {
 		return notification.NewNotificationService(cfg, pgxPool, db)
+	},
+	"email": func(cfg map[string]interface{}) serviceiface.Service {
+		return email.NewEmailService(cfg, pgxPool, db)
 	},
 	"gateway": func(cfg map[string]interface{}) serviceiface.Service {
 		return api.NewGatewayService(cfg)

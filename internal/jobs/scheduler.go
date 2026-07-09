@@ -9,6 +9,7 @@ import (
 	fdAccrual "CimplrCorpSaas/api/investment/fdAccrual"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	dinojobs "CimplrCorpSaas/internal/jobs/dino"
+	emailjobs "CimplrCorpSaas/internal/jobs/email"
 	investmentjobs "CimplrCorpSaas/internal/jobs/investment"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/serviceiface"
@@ -102,6 +103,10 @@ func (s *CronService) Start() error {
 	go dinojobs.StartOutboxWorker(ctx, s.db)
 	go dinojobs.StartInboxWorker(ctx, s.db)
 	go dinojobs.StartBrowserPushWorker(ctx, s.db)
+	emailjobs.EnsureInboxCredentialSchema(ctx, s.db)
+	go emailjobs.StartInboundPoller(ctx, s.db)
+	go emailjobs.StartGraphPoller(ctx, s.db)
+	go emailjobs.StartIMAPPoller(ctx, s.db)
 	go approvalengine.StartSLAWorker(ctx, s.db)
 	go fdAccrual.StartAccrualSchedulerWorker(s.db)
 	go investmentjobs.StartReceiptReconcileWorker(s.db)
@@ -172,9 +177,7 @@ func (s *CronService) cleanupIdleConnections() {
 		  AND now() - state_change > interval '5 minutes';
 	`
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	tag, err := s.db.Exec(ctx, query)
+	tag, err := s.db.Exec(context.Background(), query)
 	if err != nil {
 		logger.LogError("DB cleanup error: %v", err)
 		if logger.GlobalLogger != nil {

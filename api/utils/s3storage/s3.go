@@ -272,6 +272,9 @@ var moduleDefaultPrefixes = map[string]string{
 	"master-day-count-convention":  "masters/day-count-convention/",
 	"master-bank-config":           "masters/bank-config/",
 	"master-bank-rate-card":        "masters/bank-rate-card/",
+	"email-inbound":                "email/inbound/",
+	"email-attachment":             "email/inbound/attachments/",
+	"fd-rate-negotiation":          "fd/rate-negotiation/",
 }
 
 func moduleDefaultPrefix(module string) string {

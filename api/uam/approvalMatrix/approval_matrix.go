@@ -95,12 +95,12 @@ func logDBError(err error, context string) {
 
 var validModuleCodes = map[string]bool{
 	"FIXED_DEPOSIT": true, "PAYMENTS": true, "RECONCILIATION": true,
-	"VENDOR": true, "GENERAL": true,
+	"VENDOR": true, "GENERAL": true, "EMAIL_INBOX": true,
 }
 
 func validateMasterFields(moduleCode, approvalOrder string, minAmount, maxAmount *float64, slaHours *int) error {
 	if !validModuleCodes[moduleCode] {
-		return errors.New("module_code must be one of FIXED_DEPOSIT, PAYMENTS, RECONCILIATION, VENDOR, GENERAL")
+		return errors.New("module_code must be one of FIXED_DEPOSIT, PAYMENTS, RECONCILIATION, VENDOR, GENERAL, EMAIL_INBOX")
 	}
 	if approvalOrder != "PARALLEL" && approvalOrder != "SEQUENTIAL" {
 		return errors.New("approval_order must be PARALLEL or SEQUENTIAL")

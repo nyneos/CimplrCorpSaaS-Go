@@ -13,14 +13,13 @@ services:
     start_order: 3
     config:
       port: 8081
-      path_prefix: 
       load_balancer: round_robin
       vip_failover: true
   - name: auth
     start_order: 4
     config:
       max_users: 100
-      session_timeout: 45
+      session_timeout: 60
       max_login_attempts : 2
       account_lock_duration: 1
       session_cleaner_period : 1
@@ -54,10 +53,13 @@ services:
     start_order: 13
     config:
       port: 9111
+  - name: email
+    start_order: 13
+    config:
+      port: 8183
   - name: cron
     start_order: 14
     config:
       batch_size: 1000
       sweep_schedule: "*/1 * * * *"
       sweep_batch_size: 100
-

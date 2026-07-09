@@ -786,6 +786,7 @@ func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, str
 	mux.HandleFunc("/master/", createReverseProxy("http://localhost:2143"))
 	mux.HandleFunc("/investment/", createReverseProxy("http://localhost:7143"))
 	mux.HandleFunc("/notification/", createReverseProxy("http://localhost:9111"))
+	mux.HandleFunc("/email/", createReverseProxy("http://localhost:8183"))
 
 	mux.HandleFunc("/health", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
