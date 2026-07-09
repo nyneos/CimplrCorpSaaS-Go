@@ -54,18 +54,25 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 				COALESCE(t.narration_ref, ''),
 				COALESCE(t.payment_channel, ''),
 				t.withdrawal_amount::FLOAT8, t.deposit_amount::FLOAT8,
-				t.value_date,
+				t.transaction_date,
 				bs.entity_id,
 				COALESCE(mba.account_nickname, bs.account_number),
 				COALESCE(mc.category_name, ''),
 				COALESCE(t.classification_step, ''),
-				COALESCE(t.confidence_score::FLOAT8, 0)
+				COALESCE(t.confidence_score::FLOAT8, 0),
+				bs.bank_statement_id::text,
+				COALESCE(e.entity_name, ''),
+				COALESCE(mb.bank_name, ''),
+				bs.statement_period_start,
+				bs.statement_period_end
 			FROM cimplrcorpsaas.categorization_review_queue q
 			JOIN cimplrcorpsaas.bank_statement_transactions t
 			    ON t.transaction_id = q.transaction_id
 			JOIN cimplrcorpsaas.bank_statements bs
 			    ON bs.bank_statement_id = t.bank_statement_id
+			LEFT JOIN public.masterentitycash e ON e.entity_id = bs.entity_id
 			LEFT JOIN public.masterbankaccount mba ON mba.account_number = bs.account_number
+			LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 			LEFT JOIN public.mastercashflowcategory mc ON mc.category_id::text = q.suggested_cat
 			WHERE q.status = $1
 			  AND COALESCE(bs.is_deleted, false) = false`
@@ -104,17 +111,20 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			var createdAt time.Time
 			var accountNumber, description, narrationClean, narrationRef, paymentChannel string
 			var withdrawal, deposit *float64
-			var valueDate *time.Time
+			var transactionDate *time.Time
 			var entityID, accountNickname, suggestedCatName string
 			var txnClassStep string
 			var txnConfidence float64
+			var bankStatementID, entityName, bankName string
+			var periodStart, periodEnd *time.Time
 
 			if err := rows.Scan(
 				&queueID, &txnID, &suggestedCat, &confidence, &step, &status, &createdAt,
 				&accountNumber, &description, &narrationClean, &narrationRef, &paymentChannel,
-				&withdrawal, &deposit, &valueDate,
+				&withdrawal, &deposit, &transactionDate,
 				&entityID, &accountNickname, &suggestedCatName,
 				&txnClassStep, &txnConfidence,
+				&bankStatementID, &entityName, &bankName, &periodStart, &periodEnd,
 			); err != nil {
 				fmt.Printf("[REVIEW-QUEUE] scan error: %v\n", err)
 				continue
@@ -179,9 +189,18 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 				"withdrawal":         withdrawal,
 				"deposit":            deposit,
 				"entity_id":          entityID,
+				"bank_statement_id":  bankStatementID,
+				"entity_name":        entityName,
+				"bank_name":          bankName,
 			}
-			if valueDate != nil {
-				row["value_date"] = valueDate.Format(constants.DateFormat)
+			if transactionDate != nil {
+				row["transaction_date"] = transactionDate.Format(constants.DateFormat)
+			}
+			if periodStart != nil {
+				row["statement_period_start"] = periodStart.Format(constants.DateFormat)
+			}
+			if periodEnd != nil {
+				row["statement_period_end"] = periodEnd.Format(constants.DateFormat)
 			}
 			out = append(out, row)
 		}
