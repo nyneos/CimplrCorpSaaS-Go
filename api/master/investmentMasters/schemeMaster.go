@@ -1047,17 +1047,14 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// insert audit
-		oldValuesJSON, newValuesJSON, err := marshalAuditValueSnapshots(auditOldValues, auditNewValues)
-		if err != nil {
-			msg, status := getUserFriendlySchemeError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
-			return
-		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
-			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)
-		`, req.SchemeID, req.Reason, userEmail, oldValuesJSON, newValuesJSON); err != nil {
+		// insert audit (per-field old_/new_ columns)
+		auditCols, auditPlaceholders, auditArgs := buildAuditValueColumns(auditOldValues, auditNewValues, 4)
+		auditQuery := fmt.Sprintf(`
+			INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, reason, requested_by, requested_at%s)
+			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now()%s)
+		`, auditCols, auditPlaceholders)
+		execArgs := append([]interface{}{req.SchemeID, req.Reason, userEmail}, auditArgs...)
+		if _, err := tx.Exec(ctx, auditQuery, execArgs...); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
 			return
@@ -1982,17 +1979,13 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			oldValuesJSON, newValuesJSON, err := marshalAuditValueSnapshots(auditOldValues, auditNewValues)
-			if err != nil {
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(),
-				})
-				continue
-			}
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
-				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)
-			`, row.SchemeID, row.Reason, userEmail, oldValuesJSON, newValuesJSON); err != nil {
+			auditCols, auditPlaceholders, auditArgs := buildAuditValueColumns(auditOldValues, auditNewValues, 4)
+			auditQuery := fmt.Sprintf(`
+				INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, reason, requested_by, requested_at%s)
+				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now()%s)
+			`, auditCols, auditPlaceholders)
+			execArgs := append([]interface{}{row.SchemeID, row.Reason, userEmail}, auditArgs...)
+			if _, err := tx.Exec(ctx, auditQuery, execArgs...); err != nil {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(),
 				})

@@ -188,7 +188,14 @@ func fetchApprovedActiveHolidays(ctx context.Context, db *pgxpool.Pool, calendar
 	where := `
 WHERE h.calendar_id=$1
   AND COALESCE(h.is_deleted,false)=false
-  AND UPPER(h.status)='ACTIVE'`
+  AND UPPER(h.status)='ACTIVE'
+  AND UPPER(COALESCE((
+        SELECT a.processing_status
+        FROM investment.auditactionmasterholiday a
+        WHERE a.holiday_id::text = h.holiday_id::text
+        ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC, a.action_id DESC
+        LIMIT 1
+      ),'')) = 'APPROVED'`
 	if effFrom != nil {
 		where += " AND h.holiday_date >= $2"
 		args = append(args, effFrom.Format(constants.DateFormat))

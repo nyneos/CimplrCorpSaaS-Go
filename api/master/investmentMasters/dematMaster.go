@@ -902,17 +902,14 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// insert audit record
-		oldValuesJSON, newValuesJSON, err := marshalAuditValueSnapshots(auditOldValues, auditNewValues)
-		if err != nil {
-			msg, status := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
-			api.RespondWithError(w, status, msg)
-			return
-		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
-			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)
-		`, req.DematID, req.Reason, userEmail, oldValuesJSON, newValuesJSON); err != nil {
+		// insert audit record (per-field old_/new_ columns)
+		auditCols, auditPlaceholders, auditArgs := buildAuditValueColumns(auditOldValues, auditNewValues, 4)
+		auditQuery := fmt.Sprintf(`
+			INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at%s)
+			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now()%s)
+		`, auditCols, auditPlaceholders)
+		execArgs := append([]interface{}{req.DematID, req.Reason, userEmail}, auditArgs...)
+		if _, err := tx.Exec(ctx, auditQuery, execArgs...); err != nil {
 			msg, status := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
 			api.RespondWithError(w, status, msg)
 			return
@@ -1046,16 +1043,13 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			oldValuesJSON, newValuesJSON, err := marshalAuditValueSnapshots(auditOldValues, auditNewValues)
-			if err != nil {
-				msg, _ := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: msg})
-				continue
-			}
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
-				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)
-			`, row.DematID, row.Reason, userEmail, oldValuesJSON, newValuesJSON); err != nil {
+			auditCols, auditPlaceholders, auditArgs := buildAuditValueColumns(auditOldValues, auditNewValues, 4)
+			auditQuery := fmt.Sprintf(`
+				INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at%s)
+				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now()%s)
+			`, auditCols, auditPlaceholders)
+			execArgs := append([]interface{}{row.DematID, row.Reason, userEmail}, auditArgs...)
+			if _, err := tx.Exec(ctx, auditQuery, execArgs...); err != nil {
 				msg, _ := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: msg})
 				continue
