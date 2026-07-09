@@ -275,6 +275,16 @@ func createReverseProxy(target string) http.HandlerFunc {
 			return nil
 		}
 
+		proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+			logger.LogError("[Gateway] proxy error for %s %s -> %s: %v", req.Method, req.URL.Path, target, err)
+			rw.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
+			rw.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
+			rw.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
+			rw.Header().Set(headerContentType, contentTypeJSON)
+			rw.WriteHeader(http.StatusBadGateway)
+			rw.Write([]byte(`{"success":false,"error":"upstream service unavailable"}`))
+		}
+
 		proxy.ServeHTTP(w, r)
 	}
 }
