@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
-	fundavailibilty "CimplrCorpSaas/api/cash/fundavailibilty"
-	payablerecievable "CimplrCorpSaas/api/cash/payablerecievable"
-	cashlimit "CimplrCorpSaas/api/cash/limit"
-	cashprojection "CimplrCorpSaas/api/cash/projection"
 	"CimplrCorpSaas/api"
+	fundavailibilty "CimplrCorpSaas/api/cash/fundavailibilty"
+	cashlimit "CimplrCorpSaas/api/cash/limit"
+	payablerecievable "CimplrCorpSaas/api/cash/payablerecievable"
+	cashprojection "CimplrCorpSaas/api/cash/projection"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/validation"
 
@@ -549,14 +549,44 @@ func queryCashProjectionList(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 		return nil, err
 	}
 	out := make([]map[string]any, len(rows))
-	for i, row := range rows {
-		out[i] = row
-	}
+	copy(out, rows)
 	return out, nil
 }
 
 // proposalIDs filters line items to the selected cashflow proposals.
 func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, proposalIDs []string) ([]map[string]any, error) {
+	cols, err := projectionItemColumns(ctx, pool, []string{
+		"department_id",
+		"counterparty_name",
+		"start_date",
+		"end_date",
+		"maturity_date",
+		"bank_name",
+		"bank_account_number",
+		"currency_code",
+		"recurrence_frequency",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	textExpr := func(column string) string {
+		if cols[column] {
+			return fmt.Sprintf("COALESCE(i.%s, '')", column)
+		}
+		return "''"
+	}
+	dateExpr := func(column string) string {
+		if cols[column] {
+			return "i." + column
+		}
+		return "NULL::date"
+	}
+	currencyExpr := "NULLIF(TRIM(p.base_currency_code), '')"
+	if cols["currency_code"] {
+		currencyExpr = "COALESCE(NULLIF(TRIM(i.currency_code), ''), NULLIF(TRIM(p.base_currency_code), ''))"
+	}
+
 	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", 2)
 	args := append([]any{limit}, efArgs...)
 
@@ -575,30 +605,65 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(i.description, '')           AS description,
 			COALESCE(i.cashflow_type, '')         AS cashflow_type,
 			COALESCE(i.category_id::text, '')     AS category_id,
-			COALESCE(i.department_id, '')         AS department_id,
-			COALESCE(NULLIF(TRIM(i.currency_code), ''), NULLIF(TRIM(p.base_currency_code), '')) AS currency_code,
-			COALESCE(i.counterparty_name, '')     AS counterparty_name,
+			%s                                   AS department_id,
+			%s                                   AS currency_code,
+			%s                                   AS counterparty_name,
 			COALESCE(i.expected_amount, 0)        AS expected_amount,
 			COALESCE(i.is_recurring, false)       AS is_recurring,
-			COALESCE(i.recurrence_frequency, '')  AS recurrence_frequency,
-			i.start_date,
-			i.end_date,
-			i.maturity_date,
-			COALESCE(i.bank_name, '')             AS bank_name,
-			COALESCE(i.bank_account_number, '')   AS bank_account_number
+			%s                                   AS recurrence_frequency,
+			%s                                   AS start_date,
+			%s                                   AS end_date,
+			%s                                   AS maturity_date,
+			%s                                   AS bank_name,
+			%s                                   AS bank_account_number
 		FROM cimplrcorpsaas.cashflow_proposal_item i
 		JOIN cimplrcorpsaas.cashflow_proposal p ON p.proposal_id = i.proposal_id
 		WHERE i.is_deleted IS NOT TRUE
 		  AND p.is_deleted IS NOT TRUE %s %s
 		ORDER BY i.created_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0)
-	`, ef, proposalFilter)
+	`,
+		textExpr("department_id"),
+		currencyExpr,
+		textExpr("counterparty_name"),
+		textExpr("recurrence_frequency"),
+		dateExpr("start_date"),
+		dateExpr("end_date"),
+		dateExpr("maturity_date"),
+		textExpr("bank_name"),
+		textExpr("bank_account_number"),
+		ef,
+		proposalFilter,
+	)
 
 	r, err := pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
 	return scanRows(r)
+}
+
+func projectionItemColumns(ctx context.Context, pool *pgxpool.Pool, names []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(names))
+	rows, err := pool.Query(ctx, `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = 'cimplrcorpsaas'
+		  AND table_name = 'cashflow_proposal_item'
+		  AND column_name = ANY($1::text[])
+	`, names)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return out, err
+		}
+		out[name] = true
+	}
+	return out, rows.Err()
 }
 
 // ── Balances, Limits & Availability ────────────────────────────────────────
