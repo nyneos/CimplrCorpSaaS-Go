@@ -175,20 +175,45 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 		if err := json.Unmarshal([]byte(pendingEdit), &edit); err != nil {
 			return err
 		}
+		mailbox, existingIMAP, _ := emailmailbox.LoadMailboxIMAPFields(ctx, pool, inboxID)
+		existingGraph, _ := emailmailbox.LoadMailboxGraphFields(ctx, pool, inboxID)
+		imapFinal := existingIMAP
+		graphFinal := existingGraph
+		if strings.EqualFold(edit.SourceType, "IMAP") && emailmailbox.IMAPPatchPresent(edit.MailboxIMAPFields) {
+			if merged, mergeErr := emailmailbox.MergeIMAPFields(existingIMAP, edit.MailboxIMAPFields, mailbox); mergeErr == nil {
+				imapFinal = merged
+			}
+		}
+		if emailmailbox.GraphPatchPresent(edit.MailboxGraphFields) {
+			if merged, mergeErr := emailmailbox.MergeGraphFields(existingGraph, edit.MailboxGraphFields); mergeErr == nil {
+				graphFinal = merged
+			}
+		}
 		_, err := pool.Exec(ctx, `
 			UPDATE email_svc.inbox_config
 			SET display_name = COALESCE(NULLIF($2,''), display_name),
 			    filters_json = COALESCE($3::jsonb, filters_json),
 			    poll_interval_secs = CASE WHEN $4 > 0 THEN $4 ELSE poll_interval_secs END,
 			    module = COALESCE(NULLIF($5,''), module),
-			    processing_status = $6,
+			    graph_tenant_key = $6,
+			    graph_tenant_label = $7, graph_tenant_id = $8,
+			    graph_client_id = $9, graph_client_secret = $10,
+			    imap_provider = $11, imap_host = $12, imap_port = $13,
+			    imap_username = $14, imap_password = $15,
+			    imap_inbox_folder = $16, imap_sent_folder = $17, imap_use_tls = $18,
+			    processing_status = $19,
 			    pending_edit_json = NULL,
-			    approved_by = $7,
-			    checker_comment = $8,
+			    approved_by = $20,
+			    checker_comment = $21,
 			    updated_at = now()
 			WHERE inbox_id = $1::uuid
 		`, inboxID, edit.DisplayName, emailcommon.NullableJSON(edit.FiltersJSON), edit.PollIntervalSecs,
-			edit.Module, constants.StatusApproved, actorID, comment)
+			edit.Module,
+			graphFinal.TenantKey, graphFinal.TenantLabel, graphFinal.TenantID, graphFinal.ClientID, graphFinal.ClientSecret,
+			imapFinal.Provider, imapFinal.Host, imapFinal.Port,
+			imapFinal.Username, imapFinal.Password,
+			imapFinal.InboxFolder, imapFinal.SentFolder, imapFinal.UseTLS,
+			constants.StatusApproved, actorID, comment)
 		return err
 	case "EMAIL_INBOX_DELETE":
 		_, err := pool.Exec(ctx, `

@@ -169,9 +169,9 @@ func GetSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// GetAllSweepExecutionLogsV2 returns all execution logs for the requested date window.
-// Date filtering is index-friendly (no function cast on the column).
-// Search/sort/pagination are handled client-side on the returned dataset.
+const allSweepLogsMaxPageSize = 200
+
+// GetAllSweepExecutionLogsV2 returns paginated execution logs for the requested date window.
 func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -182,6 +182,8 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Status       string `json:"status,omitempty"`
 			FromDate     string `json:"from_date,omitempty"`
 			ToDate       string `json:"to_date,omitempty"`
+			Page         int    `json:"page,omitempty"`
+			PageSize     int    `json:"page_size,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -208,7 +210,72 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		query := `
+		if req.Page <= 0 {
+			req.Page = 1
+		}
+		if req.PageSize <= 0 {
+			req.PageSize = 50
+		}
+		if req.PageSize > allSweepLogsMaxPageSize {
+			req.PageSize = allSweepLogsMaxPageSize
+		}
+		offset := (req.Page - 1) * req.PageSize
+
+		entityNames := api.GetEntityNamesFromCtx(ctx)
+		normEntities := make([]string, 0, len(entityNames))
+		for _, n := range entityNames {
+			if s := strings.TrimSpace(n); s != "" {
+				normEntities = append(normEntities, strings.ToLower(s))
+			}
+		}
+
+		baseFrom := `
+			FROM cimplrcorpsaas.sweep_execution_log l
+			JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = l.sweep_id
+			WHERE COALESCE(c.is_deleted, false) = false`
+
+		args := []interface{}{}
+		argPos := 1
+
+		if len(normEntities) > 0 {
+			baseFrom += fmt.Sprintf(constants.QuerryEntityNameLower, argPos)
+			args = append(args, normEntities)
+			argPos++
+		}
+		if req.SweepID != "" {
+			baseFrom += fmt.Sprintf(constants.QuerrySweepID, argPos)
+			args = append(args, req.SweepID)
+			argPos++
+		}
+		if req.InitiationID != "" {
+			baseFrom += fmt.Sprintf(" AND l.initiation_id = $%d", argPos)
+			args = append(args, req.InitiationID)
+			argPos++
+		}
+		if req.Status != "" {
+			baseFrom += fmt.Sprintf(" AND l.status = $%d", argPos)
+			args = append(args, strings.ToUpper(req.Status))
+			argPos++
+		}
+		if req.FromDate != "" {
+			baseFrom += fmt.Sprintf(" AND l.execution_date >= $%d::date", argPos)
+			args = append(args, req.FromDate)
+			argPos++
+		}
+		if req.ToDate != "" {
+			baseFrom += fmt.Sprintf(" AND l.execution_date < $%d::date + 1", argPos)
+			args = append(args, req.ToDate)
+			argPos++
+		}
+
+		countQuery := "SELECT COUNT(*)" + baseFrom
+		var totalCount int
+		if err := pgxPool.QueryRow(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			return
+		}
+
+		selectCols := `
 			SELECT
 				l.execution_id,
 				l.initiation_id,
@@ -224,53 +291,20 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				c.entity_name,
 				c.source_bank_name,
 				c.target_bank_name,
-				c.sweep_type
-			FROM cimplrcorpsaas.sweep_execution_log l
-			LEFT JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = l.sweep_id
-			WHERE 1=1`
+				c.sweep_type`
 
-		args := []interface{}{}
-		argPos := 1
+		listArgs := append(append([]interface{}{}, args...), req.PageSize, offset)
+		query := fmt.Sprintf("%s%s ORDER BY l.execution_date DESC LIMIT $%d OFFSET $%d",
+			selectCols, baseFrom, argPos, argPos+1)
 
-		if req.SweepID != "" {
-			query += fmt.Sprintf(constants.QuerrySweepID, argPos)
-			args = append(args, req.SweepID)
-			argPos++
-		}
-		if req.InitiationID != "" {
-			query += fmt.Sprintf(" AND l.initiation_id = $%d", argPos)
-			args = append(args, req.InitiationID)
-			argPos++
-		}
-		if req.Status != "" {
-			query += fmt.Sprintf(" AND l.status = $%d", argPos)
-			args = append(args, strings.ToUpper(req.Status))
-			argPos++
-		}
-		if req.FromDate != "" {
-			// index-friendly: no cast on the column side
-			query += fmt.Sprintf(" AND l.execution_date >= $%d::date", argPos)
-			args = append(args, req.FromDate)
-			argPos++
-		}
-		if req.ToDate != "" {
-			// covers the entire to_date day without casting the column
-			query += fmt.Sprintf(" AND l.execution_date < $%d::date + 1", argPos)
-			args = append(args, req.ToDate)
-			argPos++
-		}
-		_ = argPos
-
-		query += " ORDER BY l.execution_date DESC"
-
-		rows, err := pgxPool.Query(ctx, query, args...)
+		rows, err := pgxPool.Query(ctx, query, listArgs...)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
 
-		logs := make([]map[string]interface{}, 0)
+		logs := make([]map[string]interface{}, 0, req.PageSize)
 		for rows.Next() {
 			var executionID, sweepID, fromAccount, toAccount, status string
 			var initiationID sql.NullString
@@ -330,7 +364,15 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", logs)
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"rows":      logs,
+			"total":     totalCount,
+			"page":      req.Page,
+			"page_size": req.PageSize,
+		})
 	}
 }
 

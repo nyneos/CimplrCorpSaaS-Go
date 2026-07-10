@@ -59,7 +59,7 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 			       COALESCE(att.parsed_count, 0),
 			       COALESCE(att.additional_count, 0),
 			       COALESCE(m.mail_direction, 'RECEIVED'),
-			       COALESCE(m.envelope_to[1], '')
+			       COALESCE(array_to_string(m.envelope_to, ', '), '')
 			FROM email_svc.message m
 			LEFT JOIN LATERAL (
 				SELECT COALESCE(pl.detail->>'uploaded_by', '') AS uploaded_by

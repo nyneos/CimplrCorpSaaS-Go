@@ -367,8 +367,15 @@ func createScheduledInitiation(ctx context.Context, db *pgxpool.Pool, sweepID st
 	return err
 }
 
-// ProcessPendingInitiations processes all APPROVED initiations
+// ProcessPendingInitiations processes approved initiations that are eligible for execution.
+// Each initiation may produce multiple execution logs across scheduled runs (new initiation per day).
+// Within one initiation, failed attempts are retried up to SWEEP_MAX_RETRIES (env, default 2).
 func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize int) (int, int) {
+	if batchSize <= 0 {
+		batchSize = config.SweepBatchSize
+	}
+	maxAttempts := config.SweepMaxAttemptsPerInitiation()
+
 	query := `
 		SELECT 
 			i.initiation_id,
@@ -386,12 +393,26 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 		JOIN cimplrcorpsaas.sweepconfiguration sc ON sc.sweep_id = i.sweep_id
 		JOIN cimplrcorpsaas.auditactionsweepinitiation asi ON asi.initiation_id = i.initiation_id
 		WHERE asi.processing_status = 'APPROVED'
+		AND COALESCE(i.is_deleted, false) = false
 		AND sc.is_deleted = false
+		AND NOT EXISTS (
+			SELECT 1
+			FROM cimplrcorpsaas.sweep_execution_log el
+			WHERE el.initiation_id = i.initiation_id
+			  AND el.status = 'SUCCESS'
+		)
+		AND (
+			SELECT COUNT(*)
+			FROM cimplrcorpsaas.sweep_execution_log el
+			WHERE el.initiation_id = i.initiation_id
+		) < $2
 		ORDER BY i.initiation_time ASC
+		LIMIT $1
 	`
 
-	logger.LogInfo("[SWEEP V2]  Checking for approved initiations (processing_status=APPROVED)...")
-	rows, err := db.Query(ctx, query)
+	logger.LogInfo("[SWEEP V2]  Checking approved initiations (max_attempts=%d incl. retries=%d)...",
+		maxAttempts, config.SweepMaxRetries())
+	rows, err := db.Query(ctx, query, batchSize, maxAttempts)
 	if err != nil {
 		logger.LogError("[SWEEP V2] Failed to fetch approved initiations: %v", err)
 		return 0, 0
@@ -444,24 +465,6 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 
 		if err != nil {
 			logger.LogInfo("[SWEEP V2] %s (initiation: %s) - Execution failed: %v", sweepID, initiationID, err)
-
-			// Ensure failure is persisted to sweep_execution_log. Some error paths
-			// inside executeSweepWithInitiation may return without calling
-			// logSweepFailure, so write a FAILED row here if none exists yet.
-			var existing int
-			_ = db.QueryRow(ctx, `SELECT COUNT(1) FROM cimplrcorpsaas.sweep_execution_log WHERE initiation_id = $1 AND status = 'FAILED'`, initiationID).Scan(&existing)
-			if existing == 0 {
-				// Best-effort: fetch latest source balance for balance_before
-				var balanceBefore float64
-				_ = db.QueryRow(ctx, `SELECT COALESCE(closing_balance,0) FROM bank_balances_manual WHERE account_no = $1 ORDER BY as_of_date DESC, as_of_time DESC LIMIT 1`, finalSourceAccount).Scan(&balanceBefore)
-				logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
-					SweepID:      sweepID,
-					InitiationID: initiationID,
-					FromAccount:  finalSourceAccount,
-					ToAccount:    finalTargetAccount,
-				}, BalanceBefore: balanceBefore, Reason: err.Error()})
-			}
-
 			failCount++
 		} else {
 			logger.LogInfo("[SWEEP V2] %s (initiation: %s) - Execution successful", sweepID, initiationID)
@@ -725,7 +728,8 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 	return nil
 }
 
-// logSweepFailure logs failed sweep attempts with detailed validation information
+// logSweepFailure logs a failed sweep attempt. Multiple rows per initiation_id are allowed
+// (retries within the same initiation, and separate initiations on later scheduled runs).
 func logSweepFailure(ctx context.Context, db *pgxpool.Pool, info SweepFailureInfo) {
 	query := `
 		INSERT INTO cimplrcorpsaas.sweep_execution_log (
