@@ -10,8 +10,7 @@ import (
 
 // ── Exposure Headers & Line Items ──────────────────────────────────────────
 func queryFXExposureHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "h", "entity", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "h", "entity")
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -54,8 +53,7 @@ func queryFXExposureHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, en
 
 // ── Exposure Bucketing ─────────────────────────────────────────────────────
 func queryFXExposureBucketing(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "h", "entity", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "h", "entity")
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -95,8 +93,7 @@ func queryFXExposureBucketing(ctx context.Context, pool *pgxpool.Pool, entityIDs
 
 // ── Hedging Proposals ──────────────────────────────────────────────────────
 func queryFXHedgingProposals(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "h", "entity", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "h", "entity")
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -137,8 +134,7 @@ func queryFXHedgingProposals(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 
 // ── Hedge Links Details ────────────────────────────────────────────────────
 func queryFXHedgeLinksDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "h", "entity", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "h", "entity")
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -177,8 +173,7 @@ func queryFXHedgeLinksDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs
 
 // ── Forward MTM ────────────────────────────────────────────────────────────
 func queryFXForwardMTM(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "fm", "entity", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "fm", "entity")
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -221,8 +216,7 @@ func queryFXForwardMTM(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 // ── Forward Bookings ───────────────────────────────────────────────────────
 func queryFXForwardBookings(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	// For forward_bookings, entity_level_0 holds the primary entity/business unit
-	ef, efArgs := entityNameFilter(ctx, "fb", "entity_level_0", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "fb", "entity_level_0")
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (

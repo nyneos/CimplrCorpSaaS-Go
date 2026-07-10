@@ -172,8 +172,7 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 
 // ── Payable / Receivable ───────────────────────────────────────────────────
 func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "p", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "p", "entity_name")
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -212,8 +211,7 @@ func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 }
 
 func queryCashReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "r", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "r", "entity_name")
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -348,8 +346,7 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 // Plan-level aggregation collapses those dimensions (STRING_AGG / no direction), so stacking
 // by them would be empty or incorrect.
 func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "fpg", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "fpg", "entity_name")
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -399,8 +396,7 @@ func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs
 
 // parentID = plan_id from /cash/fund-planning/summary (e.g. "plan-1783403924162").
 func queryCashFundPlanDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "g", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "g", "entity_name")
 
 	planFilter := ""
 	if parentID != "" {
@@ -434,8 +430,7 @@ func queryCashFundPlanDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs
 
 // ── Sweep Configuration & Execution ────────────────────────────────────────
 func queryCashSweepConfig(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "c", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "c", "entity_name")
 
 	// Mirrors /cash/sweep-config-v2/all:
 	// - entity_name / frequency / source bank from sweepconfiguration (V2 has no active_status)
@@ -471,8 +466,7 @@ func queryCashSweepConfig(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 }
 
 func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "c", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "c", "entity_name")
 
 	// Mirrors /cash/sweep-initiation/with-details:
 	// - latest CREATE/EDIT/DELETE audit by requested_at (so PENDING_* statuses surface)
@@ -523,8 +517,7 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 }
 
 func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "c", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "c", "entity_name")
 
 	q := fmt.Sprintf(`
 		SELECT 
@@ -594,8 +587,9 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 		currencyExpr = "COALESCE(NULLIF(TRIM(i.currency_code), ''), NULLIF(TRIM(p.base_currency_code), ''))"
 	}
 
-	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args := []any{limit, offset}
+	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", len(args)+1)
+	args = append(args, efArgs...)
 
 	proposalFilter := ""
 	proposalIDs = normalizeProposalIDs(proposalIDs)
@@ -750,8 +744,7 @@ func queryCashFundAvailability(ctx context.Context, pool *pgxpool.Pool, entityID
 }
 
 func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "l", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "l", "entity_name")
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (

@@ -467,6 +467,20 @@ func entityNameFilter(ctx context.Context, alias string, colName string, argOffs
 	return fmt.Sprintf("AND %s.%s = ANY($%d)", alias, colName, argOffset), []any{names}
 }
 
+func limitOffsetArgs(limit, offset int) []any {
+	return []any{limit, offset}
+}
+
+func withEntityFilter(args []any, entityIDs []string, alias string) ([]any, string) {
+	ef, efArgs := entityFilter(entityIDs, alias, len(args)+1)
+	return append(args, efArgs...), ef
+}
+
+func withEntityNameFilter(args []any, ctx context.Context, alias, colName string) ([]any, string) {
+	ef, efArgs := entityNameFilter(ctx, alias, colName, len(args)+1)
+	return append(args, efArgs...), ef
+}
+
 // bankIDFilter appends a "AND alias.bank_id = ANY($N)" clause when the request
 // included bank IDs in its filter band. Used for tables that store bank_id directly.
 func bankIDFilter(ctx context.Context, alias string, argOffset int) (string, []any) {
@@ -995,10 +1009,7 @@ func queryFDCashflowGroup(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 // ─── fdCashflows ──────────────────────────────────────────────────────────────
 
 func queryFDCashflows(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, fdID string) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "m", "entity_name", 2)
-
-	args := []any{limit, offset}
-	args = append(args, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "m", "entity_name")
 
 	fdFilter := ""
 	if fdID != "" {

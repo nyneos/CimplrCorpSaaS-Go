@@ -36,8 +36,7 @@ func queryInvestmentOnboardBatch(ctx context.Context, pool *pgxpool.Pool, entity
 }
 
 func queryInvestmentProposalMeta(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "p", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "p", "entity_name")
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -69,8 +68,7 @@ func queryInvestmentProposalMeta(ctx context.Context, pool *pgxpool.Pool, entity
 }
 
 func queryInvestmentInitiationAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "i", "entity_name")
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -105,8 +103,7 @@ func queryInvestmentInitiationAll(ctx context.Context, pool *pgxpool.Pool, entit
 }
 
 func queryInvestmentConfirmationAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "i", "entity_name")
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -140,8 +137,7 @@ func queryInvestmentConfirmationAll(ctx context.Context, pool *pgxpool.Pool, ent
 }
 
 func queryInvestmentPortfolioGet(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "p", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "p", "entity_name")
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -185,8 +181,7 @@ func queryInvestmentPortfolioGet(ctx context.Context, pool *pgxpool.Pool, entity
 }
 
 func queryInvestmentRedemptionInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "r", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "r", "entity_name")
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -225,8 +220,7 @@ func queryInvestmentRedemptionInitiateAll(ctx context.Context, pool *pgxpool.Poo
 }
 
 func queryInvestmentRedemptionConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", 2)
-	args := append([]any{limit, offset}, efArgs...)
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "i", "entity_name")
 
 	q := fmt.Sprintf(`
 		SELECT
