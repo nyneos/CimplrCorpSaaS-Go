@@ -18,9 +18,9 @@ import (
 )
 
 // ── Bank Statements ────────────────────────────────────────────────────────
-func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, scopePairs []bankAccountScopePair) ([]map[string]any, error) {
-	args := []any{limit}
-	argIdx := 2
+func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, scopePairs []bankAccountScopePair) ([]map[string]any, error) {
+	args := []any{limit, offset}
+	argIdx := 3
 	extraFilters := ""
 
 	ef, efArgs := entityFilter(entityIDs, "s", argIdx)
@@ -92,7 +92,7 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 		FROM scoped_statements ss
 		LEFT JOIN latest_audit la ON la.bankstatementid = ss.bank_statement_id
 		ORDER BY GREATEST(COALESCE(la.requested_at, ss.uploaded_at), COALESCE(la.checker_at, ss.uploaded_at)) DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, extraFilters,
 		constants.AuditActionDelete,
 		constants.StatusPendingDeleteApproval,
@@ -109,9 +109,9 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 }
 
 // parentID = bank_statement_id to drill into a specific statement's transactions.
-func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string, scopePairs []bankAccountScopePair) ([]map[string]any, error) {
-	args := []any{limit}
-	argIdx := 2
+func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string, scopePairs []bankAccountScopePair) ([]map[string]any, error) {
+	args := []any{limit, offset}
+	argIdx := 3
 	extraFilters := ""
 
 	ef, efArgs := entityFilter(entityIDs, "s", argIdx)
@@ -160,7 +160,7 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 		LEFT JOIN public.mastercashflowcategory mcc ON mcc.category_id = t.category_id
 		WHERE COALESCE(s.is_deleted, false) = false %s %s
 		ORDER BY t.value_date DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, extraFilters, stmtFilter)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -171,9 +171,9 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 }
 
 // ── Payable / Receivable ───────────────────────────────────────────────────
-func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "p", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -196,7 +196,7 @@ func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 			AND COALESCE(c.is_deleted, false) = false
 		WHERE COALESCE(p.is_deleted, false) = false %s
 		ORDER BY p.due_date ASC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -211,9 +211,9 @@ func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 	return filterPayRecScopeRows(ctx, rows), nil
 }
 
-func queryCashReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryCashReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "r", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -236,7 +236,7 @@ func queryCashReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			AND COALESCE(c.is_deleted, false) = false
 		WHERE COALESCE(r.is_deleted, false) = false %s
 		ORDER BY r.due_date ASC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -293,12 +293,12 @@ func filterPayRecScopeRows(ctx context.Context, rows []map[string]any) []map[str
 }
 
 // queryCashPayableReceivable is the combined legacy source (payables + receivables).
-func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	payables, err := queryCashPayable(ctx, pool, entityIDs, 0)
+func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	payables, err := queryCashPayable(ctx, pool, entityIDs, 0, 0)
 	if err != nil {
 		return nil, err
 	}
-	receivables, err := queryCashReceivable(ctx, pool, entityIDs, 0)
+	receivables, err := queryCashReceivable(ctx, pool, entityIDs, 0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -330,6 +330,13 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 			"currency_code":     row["currency_code"],
 		})
 	}
+	if offset > 0 {
+		if offset >= len(out) {
+			out = nil
+		} else {
+			out = out[offset:]
+		}
+	}
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
@@ -340,9 +347,9 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 // Group-grain rows so charts can use Currency / Direction / Horizon as X or stack fields.
 // Plan-level aggregation collapses those dimensions (STRING_AGG / no direction), so stacking
 // by them would be empty or incorrect.
-func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "fpg", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -380,7 +387,7 @@ func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		) aa ON TRUE
 		WHERE 1=1 %s
 		ORDER BY fpg.plan_id DESC, fpg.group_id DESC
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -391,9 +398,9 @@ func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs
 }
 
 // parentID = plan_id from /cash/fund-planning/summary (e.g. "plan-1783403924162").
-func queryCashFundPlanDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
+func queryCashFundPlanDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "g", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	planFilter := ""
 	if parentID != "" {
@@ -415,7 +422,7 @@ func queryCashFundPlanDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LEFT JOIN public.fund_plan_groups g ON d.group_id = g.group_id
 		WHERE 1=1 %s %s
 		ORDER BY d.line_id DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, planFilter)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -426,9 +433,9 @@ func queryCashFundPlanDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs
 }
 
 // ── Sweep Configuration & Execution ────────────────────────────────────────
-func queryCashSweepConfig(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryCashSweepConfig(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "c", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	// Mirrors /cash/sweep-config-v2/all:
 	// - entity_name / frequency / source bank from sweepconfiguration (V2 has no active_status)
@@ -453,7 +460,7 @@ func queryCashSweepConfig(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		) a ON true
 		WHERE COALESCE(c.is_deleted, false) = false %s
 		ORDER BY c.updated_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -463,9 +470,9 @@ func queryCashSweepConfig(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 	return scanRows(r)
 }
 
-func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "c", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	// Mirrors /cash/sweep-initiation/with-details:
 	// - latest CREATE/EDIT/DELETE audit by requested_at (so PENDING_* statuses surface)
@@ -505,7 +512,7 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		WHERE COALESCE(c.is_deleted, false) = false
 		  AND COALESCE(i.is_deleted, false) = false %s
 		ORDER BY i.initiation_time DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -515,9 +522,9 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 	return scanRows(r)
 }
 
-func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "c", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT 
@@ -532,7 +539,7 @@ func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = l.sweep_id
 		WHERE COALESCE(c.is_deleted, false) = false %s
 		GROUP BY c.entity_name
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -543,7 +550,7 @@ func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs
 }
 
 // ── Projections ────────────────────────────────────────────────────────────
-func queryCashProjectionList(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryCashProjectionList(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	rows, err := cashprojection.QueryProposalListV2(ctx, pool, limit)
 	if err != nil {
 		return nil, err
@@ -554,7 +561,7 @@ func queryCashProjectionList(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 }
 
 // proposalIDs filters line items to the selected cashflow proposals.
-func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, proposalIDs []string) ([]map[string]any, error) {
+func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, proposalIDs []string) ([]map[string]any, error) {
 	cols, err := projectionItemColumns(ctx, pool, []string{
 		"department_id",
 		"counterparty_name",
@@ -588,7 +595,7 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 	}
 
 	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	proposalFilter := ""
 	proposalIDs = normalizeProposalIDs(proposalIDs)
@@ -621,7 +628,7 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 		WHERE i.is_deleted IS NOT TRUE
 		  AND p.is_deleted IS NOT TRUE %s %s
 		ORDER BY i.created_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`,
 		textExpr("department_id"),
 		currencyExpr,
@@ -667,8 +674,8 @@ func projectionItemColumns(ctx context.Context, pool *pgxpool.Pool, names []stri
 }
 
 // ── Balances, Limits & Availability ────────────────────────────────────────
-func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
-	args := []any{limit}
+func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args := []any{limit, offset}
 	bf, bfArgs := bankNameFilter(ctx, "b", len(args)+1)
 	args = append(args, bfArgs...)
 	df, dfArgs := dateRangeFilter(ctx, "b", "as_of_date", len(args)+1)
@@ -696,7 +703,7 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 		LEFT JOIN latest_audit a ON a.balance_id = b.balance_id::text
 		WHERE COALESCE(b.is_deleted, false) = false %s %s
 		ORDER BY b.as_of_date DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, bf, df)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -706,7 +713,7 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 	return scanRows(r)
 }
 
-func queryCashFundAvailability(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryCashFundAvailability(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	asOfDate := time.Now()
 	if asOf, ok := ctx.Value(ctxKeyReqAsOfDate).(string); ok {
 		if parsed, err := time.Parse(constants.DateFormat, strings.TrimSpace(asOf)); err == nil {
@@ -742,9 +749,9 @@ func queryCashFundAvailability(ctx context.Context, pool *pgxpool.Pool, entityID
 	return rows, nil
 }
 
-func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "l", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (
@@ -777,7 +784,7 @@ func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 		LEFT JOIN latest_audit a ON a.limit_id = l.limit_id::text
 		WHERE COALESCE(l.is_deleted, false) = false %s
 		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -829,18 +836,33 @@ func projectUtilizationRow(row map[string]interface{}) map[string]any {
 	return out
 }
 
-func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, rowLimit int) ([]map[string]any, error) {
+func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, rowLimit int, offset int) ([]map[string]any, error) {
 	// Reuse the cash module query for scope validation and KPI columns; project to dashboard schema.
-	rows, err := cashlimit.QueryAllUtilizations(ctx, pool, rowLimit)
+	fetchLimit := 0
+	if rowLimit > 0 {
+		fetchLimit = rowLimit + offset
+	}
+	rows, err := cashlimit.QueryAllUtilizations(ctx, pool, fetchLimit)
 	if err != nil {
 		return nil, err
 	}
 
 	if names, _ := ctx.Value("reqEntityNames").([]string); len(names) > 0 {
 		rows = filterUtilizationRowsByEntityNames(rows, names)
-		if rowLimit > 0 && len(rows) > rowLimit {
-			rows = rows[:rowLimit]
+		if fetchLimit > 0 && len(rows) > fetchLimit {
+			rows = rows[:fetchLimit]
 		}
+	}
+
+	if offset > 0 {
+		if offset >= len(rows) {
+			rows = nil
+		} else {
+			rows = rows[offset:]
+		}
+	}
+	if rowLimit > 0 && len(rows) > rowLimit {
+		rows = rows[:rowLimit]
 	}
 
 	out := make([]map[string]any, len(rows))

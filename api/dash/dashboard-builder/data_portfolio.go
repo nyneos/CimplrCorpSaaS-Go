@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func queryInvestmentOnboardBatch(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryInvestmentOnboardBatch(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	// onboard_batch does not have entity_id
 	q := `
 		SELECT
@@ -25,19 +25,19 @@ func queryInvestmentOnboardBatch(ctx context.Context, pool *pgxpool.Pool, entity
 			b.completed_at
 		FROM investment.onboard_batch b
 		ORDER BY b.created_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`
 
-	r, err := pool.Query(ctx, q, limit)
+	r, err := pool.Query(ctx, q, limit, offset)
 	if err != nil {
 		return nil, err
 	}
 	return scanRows(r)
 }
 
-func queryInvestmentProposalMeta(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryInvestmentProposalMeta(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "p", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -58,7 +58,7 @@ func queryInvestmentProposalMeta(ctx context.Context, pool *pgxpool.Pool, entity
 		) a ON true
 		WHERE COALESCE(p.is_deleted, false) = false %s
 		ORDER BY p.updated_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -68,9 +68,9 @@ func queryInvestmentProposalMeta(ctx context.Context, pool *pgxpool.Pool, entity
 	return scanRows(r)
 }
 
-func queryInvestmentInitiationAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryInvestmentInitiationAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -94,7 +94,7 @@ func queryInvestmentInitiationAll(ctx context.Context, pool *pgxpool.Pool, entit
 		) a ON true
 		WHERE COALESCE(i.is_deleted, false) = false %s
 		ORDER BY i.transaction_date DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -104,9 +104,9 @@ func queryInvestmentInitiationAll(ctx context.Context, pool *pgxpool.Pool, entit
 	return scanRows(r)
 }
 
-func queryInvestmentConfirmationAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryInvestmentConfirmationAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -129,7 +129,7 @@ func queryInvestmentConfirmationAll(ctx context.Context, pool *pgxpool.Pool, ent
 		) a ON true
 		WHERE COALESCE(c.is_deleted, false) = false %s
 		ORDER BY c.nav_date DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -139,9 +139,9 @@ func queryInvestmentConfirmationAll(ctx context.Context, pool *pgxpool.Pool, ent
 	return scanRows(r)
 }
 
-func queryInvestmentPortfolioGet(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryInvestmentPortfolioGet(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "p", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -174,7 +174,7 @@ func queryInvestmentPortfolioGet(ctx context.Context, pool *pgxpool.Pool, entity
 		) p
 		`+schemejoin.NavLateralJoin("p", "")+`
 		ORDER BY p.created_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -184,9 +184,9 @@ func queryInvestmentPortfolioGet(ctx context.Context, pool *pgxpool.Pool, entity
 	return scanRows(r)
 }
 
-func queryInvestmentRedemptionInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryInvestmentRedemptionInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "r", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -214,7 +214,7 @@ func queryInvestmentRedemptionInitiateAll(ctx context.Context, pool *pgxpool.Poo
 		) a ON true
 		WHERE COALESCE(r.is_deleted, false) = false %s
 		ORDER BY r.transaction_date DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -224,9 +224,9 @@ func queryInvestmentRedemptionInitiateAll(ctx context.Context, pool *pgxpool.Poo
 	return scanRows(r)
 }
 
-func queryInvestmentRedemptionConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryInvestmentRedemptionConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "i", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -251,7 +251,7 @@ func queryInvestmentRedemptionConfirmAll(ctx context.Context, pool *pgxpool.Pool
 		) a ON true
 		WHERE COALESCE(c.is_deleted, false) = false %s
 		ORDER BY c.confirmed_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)

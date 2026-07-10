@@ -1044,7 +1044,8 @@ func QueryProposalListV2(ctx context.Context, pgxPool *pgxpool.Pool, limit int) 
 				p.effective_date,
 				p.upload_s3_key,
 				COALESCE(a.processing_status, 'N/A') AS processing_status,
-				COUNT(DISTINCT i.item_id) AS item_count
+				COUNT(DISTINCT i.item_id) AS item_count,
+				COALESCE(SUM(i.expected_amount), 0) AS expected_amount
 			FROM cimplrcorpsaas.cashflow_proposal p
 			LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i
 				ON p.proposal_id = i.proposal_id
@@ -1073,7 +1074,8 @@ func QueryProposalListV2(ctx context.Context, pgxPool *pgxpool.Pool, limit int) 
 		var uploadS3Key interface{}
 		var effectiveDate time.Time
 		var itemCount int
-		if err := rows.Scan(&proposalID, &proposalName, &baseCurrency, &effectiveDate, &uploadS3Key, &status, &itemCount); err != nil {
+		var expectedAmount float64
+		if err := rows.Scan(&proposalID, &proposalName, &baseCurrency, &effectiveDate, &uploadS3Key, &status, &itemCount, &expectedAmount); err != nil {
 			return nil, fmt.Errorf("read proposals: %w", err)
 		}
 		if err := validateProjectionProposalScope(ctx, pgxPool, proposalID, baseCurrency); err != nil {
@@ -1087,6 +1089,7 @@ func QueryProposalListV2(ctx context.Context, pgxPool *pgxpool.Pool, limit int) 
 			"upload_s3_key":      strings.TrimSpace(ifaceToString(uploadS3Key)),
 			"processing_status":  status,
 			"item_count":         itemCount,
+			"expected_amount":    expectedAmount,
 		})
 	}
 	return proposals, rows.Err()

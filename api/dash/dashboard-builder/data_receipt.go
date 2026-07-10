@@ -8,9 +8,9 @@ import (
 )
 
 // ── Maturity Summary ──────────────────────────────────────────────────────────
-func queryFDMaturitySummary(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryFDMaturitySummary(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityFilter(entityIDs, "m", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -40,7 +40,7 @@ func queryFDMaturitySummary(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 		FROM investment.fd_master m
 		WHERE COALESCE(m.is_deleted, false) = false %s
 		ORDER BY m.maturity_date DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -51,9 +51,9 @@ func queryFDMaturitySummary(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 }
 
 // ── TDS Register ─────────────────────────────────────────────────────────────
-func queryFDTDSRegister(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryFDTDSRegister(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityFilter(entityIDs, "t", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -79,7 +79,7 @@ func queryFDTDSRegister(ctx context.Context, pool *pgxpool.Pool, entityIDs []str
 		WHERE COALESCE(t.is_deleted, false) = false
 		  AND t.ingestion_source = 'TDS_WORKBENCH' %s
 		ORDER BY t.deduction_date DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -90,9 +90,9 @@ func queryFDTDSRegister(ctx context.Context, pool *pgxpool.Pool, entityIDs []str
 }
 
 // ── Receipt All ──────────────────────────────────────────────────────────────
-func queryFDReceiptAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryFDReceiptAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityFilter(entityIDs, "r", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -123,7 +123,7 @@ func queryFDReceiptAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 		) a ON true
 		WHERE COALESCE(r.is_deleted, false) = false %s
 		ORDER BY r.receipt_date DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -134,11 +134,11 @@ func queryFDReceiptAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 }
 
 // ── Reconcile Results ────────────────────────────────────────────────────────
-func queryFDReconcileResults(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryFDReconcileResults(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	// Reconcile results for FD receipts
 	// Uses investment.fd_receipt_reconcile_result
 	ef, efArgs := entityFilter(entityIDs, "rc", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -162,7 +162,7 @@ func queryFDReconcileResults(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 		LEFT JOIN investment.fd_master m ON m.fd_id::text = rc.fd_id::text
 		WHERE COALESCE(rc.is_deleted, false) = false %s
 		ORDER BY rc.created_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -173,10 +173,10 @@ func queryFDReconcileResults(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 }
 
 // ── Exceptions ───────────────────────────────────────────────────────────────
-func queryFDExceptions(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryFDExceptions(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	// fd_receipt_exception has no entity_id; filter via fd_master join
 	ef, efArgs := entityFilter(entityIDs, "m", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -207,7 +207,7 @@ func queryFDExceptions(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 		) a ON true
 		WHERE COALESCE(ex.is_deleted, false) = false %s
 		ORDER BY ex.raised_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)

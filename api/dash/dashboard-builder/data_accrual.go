@@ -12,9 +12,9 @@ import (
 // from dashboard-builder views.
 const accrualRunStatusSQL = `AND run_status = ANY(ARRAY['PENDING_APPROVAL','APPROVED','REJECTED','POSTED','POSTED_TO_GL','LOCKED'])`
 
-func queryFDAccrualRunAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryFDAccrualRunAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityFilter(entityIDs, "r", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -52,7 +52,7 @@ func queryFDAccrualRunAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		WHERE COALESCE(r.is_deleted, false) = false %s
 		  %s
 		ORDER BY r.run_date DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, accrualRunStatusSQL)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -62,9 +62,9 @@ func queryFDAccrualRunAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 	return scanRows(r)
 }
 
-func queryFDAccrualLedger(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryFDAccrualLedger(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityFilter(entityIDs, "l", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -102,7 +102,7 @@ func queryFDAccrualLedger(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		) a ON true
 		WHERE COALESCE(l.is_deleted, false) = false %s
 		ORDER BY l.created_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -112,9 +112,9 @@ func queryFDAccrualLedger(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 	return scanRows(r)
 }
 
-func queryFDAccrualExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryFDAccrualExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "r", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -131,7 +131,7 @@ func queryFDAccrualExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityI
 			AND r.run_status = ANY(ARRAY['PENDING_APPROVAL','APPROVED','REJECTED','POSTED','POSTED_TO_GL','LOCKED'])
 		WHERE 1=1 %s
 		ORDER BY l.logged_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -141,9 +141,9 @@ func queryFDAccrualExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityI
 	return scanRows(r)
 }
 
-func queryFDAccrualRunAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryFDAccrualRunAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "r", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -157,7 +157,7 @@ func queryFDAccrualRunAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 			AND r.run_status = ANY(ARRAY['PENDING_APPROVAL','APPROVED','REJECTED','POSTED','POSTED_TO_GL','LOCKED'])
 		WHERE 1=1 %s
 		ORDER BY a.requested_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -167,9 +167,9 @@ func queryFDAccrualRunAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 	return scanRows(r)
 }
 
-func queryFDAccrualLedgerAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryFDAccrualLedgerAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityNameFilter(ctx, "r", "entity_name", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -183,7 +183,7 @@ func queryFDAccrualLedgerAudit(ctx context.Context, pool *pgxpool.Pool, entityID
 			AND r.run_status = ANY(ARRAY['PENDING_APPROVAL','APPROVED','REJECTED','POSTED','POSTED_TO_GL','LOCKED'])
 		WHERE 1=1 %s
 		ORDER BY a.requested_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -194,9 +194,9 @@ func queryFDAccrualLedgerAudit(ctx context.Context, pool *pgxpool.Pool, entityID
 }
 
 
-func queryFDAccrualScheduleAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int) ([]map[string]any, error) {
+func queryFDAccrualScheduleAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	ef, efArgs := entityFilter(entityIDs, "s", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -227,7 +227,7 @@ func queryFDAccrualScheduleAll(ctx context.Context, pool *pgxpool.Pool, entityID
 		) a ON true
 		WHERE COALESCE(s.is_deleted, false) = false %s
 		ORDER BY s.created_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	r, err := pool.Query(ctx, q, args...)
@@ -237,9 +237,9 @@ func queryFDAccrualScheduleAll(ctx context.Context, pool *pgxpool.Pool, entityID
 	return scanRows(r)
 }
 
-func queryFDAccrualScheduleExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, parentID string) ([]map[string]any, error) {
+func queryFDAccrualScheduleExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
 	ef, efArgs := entityFilter(entityIDs, "sc", 2)
-	args := append([]any{limit}, efArgs...)
+	args := append([]any{limit, offset}, efArgs...)
 
 	parentFilter := ""
 	if parentID != "" {
@@ -286,7 +286,7 @@ func queryFDAccrualScheduleExecutionLog(ctx context.Context, pool *pgxpool.Pool,
 		WHERE COALESCE(sc.is_deleted, false) = false
 		  AND COALESCE(sc.is_active, false) = true %s %s
 		ORDER BY COALESCE(r.created_at, sc.created_at) DESC NULLS LAST
-		LIMIT NULLIF($1, 0)
+		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, parentFilter)
 
 	r, err := pool.Query(ctx, q, args...)
