@@ -308,13 +308,13 @@ var dataSources = map[string]dataSourceFn{
 func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			respondBuilderError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		var req dataRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			respondBuilderError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -379,7 +379,7 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 
 		fn, ok := dataSources[req.Source]
 		if !ok {
-			api.RespondWithError(w, http.StatusBadRequest,
+			respondBuilderError(w, http.StatusBadRequest,
 				fmt.Sprintf("unknown data source: %s", req.Source))
 			return
 		}
@@ -391,7 +391,7 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil {
 			logger.LogError("dashboard-builder GetDataSource [%s]: %v", req.Source, err)
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch data")
+			respondBuilderError(w, http.StatusInternalServerError, "failed to fetch data")
 			return
 		}
 
@@ -399,7 +399,9 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 			rows = []map[string]any{}
 		}
 		rows = normalizeRowsToINR(req.Source, rows)
-		api.RespondWithPayload(w, true, "", rows)
+		respondSuccess(w, http.StatusOK, "Data fetched successfully", map[string]any{
+			"rows": rows,
+		})
 	}
 }
 

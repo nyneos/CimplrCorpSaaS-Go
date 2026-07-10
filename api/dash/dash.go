@@ -248,6 +248,8 @@ func NewDashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	mux.Handle("/dash/builder/dashboard/list", midDashFull(dashboardbuilder.ListDashboards(pgxPool)))
 	mux.Handle("/dash/builder/dashboard/get", midDashFull(dashboardbuilder.GetDashboardByID(pgxPool)))
 	mux.Handle("/dash/builder/dashboard/delete", midDashFull(dashboardbuilder.DeleteDashboard(pgxPool)))
+	mux.Handle("/dash/builder/dashboard/assign", midDashFull(dashboardbuilder.AssignDashboard(pgxPool)))
+	mux.Handle("/dash/builder/dashboard/assignees", midDashFull(dashboardbuilder.GetDashboardAssignees(pgxPool)))
 	mux.Handle("/dash/builder/data", midDashFull(dashboardbuilder.GetDataSource(pgxPool)))
 
 	// ── Notification Dashboard ────────────────────────────────────────────────
