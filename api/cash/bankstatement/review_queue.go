@@ -3,12 +3,14 @@ package bankstatement
 import (
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/internal/ctxutil"
 	cat "CimplrCorpSaas/internal/services/categorizer"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -43,6 +45,17 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			req.Status = "PENDING"
 		}
 		ctx := r.Context()
+		scope := ctxutil.FromContext(ctx)
+		entityIDs := scope.EntityIDs
+		if len(entityIDs) == 0 {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusUnauthorized)
+			return
+		}
+		accountNumbers := scopeValues(scope.BankAccounts, "account_number")
+
+		// LATERAL picks at most one masterbankaccount row so nickname/bank
+		// JOINs cannot fan-out a single queue item into multiple rows
+		// (which inflates Account / Bank / Nickname filter & group counts).
 		qStr := `
 			SELECT
 				q.queue_id, q.transaction_id, q.suggested_cat,
@@ -71,15 +84,29 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			JOIN cimplrcorpsaas.bank_statements bs
 			    ON bs.bank_statement_id = t.bank_statement_id
 			LEFT JOIN public.masterentitycash e ON e.entity_id = bs.entity_id
-			LEFT JOIN public.masterbankaccount mba ON mba.account_number = bs.account_number
+			LEFT JOIN LATERAL (
+				SELECT mba.account_nickname, mba.bank_id
+				FROM public.masterbankaccount mba
+				WHERE mba.account_number = bs.account_number
+				  AND COALESCE(mba.is_deleted, false) = false
+				ORDER BY CASE WHEN mba.entity_id = bs.entity_id THEN 0 ELSE 1 END,
+				         mba.account_nickname NULLS LAST
+				LIMIT 1
+			) mba ON TRUE
 			LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 			LEFT JOIN public.mastercashflowcategory mc ON mc.category_id::text = q.suggested_cat
 			WHERE q.status = $1
-			  AND COALESCE(bs.is_deleted, false) = false`
+			  AND COALESCE(bs.is_deleted, false) = false
+			  AND bs.entity_id = ANY($2)
+			  AND (cardinality($3::text[]) = 0 OR bs.account_number = ANY($3::text[]))`
 
-		args := []interface{}{req.Status}
-		n := 2
+		args := []interface{}{req.Status, entityIDs, accountNumbers}
+		n := 4
 		if req.EntityID != "" {
+			if !scope.HasEntityAccess(req.EntityID) {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusUnauthorized)
+				return
+			}
 			qStr += ` AND bs.entity_id = $` + strconv.Itoa(n)
 			args = append(args, req.EntityID)
 			n++
@@ -103,6 +130,7 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 		defer rows.Close()
 
 		out := make([]map[string]interface{}, 0)
+		seenQueue := make(map[int64]struct{})
 		for rows.Next() {
 			var queueID, txnID int64
 			var suggestedCat *string
@@ -129,6 +157,18 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 				fmt.Printf("[REVIEW-QUEUE] scan error: %v\n", err)
 				continue
 			}
+			if _, dup := seenQueue[queueID]; dup {
+				continue
+			}
+			seenQueue[queueID] = struct{}{}
+
+			accountNumber = strings.TrimSpace(accountNumber)
+			accountNickname = strings.TrimSpace(accountNickname)
+			entityID = strings.TrimSpace(entityID)
+			entityName = strings.TrimSpace(entityName)
+			bankName = strings.TrimSpace(bankName)
+			bankStatementID = strings.TrimSpace(bankStatementID)
+			paymentChannel = strings.TrimSpace(paymentChannel)
 
 			// If the transaction has not yet been through narration processing
 			// (e.g. uploaded before the advisory-lock fix), derive narration
@@ -205,17 +245,19 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			out = append(out, row)
 		}
 
-		// Count must use the same JOINs as the main query so orphaned queue rows
-		// (where the transaction has been deleted) are not included in the total.
+		// Count must use the same scope filters as the main query so orphaned /
+		// out-of-scope queue rows are not included in the total.
 		cntStr := `
 			SELECT COUNT(*)
 			FROM cimplrcorpsaas.categorization_review_queue q
 			JOIN cimplrcorpsaas.bank_statement_transactions t ON t.transaction_id = q.transaction_id
 			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
 			WHERE q.status = $1
-			  AND COALESCE(bs.is_deleted, false) = false`
-		cntArgs := []interface{}{req.Status}
-		cn := 2
+			  AND COALESCE(bs.is_deleted, false) = false
+			  AND bs.entity_id = ANY($2)
+			  AND (cardinality($3::text[]) = 0 OR bs.account_number = ANY($3::text[]))`
+		cntArgs := []interface{}{req.Status, entityIDs, accountNumbers}
+		cn := 4
 		if req.EntityID != "" {
 			cntStr += ` AND bs.entity_id = $` + strconv.Itoa(cn)
 			cntArgs = append(cntArgs, req.EntityID)
