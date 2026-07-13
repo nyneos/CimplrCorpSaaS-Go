@@ -32,7 +32,7 @@ type approvedInbox struct {
 	OwnerUserID    string
 }
 
-// ListMessageScopedToUserSQL — after filters $1–$6: $7 filterMatchedOnly, $8 admin, $9 userID, $10 entityIDs, $11 userEmail.
+// ListMessageScopedToUserSQL — after filters $1–$6: $7 filterMatchedOnly, $8 admin, $9 userID, $10 userEmail.
 const ListMessageScopedToUserSQL = `
 AND (
 	$8::boolean
@@ -44,7 +44,7 @@ AND (
 		  AND i.is_active = true
 		  AND (
 		      i.owner_user_id = $9
-		      OR ($11 <> '' AND LOWER(i.mailbox_address) = LOWER($11))
+		      OR ($10 <> '' AND LOWER(i.mailbox_address) = LOWER($10))
 		      OR EXISTS (
 		          SELECT 1 FROM email_svc.inbox_members im
 		          WHERE im.inbox_id = i.inbox_id AND im.user_id = $9
@@ -66,13 +66,13 @@ AND (
 			  AND upl_self.step = 'UPLOAD_EML'
 			  AND (
 			      upl_self.detail->>'uploaded_by' = $9
-			      OR ($11 <> '' AND upl_self.detail->>'uploaded_by' = $11)
+			      OR ($10 <> '' AND upl_self.detail->>'uploaded_by' = $10)
 			  )
 		)
 	)
 )`
 
-// MessageScopedToUserSQL is kept for legacy callers that bind dates at $9/$10 and userEmail at $11.
+// MessageScopedToUserSQL is kept for legacy callers ($6 admin, $7 userID, $8 userEmail).
 const MessageScopedToUserSQL = `
 AND (
 	$6::boolean
@@ -84,7 +84,7 @@ AND (
 		  AND i.is_active = true
 		  AND (
 		      i.owner_user_id = $7
-		      OR ($11 <> '' AND LOWER(i.mailbox_address) = LOWER($11))
+		      OR ($8 <> '' AND LOWER(i.mailbox_address) = LOWER($8))
 		      OR EXISTS (
 		          SELECT 1 FROM email_svc.inbox_members im
 		          WHERE im.inbox_id = i.inbox_id AND im.user_id = $7
@@ -106,13 +106,13 @@ AND (
 			  AND upl_self.step = 'UPLOAD_EML'
 			  AND (
 			      upl_self.detail->>'uploaded_by' = $7
-			      OR ($11 <> '' AND upl_self.detail->>'uploaded_by' = $11)
+			      OR ($8 <> '' AND upl_self.detail->>'uploaded_by' = $8)
 			  )
 		)
 	)
 )`
 
-// joinedMessageScopedToUserSQL for attachment download ($2 admin, $3 userID, $4 entityIDs, $5 userEmail; alias m)
+// joinedMessageScopedToUserSQL for attachment download ($2 admin, $3 userID, $4 userEmail; alias m)
 const JoinedMessageScopedToUserSQL = `
 AND (
 	$2::boolean
@@ -124,7 +124,7 @@ AND (
 		  AND i.is_active = true
 		  AND (
 		      i.owner_user_id = $3
-		      OR ($5 <> '' AND LOWER(i.mailbox_address) = LOWER($5))
+		      OR ($4 <> '' AND LOWER(i.mailbox_address) = LOWER($4))
 		      OR EXISTS (
 		          SELECT 1 FROM email_svc.inbox_members im
 		          WHERE im.inbox_id = i.inbox_id AND im.user_id = $3
@@ -140,7 +140,7 @@ AND (
 	)
 )`
 
-// singleMessageScopedToUserSQL for handleMessageGet ($2 admin, $3 userID, $4 entityIDs, $5 userEmail)
+// singleMessageScopedToUserSQL for handleMessageGet ($2 admin, $3 userID, $4 userEmail)
 const SingleMessageScopedToUserSQL = `
 AND (
 	$2::boolean
@@ -152,7 +152,7 @@ AND (
 		  AND i.is_active = true
 		  AND (
 		      i.owner_user_id = $3
-		      OR ($5 <> '' AND LOWER(i.mailbox_address) = LOWER($5))
+		      OR ($4 <> '' AND LOWER(i.mailbox_address) = LOWER($4))
 		      OR EXISTS (
 		          SELECT 1 FROM email_svc.inbox_members im
 		          WHERE im.inbox_id = i.inbox_id AND im.user_id = $3
@@ -174,7 +174,7 @@ AND (
 			  AND upl_self.step = 'UPLOAD_EML'
 			  AND (
 			      upl_self.detail->>'uploaded_by' = $3
-			      OR ($5 <> '' AND upl_self.detail->>'uploaded_by' = $5)
+			      OR ($4 <> '' AND upl_self.detail->>'uploaded_by' = $4)
 			  )
 		)
 	)

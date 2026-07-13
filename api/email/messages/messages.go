@@ -62,7 +62,7 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 		dateFrom := strings.TrimSpace(req.DateFrom)
 		dateTo := strings.TrimSpace(req.DateTo)
 		inboxID := strings.TrimSpace(req.InboxID)
-		userID, userEmail, _, entityIDs := emailcommon.RequestIdentity(r, "", "")
+		userID, userEmail, _, _ := emailcommon.RequestIdentity(r, "", "")
 		admin := emailcommon.IsEmailAdmin(r.Context(), userID)
 		offset := req.Offset
 		if offset < 0 {
@@ -113,7 +113,7 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 			` + emailcommon.ListMessageScopedToUserSQL + `
 			ORDER BY CASE WHEN m.processing_status = 'MANUAL_UPLOAD' THEN m.created_at ELSE COALESCE(m.received_at, m.created_at) END DESC`
 
-		args := []interface{}{module, entityID, status, dateFrom, dateTo, inboxID, filterMatchedOnly, admin, userID, entityIDs, userEmail}
+		args := []interface{}{module, entityID, status, dateFrom, dateTo, inboxID, filterMatchedOnly, admin, userID, userEmail}
 		if req.Limit > 0 {
 			query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
 			args = append(args, req.Limit, offset)
@@ -192,7 +192,7 @@ func HandleMessageGet(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondBadRequest(w, "message_id is required")
 			return
 		}
-		userID, userEmail, _, entityIDs := emailcommon.RequestIdentity(r, "", "")
+		userID, userEmail, _, _ := emailcommon.RequestIdentity(r, "", "")
 		admin := emailcommon.IsEmailAdmin(r.Context(), userID)
 
 		var (
@@ -211,7 +211,7 @@ func HandleMessageGet(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM email_svc.message
 			WHERE message_id = $1::uuid
 			`+emailcommon.SingleMessageScopedToUserSQL+`
-		`, messageID, admin, userID, entityIDs, userEmail).Scan(&s3RawKey, &s3ParsedKey, &fromAddr, &subject, &receivedAt, &module, &entityID, &preview, &status, &extractedMeta, &mailDirection, &envelopeTo)
+		`, messageID, admin, userID, userEmail).Scan(&s3RawKey, &s3ParsedKey, &fromAddr, &subject, &receivedAt, &module, &entityID, &preview, &status, &extractedMeta, &mailDirection, &envelopeTo)
 		if err != nil {
 			emailcommon.RespondNotFound(w, "message not found")
 			return
@@ -494,7 +494,7 @@ func HandleAttachmentDownload(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondBadRequest(w, "attachment_id is required")
 			return
 		}
-		userID, userEmail, _, entityIDs := emailcommon.RequestIdentity(r, "", "")
+		userID, userEmail, _, _ := emailcommon.RequestIdentity(r, "", "")
 		admin := emailcommon.IsEmailAdmin(r.Context(), userID)
 
 		var s3Key string
@@ -504,7 +504,7 @@ func HandleAttachmentDownload(pool *pgxpool.Pool) http.HandlerFunc {
 			JOIN email_svc.message m ON m.message_id = ma.message_id
 			WHERE ma.attachment_id = $1::uuid
 			`+emailcommon.JoinedMessageScopedToUserSQL+`
-		`, attachmentID, admin, userID, entityIDs, userEmail).Scan(&s3Key)
+		`, attachmentID, admin, userID, userEmail).Scan(&s3Key)
 		if err != nil {
 			emailcommon.RespondNotFound(w, "attachment not found")
 			return
