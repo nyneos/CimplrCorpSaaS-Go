@@ -426,15 +426,18 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 		argN := 1
 		if !admin {
 			query += fmt.Sprintf(` AND (
-				i.entity_id = ANY($%d::text[])
-				OR i.owner_user_id = $%d
+				i.owner_user_id = $%d
 				OR ($%d <> '' AND LOWER(i.mailbox_address) = LOWER($%d))
 				OR EXISTS (SELECT 1 FROM email_svc.inbox_members m WHERE m.inbox_id = i.inbox_id AND m.user_id = $%d)
-			)`, argN, argN+1, argN+2, argN+2, argN+1)
+				OR (
+					i.processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+					AND i.entity_id = ANY($%d::text[])
+				)
+			)`, argN, argN+1, argN+1, argN, argN+2)
 			if len(entityIDs) == 0 && entityID != "" {
 				entityIDs = []string{entityID}
 			}
-			args = append(args, entityIDs, userID, userEmail)
+			args = append(args, userID, userEmail, entityIDs)
 			argN += 3
 		}
 		if s := strings.TrimSpace(req.Status); s != "" {
@@ -889,39 +892,45 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, inboxID+": not found")
 				continue
 			}
-			if status == constants.StatusPendingApproval {
-				_, _ = pool.Exec(r.Context(), `
+
+			// Approved mailbox → maker-checker delete (not REJECTED)
+			if strings.EqualFold(status, constants.StatusApproved) {
+				_, err := pool.Exec(r.Context(), `
 					UPDATE email_svc.inbox_config
-					SET processing_status = 'REJECTED', is_active = false, is_deleted = false,
-					    checker_comment = 'Cancelled before approval', updated_at = now()
+					SET processing_status = 'PENDING_DELETE_APPROVAL',
+					    submitted_by = $2,
+					    checker_comment = '',
+					    updated_at = now()
 					WHERE inbox_id = $1::uuid
-				`, inboxID)
-				_ = approvalengine.CancelPendingInstances(r.Context(), pool, emailInboxModuleCode, inboxID, userEmail)
-				logInboxAudit(r.Context(), pool, inboxID, "DELETE", "CANCELLED", userID, "", nil)
+				`, inboxID, userID)
+				if err != nil {
+					errors = append(errors, inboxID+": "+err.Error())
+					continue
+				}
+				logInboxAudit(r.Context(), pool, inboxID, "DELETE", constants.StatusPendingDeleteApproval, userID, "", nil)
+				if _, instErr := submitInboxApproval(r.Context(), pool, inboxID, inboxEntityID, "EMAIL_INBOX_DELETE", "DELETE", userID, userEmail); instErr != nil {
+					errors = append(errors, inboxID+": approval instance: "+instErr.Error())
+				}
 				updated = append(updated, inboxID)
 				continue
 			}
-			if status != constants.StatusApproved {
-				errors = append(errors, inboxID+": delete only from APPROVED or PENDING_APPROVAL")
+
+			// Draft not yet approved — withdraw (do not mark REJECTED)
+			if strings.EqualFold(status, constants.StatusPendingApproval) {
+				_, _ = pool.Exec(r.Context(), `
+					UPDATE email_svc.inbox_config
+					SET processing_status = 'DELETED', is_active = false, is_deleted = true,
+					    deleted_at = now(), deleted_by = $2,
+					    checker_comment = 'Withdrawn before approval', updated_at = now()
+					WHERE inbox_id = $1::uuid
+				`, inboxID, userID)
+				_ = approvalengine.CancelPendingInstances(r.Context(), pool, emailInboxModuleCode, inboxID, userEmail)
+				logInboxAudit(r.Context(), pool, inboxID, "DELETE", "WITHDRAWN", userID, "", nil)
+				updated = append(updated, inboxID)
 				continue
 			}
-			_, err := pool.Exec(r.Context(), `
-				UPDATE email_svc.inbox_config
-				SET processing_status = 'PENDING_DELETE_APPROVAL',
-				    submitted_by = $2,
-				    checker_comment = '',
-				    updated_at = now()
-				WHERE inbox_id = $1::uuid
-			`, inboxID, userID)
-			if err != nil {
-				errors = append(errors, inboxID+": "+err.Error())
-				continue
-			}
-			logInboxAudit(r.Context(), pool, inboxID, "DELETE", constants.StatusPendingDeleteApproval, userID, "", nil)
-			if _, instErr := submitInboxApproval(r.Context(), pool, inboxID, inboxEntityID, "EMAIL_INBOX_DELETE", "DELETE", userID, userEmail); instErr != nil {
-				errors = append(errors, inboxID+": approval instance: "+instErr.Error())
-			}
-			updated = append(updated, inboxID)
+
+			errors = append(errors, inboxID+": delete only from APPROVED or PENDING_APPROVAL")
 		}
 		emailcommon.RespondBulk(w, "inbox/workflow/update", "updated", updated, errors)
 	}

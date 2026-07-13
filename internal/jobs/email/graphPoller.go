@@ -146,8 +146,12 @@ func graphPollOnce(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Runt
 	}
 
 	var ingested int
+	mailboxDelay := time.Duration(getenvInt("GRAPH_MAILBOX_POLL_DELAY_MS", 1500)) * time.Millisecond
 	pollTargets := func(targets []graphPollTarget) {
-		for _, target := range targets {
+		for i, target := range targets {
+			if i > 0 && mailboxDelay > 0 {
+				time.Sleep(mailboxDelay)
+			}
 			n, err := pollGraphMailboxFolder(ctx, pool, rt, target.inbox, target.folder)
 			if err != nil {
 				logger.LogError("[graph-poller] mailbox=%s direction=%s err=%v", target.inbox.MailboxAddress, target.folder.direction, err)

@@ -45,7 +45,6 @@ AND (
 		  AND (
 		      i.owner_user_id = $9
 		      OR ($11 <> '' AND LOWER(i.mailbox_address) = LOWER($11))
-		      OR i.entity_id = ANY($10::text[])
 		      OR EXISTS (
 		          SELECT 1 FROM email_svc.inbox_members im
 		          WHERE im.inbox_id = i.inbox_id AND im.user_id = $9
@@ -86,7 +85,6 @@ AND (
 		  AND (
 		      i.owner_user_id = $7
 		      OR ($11 <> '' AND LOWER(i.mailbox_address) = LOWER($11))
-		      OR i.entity_id = ANY($8::text[])
 		      OR EXISTS (
 		          SELECT 1 FROM email_svc.inbox_members im
 		          WHERE im.inbox_id = i.inbox_id AND im.user_id = $7
@@ -127,7 +125,6 @@ AND (
 		  AND (
 		      i.owner_user_id = $3
 		      OR ($5 <> '' AND LOWER(i.mailbox_address) = LOWER($5))
-		      OR i.entity_id = ANY($4::text[])
 		      OR EXISTS (
 		          SELECT 1 FROM email_svc.inbox_members im
 		          WHERE im.inbox_id = i.inbox_id AND im.user_id = $3
@@ -156,7 +153,6 @@ AND (
 		  AND (
 		      i.owner_user_id = $3
 		      OR ($5 <> '' AND LOWER(i.mailbox_address) = LOWER($5))
-		      OR i.entity_id = ANY($4::text[])
 		      OR EXISTS (
 		          SELECT 1 FROM email_svc.inbox_members im
 		          WHERE im.inbox_id = i.inbox_id AND im.user_id = $3
@@ -192,9 +188,6 @@ func userCanAccessInboxRecord(inbox approvedInbox, userID, userEmail string, ent
 		return true
 	}
 	if userEmail != "" && normalizeEmail(inbox.MailboxAddress) == normalizeEmail(userEmail) {
-		return true
-	}
-	if inbox.EntityID != "" && EntityInScope(inbox.EntityID, entityIDs) {
 		return true
 	}
 	return false

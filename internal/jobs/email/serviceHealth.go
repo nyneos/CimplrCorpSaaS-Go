@@ -81,6 +81,7 @@ func clearMailboxPollError(ctx context.Context, pool *pgxpool.Pool, inboxID stri
 	_, _ = pool.Exec(ctx, `
 		UPDATE email_svc.inbox_config
 		SET ses_last_error = NULL, updated_at = now()
-		WHERE inbox_id = $1::uuid AND ses_last_error = $2
-	`, inboxID, EmailSubscriptionExpiredMsg)
+		WHERE inbox_id = $1::uuid
+		  AND COALESCE(ses_last_error, '') <> ''
+	`, inboxID)
 }
