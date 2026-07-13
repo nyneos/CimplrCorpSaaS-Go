@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
+	amfiinvest "CimplrCorpSaas/internal/investment"
 	"CimplrCorpSaas/internal/validation"
 	"encoding/json"
 	"fmt"
@@ -93,11 +94,30 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Normalise input (trim + lower) — no approval check needed here;
-		// this is a read-only AMFI staging lookup used during onboarding where
-		// the AMC may not be approved yet.
-		for i, a := range req.AMCs {
-			req.AMCs[i] = strings.ToLower(strings.TrimSpace(a))
+		amcKeys := make([]string, 0, len(req.AMCs))
+		seen := make(map[string]bool)
+		for _, a := range req.AMCs {
+			trimmed := strings.TrimSpace(a)
+			if trimmed == "" {
+				continue
+			}
+			resolved, err := amfiinvest.ResolveToSchemeAMCName(ctx, pgxPool, trimmed)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+				return
+			}
+			key := strings.ToLower(strings.TrimSpace(resolved))
+			if key == "" {
+				key = strings.ToLower(trimmed)
+			}
+			if !seen[key] {
+				seen[key] = true
+				amcKeys = append(amcKeys, key)
+			}
+		}
+		if len(amcKeys) == 0 {
+			api.RespondWithPayload(w, true, "", []map[string]interface{}{})
+			return
 		}
 
 		query := `
@@ -145,7 +165,7 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY s.amc_name, scheme_name;
 		`
 
-		rows, err := pgxPool.Query(ctx, query, req.AMCs)
+		rows, err := pgxPool.Query(ctx, query, amcKeys)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return

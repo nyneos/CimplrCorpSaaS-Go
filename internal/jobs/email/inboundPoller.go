@@ -100,6 +100,9 @@ func TriggerInboundPoll(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 func pollOnce(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Runtime) error {
+	if err := RequireEmailService(ctx, pool, rt); err != nil {
+		return err
+	}
 	lastKey, err := loadCursor(ctx, pool)
 	if err != nil {
 		return err
@@ -235,15 +238,15 @@ func ingestMessage(ctx context.Context, pool *pgxpool.Pool, inboxes []inboxRow, 
 	filterMatched := false
 
 	for _, inbox := range inboxes {
-		var f filters
-		_ = json.Unmarshal(inbox.FiltersJSON, &f)
-		if matchFilters(f, matchInput) && mailboxMatches(inbox.MailboxAddress, msg.Envelope.To) {
-			matchedInboxID = inbox.InboxID
-			matchedModule = inbox.Module
-			matchedEntity = inbox.EntityID
-			filterMatched = true
-			break
+		mf := parseMailboxFilters(inbox.FiltersJSON)
+		if !matchInboundRules(mf.Inbound, matchInput) || !mailboxMatches(inbox.MailboxAddress, msg.Envelope.To) {
+			continue
 		}
+		matchedInboxID = inbox.InboxID
+		matchedModule = inbox.Module
+		matchedEntity = inbox.EntityID
+		filterMatched = filterRulesActive(mf.Inbound)
+		break
 	}
 
 	if matchedInboxID == "" {
@@ -251,13 +254,7 @@ func ingestMessage(ctx context.Context, pool *pgxpool.Pool, inboxes []inboxRow, 
 		return nil
 	}
 
-	preview := msg.Body.TextPlain
-	if preview == "" {
-		preview = msg.Body.TextHTML
-	}
-	if len(preview) > 300 {
-		preview = preview[:300]
-	}
+	preview := BodyPreviewForStorage(msg.Body.TextPlain, msg.Body.TextHTML)
 
 	var messageID string
 	err := pool.QueryRow(ctx, `
@@ -344,110 +341,29 @@ func mailboxMatches(mailbox string, to []string) bool {
 }
 
 func filtersActive(f filters) bool {
-	return len(f.Senders) > 0 || len(f.Domains) > 0 || len(f.Subjects) > 0 ||
-		len(f.Recipients) > 0 || len(f.ExcludeSenders) > 0 ||
-		f.HasAttachments != nil || len(f.AttachmentTypes) > 0
+	return filterRulesActive(filterRules{
+		Senders: f.Senders, Recipients: f.Recipients, Domains: f.Domains,
+		Subjects: f.Subjects, ExcludeSenders: f.ExcludeSenders,
+		HasAttachments: f.HasAttachments, AttachmentTypes: f.AttachmentTypes,
+	})
 }
 
+// matchFilters applies inbound (received) rules — From field only for sender/domain patterns.
 func matchFilters(f filters, in matchInput) bool {
-	from := strings.ToLower(strings.TrimSpace(in.From))
-	subject := strings.TrimSpace(in.Subject)
-
-	for _, pat := range f.ExcludeSenders {
-		if globMatch(strings.ToLower(pat), from) {
-			return false
-		}
-	}
-	if len(f.Senders) > 0 && !anyGlob(f.Senders, from) {
-		return false
-	}
-	if len(f.Domains) > 0 {
-		domain := extractDomain(from)
-		if !anyGlob(f.Domains, domain) {
-			return false
-		}
-	}
-	if len(f.Recipients) > 0 {
-		ok := false
-		for _, to := range in.To {
-			if anyGlob(f.Recipients, strings.ToLower(strings.TrimSpace(to))) {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			return false
-		}
-	}
-	if len(f.Subjects) > 0 && !anyGlob(f.Subjects, subject) {
-		return false
-	}
-	if f.HasAttachments != nil && *f.HasAttachments != in.HasAttachments {
-		return false
-	}
-	if len(f.AttachmentTypes) > 0 && in.HasAttachments {
-		if !attachmentTypeMatch(f.AttachmentTypes, in.AttachmentNames) {
-			return false
-		}
-	}
-	return true
+	return matchInboundRules(filterRules{
+		Senders: f.Senders, Recipients: f.Recipients, Domains: f.Domains,
+		Subjects: f.Subjects, ExcludeSenders: f.ExcludeSenders,
+		HasAttachments: f.HasAttachments, AttachmentTypes: f.AttachmentTypes,
+	}, in)
 }
 
-// matchSentFilters applies mailbox rules to outbound (sent folder) mail.
+// matchSentFilters applies outbound (sent) rules — To field for recipient/domain patterns.
 func matchSentFilters(f filters, in matchInput) bool {
-	if !filtersActive(f) {
-		return true
-	}
-	subject := strings.TrimSpace(in.Subject)
-
-	for _, pat := range f.ExcludeSenders {
-		for _, to := range in.To {
-			if globMatch(strings.ToLower(pat), strings.ToLower(strings.TrimSpace(to))) {
-				return false
-			}
-		}
-	}
-
-	allowed := f.Recipients
-	if len(allowed) == 0 {
-		allowed = f.Senders
-	}
-	if len(allowed) > 0 {
-		ok := false
-		for _, to := range in.To {
-			if anyGlob(allowed, strings.ToLower(strings.TrimSpace(to))) {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			return false
-		}
-	}
-	if len(f.Domains) > 0 {
-		ok := false
-		for _, to := range in.To {
-			if anyGlob(f.Domains, extractDomain(strings.ToLower(strings.TrimSpace(to)))) {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			return false
-		}
-	}
-	if len(f.Subjects) > 0 && !anyGlob(f.Subjects, subject) {
-		return false
-	}
-	if f.HasAttachments != nil && *f.HasAttachments != in.HasAttachments {
-		return false
-	}
-	if len(f.AttachmentTypes) > 0 && in.HasAttachments {
-		if !attachmentTypeMatch(f.AttachmentTypes, in.AttachmentNames) {
-			return false
-		}
-	}
-	return true
+	return matchOutboundRules(filterRules{
+		Senders: f.Senders, Recipients: f.Recipients, Domains: f.Domains,
+		Subjects: f.Subjects, ExcludeSenders: f.ExcludeSenders,
+		HasAttachments: f.HasAttachments, AttachmentTypes: f.AttachmentTypes,
+	}, in)
 }
 
 func anyGlob(patterns []string, value string) bool {

@@ -93,6 +93,8 @@ type IMAPConnection struct {
 	Port        int    `json:"port"`
 	Username    string `json:"username"`
 	Password    string `json:"password"`
+	AuthMode    string `json:"auth_mode,omitempty"`
+	AccessToken string `json:"access_token,omitempty"`
 	InboxFolder string `json:"inbox_folder"`
 	SentFolder  string `json:"sent_folder"`
 	UseTLS      bool   `json:"use_tls"`
@@ -103,6 +105,13 @@ type GraphConnection struct {
 	TenantID     string `json:"tenant_id"`
 	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret"`
+}
+
+type GmailDWDConnection struct {
+	TenantLabel         string `json:"tenant_label"`
+	ServiceAccountEmail string `json:"service_account_email"`
+	ClientID            string `json:"client_id"`
+	PrivateKey          string `json:"private_key"`
 }
 
 type IMAPPulledMessage struct {
@@ -128,6 +137,40 @@ type GraphPullResult struct {
 	NewSince    string               `json:"new_since"`
 	Fetched     int                  `json:"fetched"`
 	Messages    []GraphPulledMessage `json:"messages"`
+}
+
+type OAuthConnection struct {
+	Provider     string `json:"provider"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+}
+
+type OAuthExchangeResult struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+	Scope        string `json:"scope"`
+	Email        string `json:"email"`
+}
+
+type OAuthRefreshResult struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+	Scope        string `json:"scope"`
+}
+
+type OAuthPulledMessage struct {
+	ProviderMessageID string        `json:"provider_message_id"`
+	CursorTime        string        `json:"cursor_time"`
+	Parsed            ParsedMessage `json:"parsed"`
+}
+
+type OAuthPullResult struct {
+	Initialized bool                 `json:"initialized"`
+	NewSince    string               `json:"new_since"`
+	Fetched     int                  `json:"fetched"`
+	Messages    []OAuthPulledMessage `json:"messages"`
 }
 
 func NewRuntime() *Runtime {
@@ -163,6 +206,39 @@ func pullTimeout() time.Duration {
 
 func (r *Runtime) Ready() bool {
 	return r.token != ""
+}
+
+// HealthCheck verifies the standalone email service is reachable (GET /v1/health).
+func (r *Runtime) HealthCheck(ctx context.Context) error {
+	if !r.Ready() {
+		return fmt.Errorf("mail processing not configured")
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, healthCheckTimeout())
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, r.wireRoot+"/v1/health", nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: healthCheckTimeout()}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("email service unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("email service unavailable (status %d)", resp.StatusCode)
+	}
+	return nil
+}
+
+func healthCheckTimeout() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("MAIL_RUNTIME_HEALTH_TIMEOUT_SECS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 5 * time.Second
 }
 
 func (r *Runtime) invoke(ctx context.Context, route string, payload map[string]interface{}, out interface{}, timeout time.Duration) error {
@@ -315,6 +391,14 @@ func (r *Runtime) VerifyGraph(ctx context.Context, cfg GraphConnection) error {
 	}, &out, 0)
 }
 
+func (r *Runtime) VerifyGmailDWD(ctx context.Context, mailbox string, cfg GmailDWDConnection) error {
+	var out map[string]interface{}
+	return r.invoke(ctx, "/v1/gmail-dwd/test", map[string]interface{}{
+		"mailbox_address": mailbox,
+		"gmail_dwd":       cfg,
+	}, &out, 0)
+}
+
 func (r *Runtime) PullIMAPMessages(ctx context.Context, inboxID, mailbox, folder, direction string, lastUID uint32, pageSize int, cfg IMAPConnection) (*IMAPPullResult, error) {
 	var out IMAPPullResult
 	err := r.invoke(ctx, "/v1/imap/poll-folder", map[string]interface{}{
@@ -341,6 +425,90 @@ func (r *Runtime) PullGraphMessages(ctx context.Context, inboxID, mailbox string
 		"since":           since,
 		"batch":           pageSize,
 		"graph":           cfg,
+	}, &out, pullTimeout())
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (r *Runtime) PullGmailDWDMessages(ctx context.Context, inboxID, mailbox string, sentFolder bool, since string, pageSize int, cfg GmailDWDConnection) (*GraphPullResult, error) {
+	var out GraphPullResult
+	err := r.invoke(ctx, "/v1/gmail-dwd/poll-page", map[string]interface{}{
+		"inbox_id":        inboxID,
+		"mailbox_address": mailbox,
+		"sent_folder":     sentFolder,
+		"since":           since,
+		"batch":           pageSize,
+		"gmail_dwd":       cfg,
+	}, &out, pullTimeout())
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (r *Runtime) OAuthAuthorizeURL(ctx context.Context, provider, transport, redirectURI, state string) (string, error) {
+	var out struct {
+		AuthorizeURL string `json:"authorize_url"`
+	}
+	err := r.invoke(ctx, "/v1/oauth/authorize-url", map[string]interface{}{
+		"provider":     provider,
+		"transport":    transport,
+		"redirect_uri": redirectURI,
+		"state":        state,
+	}, &out, 0)
+	if err != nil {
+		return "", err
+	}
+	return out.AuthorizeURL, nil
+}
+
+func (r *Runtime) OAuthExchange(ctx context.Context, provider, transport, code, redirectURI string) (*OAuthExchangeResult, error) {
+	var out OAuthExchangeResult
+	err := r.invoke(ctx, "/v1/oauth/exchange", map[string]interface{}{
+		"provider":     provider,
+		"transport":    transport,
+		"code":         code,
+		"redirect_uri": redirectURI,
+	}, &out, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (r *Runtime) OAuthRefresh(ctx context.Context, provider, transport, refreshToken string) (*OAuthRefreshResult, error) {
+	var out OAuthRefreshResult
+	err := r.invoke(ctx, "/v1/oauth/refresh", map[string]interface{}{
+		"provider":      provider,
+		"transport":     transport,
+		"refresh_token": refreshToken,
+	}, &out, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (r *Runtime) VerifyOAuth(ctx context.Context, provider, accessToken string) error {
+	var out map[string]interface{}
+	return r.invoke(ctx, "/v1/oauth/test", map[string]interface{}{
+		"provider":     provider,
+		"access_token": accessToken,
+	}, &out, 0)
+}
+
+func (r *Runtime) PullOAuthMessages(ctx context.Context, inboxID, mailbox, provider string, sentFolder bool, since string, pageSize int, conn OAuthConnection) (*OAuthPullResult, error) {
+	var out OAuthPullResult
+	err := r.invoke(ctx, "/v1/oauth/poll-page", map[string]interface{}{
+		"inbox_id":        inboxID,
+		"mailbox_address": mailbox,
+		"provider":        provider,
+		"sent_folder":     sentFolder,
+		"since":           since,
+		"batch":           pageSize,
+		"access_token":    conn.AccessToken,
 	}, &out, pullTimeout())
 	if err != nil {
 		return nil, err

@@ -104,12 +104,14 @@ func timeToString(t *time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// StreamRowsAsPayload streams rows inside your RespondWithPayload-compatible format
-func StreamRowsAsPayload(w http.ResponseWriter, rows pgx.Rows, build func() (NormalizedExposure, error)) {
+// StreamRowsAsEnvelope streams rows inside the CLAUDE.md API envelope (`data.rows`).
+func StreamRowsAsEnvelope(w http.ResponseWriter, message string, rows pgx.Rows, build func() (NormalizedExposure, error)) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(http.StatusOK)
-	// write JSON prefix with proper success key
-	w.Write([]byte("{\"" + constants.ValueSuccess + "\":true,\"rows\":["))
+	msgJSON, _ := json.Marshal(message)
+	w.Write([]byte(`{"` + constants.ValueSuccess + `":true,"statusCode":200,"message":`))
+	w.Write(msgJSON)
+	w.Write([]byte(`,"data":{"rows":[`))
 
 	first := true
 
@@ -123,7 +125,6 @@ func StreamRowsAsPayload(w http.ResponseWriter, rows pgx.Rows, build func() (Nor
 			w.Write([]byte(`,`))
 		}
 		first = false
-		// encode without adding an extra newline between elements
 		b, jerr := json.Marshal(item)
 		if jerr != nil {
 			logger.LogError("[STREAM] json marshal error: %v", jerr)
@@ -135,7 +136,7 @@ func StreamRowsAsPayload(w http.ResponseWriter, rows pgx.Rows, build func() (Nor
 		logger.LogError("[STREAM] rows error: %v", err)
 	}
 
-	w.Write([]byte(`]}`))
+	w.Write([]byte(`]}}`))
 }
 
 type ExposureFilter struct {
@@ -155,7 +156,7 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&payload)
 
 		if strings.TrimSpace(payload.BatchID) == "" || strings.TrimSpace(payload.FileHash) == "" {
-			api.RespondWithPayload(w, false, "batch_id and file_hash are required", nil)
+			respondEnvelopeError(w, http.StatusBadRequest, "batch_id and file_hash are required", v91ErrorCode(http.StatusBadRequest))
 			return
 		}
 
@@ -207,12 +208,12 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error(), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		defer rows.Close()
 
-		StreamRowsAsPayload(w, rows, func() (NormalizedExposure, error) {
+		StreamRowsAsEnvelope(w, "Exposures fetched successfully", rows, func() (NormalizedExposure, error) {
 			e := ExposureResponse{}
 			var (
 				nhdrID, ncompany, nentity, ndocID, nexposureType, nexposureCategory,
@@ -380,7 +381,7 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&payload)
 
 		if strings.TrimSpace(payload.BatchID) == "" || strings.TrimSpace(payload.FileHash) == "" {
-			api.RespondWithPayload(w, false, "batch_id and file_hash are required", nil)
+			respondEnvelopeError(w, http.StatusBadRequest, "batch_id and file_hash are required", v91ErrorCode(http.StatusBadRequest))
 			return
 		}
 
@@ -450,12 +451,12 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error(), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		defer rows.Close()
 
-		StreamRowsAsPayload(w, rows, func() (NormalizedExposure, error) {
+		StreamRowsAsEnvelope(w, "Exposures fetched successfully", rows, func() (NormalizedExposure, error) {
 			var e ExposureResponse
 			var (
 				nhdrID, ncompany, nentity, ndocID, nexposureType, nexposureCategory,
@@ -656,7 +657,7 @@ func GetExposureUploadBatchesMinimal(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error(), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		defer rows.Close()
@@ -692,6 +693,8 @@ func GetExposureUploadBatchesMinimal(pool *pgxpool.Pool) http.HandlerFunc {
 			list = append(list, rec)
 		}
 
-		api.RespondWithPayload(w, true, "OK", list)
+		respondEnvelopeSuccess(w, "Uploaded files fetched successfully", map[string]interface{}{
+			"rows": list,
+		})
 	}
 }

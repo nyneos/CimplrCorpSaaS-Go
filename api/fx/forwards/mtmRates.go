@@ -23,6 +23,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 
@@ -120,17 +121,12 @@ func mtmActiveFilterClause(ctx context.Context, db *sql.DB, tableAlias string) s
 	return " AND COALESCE(is_deleted, false) = false"
 }
 
-// Helper: send JSON error response
+// Helper: send JSON error response (CLAUDE.md envelope)
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
+	respondEnvelopeError(w, status, errMsg)
 }
 
-func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
+func UploadMTMFiles(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var userID string
 		ct := r.Header.Get(constants.ContentTypeText)
@@ -169,7 +165,7 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		results, err := processUploadMTMFiles(r.Context(), db, r, buNames)
+		results, err := processUploadMTMFiles(r.Context(), db, pool, r, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -182,15 +178,19 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 				break
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: !hasErrors,
-			"results":              results,
+		if hasErrors {
+			respondEnvelopeFailureWithData(w, http.StatusOK, "MTM upload completed with errors", map[string]interface{}{
+				"results": results,
+			})
+			return
+		}
+		respondEnvelopeSuccess(w, "MTM files uploaded successfully", map[string]interface{}{
+			"results": results,
 		})
 	}
 }
 
-func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
+func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
 	files := r.MultipartForm.File["files"]
 	results := []map[string]interface{}{}
 	skipDuplicates := strings.EqualFold(strings.TrimSpace(r.FormValue("skipDuplicates")), "true")
@@ -565,6 +565,13 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 				auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: fmt.Sprint(row[0]), ActionType: "CREATE", Status: constants.StatusPendingApproval, Reason: "", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": s3Key}})
 			}
 		}
+		insertedMTMIDs := make([]string, 0, len(validRows))
+		for _, row := range validRows {
+			if len(row) > 0 {
+				insertedMTMIDs = append(insertedMTMIDs, fmt.Sprint(row[0]))
+			}
+		}
+		triggerMTMNotif(ctx, pool, routeForwardUploadMTM, "UPLOAD", uploadedBy, constants.StatusPendingApproval, insertedMTMIDs)
 	}
 
 	return results, nil
@@ -978,7 +985,7 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func BulkUpdateMTMProcessingStatus(db *sql.DB) http.HandlerFunc {
+func BulkUpdateMTMProcessingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID           string   `json:"user_id"`
@@ -1141,10 +1148,17 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"updated":              updated,
+		action := strings.ToUpper(req.ProcessingStatus)
+		updatedIDs := make([]string, 0, len(updated))
+		for _, row := range updated {
+			id := strings.TrimSpace(fmt.Sprint(row["mtm_id"]))
+			if id != "" && id != "<nil>" {
+				updatedIDs = append(updatedIDs, id)
+			}
+		}
+		triggerMTMNotif(r.Context(), pool, routeForwardMTMUpdateStatus, action, checker, req.ProcessingStatus, updatedIDs)
+		respondEnvelopeSuccess(w, "MTM processing status updated successfully", map[string]interface{}{
+			"updated": updated,
 		})
 	}
 }

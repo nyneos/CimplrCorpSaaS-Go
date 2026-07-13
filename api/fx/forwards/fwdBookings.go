@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 )
@@ -241,7 +242,7 @@ func forwardUploadUserName(userID string) string {
 }
 
 // Handler: AddForwardBookingManualEntry
-func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
+func AddForwardBookingManualEntry(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID                      string      `json:"user_id"`
@@ -283,16 +284,14 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 		dec := json.NewDecoder(r.Body)
 		dec.UseNumber()
 		if err := dec.Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		// We no longer enforce a strict magnitude limit here; DB has unlimited numeric precision.
 		scope := ctxutil.FromContext(r.Context())
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		// Check entity_level_0 access
@@ -304,8 +303,7 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if !found {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "You do not have access to this business unit"})
+			respondEnvelopeError(w, http.StatusForbidden, "You do not have access to this business unit")
 			return
 		}
 		query := `INSERT INTO forward_bookings (
@@ -365,8 +363,7 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 			valPtrs[i] = &vals[i]
 		}
 		if err := row.Scan(valPtrs...); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		result := make(map[string]interface{})
@@ -377,10 +374,9 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 		_ = db.QueryRowContext(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 AND entity_level_0 = $2 LIMIT 1`, req.InternalReferenceID, req.EntityLevel0).Scan(&systemTransactionID)
 		if strings.TrimSpace(systemTransactionID) != "" {
 			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: result})
+			triggerForwardBookingNotif(r.Context(), pool, routeForwardManualEntry, "CREATE", auditutil.Actor(req.UserID), "pending", []string{systemTransactionID})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": result})
+		respondEnvelopeSuccess(w, "Forward booking created successfully", result)
 	}
 }
 
@@ -398,8 +394,7 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 		scope := ctxutil.FromContext(r.Context())
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		rows, err := db.Query(`
@@ -463,38 +458,44 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 // Multi-file upload for forward bookings (CSV/Excel)
 // Accepts multipart/form-data with files, uses user_id from middleware, checks buName access
 
-func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
+func UploadForwardBookingsMulti(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 		files := r.MultipartForm.File["files"]
 		if len(files) == 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoFilesUploaded})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 		scope := ctxutil.FromContext(r.Context())
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		// Delegate to service
 		ctx := r.Context()
 		results, err := processUploadForwardBookings(ctx, db, r, buNames)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
+		uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
+		for _, result := range results {
+			s3Key, _ := result["upload_s3_key"].(string)
+			if strings.TrimSpace(s3Key) == "" {
+				continue
+			}
+			if inserted, ok := result["inserted"].(int); ok && inserted > 0 {
+				triggerForwardBookingNotif(ctx, pool, routeForwardUploadMulti, "UPLOAD", uploadedBy, "pending", fetchBookingIDsByUploadKey(ctx, db, s3Key))
+			}
+		}
+		respondEnvelopeSuccess(w, "Forward bookings uploaded successfully", map[string]interface{}{
+			"results": results,
+		})
 	}
 }
 
@@ -779,38 +780,44 @@ func recordForwardUploadAudit(ctx context.Context, db *sql.DB, uploadS3Key, uplo
 
 // Handler: UploadForwardConfirmationsMulti
 
-func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
+func UploadForwardConfirmationsMulti(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 		files := r.MultipartForm.File["files"]
 		if len(files) == 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoFilesUploaded})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 		scope := ctxutil.FromContext(r.Context())
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		// Delegate to service
 		ctx := r.Context()
 		results, err := processUploadForwardConfirmations(ctx, db, r, buNames)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
+		uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
+		for _, result := range results {
+			s3Key, _ := result["upload_s3_key"].(string)
+			if strings.TrimSpace(s3Key) == "" {
+				continue
+			}
+			if updated, ok := result["updated"].(int); ok && updated > 0 {
+				triggerForwardConfirmationNotif(ctx, pool, routeForwardUploadConfirmations, "UPLOAD", uploadedBy, "pending", fetchBookingIDsByConfirmationUploadKey(ctx, db, s3Key))
+			}
+		}
+		respondEnvelopeSuccess(w, "Forward confirmations uploaded successfully", map[string]interface{}{
+			"results": results,
+		})
 	}
 }
 

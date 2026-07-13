@@ -1,7 +1,5 @@
 package emailjobs
 
-import "encoding/json"
-
 // FilterMatchInput is the public shape for validating a message against inbox filters.
 type FilterMatchInput struct {
 	From              string
@@ -16,45 +14,32 @@ func MailboxMatchesRecipient(mailbox string, to []string) bool {
 	return mailboxMatches(mailbox, to)
 }
 
-// FiltersConfigured reports whether any inbound filter rule is active.
+// FiltersConfigured reports whether any inbound or outbound filter rule is active.
 func FiltersConfigured(filtersJSON []byte) bool {
-	var f filters
-	_ = json.Unmarshal(filtersJSON, &f)
-	return filtersActive(f)
+	mf := parseMailboxFilters(filtersJSON)
+	return inboundFiltersActive(mf) || outboundFiltersActive(mf)
 }
 
-// MatchInboundFilters applies received-mail filter rules from filters_json.
+// MatchInboundFilters applies received-mail filter rules (match on From).
 func MatchInboundFilters(filtersJSON []byte, in FilterMatchInput) bool {
-	var f filters
-	if err := json.Unmarshal(filtersJSON, &f); err != nil {
+	mf := parseMailboxFilters(filtersJSON)
+	if !inboundFiltersActive(mf) {
 		return false
 	}
-	if !filtersActive(f) {
-		return true
-	}
-	return matchFilters(f, matchInput{
-		From:            in.From,
-		To:              in.To,
-		Subject:         in.Subject,
-		HasAttachments:  in.HasAttachments,
-		AttachmentNames: in.AttachmentNames,
+	return matchInboundRules(mf.Inbound, matchInput{
+		From: in.From, To: in.To, Subject: in.Subject,
+		HasAttachments: in.HasAttachments, AttachmentNames: in.AttachmentNames,
 	})
 }
 
-// MatchSentFilters applies sent-mail filter rules from filters_json.
+// MatchSentFilters applies sent-mail filter rules (match on To).
 func MatchSentFilters(filtersJSON []byte, in FilterMatchInput) bool {
-	var f filters
-	if err := json.Unmarshal(filtersJSON, &f); err != nil {
+	mf := parseMailboxFilters(filtersJSON)
+	if !outboundFiltersActive(mf) {
 		return false
 	}
-	if !filtersActive(f) {
-		return true
-	}
-	return matchSentFilters(f, matchInput{
-		From:            in.From,
-		To:              in.To,
-		Subject:         in.Subject,
-		HasAttachments:  in.HasAttachments,
-		AttachmentNames: in.AttachmentNames,
+	return matchOutboundRules(mf.Outbound, matchInput{
+		From: in.From, To: in.To, Subject: in.Subject,
+		HasAttachments: in.HasAttachments, AttachmentNames: in.AttachmentNames,
 	})
 }

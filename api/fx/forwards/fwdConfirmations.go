@@ -12,6 +12,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func isForwardPendingDeleteStatus(status string) bool {
@@ -34,7 +35,7 @@ func normalizeForwardSystemTransactionID(value interface{}) string {
 	}
 }
 
-func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
+func UpdateForwardBookingFields(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Accept system_transaction_id and fields in the JSON body
 		var req struct {
@@ -44,23 +45,20 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 			Reason              string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SystemTransactionID == "" || len(req.Fields) == 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "system_transaction_id and at least one field to update must be provided in body"})
+			respondEnvelopeError(w, http.StatusBadRequest, "system_transaction_id and at least one field to update must be provided in body")
 			return
 		}
 		// Check if booking exists
 		var exists bool
 		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM forward_bookings WHERE system_transaction_id = $1)", req.SystemTransactionID).Scan(&exists)
 		if err != nil || !exists {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "No matching forward booking found"})
+			respondEnvelopeError(w, http.StatusNotFound, "No matching forward booking found")
 			return
 		}
 		// Get valid columns for forward_bookings
 		colRows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'forward_bookings'`)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch columns"})
+			respondEnvelopeError(w, http.StatusInternalServerError, "Failed to fetch columns")
 			return
 		}
 		validCols := map[string]bool{}
@@ -81,8 +79,7 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 		// Edits require checker approval before becoming approved again.
 		updateFields["processing_status"] = constants.FwdProcessingStatusPendingEditApproval
 		if len(updateFields) == 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "No valid fields to update"})
+			respondEnvelopeError(w, http.StatusBadRequest, "No valid fields to update")
 			return
 		}
 		oldValues := auditutil.FetchRowSnapshot(r.Context(), db, "public.forward_bookings", "system_transaction_id", req.SystemTransactionID)
@@ -101,14 +98,12 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 		updateQuery := fmt.Sprintf("UPDATE forward_bookings SET %s WHERE system_transaction_id = $%d RETURNING row_to_json(forward_bookings)", strings.Join(setClause, ", "), len(values))
 		var updatedRaw []byte
 		if err := db.QueryRow(updateQuery, values...).Scan(&updatedRaw); err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "No matching forward booking found after update"})
+			respondEnvelopeError(w, http.StatusNotFound, "No matching forward booking found after update")
 			return
 		}
 		result := map[string]interface{}{}
 		if err := json.Unmarshal(updatedRaw, &result); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to parse updated forward booking"})
+			respondEnvelopeError(w, http.StatusInternalServerError, "Failed to parse updated forward booking")
 			return
 		}
 		requestedBy := auditutil.Actor(req.UserID)
@@ -116,14 +111,15 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 			requestedBy = auditutil.ActorFromContext(r.Context())
 		}
 		auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: req.SystemTransactionID, ActionType: constants.FwdActionTypeEdit, Status: constants.FwdProcessingStatusPendingEditApproval, Reason: strings.TrimSpace(req.Reason), RequestedBy: requestedBy, OldValues: oldValues, NewValues: result})
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": result})
+		triggerForwardBookingNotif(r.Context(), pool, routeForwardUpdateFields, "UPDATE", requestedBy, constants.FwdProcessingStatusPendingEditApproval, []string{req.SystemTransactionID})
+		respondEnvelopeSuccess(w, "Forward booking fields updated successfully", map[string]interface{}{
+			"updated": result,
+		})
 	}
 }
 
 // Handler: BulkUpdateForwardBookingProcessingStatus
-func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
+func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID               string   `json:"user_id"`
@@ -134,20 +130,17 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			Comment              string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		if len(req.SystemTransactionIDs) == 0 || (req.ProcessingStatus != constants.FwdProcessingStatusApproved && req.ProcessingStatus != constants.FwdProcessingStatusRejected) {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "system_transaction_ids (array) and valid processing_status (Approved/Rejected) required"})
+			respondEnvelopeError(w, http.StatusBadRequest, "system_transaction_ids (array) and valid processing_status (Approved/Rejected) required")
 			return
 		}
 		scope := ctxutil.FromContext(r.Context())
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
@@ -163,8 +156,7 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 		)
 
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		var deletedIds []string
@@ -336,18 +328,26 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 					}
 				}
 			}
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updatedRows, "deleted": deletedIds})
+			notifIDs := append(collectBookingIDsFromRows(updatedRows), deletedIds...)
+			action := strings.ToUpper(req.ProcessingStatus)
+			if len(deletedIds) > 0 && req.ProcessingStatus == constants.FwdProcessingStatusApproved {
+				action = "DELETE_APPROVE"
+			} else if len(deletedIds) > 0 {
+				action = "DELETE_REJECT"
+			}
+			triggerForwardBookingNotif(r.Context(), pool, routeForwardBulkUpdateStatus, action, actor, req.ProcessingStatus, notifIDs)
+			respondEnvelopeSuccess(w, "Forward booking processing status updated successfully", map[string]interface{}{
+				"updated": updatedRows,
+				"deleted": deletedIds,
+			})
 		} else {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "No matching forward bookings found"})
+			respondEnvelopeError(w, http.StatusNotFound, "No matching forward bookings found")
 		}
 	}
 }
 
 // Handler: BulkDeleteForwardBookings
-func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
+func BulkDeleteForwardBookings(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID               string   `json:"user_id"`
@@ -356,27 +356,23 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 			Comment              string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		if len(req.SystemTransactionIDs) == 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "system_transaction_ids (array) required"})
+			respondEnvelopeError(w, http.StatusBadRequest, "system_transaction_ids (array) required")
 			return
 		}
 		scope := ctxutil.FromContext(r.Context())
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		// Only update those belonging to accessible business units
 		rows, err := db.Query(`SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, pq.Array(req.SystemTransactionIDs))
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		var eligibleIds []string
@@ -393,8 +389,7 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 		}
 		rows.Close()
 		if len(eligibleIds) == 0 {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "No matching forward bookings found"})
+			respondEnvelopeError(w, http.StatusNotFound, "No matching forward bookings found")
 			return
 		}
 		oldValuesByID := make(map[string]map[string]interface{}, len(eligibleIds))
@@ -410,8 +405,7 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 		`
 		resultRows, err := db.Query(updateQuery, pq.Array(eligibleIds), constants.FwdProcessingStatusPendingDeleteApproval)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		cols, _ := resultRows.Columns()
@@ -440,14 +434,15 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		resultRows.Close()
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
+		triggerForwardBookingNotif(r.Context(), pool, routeForwardBulkDelete, "DELETE", auditutil.Actor(req.UserID), constants.FwdProcessingStatusPendingDeleteApproval, collectBookingIDsFromRows(updated))
+		respondEnvelopeSuccess(w, "Forward bookings marked for deletion successfully", map[string]interface{}{
+			"updated": updated,
+		})
 	}
 }
 
 // Handler: AddForwardConfirmationManualEntry
-func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
+func AddForwardConfirmationManualEntry(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID               string `json:"user_id"`
@@ -458,15 +453,13 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 			BankConfirmationDate string `json:"bank_confirmation_date"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		scope := ctxutil.FromContext(r.Context())
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		found := false
@@ -477,8 +470,7 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if !found {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "You do not have access to this business unit"})
+			respondEnvelopeError(w, http.StatusForbidden, "You do not have access to this business unit")
 			return
 		}
 		// Convert empty string date fields to nil
@@ -518,8 +510,7 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 			valPtrs[i] = &vals[i]
 		}
 		if err := row.Scan(valPtrs...); err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "No matching record found or already confirmed"})
+			respondEnvelopeError(w, http.StatusNotFound, "No matching record found or already confirmed")
 			return
 		}
 		result := make(map[string]interface{})
@@ -530,9 +521,10 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 		_ = db.QueryRowContext(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 AND entity_level_0 = $2 LIMIT 1`, req.InternalReferenceID, req.EntityLevel0).Scan(&systemTransactionID)
 		if strings.TrimSpace(systemTransactionID) != "" {
 			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.FwdActionTypeConfirm, Status: constants.FwdProcessingStatusPendingEditApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: result})
+			triggerForwardConfirmationNotif(r.Context(), pool, routeForwardManualConfirmation, "CONFIRM", auditutil.Actor(req.UserID), constants.FwdProcessingStatusPending, []string{systemTransactionID})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": result})
+		respondEnvelopeSuccess(w, "Forward confirmation recorded successfully", map[string]interface{}{
+			"updated": result,
+		})
 	}
 }

@@ -6,12 +6,22 @@ import (
 	"strings"
 
 	emailjobs "CimplrCorpSaas/internal/jobs/email"
-	"CimplrCorpSaas/internal/services/mailruntime"
 	"CimplrCorpSaas/internal/services/graphmail"
 	"CimplrCorpSaas/internal/services/imapmail"
+	"CimplrCorpSaas/internal/services/mailruntime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// MailboxGoogleWorkspaceFields are typed Google DWD credential columns (not JSONB).
+type MailboxGoogleWorkspaceFields struct {
+	WorkspaceTenantKey           string `json:"google_workspace_tenant_key"`
+	WorkspaceTenantLabel         string `json:"google_workspace_tenant_label"`
+	WorkspaceServiceAccountEmail string `json:"google_workspace_service_account_email"`
+	WorkspaceClientID            string `json:"google_workspace_client_id"`
+	WorkspacePrivateKey          string `json:"google_workspace_private_key,omitempty"`
+	UseCustomGoogle              bool   `json:"use_custom_google_workspace,omitempty"`
+}
 
 // MailboxGraphFields are typed Graph credential columns (not JSONB).
 type MailboxGraphFields struct {
@@ -33,6 +43,75 @@ type MailboxIMAPFields struct {
 	UseTLS      bool   `json:"imap_use_tls"`
 	InboxFolder string `json:"imap_inbox_folder"`
 	SentFolder  string `json:"imap_sent_folder"`
+}
+
+func (f MailboxGoogleWorkspaceFields) ToGoogleWorkspaceMailboxCreds() emailjobs.GoogleWorkspaceMailboxCreds {
+	return emailjobs.GoogleWorkspaceMailboxCreds{
+		TenantKey:           strings.TrimSpace(f.WorkspaceTenantKey),
+		TenantLabel:         strings.TrimSpace(f.WorkspaceTenantLabel),
+		ServiceAccountEmail: strings.TrimSpace(f.WorkspaceServiceAccountEmail),
+		ClientID:            strings.TrimSpace(f.WorkspaceClientID),
+		PrivateKey:          strings.TrimSpace(f.WorkspacePrivateKey),
+	}
+}
+
+func ResolveGoogleWorkspaceForMailbox(ctx context.Context, pool *pgxpool.Pool, fields MailboxGoogleWorkspaceFields) (mailruntime.GmailDWDConnection, error) {
+	return emailjobs.ResolveGoogleWorkspaceConnection(ctx, pool, fields.ToGoogleWorkspaceMailboxCreds())
+}
+
+func (f MailboxGoogleWorkspaceFields) redacted() MailboxGoogleWorkspaceFields {
+	out := f
+	if out.WorkspacePrivateKey != "" {
+		out.WorkspacePrivateKey = "********"
+	}
+	return out
+}
+
+func GoogleWorkspaceFieldsConfigured(f MailboxGoogleWorkspaceFields) bool {
+	return strings.TrimSpace(f.WorkspaceServiceAccountEmail) != "" &&
+		strings.TrimSpace(f.WorkspacePrivateKey) != "" &&
+		f.WorkspacePrivateKey != "********"
+}
+
+func GoogleWorkspacePatchPresent(p MailboxGoogleWorkspaceFields) bool {
+	return strings.TrimSpace(p.WorkspaceTenantKey) != "" ||
+		strings.TrimSpace(p.WorkspaceTenantLabel) != "" ||
+		strings.TrimSpace(p.WorkspaceServiceAccountEmail) != "" ||
+		strings.TrimSpace(p.WorkspaceClientID) != "" ||
+		(strings.TrimSpace(p.WorkspacePrivateKey) != "" && p.WorkspacePrivateKey != "********")
+}
+
+func MergeGoogleWorkspaceFields(existing MailboxGoogleWorkspaceFields, patch MailboxGoogleWorkspaceFields) (MailboxGoogleWorkspaceFields, error) {
+	out := existing
+	if strings.TrimSpace(patch.WorkspaceTenantKey) != "" {
+		out.WorkspaceTenantKey = strings.TrimSpace(patch.WorkspaceTenantKey)
+	}
+	if strings.TrimSpace(patch.WorkspaceTenantLabel) != "" {
+		out.WorkspaceTenantLabel = strings.TrimSpace(patch.WorkspaceTenantLabel)
+	}
+	if strings.TrimSpace(patch.WorkspaceServiceAccountEmail) != "" {
+		out.WorkspaceServiceAccountEmail = strings.TrimSpace(patch.WorkspaceServiceAccountEmail)
+	}
+	if strings.TrimSpace(patch.WorkspaceClientID) != "" {
+		out.WorkspaceClientID = strings.TrimSpace(patch.WorkspaceClientID)
+	}
+	if strings.TrimSpace(patch.WorkspacePrivateKey) != "" && patch.WorkspacePrivateKey != "********" {
+		out.WorkspacePrivateKey = strings.TrimSpace(patch.WorkspacePrivateKey)
+	}
+	return out, nil
+}
+
+func LoadMailboxGoogleWorkspaceFields(ctx context.Context, pool *pgxpool.Pool, inboxID string) (MailboxGoogleWorkspaceFields, error) {
+	var f MailboxGoogleWorkspaceFields
+	err := pool.QueryRow(ctx, fmt.Sprintf(`
+		SELECT %s, %s, %s, %s, %s
+		FROM email_svc.inbox_config
+		WHERE inbox_id = $1::uuid
+	`, emailjobs.SQLGoogleWorkspaceTenantKey, emailjobs.SQLGoogleWorkspaceTenantLabel,
+		emailjobs.SQLGoogleWorkspaceServiceAccountEmail, emailjobs.SQLGoogleWorkspaceClientID,
+		emailjobs.SQLGoogleWorkspacePrivateKey), inboxID).Scan(
+		&f.WorkspaceTenantKey, &f.WorkspaceTenantLabel, &f.WorkspaceServiceAccountEmail, &f.WorkspaceClientID, &f.WorkspacePrivateKey)
+	return f, err
 }
 
 func (f MailboxGraphFields) ToGraphMailboxCreds() emailjobs.GraphMailboxCreds {
@@ -179,6 +258,39 @@ func MergeIMAPFields(existing MailboxIMAPFields, patch MailboxIMAPFields, mailbo
 	if err := cfg.Resolve(mailbox); err != nil {
 		return out, err
 	}
+	out.Provider = cfg.Provider
+	out.Host = cfg.Host
+	out.Port = cfg.Port
+	out.Username = cfg.Username
+	out.InboxFolder = cfg.InboxFolder
+	out.SentFolder = cfg.SentFolder
+	out.UseTLS = cfg.UseTLS
+	return out, nil
+}
+
+func ResolveIMAPOAuthFields(patch MailboxIMAPFields, mailbox string) (MailboxIMAPFields, error) {
+	out := patch
+	cfg := imapmail.Config{
+		Provider:    strings.TrimSpace(out.Provider),
+		Host:        strings.TrimSpace(out.Host),
+		Port:        out.Port,
+		Username:    strings.TrimSpace(out.Username),
+		AuthMode:    "oauth",
+		AccessToken: "placeholder",
+		UseTLS:      out.UseTLS,
+		InboxFolder: strings.TrimSpace(out.InboxFolder),
+		SentFolder:  strings.TrimSpace(out.SentFolder),
+	}
+	if err := cfg.Resolve(mailbox); err != nil {
+		return out, err
+	}
+	out.Provider = cfg.Provider
+	out.Host = cfg.Host
+	out.Port = cfg.Port
+	out.Username = cfg.Username
+	out.UseTLS = cfg.UseTLS
+	out.InboxFolder = cfg.InboxFolder
+	out.SentFolder = cfg.SentFolder
 	return out, nil
 }
 

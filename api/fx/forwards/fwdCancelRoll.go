@@ -3,6 +3,7 @@ package forwards
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/fx/auditutil"
+	fxnotification "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"database/sql"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 	// "github.com/lib/pq"
 	"CimplrCorpSaas/api/constants"
 )
@@ -323,7 +325,7 @@ func executeRolloverApproval(ctx context.Context, db *sql.DB, userID, bookingID,
 }
 
 // Handler: CancellationStatusRequest
-func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
+func CancellationStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID             string             `json:"user_id"`
@@ -346,14 +348,14 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 		if requestedStatus == "" {
 			requestedStatus = "Approved"
 		}
+		notifItems := make([]fxnotification.CancelRollItem, 0, len(req.BookingAmounts))
 		for bid, amtCancelled := range req.BookingAmounts {
 			cancellationDate := strings.TrimSpace(req.CancellationDates[bid])
 			if cancellationDate == "" {
 				cancellationDate = strings.TrimSpace(req.CancellationDate)
 			}
 			if cancellationDate == "" {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "cancellation date is required for selected booking"})
+				respondWithError(w, http.StatusBadRequest, "cancellation date is required for selected booking")
 				return
 			}
 			var hasPendingCancellation bool
@@ -391,6 +393,7 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 				}
 				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
 				recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: decisionComment})
+				notifItems = append(notifItems, fxnotification.CancelRollItem{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate})
 				continue
 			}
 			// Perform the actual cancellation logic (ledger, cancellation record, etc.)
@@ -448,11 +451,15 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 				// If partial, just update processing_status
 				_, _ = db.Exec(`UPDATE forward_bookings SET status = 'Partiallu Cancelled' WHERE system_transaction_id = $1`, bid)
 			}
+			notifItems = append(notifItems, fxnotification.CancelRollItem{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"message":              "Forward Cancellation Request Processed Successfully",
+		action := constants.AuditActionApprove
+		if strings.EqualFold(requestedStatus, "Rejected") {
+			action = constants.AuditActionReject
+		}
+		triggerCancelRollNotif(r.Context(), pool, routeForwardCancellationStatus, action, auditutil.Actor(req.UserID), requestedStatus, notifItems)
+		respondEnvelopeSuccess(w, "Forward cancellation request processed successfully", map[string]interface{}{
+			"message": "Forward Cancellation Request Processed Successfully",
 		})
 	}
 }
@@ -671,7 +678,7 @@ func GetAllCancellationRollovers(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: CancellationRolloverAction
-func CancellationRolloverAction(db *sql.DB) http.HandlerFunc {
+func CancellationRolloverAction(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID  string                 `json:"user_id"`
@@ -695,6 +702,7 @@ func CancellationRolloverAction(db *sql.DB) http.HandlerFunc {
 		}
 
 		processed := 0
+		notifItems := make([]fxnotification.CancelRollItem, 0, len(req.Items))
 		for _, item := range req.Items {
 			requestType := normalizeCancelRollType(item.RequestType)
 			bookingID := strings.TrimSpace(item.BookingID)
@@ -802,14 +810,18 @@ func CancellationRolloverAction(db *sql.DB) http.HandlerFunc {
 					return
 				}
 			}
+			notifItems = append(notifItems, fxnotification.CancelRollItem{
+				RequestType: requestType,
+				BookingID:   bookingID,
+				RequestDate: requestDate,
+			})
 			processed++
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"processed":            processed,
-			"message":              "Cancellation/Rollover action processed successfully",
+		triggerCancelRollNotif(r.Context(), pool, routeForwardCancelRollAction, action, auditutil.Actor(req.UserID), action, notifItems)
+		respondEnvelopeSuccess(w, "Cancellation/rollover action processed successfully", map[string]interface{}{
+			"processed": processed,
+			"message":   "Cancellation/Rollover action processed successfully",
 		})
 	}
 }
@@ -1191,7 +1203,7 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
+func RolloverStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID           string             `json:"user_id"`
@@ -1211,6 +1223,7 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 		if requestedStatus == "" {
 			requestedStatus = "Approved"
 		}
+		notifItems := make([]fxnotification.CancelRollItem, 0, len(req.BookingAmounts))
 		for bid, amtCancelled := range req.BookingAmounts {
 			// Fetch rollover details (including new forward) from DB
 			var cancellationDate, origMaturityDate, newMaturityDate, fxPair, orderType, amount, spotRate, premiumDiscount, marginRate, netRate string
@@ -1248,6 +1261,7 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 				}
 				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
 				recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: decisionComment})
+				notifItems = append(notifItems, fxnotification.CancelRollItem{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate})
 				continue
 			}
 			// The pending tab is driven by forward_rollovers.status, so do not block
@@ -1345,11 +1359,15 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 				respondWithError(w, http.StatusInternalServerError, "failed to write new rollover ledger")
 				return
 			}
+			notifItems = append(notifItems, fxnotification.CancelRollItem{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"message":              "Forward Rollover Request Processed Successfully",
+		action := constants.AuditActionApprove
+		if strings.EqualFold(requestedStatus, "Rejected") {
+			action = constants.AuditActionReject
+		}
+		triggerCancelRollNotif(r.Context(), pool, routeForwardRolloverStatus, action, auditutil.Actor(req.UserID), requestedStatus, notifItems)
+		respondEnvelopeSuccess(w, "Forward rollover request processed successfully", map[string]interface{}{
+			"message": "Forward Rollover Request Processed Successfully",
 		})
 	}
 }

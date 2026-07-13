@@ -64,7 +64,9 @@ func finalizeRecord(
 		p.AuditTable, p.RecordID, processingStatus, tag.RowsAffected())
 
 	// Step 3: For approved DELETEs, flip is_deleted on the master record.
-	if p.ActionType == "DELETE" && p.FinalStatus == InstStatusApproved {
+	// Email inbox soft-delete is handled by the EMAIL_INBOX module post-finalize hook
+	// (sets processing_status=DELETED and audit fields). Skip generic flip here.
+	if p.ActionType == "DELETE" && p.FinalStatus == InstStatusApproved && p.RecordTable != "email_svc.inbox_config" {
 		// Table and column names are system-controlled — see note above.
 		delQ := fmt.Sprintf(`
 			UPDATE %s SET is_deleted = true WHERE %s = $1

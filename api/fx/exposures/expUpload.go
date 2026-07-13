@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
+	fxnotif "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/api/utils"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
 
 	"CimplrCorpSaas/api/constants"
@@ -109,15 +111,14 @@ func UploadExposure(w http.ResponseWriter, r *http.Request) {
 	w.Write(responseNames)
 }
 
-// Helper: send JSON error response and log
+// Helper: send JSON error response and log (CLAUDE.md envelope)
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	logger.LogError("%s", errMsg)
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
+	api.LogError("%s", errMsg)
+	api.RespondEnvelopeError(w, status, errMsg, api.EnvelopeErrorCode(status))
+}
+
+func respondWithSuccess(w http.ResponseWriter, status int, message string, data interface{}) {
+	api.RespondEnvelopeSuccess(w, message, data)
 }
 
 func fetchExposurePermissions(db *sql.DB, userID string) map[string]interface{} {
@@ -233,6 +234,88 @@ func parseDBValue(col string, val interface{}) interface{} {
 	return val
 }
 
+const headersLineItemsSelectSQL = `
+			SELECT
+				h.exposure_header_id, h.company_code, h.entity, h.entity1, h.entity2, h.entity3,
+				h.exposure_type, h.document_id, h.document_date, h.counterparty_type,
+				h.counterparty_code, h.counterparty_name, h.currency,
+				h.total_original_amount, h.total_open_amount, h.value_date,
+				h.status, h.is_active, h.created_at, h.updated_at,
+				h.approval_status, h.approval_comment, h.approved_by,
+				h.delete_comment, h.requested_by, h.rejection_comment,
+				h.approved_at, h.rejected_by, h.rejected_at,
+				h.amount_in_local_currency, h.posting_date, h.text,
+				h.gl_account, h.reference, h.additional_header_details,
+				h.exposure_category, h.exposure_creation_status, h.batch_id,
+				h.upload_s3_key, h.file_hash,
+				l.line_item_id, l.line_number, l.product_id, l.product_description,
+				l.quantity, l.unit_of_measure, l.unit_price, l.line_item_amount,
+				l.plant_code, l.delivery_date, l.payment_terms, l.inco_terms,
+				l.additional_line_details, l.created_at AS line_created_at
+			FROM exposure_headers h
+			LEFT JOIN exposure_line_items l ON l.exposure_header_id = h.exposure_header_id
+`
+
+func scanHeadersLineItemsRows(rows *sql.Rows) ([]map[string]interface{}, error) {
+	joinCols, _ := rows.Columns()
+	joinData := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		vals := make([]interface{}, len(joinCols))
+		valPtrs := make([]interface{}, len(joinCols))
+		for i := range vals {
+			valPtrs[i] = &vals[i]
+		}
+		if err := rows.Scan(valPtrs...); err != nil {
+			continue
+		}
+		rowMap := map[string]interface{}{}
+		for i, col := range joinCols {
+			pv := parseDBValue(col, vals[i])
+			if pv == nil {
+				if col == "additional_header_details" || col == "additional_line_details" {
+					rowMap[col] = map[string]interface{}{}
+				} else {
+					rowMap[col] = ""
+				}
+				continue
+			}
+			if s, ok := pv.(string); ok && s == "" {
+				if _, exists := rowMap[col]; exists {
+					continue
+				}
+			}
+			rowMap[col] = pv
+		}
+		normalizeDateFields(rowMap)
+		joinData = append(joinData, rowMap)
+	}
+	return joinData, rows.Err()
+}
+
+func queryHeadersLineItems(ctx context.Context, db *sql.DB, buNames []string, batchID string, pendingOnly bool) ([]map[string]interface{}, error) {
+	query := headersLineItemsSelectSQL + `
+			WHERE h.entity = ANY($1)
+			  AND h.exposure_creation_status = 'Approved'
+			  AND h.is_deleted IS NOT TRUE
+	`
+	args := []interface{}{pq.Array(buNames)}
+	if strings.TrimSpace(batchID) != "" {
+		query += ` AND h.batch_id::text = $2`
+		args = append(args, strings.TrimSpace(batchID))
+	}
+	if pendingOnly {
+		query += ` AND upper(COALESCE(h.approval_status, '')) <> 'APPROVED'`
+	}
+	query += ` ORDER BY h.document_id, l.line_number NULLS FIRST`
+
+	joinRows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer joinRows.Close()
+	return scanHeadersLineItemsRows(joinRows)
+}
+
 func resolveUploadMappingValue(staged map[string]interface{}, sourceCol, dataType, tableName string) (interface{}, bool) {
 	switch sourceCol {
 	case dataType:
@@ -318,7 +401,7 @@ func lookupExposureUploadS3Key(ctx context.Context, db *sql.DB, recordID string)
 }
 
 // Handler
-func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
+func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	// ...existing code...
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -513,16 +596,16 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			results = append(results, rowMap)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 results,
+		respondWithSuccess(w, http.StatusOK, "Exposure updated successfully", map[string]interface{}{
+			"data": results,
 		})
 		newValues := req.Fields
 		if len(results) > 0 {
 			newValues = results[0]
 		}
 		auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: exposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: strings.TrimSpace(req.Reason), RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValues, NewValues: newValues})
+
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteLegacyEdit, fxnotif.ActionEdit, req.UserID, auditutil.Actor(req.UserID), strings.TrimSpace(req.Reason), []string{exposureHeaderID}, nil)
 	}
 }
 
@@ -570,7 +653,8 @@ func normalizeDateFields(rowMap map[string]interface{}) {
 func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID  string `json:"user_id"`
+			BatchID string `json:"batch_id,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
@@ -585,83 +669,17 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		joinRows, err := db.QueryContext(ctx, `
-			SELECT
-				h.exposure_header_id, h.company_code, h.entity, h.entity1, h.entity2, h.entity3,
-				h.exposure_type, h.document_id, h.document_date, h.counterparty_type,
-				h.counterparty_code, h.counterparty_name, h.currency,
-				h.total_original_amount, h.total_open_amount, h.value_date,
-				h.status, h.is_active, h.created_at, h.updated_at,
-				h.approval_status, h.approval_comment, h.approved_by,
-				h.delete_comment, h.requested_by, h.rejection_comment,
-				h.approved_at, h.rejected_by, h.rejected_at,
-				h.amount_in_local_currency, h.posting_date, h.text,
-				h.gl_account, h.reference, h.additional_header_details,
-				h.exposure_category, h.exposure_creation_status, h.batch_id,
-				h.upload_s3_key,
-				l.line_item_id, l.line_number, l.product_id, l.product_description,
-				l.quantity, l.unit_of_measure, l.unit_price, l.line_item_amount,
-				l.plant_code, l.delivery_date, l.payment_terms, l.inco_terms,
-				l.additional_line_details, l.created_at AS line_created_at
-			FROM exposure_headers h
-			JOIN exposure_line_items l ON l.exposure_header_id = h.exposure_header_id
-			WHERE h.entity = ANY($1)
-			  AND h.exposure_creation_status = 'Approved'
-			  AND h.is_deleted IS NOT TRUE
-		`, pq.Array(buNames))
+		joinData, err := queryHeadersLineItems(ctx, db, buNames, req.BatchID, false)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure headers/line items")
 			return
 		}
-		defer joinRows.Close()
 
-		joinCols, _ := joinRows.Columns()
-		joinData := []map[string]interface{}{}
-		for joinRows.Next() {
-			vals := make([]interface{}, len(joinCols))
-			valPtrs := make([]interface{}, len(joinCols))
-			for i := range vals {
-				valPtrs[i] = &vals[i]
-			}
-			if err := joinRows.Scan(valPtrs...); err != nil {
-				continue
-			}
-			rowMap := map[string]interface{}{}
-			for i, col := range joinCols {
-				pv := parseDBValue(col, vals[i])
-				if pv == nil {
-					if col == "additional_header_details" || col == "additional_line_details" {
-						rowMap[col] = map[string]interface{}{}
-					} else {
-						rowMap[col] = ""
-					}
-					continue
-				}
-				if s, ok := pv.(string); ok && s == "" {
-					if _, exists := rowMap[col]; exists {
-						continue
-					}
-				}
-				rowMap[col] = pv
-			}
-			normalizeDateFields(rowMap)
-			joinData = append(joinData, rowMap)
-		}
-
-		resp := map[string]interface{}{
+		logger.LogInfo("[DEBUG] GetExposureHeadersLineItems: buAccessible=%d, pageData=%d", len(buNames), len(joinData))
+		respondWithSuccess(w, http.StatusOK, "Exposure headers and line items fetched successfully", map[string]interface{}{
 			"buAccessible": buNames,
 			"pageData":     joinData,
-		}
-		logger.LogInfo("[DEBUG] GetExposureHeadersLineItems: buAccessible=%d, pageData=%d", len(buNames), len(joinData))
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		b, jerr := json.Marshal(resp)
-		if jerr != nil {
-			respondWithError(w, http.StatusInternalServerError, "JSON marshal failed: "+jerr.Error())
-			return
-		}
-		if _, werr := w.Write(b); werr != nil {
-			logger.LogError("Failed to write response: %v", werr)
-		}
+		})
 	}
 }
 
@@ -669,7 +687,8 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID  string `json:"user_id"`
+			BatchID string `json:"batch_id,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
@@ -697,81 +716,21 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		joinRows, err := db.QueryContext(ctx, `
-			SELECT
-				h.exposure_header_id, h.company_code, h.entity, h.entity1, h.entity2, h.entity3,
-				h.exposure_type, h.document_id, h.document_date, h.counterparty_type,
-				h.counterparty_code, h.counterparty_name, h.currency,
-				h.total_original_amount, h.total_open_amount, h.value_date,
-				h.status, h.is_active, h.created_at, h.updated_at,
-				h.approval_status, h.approval_comment, h.approved_by,
-				h.delete_comment, h.requested_by, h.rejection_comment,
-				h.approved_at, h.rejected_by, h.rejected_at,
-				h.amount_in_local_currency, h.posting_date, h.text,
-				h.gl_account, h.reference, h.additional_header_details,
-				h.exposure_category, h.exposure_creation_status, h.batch_id,
-				h.upload_s3_key,
-				l.line_item_id, l.line_number, l.product_id, l.product_description,
-				l.quantity, l.unit_of_measure, l.unit_price, l.line_item_amount,
-				l.plant_code, l.delivery_date, l.payment_terms, l.inco_terms,
-				l.additional_line_details, l.created_at AS line_created_at
-			FROM exposure_headers h
-			JOIN exposure_line_items l ON l.exposure_header_id = h.exposure_header_id
-			WHERE h.entity = ANY($1)
-			  AND h.exposure_creation_status = 'Approved'
-			  AND h.is_deleted IS NOT TRUE
-			  AND upper(h.approval_status) <> 'APPROVED'
-		`, pq.Array(buNames))
+		joinData, err := queryHeadersLineItems(ctx, db, buNames, req.BatchID, true)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch pending approval headers/line items")
 			return
 		}
-		defer joinRows.Close()
 
-		joinCols, _ := joinRows.Columns()
-		joinData := []map[string]interface{}{}
-		for joinRows.Next() {
-			vals := make([]interface{}, len(joinCols))
-			valPtrs := make([]interface{}, len(joinCols))
-			for i := range vals {
-				valPtrs[i] = &vals[i]
-			}
-			if err := joinRows.Scan(valPtrs...); err != nil {
-				continue
-			}
-			rowMap := map[string]interface{}{}
-			for i, col := range joinCols {
-				pv := parseDBValue(col, vals[i])
-				if pv == nil {
-					if col == "additional_header_details" || col == "additional_line_details" {
-						rowMap[col] = map[string]interface{}{}
-					} else {
-						rowMap[col] = ""
-					}
-					continue
-				}
-				if s, ok := pv.(string); ok && s == "" {
-					if _, exists := rowMap[col]; exists {
-						continue
-					}
-				}
-				rowMap[col] = pv
-			}
-			normalizeDateFields(rowMap)
-			joinData = append(joinData, rowMap)
-		}
-
-		resp := map[string]interface{}{
+		respondWithSuccess(w, http.StatusOK, "Pending exposure headers and line items fetched successfully", map[string]interface{}{
 			"buAccessible": buNames,
 			"pageData":     joinData,
-		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		})
 	}
 }
 
 // Handler: deleteExposureHeaders - marks headers for delete approval
-func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
+func DeleteExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID            string   `json:"user_id"`
@@ -821,25 +780,22 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 		}
 		count, _ := res.RowsAffected()
 		if count == 0 {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				"message":              "No matching exposure_headers found",
-			})
+			respondWithError(w, http.StatusNotFound, "No matching exposure_headers found")
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"message":              fmt.Sprintf("%d exposure_header(s) marked for delete approval", count),
-		})
+		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d exposure_header(s) marked for delete approval", count), nil)
 		for _, id := range req.ExposureHeaderIds {
 			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: deleteComment, RequestedBy: requestedBy, OldValues: nil, NewValues: nil})
 		}
+
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteLegacyDeleteMultiple, fxnotif.ActionDelete, req.UserID, requestedBy, deleteComment, req.ExposureHeaderIds, map[string][]string{
+			"deleted": req.ExposureHeaderIds,
+		})
 	}
 }
 
 // Handler: rejectMultipleExposureHeaders - rejects multiple headers
-func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
+func RejectMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID            string   `json:"user_id"`
@@ -915,15 +871,24 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 				auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: parentID, ActionType: "REJECT", Status: constants.StatusRejected, Reason: rejectionComment, RequestedBy: rejectedBy, OldValues: oldValuesByID[parentID], NewValues: rowMap})
 			}
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"rejected":             rejected,
+		respondWithSuccess(w, http.StatusOK, "Exposures rejected successfully", map[string]interface{}{
+			"rejected": rejected,
+		})
+
+		rejectedIDs := make([]string, 0, len(rejected))
+		for _, row := range rejected {
+			if id, ok := row["exposure_header_id"]; ok {
+				rejectedIDs = append(rejectedIDs, fmt.Sprint(id))
+			}
+		}
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteLegacyRejectMultiple, fxnotif.ActionReject, req.UserID, rejectedBy, rejectionComment, req.ExposureHeaderIds, map[string][]string{
+			"rejected": rejectedIDs,
 		})
 	}
 }
 
 // Handler: approveMultipleExposureHeaders - approves multiple headers and handles business logic
-func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
+func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID            string   `json:"user_id"`
@@ -1215,18 +1180,38 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"deleted":              results["deleted"],
-			"approved":             results["approved"],
-			"rolled":               results["rolled"],
-			"skipped":              results["skipped"],
+		respondWithSuccess(w, http.StatusOK, "Exposures approved successfully", map[string]interface{}{
+			"deleted":  results["deleted"],
+			"approved": results["approved"],
+			"rolled":   results["rolled"],
+			"skipped":  results["skipped"],
+		})
+
+		approvedIDs := make([]string, 0)
+		if approvedRows, ok := results["approved"].([]map[string]interface{}); ok {
+			for _, row := range approvedRows {
+				if id, ok := row["exposure_header_id"]; ok {
+					approvedIDs = append(approvedIDs, fmt.Sprint(id))
+				}
+			}
+		}
+		deletedIDs := make([]string, 0)
+		if deletedRows, ok := results["deleted"].([]map[string]interface{}); ok {
+			for _, row := range deletedRows {
+				if id, ok := row["exposure_header_id"]; ok {
+					deletedIDs = append(deletedIDs, fmt.Sprint(id))
+				}
+			}
+		}
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteLegacyApproveMultiple, fxnotif.ActionApprove, req.UserID, approvedBy, approvalComment, req.ExposureHeaderIds, map[string][]string{
+			"approved": approvedIDs,
+			"deleted":  deletedIDs,
 		})
 	}
 }
 
 // Handler: BatchUploadStagingData - handles batch upload for staging tables
-func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
+func BatchUploadStagingData(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		err := r.ParseMultipartForm(32 << 20) // 32MB max
@@ -1289,19 +1274,27 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 			allErrors = append(allErrors, "No files found.")
 		}
 		if len(allErrors) > 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				constants.ValueError:   strings.Join(allErrors, "; "),
-			})
+			respondWithError(w, http.StatusBadRequest, strings.Join(allErrors, "; "))
 			return
 		}
-		// All successful
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 results,
+		respondWithSuccess(w, http.StatusOK, "Batch upload completed successfully", map[string]interface{}{
+			"data": results,
 		})
+
+		for _, res := range results {
+			if success, ok := res[constants.ValueSuccess].(bool); !ok || !success {
+				continue
+			}
+			uploadBatchID, _ := res["uploadBatchId"].(string)
+			if uploadBatchID == "" {
+				continue
+			}
+			exposureIDs := fxnotif.FetchExposureIDsByBatch(r.Context(), pool, uploadBatchID)
+			if len(exposureIDs) == 0 {
+				continue
+			}
+			fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteLegacyBatchUpload, fxnotif.ActionUpload, userID, session.Name, "", exposureIDs, nil)
+		}
 
 	}
 }
@@ -1340,13 +1333,8 @@ func GetExposureDownloadURL(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "failed to generate download url")
 			return
 		}
-		recordExposureDownloadAudit(r.Context(), db, recordID, exposureDownloadActor(r.Context(), req.UserID), s3Key)
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
+		respondWithSuccess(w, http.StatusOK, "Download URL generated successfully", map[string]interface{}{
+			"download_url": downloadURL,
 		})
 	}
 }
@@ -1384,26 +1372,19 @@ func recordExposureDownloadAudit(ctx context.Context, db *sql.DB, exposureHeader
 }
 
 func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	payload := map[string]interface{}{
+		"files":      files,
+		"failed_ids": failedIDs,
+	}
 	if len(files) == 0 {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: false,
-			"message":              "no downloadable files found",
-			"data": map[string]interface{}{
-				"files":      []map[string]string{},
-				"failed_ids": failedIDs,
-			},
+		api.RespondEnvelopeFailureWithData(w, http.StatusNotFound, "no downloadable files found", api.EnvelopeErrorCode(http.StatusNotFound), map[string]interface{}{
+			"files":      []map[string]string{},
+			"failed_ids": failedIDs,
 		})
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: true,
-		"data": map[string]interface{}{
-			"files":      files,
-			"failed_ids": failedIDs,
-		},
-	})
+	api.RespondEnvelopeSuccess(w, "Bulk download URLs generated successfully", payload)
 }
 
 func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {

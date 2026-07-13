@@ -15,6 +15,7 @@ import (
 	apipreval "CimplrCorpSaas/api/middlewares"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	emailjobs "CimplrCorpSaas/internal/jobs/email"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
@@ -242,13 +243,7 @@ func ingestParsedMessage(ctx context.Context, pool *pgxpool.Pool, msg mailruntim
 		return messageID, err
 	}
 
-	preview := msg.Body.TextPlain
-	if preview == "" {
-		preview = msg.Body.TextHTML
-	}
-	if len(preview) > 300 {
-		preview = preview[:300]
-	}
+	preview := emailjobs.BodyPreviewForStorage(msg.Body.TextPlain, msg.Body.TextHTML)
 
 	if status == "" {
 		status = "INGESTED"

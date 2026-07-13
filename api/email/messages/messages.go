@@ -1,6 +1,7 @@
 package emailmessages
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,6 +16,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func bodyNeedsFullParse(body map[string]interface{}, preview string) bool {
+	plain, _ := body["text_plain"].(string)
+	html, _ := body["text_html"].(string)
+	plain = strings.TrimSpace(plain)
+	html = strings.TrimSpace(html)
+	if plain == "" && html == "" {
+		return true
+	}
+	if preview != "" && plain == preview {
+		return true
+	}
+	if preview != "" && len(plain) > 0 && len(plain) <= 320 && len(preview) >= 280 && strings.HasPrefix(plain, strings.TrimSpace(preview)) {
+		return true
+	}
+	return false
+}
+
 func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -23,13 +41,15 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var req struct {
-			Module   string `json:"module"`
-			EntityID string `json:"entity_id"`
-			Status   string `json:"status"`
-			DateFrom string `json:"date_from"`
-			DateTo   string `json:"date_to"`
-			Limit    int    `json:"limit"`
-			Offset   int    `json:"offset"`
+			Module            string `json:"module"`
+			EntityID          string `json:"entity_id"`
+			Status            string `json:"status"`
+			DateFrom          string `json:"date_from"`
+			DateTo            string `json:"date_to"`
+			InboxID           string `json:"inbox_id"`
+			Limit             int    `json:"limit"`
+			Offset            int    `json:"offset"`
+			FilterMatchedOnly *bool  `json:"filter_matched_only"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			emailcommon.RespondBadRequest(w, "invalid body")
@@ -41,11 +61,16 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 		status := strings.TrimSpace(req.Status)
 		dateFrom := strings.TrimSpace(req.DateFrom)
 		dateTo := strings.TrimSpace(req.DateTo)
+		inboxID := strings.TrimSpace(req.InboxID)
 		userID, userEmail, _, entityIDs := emailcommon.RequestIdentity(r, "", "")
 		admin := emailcommon.IsEmailAdmin(r.Context(), userID)
 		offset := req.Offset
 		if offset < 0 {
 			offset = 0
+		}
+		filterMatchedOnly := true
+		if req.FilterMatchedOnly != nil {
+			filterMatchedOnly = *req.FilterMatchedOnly
 		}
 
 		query := `
@@ -82,10 +107,13 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 			  AND ($3 = '' OR m.processing_status = $3)
 			  AND ($4 = '' OR COALESCE(m.received_at, m.created_at) >= $4::date)
 			  AND ($5 = '' OR COALESCE(m.received_at, m.created_at) < ($5::date + interval '1 day'))
+			  AND ($6 = '' OR m.inbox_id::text = $6)
+			  AND (NOT $7 OR m.filter_matched = true OR m.processing_status = 'MANUAL_UPLOAD')
+			` + emailcommon.ActiveInboxMessageSQL + `
 			` + emailcommon.ListMessageScopedToUserSQL + `
 			ORDER BY CASE WHEN m.processing_status = 'MANUAL_UPLOAD' THEN m.created_at ELSE COALESCE(m.received_at, m.created_at) END DESC`
 
-		args := []interface{}{module, entityID, status, dateFrom, dateTo, admin, userID, entityIDs, userEmail}
+		args := []interface{}{module, entityID, status, dateFrom, dateTo, inboxID, filterMatchedOnly, admin, userID, entityIDs, userEmail}
 		if req.Limit > 0 {
 			query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
 			args = append(args, req.Limit, offset)
@@ -168,20 +196,22 @@ func HandleMessageGet(pool *pgxpool.Pool) http.HandlerFunc {
 		admin := emailcommon.IsEmailAdmin(r.Context(), userID)
 
 		var (
-			s3ParsedKey, fromAddr, subject, module, entityID, preview, status, mailDirection string
-			receivedAt                                                                       *time.Time
-			extractedMeta                                                                    []byte
+			s3RawKey, s3ParsedKey, fromAddr, subject, module, entityID, preview, status, mailDirection string
+			envelopeTo                                                                                   []string
+			receivedAt                                                                                   *time.Time
+			extractedMeta                                                                                []byte
 		)
 		err := pool.QueryRow(r.Context(), `
-			SELECT COALESCE(s3_parsed_key,''), COALESCE(envelope_from,''), COALESCE(subject,''),
+			SELECT COALESCE(s3_raw_key,''), COALESCE(s3_parsed_key,''), COALESCE(envelope_from,''), COALESCE(subject,''),
 			       received_at, COALESCE(module,''), COALESCE(entity_id,''),
 			       COALESCE(body_text_preview,''), processing_status,
 			       COALESCE(extracted_metadata::text, '{}'),
-			       COALESCE(mail_direction, 'RECEIVED')
+			       COALESCE(mail_direction, 'RECEIVED'),
+			       COALESCE(envelope_to, ARRAY[]::text[])
 			FROM email_svc.message
 			WHERE message_id = $1::uuid
 			`+emailcommon.SingleMessageScopedToUserSQL+`
-		`, messageID, admin, userID, entityIDs, userEmail).Scan(&s3ParsedKey, &fromAddr, &subject, &receivedAt, &module, &entityID, &preview, &status, &extractedMeta, &mailDirection)
+		`, messageID, admin, userID, entityIDs, userEmail).Scan(&s3RawKey, &s3ParsedKey, &fromAddr, &subject, &receivedAt, &module, &entityID, &preview, &status, &extractedMeta, &mailDirection, &envelopeTo)
 		if err != nil {
 			emailcommon.RespondNotFound(w, "message not found")
 			return
@@ -194,6 +224,9 @@ func HandleMessageGet(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		envelope := map[string]interface{}{
 			"from": fromAddr, "subject": subject,
+		}
+		if len(envelopeTo) > 0 {
+			envelope["to"] = envelopeTo
 		}
 
 		if s3ParsedKey != "" {
@@ -209,6 +242,40 @@ func HandleMessageGet(pool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 			}
+		}
+		if bodyNeedsFullParse(body, preview) && strings.TrimSpace(s3RawKey) != "" {
+			rt := mailruntime.NewRuntime()
+			if rt.Ready() {
+				if parsed, err := rt.DecodeMessage(r.Context(), s3RawKey); err == nil && parsed != nil {
+					if plain := strings.TrimSpace(parsed.Body.TextPlain); plain != "" {
+						body["text_plain"] = plain
+					}
+					if html := strings.TrimSpace(parsed.Body.TextHTML); html != "" {
+						body["text_html"] = html
+						if plain := strings.TrimSpace(parsed.Body.TextPlain); plain == "" {
+							body["preferred"] = "html"
+						}
+					}
+					if parsed.Envelope.From != "" {
+						envelope["from"] = parsed.Envelope.From
+					}
+					if len(parsed.Envelope.To) > 0 {
+						envelope["to"] = parsed.Envelope.To
+					}
+					if parsed.Envelope.Subject != "" {
+						envelope["subject"] = parsed.Envelope.Subject
+					}
+				}
+			}
+		}
+		if toVal, ok := envelope["to"]; !ok || toVal == nil {
+			if len(envelopeTo) > 0 {
+				envelope["to"] = envelopeTo
+			}
+		} else if arr, ok := toVal.([]string); ok && len(arr) == 0 && len(envelopeTo) > 0 {
+			envelope["to"] = envelopeTo
+		} else if arr, ok := toVal.([]interface{}); ok && len(arr) == 0 && len(envelopeTo) > 0 {
+			envelope["to"] = envelopeTo
 		}
 
 		attRows, err := pool.Query(r.Context(), `
@@ -266,6 +333,11 @@ func HandleMessageGet(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func HandleMessageExtract(pool *pgxpool.Pool) http.HandlerFunc {
+	const (
+		minExtractBodyRunes = 20
+		maxExtractBodyRunes = 512000
+	)
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			emailcommon.RespondMethodNotAllowed(w)
@@ -284,20 +356,48 @@ func HandleMessageExtract(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		var s3ParsedKey, module string
+		var s3RawKey, s3ParsedKey, module string
 		err := pool.QueryRow(r.Context(), `
-			SELECT COALESCE(s3_parsed_key,''), COALESCE(NULLIF($2,''), module, '')
+			SELECT COALESCE(s3_raw_key,''), COALESCE(s3_parsed_key,''), COALESCE(NULLIF($2,''), module, '')
 			FROM email_svc.message
 			WHERE message_id = $1::uuid
-		`, req.MessageID, req.Module).Scan(&s3ParsedKey, &module)
-		if err != nil || s3ParsedKey == "" {
-			emailcommon.RespondNotFound(w, "parsed message not found")
+		`, req.MessageID, req.Module).Scan(&s3RawKey, &s3ParsedKey, &module)
+		if err != nil {
+			emailcommon.RespondNotFound(w, "message not found")
 			return
 		}
 
 		rt := mailruntime.NewRuntime()
 		if !rt.Ready() {
 			emailcommon.RespondUnavailable(w, "mail processing unavailable")
+			return
+		}
+
+		if s3ParsedKey == "" && strings.TrimSpace(s3RawKey) != "" {
+			decoded, decErr := rt.DecodeMessage(r.Context(), s3RawKey)
+			if decErr == nil && decoded != nil && strings.TrimSpace(decoded.S3ParsedKey) != "" {
+				s3ParsedKey = decoded.S3ParsedKey
+				_, _ = pool.Exec(r.Context(), `
+					UPDATE email_svc.message SET s3_parsed_key = $2, updated_at = now() WHERE message_id = $1::uuid
+				`, req.MessageID, s3ParsedKey)
+			}
+		}
+		if s3ParsedKey == "" {
+			emailcommon.RespondNotFound(w, "parsed message not found — re-ingest or open preview to parse from raw")
+			return
+		}
+
+		bodyLen, bodyErr := parsedBodyRuneLen(r.Context(), s3ParsedKey)
+		if bodyErr != nil {
+			emailcommon.RespondBadRequest(w, bodyErr.Error())
+			return
+		}
+		if bodyLen < minExtractBodyRunes {
+			emailcommon.RespondBadRequest(w, fmt.Sprintf("email body too short for extraction (%d chars, minimum %d)", bodyLen, minExtractBodyRunes))
+			return
+		}
+		if bodyLen > maxExtractBodyRunes {
+			emailcommon.RespondBadRequest(w, fmt.Sprintf("email body too large for extraction (%d chars, maximum %d)", bodyLen, maxExtractBodyRunes))
 			return
 		}
 
@@ -316,6 +416,28 @@ func HandleMessageExtract(pool *pgxpool.Pool) http.HandlerFunc {
 
 		emailcommon.RespondPayload(w, "messages/extract", map[string]interface{}{"row": out})
 	}
+}
+
+func parsedBodyRuneLen(ctx context.Context, s3ParsedKey string) (int, error) {
+	raw, err := s3storage.GetObjectBytes(ctx, s3ParsedKey)
+	if err != nil {
+		return 0, fmt.Errorf("could not read parsed message from storage")
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return 0, fmt.Errorf("invalid parsed message json")
+	}
+	body, _ := parsed["body"].(map[string]interface{})
+	plain, _ := body["text_plain"].(string)
+	html, _ := body["text_html"].(string)
+	text := strings.TrimSpace(plain)
+	if text == "" {
+		text = strings.TrimSpace(html)
+	}
+	if text == "" {
+		return 0, nil
+	}
+	return len([]rune(text)), nil
 }
 
 func HandleMessageLink(pool *pgxpool.Pool) http.HandlerFunc {

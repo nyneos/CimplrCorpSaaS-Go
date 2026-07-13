@@ -22,6 +22,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/mastererrors"
+	amfiinvest "CimplrCorpSaas/internal/investment"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -490,6 +491,12 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: amc_name is required", rowNum))
 					return
 				}
+				if canonical, errMsg := amfiinvest.ValidateAMFISchemeAMCName(ctx, pgxPool, amcName); errMsg != "" {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: %s", rowNum, errMsg))
+					return
+				} else if pos, ok := headerPos["amc_name"]; ok && pos < len(row) {
+					row[pos] = canonical
+				}
 				if amcCode == "" {
 					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: internal_amc_code is required", rowNum))
 					return
@@ -710,6 +717,14 @@ func CreateAMCsingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		ctx := r.Context()
+		canonicalName, errMsg := amfiinvest.ValidateAMFISchemeAMCName(ctx, pgxPool, req.AmcName)
+		if errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+		req.AmcName = canonicalName
+
 		// --- Get user email from active sessions ---
 		userEmail := api.GetUserEmailFromCtx(r.Context())
 		if userEmail == "" {
@@ -717,7 +732,6 @@ func CreateAMCsingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrTxStartFailed)
@@ -848,6 +862,15 @@ func CreateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					constants.ValueError:   "Missing amc_name or internal_amc_code",
 				})
 				continue
+			}
+			if canonical, errMsg := amfiinvest.ValidateAMFISchemeAMCName(ctx, pgxPool, name); errMsg != "" {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false,
+					constants.ValueError:   errMsg,
+				})
+				continue
+			} else {
+				name = canonical
 			}
 
 			tx, err := pgxPool.Begin(ctx)

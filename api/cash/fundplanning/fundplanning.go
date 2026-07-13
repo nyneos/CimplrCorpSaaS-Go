@@ -24,14 +24,44 @@ func validateFundPlanScope(ctx context.Context, fields map[string]interface{}) s
 	return validation.ValidateCashMasterReferences(ctx, fields)
 }
 
-var (
-	schemaCache struct {
-		hasCpiCounterparty bool
-		hasCpCounterparty  bool
-		hasCpiDept         bool
-		expires            time.Time
+// projectionDueItemsQuery reads approved cashflow projection V2 rows (cimplrcorpsaas schema).
+func projectionDueItemsQuery(includeCounterparty, includeType bool, argI int) string {
+	primaryField := constants.QuerryGeneric
+	if includeCounterparty {
+		primaryField = "COALESCE(NULLIF(cpi.entity_name, ''), 'Generic')"
+	} else if includeType {
+		primaryField = "COALESCE(CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'Collection' WHEN cpi.cashflow_type = 'Outflow' THEN 'Vendor Payment' ELSE NULL END, 'Generic')"
 	}
-)
+	return `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref FROM (
+		SELECT
+			COALESCE(cpi.maturity_date, cp.effective_date) as dt,
+			CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'inflow' ELSE 'outflow' END as direction,
+			COALESCE(NULLIF(cpi.currency_code,''), cp.base_currency_code) as currency,
+			` + primaryField + ` as primary_name,
+			cpi.expected_amount as amount,
+			'Generic' as costprofit_center,
+			cpi.item_id::text as source_ref
+		FROM cimplrcorpsaas.cashflow_proposal cp
+		JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cpi.proposal_id = cp.proposal_id AND COALESCE(cpi.is_deleted, false) = false
+		WHERE EXISTS (
+			SELECT 1 FROM cimplrcorpsaas.audit_action_cashflow_proposal a
+			WHERE a.proposal_id = cp.proposal_id AND a.processing_status = 'APPROVED'
+		)
+		AND COALESCE(cp.is_deleted, false) = false
+		AND COALESCE(cpi.maturity_date, cp.effective_date) >= $` + fmt.Sprint(argI) + `
+		AND COALESCE(cpi.maturity_date, cp.effective_date) <= $` + fmt.Sprint(argI+1)
+}
+
+func resolveGroupMetadata(group FundPlanGroupRequest) (direction, currency, primaryKey, primaryValue string, err error) {
+	direction = strings.TrimSpace(group.Direction)
+	currency = strings.TrimSpace(group.Currency)
+	primaryKey = strings.TrimSpace(group.PrimaryKey)
+	primaryValue = strings.TrimSpace(group.PrimaryValue)
+	if direction != "" && currency != "" && primaryKey != "" {
+		return direction, currency, primaryKey, primaryValue, nil
+	}
+	return parseGroupID(group.GroupID)
+}
 
 func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -196,66 +226,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			parts = append(parts, q)
 		}
 		if req.IncludeProjections {
-			var hasCpiCounterparty, hasCpCounterparty, hasCpiDept bool
-			if time.Now().Before(schemaCache.expires) {
-				hasCpiCounterparty = schemaCache.hasCpiCounterparty
-				hasCpCounterparty = schemaCache.hasCpCounterparty
-				hasCpiDept = schemaCache.hasCpiDept
-			} else {
-				row := pgxPool.QueryRow(ctx, `SELECT
-					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='counterparty_name') as has_cpi_counterparty,
-					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal' AND column_name='counterparty_name') as has_cp_counterparty,
-					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='department_id') as has_cpi_dept
-				`)
-				_ = row.Scan(&hasCpiCounterparty, &hasCpCounterparty, &hasCpiDept)
-				schemaCache.hasCpiCounterparty = hasCpiCounterparty
-				schemaCache.hasCpCounterparty = hasCpCounterparty
-				schemaCache.hasCpiDept = hasCpiDept
-				schemaCache.expires = time.Now().Add(5 * time.Minute)
-			}
-			primaryField := constants.QuerryGeneric
-			joinCounterparty := false
-			if req.IncludeCounterparty {
-				if hasCpiCounterparty || hasCpCounterparty {
-					primaryField = "COALESCE(NULLIF(m.counterparty_name, ''), 'Generic')"
-					joinCounterparty = true
-				} else {
-					primaryField = constants.QuerryGeneric
-				}
-			} else if req.IncludeType {
-				primaryField = "COALESCE(CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'Collection' WHEN cpi.cashflow_type = 'Outflow' THEN 'Vendor Payment' ELSE NULL END, 'Generic')"
-			} else {
-				primaryField = constants.QuerryGeneric
-			}
-			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref FROM (
-				SELECT 
-					cpi.start_date as dt, 
-					CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'inflow' ELSE 'outflow' END as direction, 
-					cp.currency_code as currency, 
-					` + primaryField + ` as primary_name, 
-					cpi.expected_amount as amount,
-					COALESCE(NULLIF(cpi.department_id, ''), 'Generic') as costprofit_center,
-					cp.proposal_id::text as source_ref
-				FROM cashflow_proposal cp
-				JOIN cashflow_proposal_item cpi ON cpi.proposal_id = cp.proposal_id AND COALESCE(cpi.is_deleted, false) = false
-
-`
-			if joinCounterparty {
-				if hasCpiCounterparty && hasCpCounterparty {
-					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = COALESCE(NULLIF(cpi.counterparty_name, ''), NULLIF(cp.counterparty_name, ''))\n"
-				} else if hasCpiCounterparty {
-					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = cpi.counterparty_name\n"
-				} else {
-					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = cp.counterparty_name\n"
-				}
-			}
-
-			q += `			WHERE EXISTS (
-					SELECT 1 FROM audit_action_cashflow_proposal a WHERE a.proposal_id::text = cp.proposal_id::text AND a.processing_status = 'APPROVED'
-				)
-				AND cp.status = 'Active'
-				AND cpi.start_date >= $` + fmt.Sprint(argI) + ` 
-				AND cpi.start_date <= $` + fmt.Sprint(argI+1)
+			q := projectionDueItemsQuery(req.IncludeCounterparty, req.IncludeType, argI)
 
 			args = append(args, now, endDate)
 			argI += 2
@@ -267,14 +238,8 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if req.Currency != "" {
-				q += ` AND cp.currency_code = $` + fmt.Sprint(argI)
+				q += ` AND COALESCE(NULLIF(cpi.currency_code,''), cp.base_currency_code) = $` + fmt.Sprint(argI)
 				args = append(args, req.Currency)
-				argI++
-			}
-
-			if strings.TrimSpace(req.CostProfitCenter) != "" && hasCpiDept {
-				q += ` AND cpi.department_id = $` + fmt.Sprint(argI)
-				args = append(args, req.CostProfitCenter)
 				argI++
 			}
 
@@ -540,66 +505,7 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			parts = append(parts, q)
 		}
 		if req.IncludeProjections {
-			var hasCpiCounterparty, hasCpCounterparty, hasCpiDept bool
-			if time.Now().Before(schemaCache.expires) {
-				hasCpiCounterparty = schemaCache.hasCpiCounterparty
-				hasCpCounterparty = schemaCache.hasCpCounterparty
-				hasCpiDept = schemaCache.hasCpiDept
-			} else {
-				row := pgxPool.QueryRow(ctx, `SELECT
-					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='counterparty_name') as has_cpi_counterparty,
-					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal' AND column_name='counterparty_name') as has_cp_counterparty,
-					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='department_id') as has_cpi_dept
-				`)
-				_ = row.Scan(&hasCpiCounterparty, &hasCpCounterparty, &hasCpiDept)
-				schemaCache.hasCpiCounterparty = hasCpiCounterparty
-				schemaCache.hasCpCounterparty = hasCpCounterparty
-				schemaCache.hasCpiDept = hasCpiDept
-				schemaCache.expires = time.Now().Add(5 * time.Minute)
-			}
-			primaryField := constants.QuerryGeneric
-			joinCounterparty := false
-			if req.IncludeCounterparty {
-				if hasCpiCounterparty || hasCpCounterparty {
-					primaryField = "COALESCE(NULLIF(m.counterparty_name, ''), 'Generic')"
-					joinCounterparty = true
-				} else {
-					primaryField = constants.QuerryGeneric
-				}
-			} else if req.IncludeType {
-				primaryField = "COALESCE(CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'Collection' WHEN cpi.cashflow_type = 'Outflow' THEN 'Vendor Payment' ELSE NULL END, 'Generic')"
-			} else {
-				primaryField = constants.QuerryGeneric
-			}
-			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref FROM (
-				SELECT
-					cpi.start_date as dt,
-					CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'inflow' ELSE 'outflow' END as direction,
-					cp.currency_code as currency,
-					` + primaryField + ` as primary_name,
-					cpi.expected_amount as amount,
-					COALESCE(NULLIF(cpi.department_id, ''), 'Generic') as costprofit_center,
-					cp.proposal_id::text as source_ref
-				FROM cashflow_proposal cp
-				JOIN cashflow_proposal_item cpi ON cpi.proposal_id = cp.proposal_id AND COALESCE(cpi.is_deleted, false) = false
-
-`
-			if joinCounterparty {
-				if hasCpiCounterparty && hasCpCounterparty {
-					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = COALESCE(NULLIF(cpi.counterparty_name, ''), NULLIF(cp.counterparty_name, ''))\n"
-				} else if hasCpiCounterparty {
-					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = cpi.counterparty_name\n"
-				} else {
-					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = cp.counterparty_name\n"
-				}
-			}
-
-			q += `			WHERE EXISTS (
-					SELECT 1 FROM audit_action_cashflow_proposal a WHERE a.proposal_id::text = cp.proposal_id::text AND a.processing_status = 'APPROVED'
-				)
-				AND cp.status = 'Active'
-				AND cpi.start_date >= $` + fmt.Sprint(argI) + `
-				AND cpi.start_date <= $` + fmt.Sprint(argI+1)
+			q := projectionDueItemsQuery(req.IncludeCounterparty, req.IncludeType, argI)
 
 			args = append(args, now, endDate)
 			argI += 2
@@ -611,14 +517,8 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if req.Currency != "" {
-				q += ` AND cp.currency_code = $` + fmt.Sprint(argI)
+				q += ` AND COALESCE(NULLIF(cpi.currency_code,''), cp.base_currency_code) = $` + fmt.Sprint(argI)
 				args = append(args, req.Currency)
-				argI++
-			}
-
-			if strings.TrimSpace(req.CostProfitCenter) != "" && hasCpiDept {
-				q += ` AND cpi.department_id = $` + fmt.Sprint(argI)
-				args = append(args, req.CostProfitCenter)
 				argI++
 			}
 
@@ -829,13 +729,13 @@ func getAvailableBankAccounts(ctx context.Context, pgxPool *pgxpool.Pool) []Bank
 }
 
 func suggestAccountsForGroup(group *FundPlanningGroup, bankAccounts []BankAccountInfo) []SuggestedAccount {
-	var suggestions []SuggestedAccount
+	suggestions := make([]SuggestedAccount, 0, len(bankAccounts))
 
 	for _, account := range bankAccounts {
 		score := 0
 		confidence := 0
-		var reasons []string
-		var warnings []string
+		reasons := make([]string, 0, 4)
+		warnings := make([]string, 0, 3)
 
 		// Currency match (+30)
 		if account.Currency == group.Currency {
@@ -1069,6 +969,10 @@ type CreateFundPlanRequest struct {
 
 type FundPlanGroupRequest struct {
 	GroupID           string                      `json:"group_id"`
+	Direction         string                      `json:"direction"`
+	Currency          string                      `json:"currency"`
+	PrimaryKey        string                      `json:"primary_key"`
+	PrimaryValue      string                      `json:"primary_value"`
 	Status            string                      `json:"status"`
 	TotalAmount       float64                     `json:"total_amount"`
 	AllocatedAccounts []FundPlanAllocationRequest `json:"allocated_accounts"`
@@ -1122,10 +1026,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
-		if req.PlanID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrPlanIDRequired)
-			return
-		}
+		planID := uuid.New().String()
 		if req.EntityName == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrEntityNameRequired)
 			return
@@ -1143,7 +1044,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		for _, group := range req.Groups {
-			_, currency, primaryKey, primaryValue, err := parseGroupID(group.GroupID)
+			_, currency, primaryKey, primaryValue, err := resolveGroupMetadata(group)
 			if err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, err.Error())
 				return
@@ -1196,7 +1097,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Process each group
 		for _, group := range req.Groups {
 			groupResult := processGroupCreation(ctx, tx, groupCreationMeta{
-				PlanID:      req.PlanID,
+				PlanID:      planID,
 				EntityName:  req.EntityName,
 				Horizon:     req.Horizon,
 				UserEmail:   userEmail,
@@ -1223,21 +1124,25 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Transaction will be rolled back by defer
 		}
 
-		api.RespondWithPayload(w, allSuccess, "", results)
+		api.RespondWithPayload(w, allSuccess, "", map[string]interface{}{
+			"plan_id": planID,
+			"groups":  results,
+		})
 	}
 }
 
 // processGroupCreation handles creation of a single fund plan group with all its components
 func processGroupCreation(ctx context.Context, tx pgx.Tx, meta groupCreationMeta, group FundPlanGroupRequest) map[string]interface{} {
+	dbGroupID := uuid.New().String()
 	result := map[string]interface{}{
-		"group_id":             group.GroupID,
+		"group_id":             dbGroupID,
+		"client_group_key":     group.GroupID,
 		constants.ValueSuccess: false,
 	}
 
-	// Parse group metadata from group_id
-	direction, currency, primaryKey, primaryValue, err := parseGroupID(group.GroupID)
+	direction, currency, primaryKey, primaryValue, err := resolveGroupMetadata(group)
 	if err != nil {
-		result[constants.ValueError] = fmt.Sprintf("failed to parse group_id %s: %s", group.GroupID, err.Error())
+		result[constants.ValueError] = fmt.Sprintf("failed to resolve group metadata for %s: %s", group.GroupID, err.Error())
 		return result
 	}
 
@@ -1268,7 +1173,7 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, meta groupCreationMeta
 		INSERT INTO fund_plan_groups (group_id, plan_id, direction, currency, primary_key, primary_value, total_amount, entity_name, horizon)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
 
-	_, err = tx.Exec(ctx, insertGroupQuery, group.GroupID, meta.PlanID, direction, currency, primaryKey, primaryValue, group.TotalAmount, meta.EntityName, meta.Horizon)
+	_, err = tx.Exec(ctx, insertGroupQuery, dbGroupID, meta.PlanID, direction, currency, primaryKey, primaryValue, group.TotalAmount, meta.EntityName, meta.Horizon)
 	if err != nil {
 		result[constants.ValueError] = fmt.Sprintf("failed to insert group: %s", err.Error())
 		return result
@@ -1293,8 +1198,8 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, meta groupCreationMeta
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
 
 		_, err = tx.Exec(ctx, insertLineQuery,
-			lineUUID, // Database UUID primary key
-			group.GroupID,
+			lineUUID,
+			dbGroupID,
 			line.LineID,  // source_ref is the transaction reference (TR-PAY-xxx, TR-REC-xxx)
 			primaryValue, // counterparty_or_type from group metadata
 			getCategoryFromDirection(direction),
@@ -1315,7 +1220,7 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, meta groupCreationMeta
 			INSERT INTO fund_plan_allocations (allocation_id, group_id, account_id, allocated_amount)
 			VALUES (gen_random_uuid(), $1, $2, $3)`
 
-		_, err = tx.Exec(ctx, insertAllocationQuery, group.GroupID, allocation.AccountID, allocation.AllocatedAmount)
+		_, err = tx.Exec(ctx, insertAllocationQuery, dbGroupID, allocation.AccountID, allocation.AllocatedAmount)
 		if err != nil {
 			result[constants.ValueError] = fmt.Sprintf("failed to insert allocation for account %s: %s", allocation.AccountID, err.Error())
 			return result
@@ -1329,7 +1234,7 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, meta groupCreationMeta
 		RETURNING action_id`
 
 	var actionID string
-	err = tx.QueryRow(ctx, insertAuditQuery, group.GroupID, meta.UserEmail, nullIfEmpty(meta.RequestedIP)).Scan(&actionID)
+	err = tx.QueryRow(ctx, insertAuditQuery, dbGroupID, meta.UserEmail, nullIfEmpty(meta.RequestedIP)).Scan(&actionID)
 	if err != nil {
 		result[constants.ValueError] = fmt.Sprintf("failed to create audit action: %s", err.Error())
 		return result

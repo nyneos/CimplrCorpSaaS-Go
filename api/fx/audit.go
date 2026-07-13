@@ -89,10 +89,8 @@ func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 			payload = append(payload, fileAuditRows...)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"audit_logs":           payload,
+		api.RespondEnvelopeSuccess(w, "FX audit history fetched successfully", map[string]interface{}{
+			"audit_logs": payload,
 		})
 	}
 }
@@ -672,12 +670,8 @@ func queryFXDownloadAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parent
 }
 
 func writeFXAuditError(w http.ResponseWriter, status int, message string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   message,
-	})
+	api.LogError("%s", message)
+	api.RespondEnvelopeError(w, status, message, api.EnvelopeErrorCode(status))
 }
 
 func nullString(value sql.NullString) string {

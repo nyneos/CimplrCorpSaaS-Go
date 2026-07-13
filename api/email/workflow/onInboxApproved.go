@@ -48,6 +48,44 @@ func OnInboxApproved(pool *pgxpool.Pool, inboxID string) {
 				`, inboxID, "imap poll after approve: "+err.Error())
 			}
 			return
+		case "GOOGLE_WORKSPACE":
+			_, _ = pool.Exec(bgCtx, `
+				UPDATE email_svc.inbox_config
+				SET graph_last_sync_at = $2,
+				    graph_sent_last_sync_at = $2,
+				    ses_sync_status = 'GOOGLE_WORKSPACE',
+				    ses_last_error = NULL,
+				    updated_at = now()
+				WHERE inbox_id = $1::uuid
+			`, inboxID, now)
+			if err := emailjobs.TriggerGoogleWorkspacePoll(bgCtx, pool); err != nil {
+				_, _ = pool.Exec(bgCtx, `
+					UPDATE email_svc.inbox_config
+					SET ses_last_error = $2, updated_at = now()
+					WHERE inbox_id = $1::uuid
+				`, inboxID, "google workspace poll after approve: "+err.Error())
+			}
+			return
+		case "OAUTH":
+			_, _ = pool.Exec(bgCtx, `
+				UPDATE email_svc.inbox_config
+				SET imap_inbox_last_uid = 0,
+				    imap_sent_last_uid = 0,
+				    graph_last_sync_at = $2,
+				    graph_sent_last_sync_at = $2,
+				    ses_sync_status = 'OAUTH',
+				    ses_last_error = NULL,
+				    updated_at = now()
+				WHERE inbox_id = $1::uuid
+			`, inboxID, now)
+			if err := emailjobs.TriggerOAuthPoll(bgCtx, pool); err != nil {
+				_, _ = pool.Exec(bgCtx, `
+					UPDATE email_svc.inbox_config
+					SET ses_last_error = $2, updated_at = now()
+					WHERE inbox_id = $1::uuid
+				`, inboxID, "oauth poll after approve: "+err.Error())
+			}
+			return
 		default:
 			_, _ = pool.Exec(bgCtx, `
 				UPDATE email_svc.inbox_config

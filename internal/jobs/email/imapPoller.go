@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/internal/logger"
+	"CimplrCorpSaas/internal/services/imapmail"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,6 +22,8 @@ type imapCred struct {
 	Port        int
 	Username    string
 	Password    string
+	AuthMode    string
+	AccessToken string
 	InboxFolder string
 	SentFolder  string
 	UseTLS      bool
@@ -37,6 +40,8 @@ func (c imapCred) toPayload() mailruntime.IMAPConnection {
 		Port:        port,
 		Username:    c.Username,
 		Password:    c.Password,
+		AuthMode:    c.AuthMode,
+		AccessToken: c.AccessToken,
 		UseTLS:      c.UseTLS,
 		InboxFolder: c.InboxFolder,
 		SentFolder:  c.SentFolder,
@@ -111,6 +116,9 @@ func TriggerIMAPPoll(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 func imapPollOnce(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Runtime) error {
+	if err := RequireEmailService(ctx, pool, rt); err != nil {
+		return err
+	}
 	inboxes, err := loadIMAPInboxes(ctx, pool)
 	if err != nil {
 		return err
@@ -120,35 +128,48 @@ func imapPollOnce(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Runti
 		return nil
 	}
 
-	var ingested int
+	type imapPollTarget struct {
+		inbox  imapInboxRow
+		folder imapFolderPoll
+	}
+
+	receivedTargets := make([]imapPollTarget, 0, len(inboxes))
+	sentTargets := make([]imapPollTarget, 0, len(inboxes))
 	for _, inbox := range inboxes {
 		payload := inbox.IMAP.toPayload()
-		folders := []imapFolderPoll{
-			{
+		receivedTargets = append(receivedTargets, imapPollTarget{
+			inbox: inbox,
+			folder: imapFolderPoll{
 				direction: mailDirectionReceived,
 				folder:    strings.TrimSpace(payload.InboxFolder),
 				lastUID:   &inbox.InboxLastUID,
 				setUIDFn:  setIMAPInboxLastUID,
 			},
-		}
+		})
 		if strings.TrimSpace(payload.SentFolder) != "" {
-			folders = append(folders, imapFolderPoll{
-				direction: mailDirectionSent,
-				folder:    strings.TrimSpace(payload.SentFolder),
-				lastUID:   &inbox.SentLastUID,
-				setUIDFn:  setIMAPSentLastUID,
+			sentTargets = append(sentTargets, imapPollTarget{
+				inbox: inbox,
+				folder: imapFolderPoll{
+					direction: mailDirectionSent,
+					folder:    strings.TrimSpace(payload.SentFolder),
+					lastUID:   &inbox.SentLastUID,
+					setUIDFn:  setIMAPSentLastUID,
+				},
 			})
 		}
+	}
 
-		for _, folder := range folders {
-			n, err := pollIMAPFolder(ctx, pool, rt, inbox, folder)
+	var ingested int
+	pollTargets := func(targets []imapPollTarget) {
+		for _, target := range targets {
+			n, err := pollIMAPFolder(ctx, pool, rt, target.inbox, target.folder)
 			if err != nil {
-				logger.LogError("[imap-poller] mailbox=%s folder=%s err=%v", inbox.MailboxAddress, folder.folder, err)
+				logger.LogError("[imap-poller] mailbox=%s folder=%s err=%v", target.inbox.MailboxAddress, target.folder.folder, err)
 				_, _ = pool.Exec(ctx, `
 					UPDATE email_svc.inbox_config
 					SET ses_last_error = $2, updated_at = now()
 					WHERE inbox_id = $1::uuid
-				`, inbox.InboxID, "imap: "+err.Error())
+				`, target.inbox.InboxID, "imap: "+err.Error())
 				continue
 			}
 			ingested += n
@@ -156,9 +177,12 @@ func imapPollOnce(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Runti
 				UPDATE email_svc.inbox_config
 				SET ses_last_error = NULL, updated_at = now()
 				WHERE inbox_id = $1::uuid
-			`, inbox.InboxID)
+			`, target.inbox.InboxID)
 		}
 	}
+	// Poll all inbox (received) folders first so cross-mailbox tests show RECEIVED before SENT.
+	pollTargets(receivedTargets)
+	pollTargets(sentTargets)
 	if ingested > 0 {
 		logger.LogInfo("[imap-poller] ingested %d message(s)", ingested)
 	}
@@ -201,9 +225,56 @@ func loadIMAPInboxes(ctx context.Context, pool *pgxpool.Pool) ([]imapInboxRow, e
 		}
 		r.InboxLastUID = uint32(inboxUID)
 		r.SentLastUID = uint32(sentUID)
+		resolveIMAPRowDefaults(&r)
+		persistResolvedIMAPFolders(ctx, pool, &r)
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func resolveIMAPRowDefaults(r *imapInboxRow) {
+	cfg := imapmail.Config{
+		Provider:    r.IMAP.Provider,
+		Host:        r.IMAP.Host,
+		Port:        r.IMAP.Port,
+		Username:    r.IMAP.Username,
+		InboxFolder: r.IMAP.InboxFolder,
+		SentFolder:  r.IMAP.SentFolder,
+		UseTLS:      r.IMAP.UseTLS,
+	}
+	if strings.TrimSpace(cfg.Username) == "" {
+		cfg.Username = r.MailboxAddress
+	}
+	if err := cfg.Resolve(r.MailboxAddress); err != nil {
+		return
+	}
+	if strings.TrimSpace(r.IMAP.Host) == "" {
+		r.IMAP.Host = cfg.Host
+	}
+	if r.IMAP.Port <= 0 {
+		r.IMAP.Port = cfg.Port
+	}
+	if strings.TrimSpace(r.IMAP.InboxFolder) == "" {
+		r.IMAP.InboxFolder = cfg.InboxFolder
+	}
+	if strings.TrimSpace(r.IMAP.SentFolder) == "" {
+		r.IMAP.SentFolder = cfg.SentFolder
+	}
+}
+
+func persistResolvedIMAPFolders(ctx context.Context, pool *pgxpool.Pool, r *imapInboxRow) {
+	inboxFolder := strings.TrimSpace(r.IMAP.InboxFolder)
+	sentFolder := strings.TrimSpace(r.IMAP.SentFolder)
+	if inboxFolder == "" && sentFolder == "" {
+		return
+	}
+	_, _ = pool.Exec(ctx, `
+		UPDATE email_svc.inbox_config
+		SET imap_inbox_folder = CASE WHEN imap_inbox_folder = '' AND $2 <> '' THEN $2 ELSE imap_inbox_folder END,
+		    imap_sent_folder = CASE WHEN imap_sent_folder = '' AND $3 <> '' THEN $3 ELSE imap_sent_folder END,
+		    updated_at = now()
+		WHERE inbox_id = $1::uuid
+	`, r.InboxID, inboxFolder, sentFolder)
 }
 
 func pollIMAPFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Runtime,
@@ -222,10 +293,11 @@ func pollIMAPFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Run
 			if err := folder.setUIDFn(ctx, pool, inbox.InboxID, resp.NewLastUID); err != nil {
 				return totalIngested, err
 			}
-			*folder.lastUID = resp.NewLastUID
-			logger.LogInfo("[imap-poller] mailbox=%s folder=%s initialized uid cursor=%d (new mail only)",
+			lastUID = resp.NewLastUID
+			*folder.lastUID = lastUID
+			logger.LogInfo("[imap-poller] mailbox=%s folder=%s initialized uid cursor=%d (continuing poll)",
 				inbox.MailboxAddress, folder.folder, resp.NewLastUID)
-			return totalIngested, nil
+			continue
 		}
 
 		if len(resp.Messages) == 0 {
@@ -243,9 +315,6 @@ func pollIMAPFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Run
 			EntityID:       inbox.EntityID,
 		}
 
-		var f filters
-		_ = json.Unmarshal(inbox.FiltersJSON, &f)
-
 		for _, im := range resp.Messages {
 			exists, err := imapMessageExists(ctx, pool, im.IMAPMessageKey)
 			if err != nil {
@@ -255,18 +324,11 @@ func pollIMAPFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Run
 				continue
 			}
 
-			if filtersActive(f) {
-				matchIn := matchInputFromParsed(im.Parsed)
-				var ok bool
-				if folder.direction == mailDirectionSent {
-					ok = matchSentFilters(f, matchIn)
-				} else {
-					ok = matchFilters(f, matchIn)
-				}
-				if !ok {
-					logger.LogInfo("[imap-poller] skip uid=%d folder=%s (inbox filter)", im.UID, folder.folder)
-					continue
-				}
+			matchIn := matchInputFromParsed(im.Parsed)
+			ok, active := directionFilterMatch(inbox.FiltersJSON, folder.direction, matchIn)
+			if !active || !ok {
+				logger.LogInfo("[imap-poller] skip uid=%d folder=%s (inbox filter)", im.UID, folder.folder)
+				continue
 			}
 
 			if err := ingestIMAPMessage(ctx, pool, inboxRow, im.Parsed, im.IMAPMessageKey, folder.direction); err != nil {
@@ -328,28 +390,13 @@ func ingestIMAPMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow, 
 		return nil
 	}
 
-	var f filters
-	_ = json.Unmarshal(inbox.FiltersJSON, &f)
 	matchInput := matchInputFromParsed(msg)
-	filterMatched := false
-	if filtersActive(f) {
-		if strings.EqualFold(mailDirection, mailDirectionSent) {
-			filterMatched = matchSentFilters(f, matchInput)
-		} else {
-			filterMatched = matchFilters(f, matchInput)
-		}
-		if !filterMatched {
-			return nil
-		}
+	filterMatched, active := directionFilterMatch(inbox.FiltersJSON, mailDirection, matchInput)
+	if !active || !filterMatched {
+		return nil
 	}
 
-	preview := msg.Body.TextPlain
-	if preview == "" {
-		preview = msg.Body.TextHTML
-	}
-	if len(preview) > 300 {
-		preview = preview[:300]
-	}
+	preview := BodyPreviewForStorage(msg.Body.TextPlain, msg.Body.TextHTML)
 
 	toAddrs := msg.Envelope.To
 	if len(toAddrs) == 0 && !strings.EqualFold(mailDirection, mailDirectionSent) {

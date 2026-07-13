@@ -160,23 +160,23 @@ type AuditExecutor interface {
 func NewListHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			respondEnvelopeError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if strings.TrimSpace(body.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
 		files, err := cfg.List(r.Context(), pool, parentID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -184,31 +184,31 @@ func NewListHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			files, err = enrichFilesWithAudit(r.Context(), pool, cfg, parentID, files)
 			if err != nil {
 				if !isUndefinedTableError(err) {
-					api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+					respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 					return
 				}
 			}
 		}
 
-		writeSuccess(w, map[string]interface{}{"files": files})
+		writeSuccess(w, "Files fetched successfully", map[string]interface{}{"files": files})
 	}
 }
 
 func NewUploadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			respondEnvelopeError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		if err := r.ParseMultipartForm(64 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		parentID := strings.TrimSpace(r.FormValue(cfg.ParentIDField))
 		if parentID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("%s required", cfg.ParentIDField))
+			respondEnvelopeError(w, http.StatusBadRequest, fmt.Sprintf("%s required", cfg.ParentIDField))
 			return
 		}
 
@@ -221,7 +221,7 @@ func NewUploadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 
 		fileHeaders := collectMultipartFiles(r, "file", "files")
 		if len(fileHeaders) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "no files provided")
+			respondEnvelopeError(w, http.StatusBadRequest, "no files provided")
 			return
 		}
 
@@ -230,51 +230,51 @@ func NewUploadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			record, err := uploadOneFile(r.Context(), pool, cfg, parentID, uploadedBy, requestedIP, header)
 			if err != nil {
 				if errors.Is(err, ErrFileAlreadyUploaded) {
-					api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
+					respondEnvelopeError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
 					return
 				}
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				respondEnvelopeError(w, http.StatusBadRequest, err.Error())
 				return
 			}
 			uploaded = append(uploaded, *record)
 		}
 
-		writeSuccess(w, map[string]interface{}{"files": uploaded})
+		writeSuccess(w, "Files uploaded successfully", map[string]interface{}{"files": uploaded})
 	}
 }
 
 func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			respondEnvelopeError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		if strings.TrimSpace(body.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
 		var req downloadRequest
 		if err := json.NewDecoder(strings.NewReader(body.Raw)).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		var record *FileRecord
 		if strings.TrimSpace(req.FileID) == "" {
 			if cfg.List == nil {
-				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
+				respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
 				return
 			}
 			records, err := cfg.List(r.Context(), pool, parentID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 			for i := range records {
@@ -287,18 +287,18 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			var err error
 			record, err = cfg.GetOne(r.Context(), pool, parentID, req.FileID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 		}
 		if record == nil || strings.TrimSpace(record.UploadS3Key) == "" {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			respondEnvelopeError(w, http.StatusNotFound, constants.ErrFileNotFound)
 			return
 		}
 
 		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), record.UploadS3Key, 15*time.Minute)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to generate download url: "+err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, "failed to generate download url: "+err.Error())
 			return
 		}
 
@@ -307,7 +307,7 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			requestedIP := api.ClientIPFromRequest(r)
 			if err := recordDownloadAudit(r.Context(), pool, cfg, parentID, *record, downloadActorInfo{RequestedBy: performedBy, RequestedIP: requestedIP, IsPreview: req.Preview}); err != nil {
 				if !isUndefinedTableError(err) {
-					api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+					respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 					return
 				}
 			}
@@ -320,12 +320,12 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 				RequestedIP: requestedIP,
 				IsPreview:   req.Preview,
 			}); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 		}
 
-		writeSuccess(w, map[string]interface{}{
+		writeSuccess(w, "Download URL generated successfully", map[string]interface{}{
 			"download_url": downloadURL,
 			"file_id":      record.FileID,
 		})
@@ -336,33 +336,33 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 func NewMainFileDownloadHandler(pool *pgxpool.Pool, cfg Config, loadMain func(ctx context.Context, pool *pgxpool.Pool, parentID string) (*MainPackageFile, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			respondEnvelopeError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if strings.TrimSpace(body.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		if loadMain == nil {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			respondEnvelopeError(w, http.StatusNotFound, constants.ErrFileNotFound)
 			return
 		}
 
 		mainFile, err := loadMain(r.Context(), pool, parentID)
 		if err != nil || mainFile == nil || strings.TrimSpace(mainFile.UploadS3Key) == "" {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			respondEnvelopeError(w, http.StatusNotFound, constants.ErrFileNotFound)
 			return
 		}
 
 		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), mainFile.UploadS3Key, 15*time.Minute)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to generate download url: "+err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, "failed to generate download url: "+err.Error())
 			return
 		}
 
@@ -378,12 +378,12 @@ func NewMainFileDownloadHandler(pool *pgxpool.Pool, cfg Config, loadMain func(ct
 				UploadedAt:  time.Now().UTC(),
 				RequestedIP: api.ClientIPFromRequest(r),
 			}); auditErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, auditErr.Error())
+				respondEnvelopeError(w, http.StatusInternalServerError, auditErr.Error())
 				return
 			}
 		}
 
-		writeSuccess(w, map[string]interface{}{"download_url": downloadURL})
+		writeSuccess(w, "Download URL generated successfully", map[string]interface{}{"download_url": downloadURL})
 	}
 }
 
@@ -395,27 +395,27 @@ type mainFileBulkRequest struct {
 func NewMainFileBulkDownloadHandler(pool *pgxpool.Pool, cfg Config, loadMain func(ctx context.Context, pool *pgxpool.Pool, rowID string) (*MainPackageFile, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			respondEnvelopeError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		var req mainFileBulkRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		if loadMain == nil {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			respondEnvelopeError(w, http.StatusNotFound, constants.ErrFileNotFound)
 			return
 		}
 
 		ids := trimStringList(req.IDs)
 		if len(ids) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "ids required")
+			respondEnvelopeError(w, http.StatusBadRequest, "ids required")
 			return
 		}
 
@@ -467,7 +467,7 @@ func NewMainFileBulkDownloadHandler(pool *pgxpool.Pool, cfg Config, loadMain fun
 			})
 		}
 
-		writeSuccess(w, map[string]interface{}{
+		writeSuccess(w, "Bulk download URLs generated successfully", map[string]interface{}{
 			"files":      files,
 			"failed_ids": uniqueStrings(failedIDs),
 		})
@@ -477,35 +477,35 @@ func NewMainFileBulkDownloadHandler(pool *pgxpool.Pool, cfg Config, loadMain fun
 func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			respondEnvelopeError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if strings.TrimSpace(body.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
 		var req downloadSelectedRequest
 		if err := json.NewDecoder(strings.NewReader(body.Raw)).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		fileIDs := trimStringList(req.FileIDs)
 		if len(fileIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "file_ids required")
+			respondEnvelopeError(w, http.StatusBadRequest, "file_ids required")
 			return
 		}
 
 		records, failedIDs, err := cfg.GetMany(r.Context(), pool, parentID, fileIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -553,7 +553,7 @@ func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc
 			})
 		}
 
-		writeSuccess(w, map[string]interface{}{
+		writeSuccess(w, "Bulk download URLs generated successfully", map[string]interface{}{
 			"files":      files,
 			"failed_ids": uniqueStrings(failedIDs),
 		})
@@ -563,13 +563,13 @@ func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc
 func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			respondEnvelopeError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -580,39 +580,39 @@ func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 
 		var req deleteRequest
 		if err := json.NewDecoder(strings.NewReader(body.Raw)).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		if strings.TrimSpace(req.FileID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
 			return
 		}
 		if strings.TrimSpace(req.Reason) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "reason required")
+			respondEnvelopeError(w, http.StatusBadRequest, "reason required")
 			return
 		}
 
 		record, err := cfg.GetOne(r.Context(), pool, parentID, req.FileID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if record == nil {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			respondEnvelopeError(w, http.StatusNotFound, constants.ErrFileNotFound)
 			return
 		}
 
 		pending, err := latestPendingDelete(r.Context(), pool, cfg, req.FileID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if pending != nil {
-			api.RespondWithError(w, http.StatusConflict, "delete approval is already pending for this file")
+			respondEnvelopeError(w, http.StatusConflict, "delete approval is already pending for this file")
 			return
 		}
 
@@ -622,11 +622,11 @@ func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			RequestedIP: api.ClientIPFromRequest(r),
 			Reason:      strings.TrimSpace(req.Reason),
 		}); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		writeSuccess(w, map[string]interface{}{"message": "Delete submitted for approval."})
+		writeSuccess(w, "Delete submitted for approval.", map[string]interface{}{"message": "Delete submitted for approval."})
 	}
 }
 
@@ -641,31 +641,31 @@ func NewRejectDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 func NewAuditHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			respondEnvelopeError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		if !auditEnabled(cfg) {
-			api.RespondWithError(w, http.StatusNotFound, "audit not configured for this module")
+			respondEnvelopeError(w, http.StatusNotFound, "audit not configured for this module")
 			return
 		}
 
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		var req downloadRequest
 		if err := json.NewDecoder(strings.NewReader(body.Raw)).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		if strings.TrimSpace(req.FileID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
 			return
 		}
 
@@ -674,23 +674,23 @@ func NewAuditHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			fileLookup = cfg.GetOne
 		}
 		if fileLookup == nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "file lookup not configured")
+			respondEnvelopeError(w, http.StatusInternalServerError, "file lookup not configured")
 			return
 		}
 
 		record, err := fileLookup(r.Context(), pool, parentID, req.FileID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if record == nil {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			respondEnvelopeError(w, http.StatusNotFound, constants.ErrFileNotFound)
 			return
 		}
 
 		events, err := listAuditEvents(r.Context(), pool, cfg, parentID, req.FileID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if len(events) == 0 {
@@ -983,31 +983,31 @@ func decodeParentJSON(r *http.Request, parentField string) (decodedParentBody, s
 func newDeleteDecisionHandler(pool *pgxpool.Pool, cfg Config, nextStatus string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			respondEnvelopeError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		if !auditEnabled(cfg) {
-			api.RespondWithError(w, http.StatusNotFound, "delete workflow not configured for this module")
+			respondEnvelopeError(w, http.StatusNotFound, "delete workflow not configured for this module")
 			return
 		}
 
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		var req deleteDecisionRequest
 		if err := json.NewDecoder(strings.NewReader(body.Raw)).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if strings.TrimSpace(req.UserID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		if strings.TrimSpace(req.FileID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
 			return
 		}
 
@@ -1016,62 +1016,62 @@ func newDeleteDecisionHandler(pool *pgxpool.Pool, cfg Config, nextStatus string)
 			fileLookup = cfg.GetOne
 		}
 		if fileLookup == nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "file lookup not configured")
+			respondEnvelopeError(w, http.StatusInternalServerError, "file lookup not configured")
 			return
 		}
 
 		record, err := fileLookup(r.Context(), pool, parentID, req.FileID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if record == nil {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+			respondEnvelopeError(w, http.StatusNotFound, constants.ErrFileNotFound)
 			return
 		}
 
 		tx, err := pool.Begin(r.Context())
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer tx.Rollback(r.Context())
 
 		auditRow, err := latestPendingDeleteForUpdate(r.Context(), tx, cfg, req.FileID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if auditRow == nil {
-			api.RespondWithError(w, http.StatusNotFound, "pending delete request not found")
+			respondEnvelopeError(w, http.StatusNotFound, "pending delete request not found")
 			return
 		}
 
 		checkerBy := requestedByOrFallback(r.Context(), req.UserID)
 		checkerAt := time.Now().UTC()
 		if err := updateDeleteAuditDecision(r.Context(), tx, cfg, deleteAuditDecisionParams{AuditID: auditRow.AuditID, NextStatus: nextStatus, CheckerBy: checkerBy, CheckerAt: checkerAt, CheckerIP: api.ClientIPFromRequest(r), CheckerComment: strings.TrimSpace(req.Comment)}); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
 		if nextStatus == fileAuditApprovedStatus {
 			if cfg.SoftDeleteTx == nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "transactional delete handler not configured")
+				respondEnvelopeError(w, http.StatusInternalServerError, "transactional delete handler not configured")
 				return
 			}
 			deleted, deleteErr := cfg.SoftDeleteTx(r.Context(), tx, parentID, req.FileID, checkerBy, checkerAt)
 			if deleteErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, deleteErr.Error())
+				respondEnvelopeError(w, http.StatusInternalServerError, deleteErr.Error())
 				return
 			}
 			if !deleted {
-				api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+				respondEnvelopeError(w, http.StatusNotFound, constants.ErrFileNotFound)
 				return
 			}
 		}
 
 		if err := tx.Commit(r.Context()); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -1079,37 +1079,37 @@ func newDeleteDecisionHandler(pool *pgxpool.Pool, cfg Config, nextStatus string)
 		if nextStatus == fileAuditApprovedStatus {
 			message = "Delete approved."
 		}
-		writeSuccess(w, map[string]interface{}{"message": message})
+		writeSuccess(w, message, map[string]interface{}{"message": message})
 	}
 }
 
 func deleteImmediate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, cfg Config, parentID, rawBody string) {
 	var req downloadRequest
 	if err := json.NewDecoder(strings.NewReader(rawBody)).Decode(&req); err != nil {
-		api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+		respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 		return
 	}
 	if strings.TrimSpace(req.FileID) == "" {
-		api.RespondWithError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
+		respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFileIDRequired)
 		return
 	}
 	if cfg.SoftDelete == nil {
-		api.RespondWithError(w, http.StatusInternalServerError, "delete handler not configured")
+		respondEnvelopeError(w, http.StatusInternalServerError, "delete handler not configured")
 		return
 	}
 
 	deletedBy := requestedByOrFallback(r.Context(), req.UserID)
 	deleted, err := cfg.SoftDelete(r.Context(), pool, parentID, req.FileID, deletedBy, time.Now().UTC())
 	if err != nil {
-		api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+		respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if !deleted {
-		api.RespondWithError(w, http.StatusNotFound, constants.ErrFileNotFound)
+		respondEnvelopeError(w, http.StatusNotFound, constants.ErrFileNotFound)
 		return
 	}
 
-	api.RespondWithResult(w, true, "")
+	api.RespondEnvelopeSuccess(w, "File deleted successfully", nil)
 }
 
 func recordMainUploadAuditSafely(ctx context.Context, tx pgx.Tx, cfg Config, parentID string, payload MainUploadAuditPayload) error {
@@ -1776,6 +1776,11 @@ func isCheckViolationError(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23514"
 }
 
+func respondEnvelopeError(w http.ResponseWriter, status int, message string) {
+	api.LogError("%s", message)
+	api.RespondEnvelopeError(w, status, message, api.EnvelopeErrorCode(status))
+}
+
 func writeAuditSuccess(w http.ResponseWriter, rows []fileAuditEvent) {
 	auditRows := make([]map[string]interface{}, 0, len(rows))
 	for _, row := range rows {
@@ -1794,11 +1799,8 @@ func writeAuditSuccess(w http.ResponseWriter, rows []fileAuditEvent) {
 		})
 	}
 
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: true,
-		"audit_logs":           auditRows,
+	api.RespondEnvelopeSuccess(w, "File audit history fetched successfully", map[string]interface{}{
+		"audit_logs": auditRows,
 	})
 }
 
@@ -1837,11 +1839,6 @@ func uniqueStrings(values []string) []string {
 	return trimStringList(values)
 }
 
-func writeSuccess(w http.ResponseWriter, data interface{}) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: true,
-		"data":                 data,
-	})
+func writeSuccess(w http.ResponseWriter, message string, data interface{}) {
+	api.RespondEnvelopeSuccess(w, message, data)
 }

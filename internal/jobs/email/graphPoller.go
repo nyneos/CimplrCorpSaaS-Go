@@ -105,6 +105,9 @@ func TriggerGraphPoll(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 func graphPollOnce(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Runtime) error {
+	if err := RequireEmailService(ctx, pool, rt); err != nil {
+		return err
+	}
 	inboxes, err := loadGraphInboxes(ctx, pool)
 	if err != nil {
 		return err
@@ -114,31 +117,53 @@ func graphPollOnce(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Runt
 		return nil
 	}
 
-	var ingested int
+	type graphPollTarget struct {
+		inbox  graphInboxRow
+		folder graphFolderPoll
+	}
+
+	receivedTargets := make([]graphPollTarget, 0, len(inboxes))
+	sentTargets := make([]graphPollTarget, 0, len(inboxes))
 	for _, inbox := range inboxes {
-		folders := []graphFolderPoll{
-			{
+		receivedTargets = append(receivedTargets, graphPollTarget{
+			inbox: inbox,
+			folder: graphFolderPoll{
 				direction:  mailDirectionReceived,
 				sentFolder: false,
 				lastSync:   &inbox.LastSync,
 				setSyncFn:  setGraphLastSync,
 			},
-			{
+		})
+		sentTargets = append(sentTargets, graphPollTarget{
+			inbox: inbox,
+			folder: graphFolderPoll{
 				direction:  mailDirectionSent,
 				sentFolder: true,
 				lastSync:   &inbox.SentLastSync,
 				setSyncFn:  setGraphSentLastSync,
 			},
-		}
-		for _, folder := range folders {
-			n, err := pollGraphMailboxFolder(ctx, pool, rt, inbox, folder)
+		})
+	}
+
+	var ingested int
+	pollTargets := func(targets []graphPollTarget) {
+		for _, target := range targets {
+			n, err := pollGraphMailboxFolder(ctx, pool, rt, target.inbox, target.folder)
 			if err != nil {
-				logger.LogError("[graph-poller] mailbox=%s direction=%s err=%v", inbox.MailboxAddress, folder.direction, err)
+				logger.LogError("[graph-poller] mailbox=%s direction=%s err=%v", target.inbox.MailboxAddress, target.folder.direction, err)
+				_, _ = pool.Exec(ctx, `
+					UPDATE email_svc.inbox_config
+					SET ses_last_error = $2, updated_at = now()
+					WHERE inbox_id = $1::uuid
+				`, target.inbox.InboxID, "graph: "+err.Error())
 				continue
 			}
 			ingested += n
+			clearMailboxPollError(ctx, pool, target.inbox.InboxID)
 		}
 	}
+	pollTargets(receivedTargets)
+	pollTargets(sentTargets)
 	if ingested > 0 {
 		logger.LogInfo("[graph-poller] ingested %d message(s)", ingested)
 	}
@@ -220,7 +245,7 @@ func pollGraphMailboxFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 			break
 		}
 
-		n, err := ingestGraphPollPage(ctx, pool, inbox, folder, resp)
+		n, err := ingestGraphPollPage(ctx, pool, inbox, folder, resp, "OUTLOOK_GRAPH")
 		if err != nil {
 			return totalIngested, err
 		}
@@ -253,7 +278,7 @@ func mustParseRFC3339(s string) time.Time {
 	return t
 }
 
-func ingestGraphPollPage(ctx context.Context, pool *pgxpool.Pool, inbox graphInboxRow, folder graphFolderPoll, resp *mailruntime.GraphPullResult) (int, error) {
+func ingestGraphPollPage(ctx context.Context, pool *pgxpool.Pool, inbox graphInboxRow, folder graphFolderPoll, resp *mailruntime.GraphPullResult, sourceType string) (int, error) {
 	inboxRow := inboxRow{
 		InboxID:        inbox.InboxID,
 		MailboxAddress: inbox.MailboxAddress,
@@ -261,9 +286,6 @@ func ingestGraphPollPage(ctx context.Context, pool *pgxpool.Pool, inbox graphInb
 		Module:         inbox.Module,
 		EntityID:       inbox.EntityID,
 	}
-
-	var f filters
-	_ = json.Unmarshal(inbox.FiltersJSON, &f)
 
 	var ingested int
 	for _, gm := range resp.Messages {
@@ -278,21 +300,14 @@ func ingestGraphPollPage(ctx context.Context, pool *pgxpool.Pool, inbox graphInb
 			continue
 		}
 
-		if filtersActive(f) {
-			matchIn := matchInputFromParsed(gm.Parsed)
-			var ok bool
-			if folder.sentFolder {
-				ok = matchSentFilters(f, matchIn)
-			} else {
-				ok = matchFilters(f, matchIn)
-			}
-			if !ok {
-				logger.LogInfo("[graph-poller] skip graph_id=%s direction=%s (inbox filter)", gm.GraphMessageID, folder.direction)
-				continue
-			}
+		matchIn := matchInputFromParsed(gm.Parsed)
+		ok, active := directionFilterMatch(inbox.FiltersJSON, folder.direction, matchIn)
+		if !active || !ok {
+			logger.LogInfo("[graph-poller] skip graph_id=%s direction=%s (inbox filter)", gm.GraphMessageID, folder.direction)
+			continue
 		}
 
-		if err := ingestGraphMessage(ctx, pool, inboxRow, gm.Parsed, gm.GraphMessageID, folder.direction); err != nil {
+		if err := ingestGraphMessage(ctx, pool, inboxRow, gm.Parsed, gm.GraphMessageID, folder.direction, sourceType); err != nil {
 			logger.LogError("[graph-poller] ingest graph_id=%s err=%v", gm.GraphMessageID, err)
 			continue
 		}
@@ -328,7 +343,7 @@ func setGraphSentLastSync(ctx context.Context, pool *pgxpool.Pool, inboxID strin
 	return err
 }
 
-func ingestGraphMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow, msg mailruntime.ParsedEmail, graphMessageID, mailDirection string) error {
+func ingestGraphMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow, msg mailruntime.ParsedMessage, graphMessageID, mailDirection, sourceType string) error {
 	var exists bool
 	if err := pool.QueryRow(ctx, `
 		SELECT EXISTS(SELECT 1 FROM email_svc.message WHERE s3_raw_key = $1 OR graph_message_id = $2)
@@ -339,31 +354,13 @@ func ingestGraphMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow,
 		return nil
 	}
 
-	var f filters
-	_ = json.Unmarshal(inbox.FiltersJSON, &f)
 	matchInput := matchInputFromParsed(msg)
-	var filterMatched bool
-	if filtersActive(f) {
-		if strings.EqualFold(mailDirection, mailDirectionSent) {
-			filterMatched = matchSentFilters(f, matchInput)
-			if !filterMatched {
-				return nil
-			}
-		} else {
-			filterMatched = matchFilters(f, matchInput)
-			if !filterMatched {
-				return nil
-			}
-		}
+	filterMatched, active := directionFilterMatch(inbox.FiltersJSON, mailDirection, matchInput)
+	if !active || !filterMatched {
+		return nil
 	}
 
-	preview := msg.Body.TextPlain
-	if preview == "" {
-		preview = msg.Body.TextHTML
-	}
-	if len(preview) > 300 {
-		preview = preview[:300]
-	}
+	preview := BodyPreviewForStorage(msg.Body.TextPlain, msg.Body.TextHTML)
 
 	toAddrs := msg.Envelope.To
 	if len(toAddrs) == 0 {
@@ -372,6 +369,10 @@ func ingestGraphMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow,
 		} else {
 			toAddrs = []string{inbox.MailboxAddress}
 		}
+	}
+
+	if sourceType == "" {
+		sourceType = "OUTLOOK_GRAPH"
 	}
 
 	if mailDirection == "" {
@@ -413,20 +414,24 @@ func ingestGraphMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow,
 		if err != nil {
 			return err
 		}
-		logAttachmentIngest(ctx, pool, messageID, attachmentID, "OUTLOOK_GRAPH", att.Filename, att.ContentType, att.S3Key, att.SizeBytes)
+		logAttachmentIngest(ctx, pool, messageID, attachmentID, sourceType, att.Filename, att.ContentType, att.S3Key, att.SizeBytes)
 	}
 
 	detail, _ := json.Marshal(map[string]string{
-		"source":           "OUTLOOK_GRAPH",
+		"source":           sourceType,
 		"graph_message_id": graphMessageID,
 		"s3_raw_key":       msg.S3RawKey,
 		"mailbox":          inbox.MailboxAddress,
 		"mail_direction":   mailDirection,
 	})
+	step := "GRAPH_INGEST"
+	if sourceType == "GOOGLE_WORKSPACE" {
+		step = "GMAIL_DWD_INGEST"
+	}
 	_, _ = pool.Exec(ctx, `
 		INSERT INTO email_svc.processing_log (message_id, step, status, detail)
-		VALUES ($1::uuid, 'GRAPH_INGEST', 'OK', $2::jsonb)
-	`, messageID, string(detail))
+		VALUES ($1::uuid, $2, 'OK', $3::jsonb)
+	`, messageID, step, string(detail))
 
 	return nil
 }

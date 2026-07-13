@@ -40,20 +40,25 @@ type workflowInbox struct {
 	SESLastError     string          `json:"ses_last_error"`
 	SubmittedBy      string          `json:"submitted_by"`
 	ApprovedBy       string          `json:"approved_by"`
-	SourceType       string `json:"source_type"`
+	SourceType       string          `json:"source_type"`
 	emailmailbox.MailboxGraphFields
 	emailmailbox.MailboxIMAPFields
-	GraphLastSyncAt     *time.Time `json:"graph_last_sync_at"`
+	emailmailbox.MailboxOAuthFields
+	emailmailbox.MailboxGoogleWorkspaceFields
+	GraphLastSyncAt     *time.Time      `json:"graph_last_sync_at"`
 	GraphSentLastSyncAt *time.Time      `json:"graph_sent_last_sync_at"`
 	CheckerComment      string          `json:"checker_comment"`
-	IsActive         bool            `json:"is_active"`
-	IsDeleted        bool            `json:"is_deleted"`
-	GraphSecretSet      bool `json:"graph_client_secret_set,omitempty"`
-	IMAPPasswordSet     bool `json:"imap_password_set,omitempty"`
-	SharedUserIDs    []string        `json:"shared_user_ids,omitempty"`
-	PendingEditJSON  json.RawMessage `json:"pending_edit_json,omitempty"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
+	IsActive            bool            `json:"is_active"`
+	IsDeleted           bool            `json:"is_deleted"`
+	GraphSecretSet      bool            `json:"graph_client_secret_set,omitempty"`
+	GooglePrivateKeySet bool            `json:"google_workspace_private_key_set,omitempty"`
+	IMAPPasswordSet     bool            `json:"imap_password_set,omitempty"`
+	SharedUserIDs       []string        `json:"shared_user_ids,omitempty"`
+	PendingEditJSON     json.RawMessage `json:"pending_edit_json,omitempty"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+	RequestedAt         *time.Time      `json:"requested_at,omitempty"`
+	CheckerAt           *time.Time      `json:"checker_at,omitempty"`
 }
 
 func init() {
@@ -61,8 +66,6 @@ func init() {
 	approvalengine.RegisterPostFinalizeHook("EMAIL_INBOX_EDIT", finalizeEmailInboxApproval)
 	approvalengine.RegisterPostFinalizeHook("EMAIL_INBOX_DELETE", finalizeEmailInboxApproval)
 }
-
-
 
 func sesRuleNameForInbox(inboxID string) string {
 	short := strings.ReplaceAll(inboxID, "-", "")
@@ -72,14 +75,40 @@ func sesRuleNameForInbox(inboxID string) string {
 	return "cimplr-inbox-" + short
 }
 
-func HandleWorkflowMeta() http.HandlerFunc {
+func HandleWorkflowMeta(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			emailcommon.RespondMethodNotAllowed(w)
 			return
 		}
+		domains := emailmailbox.AllowedMailboxDomains()
+		defaultDomain := ""
+		if len(domains) > 0 {
+			defaultDomain = domains[0]
+		}
+		graphLabel := strings.TrimSpace(os.Getenv("AZURE_GRAPH_TENANT_LABEL"))
+		googleLabel := strings.TrimSpace(os.Getenv("GOOGLE_WORKSPACE_TENANT_LABEL"))
+		if row, err := emailjobs.LoadDefaultGraphTenant(r.Context(), pool); err == nil {
+			if graphLabel == "" {
+				graphLabel = strings.TrimSpace(row.TenantLabel)
+			}
+		}
+		if row, err := emailjobs.LoadDefaultGoogleWorkspaceTenant(r.Context(), pool); err == nil {
+			if googleLabel == "" {
+				googleLabel = strings.TrimSpace(row.TenantLabel)
+			}
+		}
+		if graphLabel == "" {
+			graphLabel = "default"
+		}
+		if googleLabel == "" {
+			googleLabel = "default"
+		}
 		emailcommon.RespondPayload(w, "inbox/workflow/meta", map[string]interface{}{
-			"allowed_domains": emailmailbox.AllowedMailboxDomains(),
+			"allowed_domains":                        domains,
+			"default_mailbox_domain":                 defaultDomain,
+			"default_graph_tenant_label":             graphLabel,
+			"default_google_workspace_tenant_label":  googleLabel,
 		})
 	}
 }
@@ -177,8 +206,10 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 		}
 		mailbox, existingIMAP, _ := emailmailbox.LoadMailboxIMAPFields(ctx, pool, inboxID)
 		existingGraph, _ := emailmailbox.LoadMailboxGraphFields(ctx, pool, inboxID)
+		existingGoogle, _ := emailmailbox.LoadMailboxGoogleWorkspaceFields(ctx, pool, inboxID)
 		imapFinal := existingIMAP
 		graphFinal := existingGraph
+		googleFinal := existingGoogle
 		if strings.EqualFold(edit.SourceType, "IMAP") && emailmailbox.IMAPPatchPresent(edit.MailboxIMAPFields) {
 			if merged, mergeErr := emailmailbox.MergeIMAPFields(existingIMAP, edit.MailboxIMAPFields, mailbox); mergeErr == nil {
 				imapFinal = merged
@@ -187,6 +218,11 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 		if emailmailbox.GraphPatchPresent(edit.MailboxGraphFields) {
 			if merged, mergeErr := emailmailbox.MergeGraphFields(existingGraph, edit.MailboxGraphFields); mergeErr == nil {
 				graphFinal = merged
+			}
+		}
+		if emailmailbox.GoogleWorkspacePatchPresent(edit.MailboxGoogleWorkspaceFields) {
+			if merged, mergeErr := emailmailbox.MergeGoogleWorkspaceFields(existingGoogle, edit.MailboxGoogleWorkspaceFields); mergeErr == nil {
+				googleFinal = merged
 			}
 		}
 		_, err := pool.Exec(ctx, `
@@ -198,24 +234,34 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 			    graph_tenant_key = $6,
 			    graph_tenant_label = $7, graph_tenant_id = $8,
 			    graph_client_id = $9, graph_client_secret = $10,
-			    imap_provider = $11, imap_host = $12, imap_port = $13,
-			    imap_username = $14, imap_password = $15,
-			    imap_inbox_folder = $16, imap_sent_folder = $17, imap_use_tls = $18,
-			    processing_status = $19,
+			    google_workspace_tenant_key = $11,
+			    google_workspace_tenant_label = $12,
+			    google_workspace_service_account_email = $13,
+			    google_workspace_client_id = $14,
+			    google_workspace_private_key = $15,
+			    imap_provider = $16, imap_host = $17, imap_port = $18,
+			    imap_username = $19, imap_password = $20,
+			    imap_inbox_folder = $21, imap_sent_folder = $22, imap_use_tls = $23,
+			    processing_status = $24,
 			    pending_edit_json = NULL,
-			    approved_by = $20,
-			    checker_comment = $21,
+			    approved_by = $25,
+			    checker_comment = $26,
 			    updated_at = now()
 			WHERE inbox_id = $1::uuid
 		`, inboxID, edit.DisplayName, emailcommon.NullableJSON(edit.FiltersJSON), edit.PollIntervalSecs,
 			edit.Module,
 			graphFinal.TenantKey, graphFinal.TenantLabel, graphFinal.TenantID, graphFinal.ClientID, graphFinal.ClientSecret,
+			googleFinal.WorkspaceTenantKey, googleFinal.WorkspaceTenantLabel, googleFinal.WorkspaceServiceAccountEmail,
+			googleFinal.WorkspaceClientID, googleFinal.WorkspacePrivateKey,
 			imapFinal.Provider, imapFinal.Host, imapFinal.Port,
 			imapFinal.Username, imapFinal.Password,
 			imapFinal.InboxFolder, imapFinal.SentFolder, imapFinal.UseTLS,
 			constants.StatusApproved, actorID, comment)
 		return err
 	case "EMAIL_INBOX_DELETE":
+		if err := emailcommon.DeleteMessagesForInbox(ctx, pool, inboxID); err != nil {
+			return err
+		}
 		_, err := pool.Exec(ctx, `
 			UPDATE email_svc.inbox_config
 			SET processing_status = 'DELETED', is_deleted = true, is_active = false,
@@ -331,6 +377,8 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 		userID, userEmail, entityID, entityIDs := emailcommon.RequestIdentity(r, req.UserID, req.EntityID)
 		admin := emailcommon.IsEmailAdmin(r.Context(), userID)
 
+		emailjobs.SyncEmailServiceStatus(r.Context(), pool)
+
 		query := fmt.Sprintf(`
 			SELECT i.inbox_id::text, i.mailbox_address, COALESCE(i.display_name,''),
 			       COALESCE(i.domain,''), i.filters_json, i.poll_interval_secs,
@@ -340,18 +388,36 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 			       COALESCE(i.submitted_by,''), COALESCE(i.approved_by,''),
 			       COALESCE(i.source_type,'OUTLOOK_GRAPH'),
 			       %s, %s, %s, %s, %s,
+			       %s, %s, %s, %s, %s,
 			       %s, %s, %s,
 			       %s, %s,
 			       %s, %s,
 			       %s,
+			       COALESCE(i.oauth_provider,''), COALESCE(i.oauth_mail_transport,'api'),
+			       (COALESCE(i.oauth_refresh_token,'') <> ''),
 			       i.graph_last_sync_at, i.graph_sent_last_sync_at,
 			       COALESCE(i.checker_comment,''), i.is_active, i.is_deleted,
 			       COALESCE(i.pending_edit_json::text, 'null'),
-			       i.created_at, i.updated_at
+			       i.created_at, i.updated_at,
+			       ia.requested_at, ia.checker_at
 			FROM email_svc.inbox_config i
+			LEFT JOIN LATERAL (
+				SELECT
+					MAX(a.created_at) FILTER (
+						WHERE a.action_type IN ('CREATE','EDIT','DELETE')
+					) AS requested_at,
+					MAX(a.created_at) FILTER (
+						WHERE a.action_type LIKE 'APPROVE%%'
+					) AS checker_at
+				FROM email_svc.inbox_audit a
+				WHERE a.inbox_id = i.inbox_id
+			) ia ON true
 			WHERE i.is_deleted = false
 		`, emailjobs.SQLCoalesceGraphTenantKey, emailjobs.SQLCoalesceGraphTenantLabel, emailjobs.SQLCoalesceGraphTenantID,
 			emailjobs.SQLCoalesceGraphClientID, emailjobs.SQLCoalesceGraphSecret,
+			emailjobs.SQLCoalesceGoogleWorkspaceTenantKey, emailjobs.SQLCoalesceGoogleWorkspaceTenantLabel,
+			emailjobs.SQLCoalesceGoogleWorkspaceServiceAccountEmail, emailjobs.SQLCoalesceGoogleWorkspaceClientID,
+			emailjobs.SQLCoalesceGoogleWorkspacePrivateKey,
 			emailjobs.SQLCoalesceIMAPProvider, emailjobs.SQLCoalesceIMAPHost, emailjobs.SQLCoalesceIMAPPort,
 			emailjobs.SQLCoalesceIMAPUsername, emailjobs.SQLCoalesceIMAPPassword,
 			emailjobs.SQLCoalesceIMAPInboxFolder, emailjobs.SQLCoalesceIMAPSentFolder,
@@ -375,7 +441,7 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 			query += fmt.Sprintf(" AND i.processing_status = $%d", argN)
 			args = append(args, s)
 		}
-		query += " ORDER BY i.created_at DESC"
+		query += " ORDER BY COALESCE(ia.requested_at, i.created_at) DESC NULLS LAST"
 
 		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {
@@ -389,20 +455,28 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 			var item workflowInbox
 			var pendingText string
 			var graphSecret string
+			var googlePrivateKey string
 			var imapPassword string
+			var oauthProvider string
+			var oauthMailTransport string
+			var oauthConnected bool
 			if err := rows.Scan(
 				&item.InboxID, &item.MailboxAddress, &item.DisplayName, &item.Domain,
 				&item.FiltersJSON, &item.PollIntervalSecs, &item.Module, &item.EntityID,
 				&item.ProcessingStatus, &item.SESSyncStatus, &item.SESSyncedAt, &item.SESLastError,
 				&item.SubmittedBy, &item.ApprovedBy, &item.SourceType,
 				&item.TenantKey, &item.TenantLabel, &item.TenantID, &item.ClientID, &graphSecret,
+				&item.MailboxGoogleWorkspaceFields.WorkspaceTenantKey, &item.MailboxGoogleWorkspaceFields.WorkspaceTenantLabel,
+				&item.MailboxGoogleWorkspaceFields.WorkspaceServiceAccountEmail, &item.MailboxGoogleWorkspaceFields.WorkspaceClientID, &googlePrivateKey,
 				&item.Provider, &item.Host, &item.Port,
 				&item.Username, &imapPassword, &item.InboxFolder,
 				&item.SentFolder, &item.UseTLS,
+				&oauthProvider, &oauthMailTransport, &oauthConnected,
 				&item.GraphLastSyncAt, &item.GraphSentLastSyncAt,
 				&item.CheckerComment,
 				&item.IsActive, &item.IsDeleted, &pendingText,
 				&item.CreatedAt, &item.UpdatedAt,
+				&item.RequestedAt, &item.CheckerAt,
 			); err != nil {
 				emailcommon.RespondInternal(w, err.Error())
 				return
@@ -414,10 +488,17 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 				item.ClientSecret = graphSecret
 				item.GraphSecretSet = true
 			}
+			if googlePrivateKey != "" {
+				item.MailboxGoogleWorkspaceFields.WorkspacePrivateKey = googlePrivateKey
+				item.GooglePrivateKeySet = true
+			}
 			if imapPassword != "" {
 				item.Password = imapPassword
 				item.IMAPPasswordSet = true
 			}
+			item.OAuthProvider = oauthProvider
+			item.OAuthMailTransport = oauthMailTransport
+			item.OAuthConnected = oauthConnected
 			items = append(items, item)
 		}
 		emailcommon.RespondList(w, "inbox/workflow/list", items, len(items))
@@ -463,15 +544,21 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				sourceType = "OUTLOOK_GRAPH"
 			}
 			graphFields := item.MailboxGraphFields
-			customGraph := emailmailbox.GraphFieldsConfigured(graphFields)
-			if !emailmailbox.MailboxAddressAllowed(addr, sourceType, customGraph) {
+			googleFields := item.MailboxGoogleWorkspaceFields
+			customCreds := emailmailbox.GraphFieldsConfigured(graphFields) || emailmailbox.GoogleWorkspaceFieldsConfigured(googleFields)
+			if !emailmailbox.MailboxAddressAllowed(addr, sourceType, customCreds) {
 				errors = append(errors, addr+": domain not allowed for source "+sourceType)
+				continue
+			}
+			if strings.EqualFold(sourceType, "OAUTH") {
+				errors = append(errors, addr+": OAuth mail source is not available yet")
 				continue
 			}
 			domain := strings.TrimPrefix(addr[strings.LastIndex(addr, "@"):], "@")
 			if len(item.FiltersJSON) == 0 {
 				item.FiltersJSON = json.RawMessage(`{}`)
 			}
+			item.FiltersJSON = emailjobs.NormalizeMailboxFiltersJSON(item.FiltersJSON)
 			if item.PollIntervalSecs <= 0 {
 				item.PollIntervalSecs = 60
 			}
@@ -489,6 +576,23 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				imapFields = merged
 			}
+			if strings.EqualFold(sourceType, "OAUTH") && strings.TrimSpace(item.OAuthProvider) == "" {
+				errors = append(errors, addr+": oauth provider required (microsoft or google)")
+				continue
+			}
+			if strings.EqualFold(sourceType, "OAUTH") {
+				if strings.TrimSpace(item.OAuthMailTransport) == "" {
+					item.OAuthMailTransport = "api"
+				}
+				if strings.EqualFold(item.OAuthMailTransport, "imap") {
+					merged, mergeErr := emailmailbox.ResolveIMAPOAuthFields(imapFields, addr)
+					if mergeErr != nil {
+						errors = append(errors, addr+": oauth imap: "+mergeErr.Error())
+						continue
+					}
+					imapFields = merged
+				}
+			}
 			if strings.EqualFold(sourceType, "OUTLOOK_GRAPH") && emailmailbox.GraphFieldsConfigured(graphFields) {
 				merged, mergeErr := emailmailbox.MergeGraphFields(emailmailbox.MailboxGraphFields{}, graphFields)
 				if mergeErr != nil {
@@ -497,9 +601,37 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				graphFields = merged
 			}
+			if strings.EqualFold(sourceType, "GOOGLE_WORKSPACE") && emailmailbox.GoogleWorkspaceFieldsConfigured(googleFields) {
+				merged, mergeErr := emailmailbox.MergeGoogleWorkspaceFields(emailmailbox.MailboxGoogleWorkspaceFields{}, googleFields)
+				if mergeErr != nil {
+					errors = append(errors, addr+": google workspace: "+mergeErr.Error())
+					continue
+				}
+				googleFields = merged
+			}
 			graphTenantKey := strings.TrimSpace(graphFields.TenantKey)
 			if strings.EqualFold(sourceType, "OUTLOOK_GRAPH") && graphTenantKey == "" && !emailmailbox.GraphFieldsConfigured(graphFields) {
 				graphTenantKey = "default"
+			}
+			googleTenantKey := strings.TrimSpace(googleFields.WorkspaceTenantKey)
+			if strings.EqualFold(sourceType, "GOOGLE_WORKSPACE") && googleTenantKey == "" && !emailmailbox.GoogleWorkspaceFieldsConfigured(googleFields) {
+				googleTenantKey = "default"
+			}
+
+			var activeExists bool
+			if err := pool.QueryRow(r.Context(), `
+				SELECT EXISTS(
+					SELECT 1 FROM email_svc.inbox_config
+					WHERE LOWER(mailbox_address) = LOWER($1)
+					  AND COALESCE(is_deleted, false) = false
+				)
+			`, addr).Scan(&activeExists); err != nil {
+				errors = append(errors, addr+": lookup failed")
+				continue
+			}
+			if activeExists {
+				errors = append(errors, addr+": mailbox already exists")
+				continue
 			}
 
 			var inboxID string
@@ -508,21 +640,28 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 					mailbox_address, display_name, domain, filters_json, poll_interval_secs,
 					module, entity_id, is_active, processing_status, source_type,
 					graph_tenant_key, graph_tenant_label, graph_tenant_id, graph_client_id, graph_client_secret,
+					google_workspace_tenant_key, google_workspace_tenant_label,
+					google_workspace_service_account_email, google_workspace_client_id, google_workspace_private_key,
 					imap_provider, imap_host, imap_port, imap_username, imap_password,
 					imap_inbox_folder, imap_sent_folder, imap_use_tls,
+					oauth_provider, oauth_mail_transport,
 					owner_user_id, submitted_by, ses_rule_name
 				) VALUES ($1, $2, $3, $4::jsonb, $5, NULLIF($6,''), NULLIF($7,''), false,
 				          $8, $9,
 				          $10, $11, $12, $13, $14,
 				          $15, $16, $17, $18, $19,
-				          $20, $21, $22,
-				          $23, $24, $25)
+				          $20, $21, $22, $23, $24,
+				          $25, $26, $27,
+				          COALESCE($28,''), COALESCE(NULLIF($29,''),'api'),
+				          $30, $31, $32)
 				RETURNING inbox_id::text
 			`, addr, item.DisplayName, domain, string(item.FiltersJSON), item.PollIntervalSecs,
 				item.Module, entityID, constants.StatusPendingApproval, sourceType,
 				graphTenantKey, graphFields.TenantLabel, graphFields.TenantID, graphFields.ClientID, graphFields.ClientSecret,
+				googleTenantKey, googleFields.WorkspaceTenantLabel, googleFields.WorkspaceServiceAccountEmail, googleFields.WorkspaceClientID, googleFields.WorkspacePrivateKey,
 				imapFields.Provider, imapFields.Host, imapFields.Port, imapFields.Username, imapFields.Password,
 				imapFields.InboxFolder, imapFields.SentFolder, imapFields.UseTLS,
+				strings.TrimSpace(item.OAuthProvider), strings.TrimSpace(item.OAuthMailTransport),
 				userID, userID, "",
 			).Scan(&inboxID)
 			if err != nil {
@@ -648,6 +787,29 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 						merged.TenantKey, merged.TenantLabel, merged.TenantID, merged.ClientID, merged.ClientSecret)
 					argN += 5
 				}
+				if strings.EqualFold(item.SourceType, "GOOGLE_WORKSPACE") && emailmailbox.GoogleWorkspacePatchPresent(item.MailboxGoogleWorkspaceFields) {
+					existing, loadErr := emailmailbox.LoadMailboxGoogleWorkspaceFields(r.Context(), pool, inboxID)
+					if loadErr != nil {
+						errors = append(errors, inboxID+": "+loadErr.Error())
+						continue
+					}
+					merged, mergeErr := emailmailbox.MergeGoogleWorkspaceFields(existing, item.MailboxGoogleWorkspaceFields)
+					if mergeErr != nil {
+						errors = append(errors, inboxID+": google workspace: "+mergeErr.Error())
+						continue
+					}
+					extraSQL += fmt.Sprintf(`,
+					    google_workspace_tenant_key = $%d,
+					    google_workspace_tenant_label = $%d,
+					    google_workspace_service_account_email = $%d,
+					    google_workspace_client_id = $%d,
+					    google_workspace_private_key = $%d`,
+						argN, argN+1, argN+2, argN+3, argN+4)
+					extraArgs = append(extraArgs,
+						merged.WorkspaceTenantKey, merged.WorkspaceTenantLabel, merged.WorkspaceServiceAccountEmail,
+						merged.WorkspaceClientID, merged.WorkspacePrivateKey)
+					argN += 5
+				}
 				_, err := pool.Exec(r.Context(), fmt.Sprintf(`
 					UPDATE email_svc.inbox_config
 					SET display_name = COALESCE(NULLIF($2,''), display_name),
@@ -729,9 +891,11 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if status == constants.StatusPendingApproval {
 				_, _ = pool.Exec(r.Context(), `
-					UPDATE email_svc.inbox_config SET is_deleted = true, deleted_at = now(), deleted_by = $2, processing_status = 'REJECTED'
+					UPDATE email_svc.inbox_config
+					SET processing_status = 'REJECTED', is_active = false, is_deleted = false,
+					    checker_comment = 'Cancelled before approval', updated_at = now()
 					WHERE inbox_id = $1::uuid
-				`, inboxID, userID)
+				`, inboxID)
 				_ = approvalengine.CancelPendingInstances(r.Context(), pool, emailInboxModuleCode, inboxID, userEmail)
 				logInboxAudit(r.Context(), pool, inboxID, "DELETE", "CANCELLED", userID, "", nil)
 				updated = append(updated, inboxID)
@@ -874,8 +1038,10 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 					if json.Unmarshal([]byte(pendingEdit), &edit) == nil {
 						mailbox, existingIMAP, _ := emailmailbox.LoadMailboxIMAPFields(r.Context(), pool, inboxID)
 						existingGraph, _ := emailmailbox.LoadMailboxGraphFields(r.Context(), pool, inboxID)
+						existingGoogle, _ := emailmailbox.LoadMailboxGoogleWorkspaceFields(r.Context(), pool, inboxID)
 						imapFinal := existingIMAP
 						graphFinal := existingGraph
+						googleFinal := existingGoogle
 						if strings.EqualFold(edit.SourceType, "IMAP") && emailmailbox.IMAPPatchPresent(edit.MailboxIMAPFields) {
 							merged, mergeErr := emailmailbox.MergeIMAPFields(existingIMAP, edit.MailboxIMAPFields, mailbox)
 							if mergeErr != nil {
@@ -892,6 +1058,14 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 							}
 							graphFinal = merged
 						}
+						if emailmailbox.GoogleWorkspacePatchPresent(edit.MailboxGoogleWorkspaceFields) {
+							merged, mergeErr := emailmailbox.MergeGoogleWorkspaceFields(existingGoogle, edit.MailboxGoogleWorkspaceFields)
+							if mergeErr != nil {
+								errors = append(errors, inboxID+": google workspace: "+mergeErr.Error())
+								continue
+							}
+							googleFinal = merged
+						}
 						_, err = pool.Exec(r.Context(), `
 							UPDATE email_svc.inbox_config
 							SET display_name = COALESCE(NULLIF($2,''), display_name),
@@ -901,18 +1075,25 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 							    graph_tenant_key = $6,
 							    graph_tenant_label = $7, graph_tenant_id = $8,
 							    graph_client_id = $9, graph_client_secret = $10,
-							    imap_provider = $11, imap_host = $12, imap_port = $13,
-							    imap_username = $14, imap_password = $15,
-							    imap_inbox_folder = $16, imap_sent_folder = $17, imap_use_tls = $18,
-							    processing_status = $19,
+							    google_workspace_tenant_key = $11,
+							    google_workspace_tenant_label = $12,
+							    google_workspace_service_account_email = $13,
+							    google_workspace_client_id = $14,
+							    google_workspace_private_key = $15,
+							    imap_provider = $16, imap_host = $17, imap_port = $18,
+							    imap_username = $19, imap_password = $20,
+							    imap_inbox_folder = $21, imap_sent_folder = $22, imap_use_tls = $23,
+							    processing_status = $24,
 							    pending_edit_json = NULL,
-							    approved_by = $20,
-							    checker_comment = $21,
+							    approved_by = $25,
+							    checker_comment = $26,
 							    updated_at = now()
 							WHERE inbox_id = $1::uuid
 						`, inboxID, edit.DisplayName, emailcommon.NullableJSON(edit.FiltersJSON), edit.PollIntervalSecs,
 							edit.Module,
 							graphFinal.TenantKey, graphFinal.TenantLabel, graphFinal.TenantID, graphFinal.ClientID, graphFinal.ClientSecret,
+							googleFinal.WorkspaceTenantKey, googleFinal.WorkspaceTenantLabel, googleFinal.WorkspaceServiceAccountEmail,
+							googleFinal.WorkspaceClientID, googleFinal.WorkspacePrivateKey,
 							imapFinal.Provider, imapFinal.Host, imapFinal.Port,
 							imapFinal.Username, imapFinal.Password,
 							imapFinal.InboxFolder, imapFinal.SentFolder, imapFinal.UseTLS,
@@ -931,6 +1112,10 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 			case constants.StatusPendingDeleteApproval:
 				var mailbox string
 				_ = pool.QueryRow(r.Context(), `SELECT mailbox_address FROM email_svc.inbox_config WHERE inbox_id = $1::uuid`, inboxID).Scan(&mailbox)
+				if err := emailcommon.DeleteMessagesForInbox(r.Context(), pool, inboxID); err != nil {
+					errors = append(errors, inboxID+": "+err.Error())
+					continue
+				}
 				_, err = pool.Exec(r.Context(), `
 					UPDATE email_svc.inbox_config
 					SET processing_status = 'DELETED', is_deleted = true, is_active = false,
@@ -1097,6 +1282,24 @@ func HandleWorkflowInboxSync(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+func HandleEmailServiceHealth(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			emailcommon.RespondMethodNotAllowed(w)
+			return
+		}
+		healthy := emailjobs.SyncEmailServiceStatus(r.Context(), pool)
+		msg := ""
+		if !healthy {
+			msg = emailjobs.EmailSubscriptionExpiredMsg
+		}
+		emailcommon.RespondPayload(w, "service/health", map[string]interface{}{
+			"healthy": healthy,
+			"message": msg,
+		})
+	}
+}
+
 func HandlePollTrigger(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1114,12 +1317,16 @@ func HandlePollTrigger(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		started := emailjobs.StartInboundPollAsync(pool)
 		graphStarted := emailjobs.StartGraphPollAsync(pool)
+		googleStarted := emailjobs.StartGoogleWorkspacePollAsync(pool)
 		imapStarted := emailjobs.StartIMAPPollAsync(pool)
+		oauthStarted := emailjobs.StartOAuthPollAsync(pool)
 		emailcommon.RespondPayload(w, "poll/trigger", map[string]interface{}{
-			"started":         started || graphStarted || imapStarted,
+			"started":         started || graphStarted || googleStarted || imapStarted || oauthStarted,
 			"inbound_started": started,
 			"graph_started":   graphStarted,
+			"google_started":  googleStarted,
 			"imap_started":    imapStarted,
+			"oauth_started":   oauthStarted,
 			"message":         "Poll started in background; mail arrives within ~60s via cron if already running",
 		})
 	}

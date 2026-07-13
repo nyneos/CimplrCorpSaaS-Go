@@ -72,7 +72,7 @@ type seriesCacheEntry struct {
 }
 
 var (
-	seriesCache   sync.Map
+	seriesCache    sync.Map
 	seriesCacheTTL = 15 * time.Minute
 )
 

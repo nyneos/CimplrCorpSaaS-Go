@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
+	fxnotif "CimplrCorpSaas/api/fx/notification"
 
 	"CimplrCorpSaas/api/constants"
 
@@ -29,15 +29,15 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"payload"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error(), v91ErrorCode(http.StatusBadRequest))
 			return
 		}
 		if req.UserID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired, v91ErrorCode(http.StatusBadRequest))
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "empty payload")
+			respondEnvelopeError(w, http.StatusBadRequest, "empty payload", v91ErrorCode(http.StatusBadRequest))
 			return
 		}
 		requester := ""
@@ -48,23 +48,23 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requester == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
 		updated := make([]string, 0, len(req.Rows))
 
 		for i, p := range req.Rows {
 			if p.ExposureHeaderID == "" {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("missing exposure_header_id at index %d", i))
+				respondEnvelopeError(w, http.StatusBadRequest, fmt.Sprintf("missing exposure_header_id at index %d", i), v91ErrorCode(http.StatusBadRequest))
 				return
 			}
 			if p.NewValueDate == "" {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("missing new_value_date at index %d", i))
+				respondEnvelopeError(w, http.StatusBadRequest, fmt.Sprintf("missing new_value_date at index %d", i), v91ErrorCode(http.StatusBadRequest))
 				return
 			}
 			dt, err := parseFlexibleDate(p.NewValueDate)
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("invalid date at index %d: %v", i, err))
+				respondEnvelopeError(w, http.StatusBadRequest, fmt.Sprintf("invalid date at index %d: %v", i, err), v91ErrorCode(http.StatusBadRequest))
 				return
 			}
 			q := `
@@ -83,7 +83,7 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 
 			var id string
 			if err := row.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("db update error at index %d: %v", i, err))
+				respondEnvelopeError(w, http.StatusInternalServerError, fmt.Sprintf("db update error at index %d: %v", i, err), v91ErrorCode(http.StatusInternalServerError))
 				return
 			}
 
@@ -91,7 +91,13 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			newValues := auditutil.FetchRowSnapshotPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", id)
 			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: requester, OldValues: oldValues, NewValues: newValues})
 		}
-		api.RespondWithPayload(w, true, "value_date updated successfully", updated)
+		respondEnvelopeSuccess(w, "value_date updated successfully", map[string]interface{}{
+			"updated": updated,
+		})
+
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.SourceRouteV91BulkUpdateValueDate, fxnotif.ActionUpdate, req.UserID, requester, "", updated, map[string][]string{
+			"updated": updated,
+		})
 	}
 }
 
@@ -181,7 +187,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ExposureIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSON, v91ErrorCode(http.StatusBadRequest))
 			return
 		}
 		approver := ""
@@ -192,14 +198,14 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if approver == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
 
 		sel := `SELECT exposure_header_id, exposure_creation_status FROM public.exposure_headers WHERE exposure_header_id = ANY($1)`
 		rows, err := pool.Query(ctx, sel, req.ExposureIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error(), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		defer rows.Close()
@@ -225,7 +231,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			uq := `UPDATE public.exposure_headers SET exposure_creation_status='Approved', updated_at=now() WHERE exposure_header_id = ANY($1) RETURNING exposure_header_id`
 			r2, err := pool.Query(ctx, uq, toApprove)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error(), v91ErrorCode(http.StatusInternalServerError))
 				return
 			}
 			defer r2.Close()
@@ -252,7 +258,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			`
 			drows, derr := pool.Query(ctx, delQ, toDelete, approver)
 			if derr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to soft delete headers: "+derr.Error())
+				respondEnvelopeError(w, http.StatusInternalServerError, "failed to soft delete headers: "+derr.Error(), v91ErrorCode(http.StatusInternalServerError))
 				return
 			}
 			for drows.Next() {
@@ -266,7 +272,12 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		resp := map[string]interface{}{"approved": approvedIDs, "deleted": deletedIDs}
-		api.RespondWithPayload(w, true, "", resp)
+		respondEnvelopeSuccess(w, "Exposures approved successfully", resp)
+
+		fxnotif.NotifyExposureBulkAction(ctx, pool, v91ExposureActionSourceRoute(r, fxnotif.SourceRouteV91BulkApprove), fxnotif.ActionApprove, req.UserID, approver, req.Comment, req.ExposureIDs, map[string][]string{
+			"approved": approvedIDs,
+			"deleted":  deletedIDs,
+		})
 	}
 }
 func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
@@ -278,7 +289,7 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ExposureIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSON, v91ErrorCode(http.StatusBadRequest))
 			return
 		}
 		rejector := ""
@@ -289,7 +300,7 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if rejector == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
 
@@ -304,7 +315,7 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := pool.Query(ctx, q, req.ExposureIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error(), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		defer rows.Close()
@@ -316,7 +327,13 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusRejected, CheckerBy: rejector, Comment: req.Comment})
 			}
 		}
-		api.RespondWithPayload(w, true, "", updated)
+		respondEnvelopeSuccess(w, "Exposures rejected successfully", map[string]interface{}{
+			"rejected": updated,
+		})
+
+		fxnotif.NotifyExposureBulkAction(ctx, pool, v91ExposureActionSourceRoute(r, fxnotif.SourceRouteV91BulkReject), fxnotif.ActionReject, req.UserID, rejector, req.Comment, req.ExposureIDs, map[string][]string{
+			"rejected": updated,
+		})
 	}
 }
 
@@ -329,7 +346,7 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ExposureIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSON, v91ErrorCode(http.StatusBadRequest))
 			return
 		}
 		deleter := ""
@@ -340,7 +357,7 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if deleter == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
 
@@ -356,7 +373,7 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := pool.Query(ctx, q, req.ExposureIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error(), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		defer rows.Close()
@@ -368,8 +385,21 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: req.Comment, RequestedBy: deleter, OldValues: nil, NewValues: nil})
 			}
 		}
-		api.RespondWithPayload(w, true, "", deleted)
+		respondEnvelopeSuccess(w, "Exposures marked for delete approval", map[string]interface{}{
+			"deleted": deleted,
+		})
+
+		fxnotif.NotifyExposureBulkAction(ctx, pool, v91ExposureActionSourceRoute(r, fxnotif.SourceRouteV91BulkDelete), fxnotif.ActionDelete, req.UserID, deleter, req.Comment, req.ExposureIDs, map[string][]string{
+			"deleted": deleted,
+		})
 	}
+}
+
+func v91ExposureActionSourceRoute(r *http.Request, fallback string) string {
+	if r != nil && strings.HasPrefix(r.URL.Path, "/fx/exposures/v91/upload/") {
+		return r.URL.Path
+	}
+	return fallback
 }
 
 // func nullifyEmpty(s string) interface{} {

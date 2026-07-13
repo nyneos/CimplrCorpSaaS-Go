@@ -5,6 +5,7 @@ package exposures
 import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
+	fxnotif "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 	"database/sql"
@@ -15,6 +16,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 )
 
@@ -90,7 +92,7 @@ func mapColumns(fields map[string]interface{}, allowed map[string]string) (map[s
 }
 
 // Handler: Update exposure headers, line items, bucketing, hedging proposal
-func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
+func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID           string                 `json:"user_id"`
@@ -370,11 +372,11 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			}
 			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableHedgeProposal, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: actor, OldValues: oldHedging, NewValues: newValues})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"updated":              updated,
+		respondWithSuccess(w, http.StatusOK, "Exposure bucketing updated successfully", map[string]interface{}{
+			"updated": updated,
 		})
+
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteBucketingUpdate, fxnotif.ActionUpdate, req.UserID, actor, reason, []string{req.ExposureHeaderID}, nil)
 	}
 }
 
@@ -503,12 +505,11 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		if perms, ok := exposureBucketingPerms[constants.ExposureBucketing]; ok {
 			resp[constants.ExposureBucketing] = perms
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		respondWithSuccess(w, http.StatusOK, "Exposure bucketing data fetched successfully", resp)
 	}
 }
 
-func DeleteBucketingStatus(db *sql.DB) http.HandlerFunc {
+func DeleteBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID            string   `json:"user_id"`
@@ -588,15 +589,17 @@ func DeleteBucketingStatus(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"deleted":              deleted,
+		respondWithSuccess(w, http.StatusOK, "Exposure bucketing rows marked for delete approval", map[string]interface{}{
+			"deleted": deleted,
+		})
+
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteBucketingDelete, fxnotif.ActionDelete, req.UserID, requestedBy, deleteComment, req.ExposureHeaderIds, map[string][]string{
+			"deleted": deleted,
 		})
 	}
 }
 
-func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
+func ApproveBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID            string   `json:"user_id"`
@@ -736,16 +739,25 @@ func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
 			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: updatedBy, Comment: req.Comments})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"Approved":             approved,
-			"deleted":              deleted,
+		respondWithSuccess(w, http.StatusOK, "Exposure bucketing rows approved successfully", map[string]interface{}{
+			"Approved": approved,
+			"deleted":  deleted,
+		})
+
+		approvedIDs := make([]string, 0, len(approved))
+		for _, rowMap := range approved {
+			if id, ok := rowMap["exposure_header_id"]; ok {
+				approvedIDs = append(approvedIDs, fmt.Sprint(id))
+			}
+		}
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteBucketingApprove, fxnotif.ActionApprove, req.UserID, updatedBy, req.Comments, req.ExposureHeaderIds, map[string][]string{
+			"approved": approvedIDs,
+			"deleted":  deleted,
 		})
 	}
 }
 
-func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
+func RejectBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID            string   `json:"user_id"`
@@ -804,10 +816,18 @@ func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
 				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: constants.StatusRejected, CheckerBy: updatedBy, Comment: req.Comments})
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"Rejected":             rejected,
+		respondWithSuccess(w, http.StatusOK, "Exposure bucketing rows rejected successfully", map[string]interface{}{
+			"Rejected": rejected,
+		})
+
+		rejectedIDs := make([]string, 0, len(rejected))
+		for _, rowMap := range rejected {
+			if id, ok := rowMap["exposure_header_id"]; ok {
+				rejectedIDs = append(rejectedIDs, fmt.Sprint(id))
+			}
+		}
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteBucketingReject, fxnotif.ActionReject, req.UserID, updatedBy, req.Comments, req.ExposureHeaderIds, map[string][]string{
+			"rejected": rejectedIDs,
 		})
 	}
 }

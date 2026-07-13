@@ -32,10 +32,10 @@ type approvedInbox struct {
 	OwnerUserID    string
 }
 
-// ListMessageScopedToUserSQL — after filters $1–$5: $6 admin, $7 userID, $8 entityIDs, $9 userEmail.
+// ListMessageScopedToUserSQL — after filters $1–$6: $7 filterMatchedOnly, $8 admin, $9 userID, $10 entityIDs, $11 userEmail.
 const ListMessageScopedToUserSQL = `
 AND (
-	$6::boolean
+	$8::boolean
 	OR EXISTS (
 		SELECT 1
 		FROM email_svc.inbox_config i
@@ -43,12 +43,12 @@ AND (
 		  AND i.processing_status = 'APPROVED'
 		  AND i.is_active = true
 		  AND (
-		      i.owner_user_id = $7
-		      OR ($9 <> '' AND LOWER(i.mailbox_address) = LOWER($9))
-		      OR i.entity_id = ANY($8::text[])
+		      i.owner_user_id = $9
+		      OR ($11 <> '' AND LOWER(i.mailbox_address) = LOWER($11))
+		      OR i.entity_id = ANY($10::text[])
 		      OR EXISTS (
 		          SELECT 1 FROM email_svc.inbox_members im
-		          WHERE im.inbox_id = i.inbox_id AND im.user_id = $7
+		          WHERE im.inbox_id = i.inbox_id AND im.user_id = $9
 		      )
 		  )
 		  AND (
@@ -66,8 +66,8 @@ AND (
 			WHERE upl_self.message_id = m.message_id
 			  AND upl_self.step = 'UPLOAD_EML'
 			  AND (
-			      upl_self.detail->>'uploaded_by' = $7
-			      OR ($9 <> '' AND upl_self.detail->>'uploaded_by' = $9)
+			      upl_self.detail->>'uploaded_by' = $9
+			      OR ($11 <> '' AND upl_self.detail->>'uploaded_by' = $11)
 			  )
 		)
 	)

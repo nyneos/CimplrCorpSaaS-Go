@@ -4,7 +4,9 @@ import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
+	fxnotif "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/internal/ctxutil"
+	"context"
 	"CimplrCorpSaas/internal/logger"
 	"database/sql"
 	"encoding/json"
@@ -14,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 )
 
@@ -79,9 +82,8 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 data,
+		respondWithSuccess(w, http.StatusOK, "Hedge links fetched successfully", map[string]interface{}{
+			"data": data,
 		})
 	}
 }
@@ -267,11 +269,8 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 				"bank":                  bankName,
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		// json.NewEncoder(w).Encode(response)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 response,
+		respondWithSuccess(w, http.StatusOK, "Forward bookings fetched successfully", map[string]interface{}{
+			"data": response,
 		})
 	}
 }
@@ -451,17 +450,14 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 				})
 			}
 		}
-		// finished processing headers
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 response,
+		respondWithSuccess(w, http.StatusOK, "Exposure headers fetched successfully", map[string]interface{}{
+			"data": response,
 		})
 	}
 }
 
 // Handler: LinkExposureHedge - upsert exposure_hedge_links and log to forward_booking_ledger
-func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
+func LinkExposureHedge(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID           string  `json:"user_id"`
@@ -520,8 +516,16 @@ func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 		`, req.ExposureHeaderID, req.BookingID, auditutil.Actor(req.UserID), auditutil.NullIfBlank(api.ClientIPFromRequest(r)), auditutil.JSONValue(linkMap)); auditErr != nil {
 			logger.LogError("fx hedge link audit failed exposure=%s booking=%s: %v", req.ExposureHeaderID, req.BookingID, auditErr)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "link": linkMap})
+		respondWithSuccess(w, http.StatusOK, "Exposure hedge link saved successfully", map[string]interface{}{
+			"link": linkMap,
+		})
+
+		payload := fxnotif.BuildExposureBulkActionPayload(r.Context(), pool, []string{req.ExposureHeaderID}, fxnotif.ActionLink, req.UserID, "", nil, nil, nil)
+		payloadMap := payload.ToMap()
+		payloadMap["UserID"] = req.UserID
+		payloadMap["BookingID"] = req.BookingID
+		payloadMap["HedgedAmount"] = req.HedgedAmount
+		fxnotif.TriggerFX(context.WithoutCancel(r.Context()), pool, fxnotif.SourceRouteLinkExposureHedge, fxnotif.CorrelationID("FXLINK", req.ExposureHeaderID), payloadMap)
 	}
 }
 

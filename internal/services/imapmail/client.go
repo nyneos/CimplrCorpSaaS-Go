@@ -10,6 +10,7 @@ import (
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
+	"github.com/emersion/go-sasl"
 )
 
 // FetchedMessage is one raw RFC822 message from IMAP.
@@ -26,6 +27,22 @@ type Client struct{}
 
 func NewClient() *Client { return &Client{} }
 
+type xoauth2Client struct {
+	username string
+	token    string
+}
+
+func (a *xoauth2Client) Start() (string, []byte, error) {
+	msg := "user=" + a.username + "\x01auth=Bearer " + a.token + "\x01\x01"
+	return "XOAUTH2", []byte(msg), nil
+}
+
+func (a *xoauth2Client) Next(_ []byte) ([]byte, error) {
+	return nil, nil
+}
+
+var _ sasl.Client = (*xoauth2Client)(nil)
+
 func (c *Client) dial(cfg Config) (*client.Client, error) {
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	var (
@@ -40,9 +57,18 @@ func (c *Client) dial(cfg Config) (*client.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("imap dial %s: %w", addr, err)
 	}
-	if err := imapClient.Login(cfg.Username, cfg.Password); err != nil {
+	var authErr error
+	if strings.EqualFold(strings.TrimSpace(cfg.AuthMode), "oauth") {
+		authErr = imapClient.Authenticate(&xoauth2Client{
+			username: strings.TrimSpace(cfg.Username),
+			token:    strings.TrimSpace(cfg.AccessToken),
+		})
+	} else {
+		authErr = imapClient.Login(cfg.Username, cfg.Password)
+	}
+	if authErr != nil {
 		_ = imapClient.Logout()
-		return nil, fmt.Errorf("imap login: %w", err)
+		return nil, fmt.Errorf("imap login: %w", authErr)
 	}
 	return imapClient, nil
 }

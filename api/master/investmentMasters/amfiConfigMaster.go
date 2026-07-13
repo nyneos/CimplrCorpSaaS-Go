@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	amfiinvest "CimplrCorpSaas/internal/investment"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -108,27 +109,18 @@ func GetDistinctAMCNamesFromAMFI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		query := `
-			WITH amfi_amcs AS (
-    SELECT DISTINCT amc_name
-    FROM investment.amfi_scheme_master_staging
-    WHERE amc_name IS NOT NULL AND amc_name <> ''
-
-    UNION
-
-    SELECT DISTINCT amc_name
-    FROM investment.amfi_nav_staging
-    WHERE amc_name IS NOT NULL AND amc_name <> ''
-)
-SELECT a.amc_name
-FROM amfi_amcs a
-WHERE NOT EXISTS (
-    SELECT 1
-    FROM investment.masteramc m
-    WHERE m.amc_name = a.amc_name
-      AND COALESCE(m.is_deleted, false) = false
-)
-ORDER BY a.amc_name;
-
+			SELECT DISTINCT s.amc_name
+			FROM investment.amfi_scheme_master_staging s
+			WHERE s.amc_name IS NOT NULL
+			  AND TRIM(s.amc_name) <> ''
+			  AND s.amc_name NOT LIKE 'Open Ended Schemes%'
+			  AND NOT EXISTS (
+			    SELECT 1
+			    FROM investment.masteramc m
+			    WHERE LOWER(TRIM(m.amc_name)) = LOWER(TRIM(s.amc_name))
+			      AND COALESCE(m.is_deleted, false) = false
+			  )
+			ORDER BY s.amc_name;
 		`
 
 		rows, err := pgxPool.Query(ctx, query)
@@ -201,6 +193,16 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			amcNames[i] = a.Name
 		}
 
+		schemeAMCNames, err := amfiinvest.ResolveManyToSchemeAMCNames(ctx, pgxPool, amcNames)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve AMC names: "+err.Error())
+			return
+		}
+		if len(schemeAMCNames) == 0 {
+			api.RespondWithPayload(w, true, "No AMFI schemes found for approved AMCs", []map[string]any{})
+			return
+		}
+
 		// scheme_nav_name is unique per plan type; join NAV on scheme_code and pick latest nav_date.
 		schemeQuery := `
 			WITH latest_nav AS (
@@ -230,7 +232,7 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY sm.scheme_nav_name;
 		`
 
-		schemeRows, err := pgxPool.Query(ctx, schemeQuery, amcNames)
+		schemeRows, err := pgxPool.Query(ctx, schemeQuery, schemeAMCNames)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch schemes: "+err.Error())
 			return

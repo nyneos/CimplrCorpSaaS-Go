@@ -52,6 +52,11 @@ spec:
                 secretKeyRef:
                   name: cimplruat-secrets
                   key: DB_NAME
+            - name: DB_SSLMODE
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: DB_SSLMODE
             - name: ENABLE_ADMIN_OVERRIDE
               valueFrom:
                 secretKeyRef:
@@ -182,7 +187,181 @@ spec:
                 secretKeyRef:
                   name: cimplruat-secrets
                   key: BANK_STMT_S3_REGION
-          # Optional: set runtime environment name or port if needed
+            - name: FRONTEND_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: FRONTEND_URL
+            - name: AZURE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: AZURE_CLIENT_ID
+            - name: AZURE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: AZURE_CLIENT_SECRET
+            - name: AZURE_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: AZURE_TENANT_ID
+            - name: AZURE_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: AZURE_REDIRECT_URI
+            - name: AZURE_GRAPH_TENANT_LABEL
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: AZURE_GRAPH_TENANT_LABEL
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: GOOGLE_CLIENT_ID
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: GOOGLE_CLIENT_SECRET
+            - name: GOOGLE_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: GOOGLE_REDIRECT_URI
+            - name: GOOGLE_DWD_SERVICE_ACCOUNT_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: GOOGLE_DWD_SERVICE_ACCOUNT_EMAIL
+            - name: GOOGLE_DWD_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: GOOGLE_DWD_PRIVATE_KEY
+            - name: GOOGLE_DWD_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: GOOGLE_DWD_CLIENT_ID
+            - name: GOOGLE_WORKSPACE_TENANT_LABEL
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: GOOGLE_WORKSPACE_TENANT_LABEL
+            - name: EMAIL_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: EMAIL_SERVICE_KEY
+            - name: EMAIL_POLLER_ENABLED
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: EMAIL_POLLER_ENABLED
+            - name: EMAIL_POLL_INTERVAL_SECS
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: EMAIL_POLL_INTERVAL_SECS
+            - name: GRAPH_POLLER_ENABLED
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: GRAPH_POLLER_ENABLED
+            - name: GRAPH_POLL_INTERVAL_SECS
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: GRAPH_POLL_INTERVAL_SECS
+            - name: OAUTH_POLLER_ENABLED
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: OAUTH_POLLER_ENABLED
+            - name: OAUTH_POLL_INTERVAL_SECS
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: OAUTH_POLL_INTERVAL_SECS
+            - name: EMAIL_POLL_BATCH_SIZE
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: EMAIL_POLL_BATCH_SIZE
+            - name: EMAIL_INBOUND_S3_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: EMAIL_INBOUND_S3_BUCKET
+            - name: EMAIL_INBOUND_S3_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: EMAIL_INBOUND_S3_REGION
+            - name: EMAIL_INBOUND_S3_PREFIX
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: EMAIL_INBOUND_S3_PREFIX
+            - name: EMAIL_INBOUND_S3_PARSED_PREFIX
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: EMAIL_INBOUND_S3_PARSED_PREFIX
+            - name: EMAIL_INBOUND_S3_ATTACH_PREFIX
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: EMAIL_INBOUND_S3_ATTACH_PREFIX
+            - name: EMAIL_ALLOWED_MAILBOX_DOMAINS
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: EMAIL_ALLOWED_MAILBOX_DOMAINS
+            - name: EMAIL_SES_RULE_SET_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: EMAIL_SES_RULE_SET_NAME
+            - name: EMAIL_SES_IAM_ROLE_ARN
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: EMAIL_SES_IAM_ROLE_ARN
+            - name: MAIL_OAUTH_MS_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: MAIL_OAUTH_MS_CLIENT_ID
+            - name: MAIL_OAUTH_MS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: MAIL_OAUTH_MS_CLIENT_SECRET
+            - name: MAIL_OAUTH_GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: MAIL_OAUTH_GOOGLE_CLIENT_ID
+            - name: MAIL_OAUTH_GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: MAIL_OAUTH_GOOGLE_CLIENT_SECRET
+            - name: MAIL_OAUTH_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: MAIL_OAUTH_REDIRECT_URI
+            - name: MAIL_OAUTH_FRONTEND_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: MAIL_OAUTH_FRONTEND_URL
             - name: ENV
               value: "uat"
             - name: APP_PORT
