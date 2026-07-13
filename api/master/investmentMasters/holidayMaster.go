@@ -417,8 +417,9 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		
-		_, err = tx.Exec(ctx, `
+		// Insert holidays and capture the newly created rows so we can raise one
+		// CREATE audit row per holiday in the dedicated holiday audit table.
+		insRows, err := tx.Query(ctx, `
 			INSERT INTO investment.masterholiday
 			(calendar_id, holiday_date, holiday_name, holiday_type, recurrence_rule, notes, ingestion_source, status)
 			SELECT DISTINCT ON (th.calendar_id, lower(btrim(th.holiday_name)))
@@ -430,24 +431,42 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND lower(btrim(mh.holiday_name)) = lower(btrim(th.holiday_name))
 				  AND COALESCE(mh.is_deleted,false)=false
 			)
-			ORDER BY th.calendar_id, lower(btrim(th.holiday_name));
+			ORDER BY th.calendar_id, lower(btrim(th.holiday_name))
+			RETURNING holiday_id::text, calendar_id::text;
 		`)
 		if err != nil {
 			api.RespondWithError(w, 500, "insert error: "+err.Error())
 			return
 		}
-
-		// Create calendar audit once
-		_, err = tx.Exec(ctx, `
-	INSERT INTO investment.auditactioncalendar
-	(calendar_id, actiontype, processing_status, reason, requested_by, requested_at)
-	SELECT DISTINCT calendar_id, 'CREATE', 'PENDING_APPROVAL', 'Holidays Inserted', $1, now()
-	FROM tmp_holiday
-`, userEmail)
-
-		if err != nil {
-			api.RespondWithError(w, 500, "audit insert error: "+err.Error())
+		var newHolidayIDs, newHolidayCalIDs []string
+		for insRows.Next() {
+			var hid, cid string
+			if err := insRows.Scan(&hid, &cid); err != nil {
+				insRows.Close()
+				api.RespondWithError(w, 500, "insert scan error: "+err.Error())
+				return
+			}
+			newHolidayIDs = append(newHolidayIDs, hid)
+			newHolidayCalIDs = append(newHolidayCalIDs, cid)
+		}
+		insRows.Close()
+		if err := insRows.Err(); err != nil {
+			api.RespondWithError(w, 500, "insert error: "+err.Error())
 			return
+		}
+
+		// One CREATE audit row per newly inserted holiday (dedicated holiday audit).
+		if len(newHolidayIDs) > 0 {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO investment.auditactionmasterholiday
+				(holiday_id, calendar_id, actiontype, processing_status, reason, requested_by, requested_at)
+				SELECT hid, cid, 'CREATE', 'PENDING_APPROVAL', 'Holidays Inserted', $3, now()
+				FROM unnest($1::text[], $2::text[]) AS t(hid, cid)
+			`, newHolidayIDs, newHolidayCalIDs, userEmail)
+			if err != nil {
+				api.RespondWithError(w, 500, "audit insert error: "+err.Error())
+				return
+			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -889,7 +908,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Dedupe on holiday name only (case-insensitive) within the calendar: DISTINCT ON
 			// collapses same-name rows in this file; NOT EXISTS skips names already saved.
-			_, err = tx.Exec(ctx, `
+			uplRows, err := tx.Query(ctx, `
 				INSERT INTO investment.masterholiday
 				(calendar_id, holiday_date, holiday_name, holiday_type, recurrence_rule, notes, ingestion_source, status)
 				SELECT DISTINCT ON (thu.calendar_id, lower(btrim(thu.holiday_name)))
@@ -901,22 +920,42 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					  AND lower(btrim(mh.holiday_name)) = lower(btrim(thu.holiday_name))
 					  AND COALESCE(mh.is_deleted,false)=false
 				)
-				ORDER BY thu.calendar_id, lower(btrim(thu.holiday_name));
+				ORDER BY thu.calendar_id, lower(btrim(thu.holiday_name))
+				RETURNING holiday_id::text, calendar_id::text;
 			`)
 			if err != nil {
 				api.RespondWithError(w, 500, "insert: "+err.Error())
 				return
 			}
-
-			_, err = tx.Exec(ctx, `
-				INSERT INTO investment.auditactioncalendar
-				(calendar_id, actiontype, processing_status, reason, requested_by, requested_at)
-				SELECT DISTINCT calendar_id, 'CREATE','PENDING_APPROVAL','Holidays Inserted (Bulk)', $1, now()
-				FROM tmp_holiday_upload
-			`, userEmail)
-			if err != nil {
-				api.RespondWithError(w, 500, "audit: "+err.Error())
+			var uplHolIDs, uplHolCalIDs []string
+			for uplRows.Next() {
+				var hid, cid string
+				if err := uplRows.Scan(&hid, &cid); err != nil {
+					uplRows.Close()
+					api.RespondWithError(w, 500, "insert scan: "+err.Error())
+					return
+				}
+				uplHolIDs = append(uplHolIDs, hid)
+				uplHolCalIDs = append(uplHolCalIDs, cid)
+			}
+			uplRows.Close()
+			if err := uplRows.Err(); err != nil {
+				api.RespondWithError(w, 500, "insert: "+err.Error())
 				return
+			}
+
+			// One CREATE audit row per newly inserted holiday (dedicated holiday audit).
+			if len(uplHolIDs) > 0 {
+				_, err = tx.Exec(ctx, `
+					INSERT INTO investment.auditactionmasterholiday
+					(holiday_id, calendar_id, actiontype, processing_status, reason, requested_by, requested_at)
+					SELECT hid, cid, 'CREATE','PENDING_APPROVAL','Holidays Inserted (Bulk)', $3, now()
+					FROM unnest($1::text[], $2::text[]) AS t(hid, cid)
+				`, uplHolIDs, uplHolCalIDs, userEmail)
+				if err != nil {
+					api.RespondWithError(w, 500, "audit: "+err.Error())
+					return
+				}
 			}
 
 			if err := tx.Commit(ctx); err != nil {
@@ -1361,26 +1400,34 @@ history AS (
     GROUP BY calendar_id
 ),
 hol AS (
-	SELECT 
-        holiday_id,
-        holiday_date,
-        old_holiday_date,
-        holiday_name,
-        old_holiday_name,
-        holiday_type,
-        old_holiday_type,
-        recurrence_rule,
-        old_recurrence_rule,
-        notes,
-        old_notes,
-        status,
-        old_status,
-        ingestion_source
-	FROM investment.masterholiday
-	WHERE calendar_id = $1
-	  AND COALESCE(is_deleted,false)=false
-	  AND UPPER(status) = 'ACTIVE'
-	ORDER BY holiday_date
+	SELECT
+        mh.holiday_id,
+        mh.holiday_date,
+        mh.old_holiday_date,
+        mh.holiday_name,
+        mh.old_holiday_name,
+        mh.holiday_type,
+        mh.old_holiday_type,
+        mh.recurrence_rule,
+        mh.old_recurrence_rule,
+        mh.notes,
+        mh.old_notes,
+        mh.status,
+        mh.old_status,
+        mh.ingestion_source
+	FROM investment.masterholiday mh
+	WHERE mh.calendar_id = $1
+	  AND COALESCE(mh.is_deleted,false)=false
+	  AND UPPER(mh.status) = 'ACTIVE'
+	  -- Gate on the holiday's OWN latest audit being APPROVED (decoupled pipeline).
+	  AND UPPER(COALESCE((
+	        SELECT a.processing_status
+	        FROM investment.auditactionmasterholiday a
+	        WHERE a.holiday_id::text = mh.holiday_id::text
+	        ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC, a.action_id DESC
+	        LIMIT 1
+	      ),'')) = 'APPROVED'
+	ORDER BY mh.holiday_date
 )
 
 SELECT
@@ -1884,12 +1931,16 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Insert audit
-		_, err = tx.Exec(ctx, `
+		// Insert audit (per-field old_/new_ columns)
+		calOld, calNew := buildCalendarAuditSnapshot(oldVals, req.Fields)
+		cCols, cPlaceholders, cArgs := buildAuditValueColumns(calOld, calNew, 4)
+		calAuditQuery := fmt.Sprintf(`
             INSERT INTO investment.auditactioncalendar
-            (calendar_id, actiontype, processing_status, reason, requested_by, requested_at)
-            VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
-        `, req.CalendarID, req.Reason, userEmail)
+            (calendar_id, actiontype, processing_status, reason, requested_by, requested_at%s)
+            VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now()%s)
+        `, cCols, cPlaceholders)
+		cExecArgs := append([]interface{}{req.CalendarID, req.Reason, userEmail}, cArgs...)
+		_, err = tx.Exec(ctx, calAuditQuery, cExecArgs...)
 		if err != nil {
 			api.RespondWithError(w, 500, constants.ErrAuditInsertFailed+err.Error())
 			return
@@ -2150,8 +2201,14 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			oldValuesMap[field] = oldStr
 			newValuesMap[field] = newStr
 		}
-		oldValuesJSON, _ := json.Marshal(oldValuesMap)
-		newValuesJSON, _ := json.Marshal(newValuesMap)
+		// Per-field old_/new_ audit columns. Empty strings map to NULL so typed
+		// columns (e.g. old_holiday_date/new_holiday_date) accept them.
+		auditOldValues := map[string]interface{}{}
+		auditNewValues := map[string]interface{}{}
+		for k := range newValuesMap {
+			auditOldValues[k] = emptyStringToNil(oldValuesMap[k])
+			auditNewValues[k] = emptyStringToNil(newValuesMap[k])
+		}
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			tx.Rollback(ctx)
@@ -2159,11 +2216,14 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		_, err = tx.Exec(ctx, `
-			INSERT INTO investment.auditactioncalendar
-			(calendar_id, actiontype, processing_status, reason, requested_by, requested_at, old_values, new_values)
-			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4::jsonb,$5::jsonb)
-		`, calendarID, req.Reason, userEmail, string(oldValuesJSON), string(newValuesJSON))
+		auditCols, auditPlaceholders, auditArgs := buildAuditValueColumns(auditOldValues, auditNewValues, 5)
+		auditQuery := fmt.Sprintf(`
+			INSERT INTO investment.auditactionmasterholiday
+			(holiday_id, calendar_id, actiontype, processing_status, reason, requested_by, requested_at%s)
+			VALUES ($1,$2,'EDIT','PENDING_EDIT_APPROVAL',$3,$4,now()%s)
+		`, auditCols, auditPlaceholders)
+		execArgs := append([]interface{}{req.HolidayID, calendarID, req.Reason, userEmail}, auditArgs...)
+		_, err = tx.Exec(ctx, auditQuery, execArgs...)
 		if err != nil {
 			tx.Rollback(ctx)
 			api.RespondWithError(w, 500, constants.ErrAuditInsertFailed+err.Error())
@@ -2344,19 +2404,72 @@ func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			// Per-holiday EDIT audit row in the dedicated holiday audit table.
+			holOld := map[string]interface{}{}
+			holNew := map[string]interface{}{}
+			for _, f := range allowedH {
+				val, ok := h[f]
+				if !ok {
+					continue
+				}
+				var oldStr, newStr string
+				if f == "holiday_date" {
+					oldStr = holidayDateToStr(old[f])
+					newStr = holidayDateToStr(val)
+				} else {
+					if old[f] != nil {
+						oldStr = strings.TrimSpace(fmt.Sprint(old[f]))
+					}
+					if val != nil {
+						newStr = strings.TrimSpace(fmt.Sprint(val))
+					}
+				}
+				if oldStr == newStr {
+					continue
+				}
+				holOld[f] = oldStr
+				holNew[f] = newStr
+			}
+			holAuditOld := map[string]interface{}{}
+			holAuditNew := map[string]interface{}{}
+			for k := range holNew {
+				holAuditOld[k] = emptyStringToNil(holOld[k])
+				holAuditNew[k] = emptyStringToNil(holNew[k])
+			}
+			hCols, hPlaceholders, hArgs := buildAuditValueColumns(holAuditOld, holAuditNew, 5)
+			hAuditQuery := fmt.Sprintf(`
+				INSERT INTO investment.auditactionmasterholiday
+				(holiday_id, calendar_id, actiontype, processing_status, reason, requested_by, requested_at%s)
+				VALUES ($1,$2,'EDIT','PENDING_EDIT_APPROVAL',$3,$4,now()%s)
+			`, hCols, hPlaceholders)
+			hExecArgs := append([]interface{}{holidayID, req.CalendarID, req.Reason, userEmail}, hArgs...)
+			if _, err := tx.Exec(ctx, hAuditQuery, hExecArgs...); err != nil {
+				holidayResults = append(holidayResults, map[string]string{
+					"id": holidayID, constants.KeyStatus: "failed", constants.ValueError: "audit: " + err.Error(),
+				})
+				continue
+			}
+
 			holidayResults = append(holidayResults, map[string]string{
 				"id": holidayID, constants.KeyStatus: "updated",
 			})
 		}
 
-		_, err = tx.Exec(ctx, `
-			INSERT INTO investment.auditactioncalendar
-			(calendar_id, actiontype, processing_status, reason, requested_by, requested_at)
-			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
-		`, req.CalendarID, req.Reason, userEmail)
-		if err != nil {
-			api.RespondWithError(w, 500, "audit failed: "+err.Error())
-			return
+	
+		if len(calSets) > 0 {
+			calOld, calNew := buildCalendarAuditSnapshot(oldVals, req.CalendarFields)
+			cCols, cPlaceholders, cArgs := buildAuditValueColumns(calOld, calNew, 4)
+			calAuditQuery := fmt.Sprintf(`
+				INSERT INTO investment.auditactioncalendar
+				(calendar_id, actiontype, processing_status, reason, requested_by, requested_at%s)
+				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now()%s)
+			`, cCols, cPlaceholders)
+			cExecArgs := append([]interface{}{req.CalendarID, req.Reason, userEmail}, cArgs...)
+			_, err = tx.Exec(ctx, calAuditQuery, cExecArgs...)
+			if err != nil {
+				api.RespondWithError(w, 500, "audit failed: "+err.Error())
+				return
+			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -2407,13 +2520,19 @@ func GetPastYearsHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		query := `
-WITH latest_audit AS (
+WITH cal_latest AS (
 	SELECT DISTINCT ON (calendar_id)
 	       calendar_id, processing_status
 	FROM investment.auditactioncalendar
 	ORDER BY calendar_id, requested_at DESC
+),
+hol_latest AS (
+	SELECT DISTINCT ON (holiday_id)
+	       holiday_id, processing_status
+	FROM investment.auditactionmasterholiday
+	ORDER BY holiday_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamptz), COALESCE(checker_at,'1970-01-01'::timestamptz)) DESC, action_id DESC
 )
-SELECT 
+SELECT
 	h.holiday_id,
 	h.holiday_date,
 	h.holiday_name,
@@ -2421,11 +2540,13 @@ SELECT
 	h.recurrence_rule,
 	h.notes
 FROM investment.mastercalendar c
-JOIN latest_audit a ON a.calendar_id = c.calendar_id
+JOIN cal_latest a ON a.calendar_id = c.calendar_id
 JOIN investment.masterholiday h ON h.calendar_id = c.calendar_id
-WHERE 
+JOIN hol_latest ha ON ha.holiday_id::text = h.holiday_id::text
+WHERE
 	c.status = 'Active'
 	AND UPPER(a.processing_status) = 'APPROVED'
+	AND UPPER(ha.processing_status) = 'APPROVED'
 	AND COALESCE(c.is_deleted,false) = false
 	AND COALESCE(h.is_deleted,false) = false
 	AND UPPER(h.status) = 'ACTIVE'
@@ -2475,22 +2596,49 @@ func coalesceStrPtr(v *string) string {
 	return *v
 }
 
+// holidayDateToStr canonicalizes any holiday_date value (time.Time, *time.Time,
+// or string) to YYYY-MM-DD so old/new snapshots compare reliably.
+func holidayDateToStr(x interface{}) string {
+	if x == nil {
+		return ""
+	}
+	switch t := x.(type) {
+	case time.Time:
+		return t.Format(constants.DateFormat)
+	case *time.Time:
+		if t == nil {
+			return ""
+		}
+		return t.Format(constants.DateFormat)
+	case string:
+		return NormalizeDate(t)
+	default:
+		return NormalizeDate(fmt.Sprint(t))
+	}
+}
+
 // DeleteHoliday soft-deletes a single holiday entry (sets is_deleted=true).
 // POST /master/calendar/holiday/delete
 // Body: { "holiday_id": "...", "calendar_id": "..." }
 func DeleteHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID     string `json:"user_id"`
-			HolidayID  string `json:"holiday_id"`
-			CalendarID string `json:"calendar_id"`
+			UserID     string   `json:"user_id"`
+			HolidayID  string   `json:"holiday_id"`
+			HolidayIDs []string `json:"holiday_ids"`
+			CalendarID string   `json:"calendar_id"`
+			Reason     string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, 400, constants.ErrInvalidJSONShort)
 			return
 		}
-		if strings.TrimSpace(req.HolidayID) == "" || strings.TrimSpace(req.CalendarID) == "" {
-			api.RespondWithError(w, 400, "holiday_id and calendar_id are required")
+		ids := req.HolidayIDs
+		if len(ids) == 0 && strings.TrimSpace(req.HolidayID) != "" {
+			ids = []string{req.HolidayID}
+		}
+		if len(ids) == 0 {
+			api.RespondWithError(w, 400, "holiday_id or holiday_ids required")
 			return
 		}
 
@@ -2514,13 +2662,18 @@ func DeleteHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
+		// Approval-gated delete: raise a PENDING_DELETE_APPROVAL request per holiday
+		// in the dedicated holiday audit table. The master row is NOT soft-deleted
+		// until a checker approves (see BulkApproveHolidayActions).
 		tag, err := tx.Exec(ctx, `
-			UPDATE investment.masterholiday
-			SET is_deleted = true, status = 'Inactive'
-			WHERE holiday_id = $1 AND calendar_id = $2 AND COALESCE(is_deleted, false) = false
-		`, req.HolidayID, req.CalendarID)
+			INSERT INTO investment.auditactionmasterholiday
+			(holiday_id, calendar_id, actiontype, processing_status, reason, requested_by, requested_at)
+			SELECT mh.holiday_id::text, mh.calendar_id::text, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now()
+			FROM investment.masterholiday mh
+			WHERE mh.holiday_id = ANY($1) AND COALESCE(mh.is_deleted, false) = false
+		`, ids, req.Reason, userEmail)
 		if err != nil {
-			api.RespondWithError(w, 500, "delete failed: "+err.Error())
+			api.RespondWithError(w, 500, "delete request failed: "+err.Error())
 			return
 		}
 		if tag.RowsAffected() == 0 {
@@ -2533,6 +2686,9 @@ func DeleteHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "Holiday deleted successfully", nil)
+		api.RespondWithPayload(w, true, "", map[string]any{
+			"delete_requested":  ids,
+			constants.KeyStatus: constants.StatusPendingDeleteApproval,
+		})
 	}
 }

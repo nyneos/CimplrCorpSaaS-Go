@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -87,16 +88,63 @@ func respondMasterAuditPayload(w http.ResponseWriter, payload interface{}) {
 	})
 }
 
-func marshalAuditValueSnapshots(oldValues, newValues map[string]interface{}) (string, string, error) {
-	oldJSON, err := json.Marshal(oldValues)
-	if err != nil {
-		return "", "", err
+// emptyStringToNil returns nil for an empty/whitespace string value so that a
+// typed audit column (e.g. a date column) receives SQL NULL rather than "".
+func emptyStringToNil(v interface{}) interface{} {
+	if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+		return nil
 	}
-	newJSON, err := json.Marshal(newValues)
-	if err != nil {
-		return "", "", err
+	return v
+}
+
+// buildAuditValueColumns turns per-field old/new value maps into the dynamic
+// `old_<field>`/`new_<field>` column fragment, placeholder fragment, and argument
+// slice for a masters audit INSERT (Pattern B). Only fields present in newValues
+// are written, so unchanged fields stay NULL. startPos is the first positional
+// placeholder to use (i.e. one past the fixed leading params of the INSERT).
+//
+// The returned cols/placeholders fragments are prefixed with ", " when non-empty
+// so they can be appended directly after the fixed column/value lists. If no
+// fields are present, all three return values are empty/nil.
+func buildAuditValueColumns(oldValues, newValues map[string]interface{}, startPos int) (cols, placeholders string, args []interface{}) {
+	var colParts, phParts []string
+	pos := startPos
+	for k := range newValues {
+		colParts = append(colParts, "old_"+k, "new_"+k)
+		phParts = append(phParts, fmt.Sprintf("$%d", pos), fmt.Sprintf("$%d", pos+1))
+		args = append(args, oldValues[k], newValues[k])
+		pos += 2
 	}
-	return string(oldJSON), string(newJSON), nil
+	if len(colParts) == 0 {
+		return "", "", nil
+	}
+	return ", " + strings.Join(colParts, ", "), ", " + strings.Join(phParts, ", "), args
+}
+
+// calendarAuditFields are the calendar business fields that have dedicated
+// old_/new_ columns on investment.auditactioncalendar.
+var calendarAuditFields = map[string]bool{
+	"calendar_code": true, "calendar_name": true, "scope": true, "country": true,
+	"state": true, "city": true, "timezone": true, "weekend_pattern": true,
+	"status": true,
+}
+
+// buildCalendarAuditSnapshot builds the old/new value maps for a calendar EDIT
+// audit row, restricted to the audited calendar fields (those with old_/new_
+// columns). oldVals is the pre-update calendar row; newFields is the incoming
+// edit payload.
+func buildCalendarAuditSnapshot(oldVals, newFields map[string]interface{}) (oldM, newM map[string]interface{}) {
+	oldM = map[string]interface{}{}
+	newM = map[string]interface{}{}
+	for k, v := range newFields {
+		f := strings.ToLower(k)
+		if !calendarAuditFields[f] {
+			continue
+		}
+		oldM[f] = emptyStringToNil(oldVals[f])
+		newM[f] = emptyStringToNil(v)
+	}
+	return oldM, newM
 }
 
 // ─── GetInterestTypeAuditHistory ─────────────────────────────────────────────
@@ -809,34 +857,45 @@ func GetAMCAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.checker_ip,'') AS checker_ip,
 				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment,
-				COALESCE(a.old_values, '{}'::jsonb)::text AS old_values,
-				COALESCE(a.new_values, '{}'::jsonb)::text AS new_values,
+				COALESCE(a.old_amc_name,'') AS old_amc_name,
+				COALESCE(a.new_amc_name,'') AS new_amc_name,
+				COALESCE(a.old_internal_amc_code,'') AS old_internal_amc_code,
+				COALESCE(a.new_internal_amc_code,'') AS new_internal_amc_code,
+				COALESCE(a.old_status,'') AS old_status,
+				COALESCE(a.new_status,'') AS new_status,
+				COALESCE(a.old_primary_contact_name,'') AS old_primary_contact_name,
+				COALESCE(a.new_primary_contact_name,'') AS new_primary_contact_name,
+				COALESCE(a.old_primary_contact_email,'') AS old_primary_contact_email,
+				COALESCE(a.new_primary_contact_email,'') AS new_primary_contact_email,
+				COALESCE(a.old_sebi_registration_no,'') AS old_sebi_registration_no,
+				COALESCE(a.new_sebi_registration_no,'') AS new_sebi_registration_no,
+				COALESCE(a.old_amc_beneficiary_name,'') AS old_amc_beneficiary_name,
+				COALESCE(a.new_amc_beneficiary_name,'') AS new_amc_beneficiary_name,
+				COALESCE(a.old_amc_bank_account_no,'') AS old_amc_bank_account_no,
+				COALESCE(a.new_amc_bank_account_no,'') AS new_amc_bank_account_no,
+				COALESCE(a.old_amc_bank_name,'') AS old_amc_bank_name,
+				COALESCE(a.new_amc_bank_name,'') AS new_amc_bank_name,
+				COALESCE(a.old_amc_bank_ifsc,'') AS old_amc_bank_ifsc,
+				COALESCE(a.new_amc_bank_ifsc,'') AS new_amc_bank_ifsc,
+				COALESCE(a.old_mfu_amc_code,'') AS old_mfu_amc_code,
+				COALESCE(a.new_mfu_amc_code,'') AS new_mfu_amc_code,
+				COALESCE(a.old_cams_amc_code,'') AS old_cams_amc_code,
+				COALESCE(a.new_cams_amc_code,'') AS new_cams_amc_code,
+				COALESCE(a.old_erp_vendor_code,'') AS old_erp_vendor_code,
+				COALESCE(a.new_erp_vendor_code,'') AS new_erp_vendor_code,
 				COALESCE(m.amc_name,'') AS amc_name,
-				COALESCE(m.old_amc_name,'') AS old_amc_name,
 				COALESCE(m.internal_amc_code,'') AS internal_amc_code,
-				COALESCE(m.old_internal_amc_code,'') AS old_internal_amc_code,
 				COALESCE(m.status,'') AS status,
-				COALESCE(m.old_status,'') AS old_status,
 				COALESCE(m.primary_contact_name,'') AS primary_contact_name,
-				COALESCE(m.old_primary_contact_name,'') AS old_primary_contact_name,
 				COALESCE(m.primary_contact_email,'') AS primary_contact_email,
-				COALESCE(m.old_primary_contact_email,'') AS old_primary_contact_email,
 				COALESCE(m.sebi_registration_no,'') AS sebi_registration_no,
-				COALESCE(m.old_sebi_registration_no,'') AS old_sebi_registration_no,
 				COALESCE(m.amc_beneficiary_name,'') AS amc_beneficiary_name,
-				COALESCE(m.old_amc_beneficiary_name,'') AS old_amc_beneficiary_name,
 				COALESCE(m.amc_bank_account_no,'') AS amc_bank_account_no,
-				COALESCE(m.old_amc_bank_account_no,'') AS old_amc_bank_account_no,
 				COALESCE(m.amc_bank_name,'') AS amc_bank_name,
-				COALESCE(m.old_amc_bank_name,'') AS old_amc_bank_name,
 				COALESCE(m.amc_bank_ifsc,'') AS amc_bank_ifsc,
-				COALESCE(m.old_amc_bank_ifsc,'') AS old_amc_bank_ifsc,
 				COALESCE(m.mfu_amc_code,'') AS mfu_amc_code,
-				COALESCE(m.old_mfu_amc_code,'') AS old_mfu_amc_code,
 				COALESCE(m.cams_amc_code,'') AS cams_amc_code,
-				COALESCE(m.old_cams_amc_code,'') AS old_cams_amc_code,
 				COALESCE(m.erp_vendor_code,'') AS erp_vendor_code,
-				COALESCE(m.old_erp_vendor_code,'') AS old_erp_vendor_code,
 				COALESCE(m.source,'') AS source,
 				COALESCE(m.is_deleted,false) AS is_deleted
 			FROM investment.auditactionamc a
@@ -912,26 +971,33 @@ func GetSchemeAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.checker_ip,'') AS checker_ip,
 				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment,
-				COALESCE(a.old_values, '{}'::jsonb)::text AS old_values,
-				COALESCE(a.new_values, '{}'::jsonb)::text AS new_values,
+				COALESCE(a.old_scheme_name,'') AS old_scheme_name,
+				COALESCE(a.new_scheme_name,'') AS new_scheme_name,
+				COALESCE(a.old_isin,'') AS old_isin,
+				COALESCE(a.new_isin,'') AS new_isin,
+				COALESCE(a.old_amc_name,'') AS old_amc_name,
+				COALESCE(a.new_amc_name,'') AS new_amc_name,
+				COALESCE(a.old_internal_scheme_code,'') AS old_internal_scheme_code,
+				COALESCE(a.new_internal_scheme_code,'') AS new_internal_scheme_code,
+				COALESCE(a.old_internal_risk_rating,'') AS old_internal_risk_rating,
+				COALESCE(a.new_internal_risk_rating,'') AS new_internal_risk_rating,
+				COALESCE(a.old_erp_gl_account,'') AS old_erp_gl_account,
+				COALESCE(a.new_erp_gl_account,'') AS new_erp_gl_account,
+				COALESCE(a.old_amfi_scheme_code,'') AS old_amfi_scheme_code,
+				COALESCE(a.new_amfi_scheme_code,'') AS new_amfi_scheme_code,
+				COALESCE(a.old_status,'') AS old_status,
+				COALESCE(a.new_status,'') AS new_status,
+				COALESCE(a.old_method,'') AS old_method,
+				COALESCE(a.new_method,'') AS new_method,
 				COALESCE(m.scheme_name,'') AS scheme_name,
-				COALESCE(m.old_scheme_name,'') AS old_scheme_name,
 				COALESCE(m.isin,'') AS isin,
-				COALESCE(m.old_isin,'') AS old_isin,
 				COALESCE(m.amc_name,'') AS amc_name,
-				COALESCE(m.old_amc_name,'') AS old_amc_name,
 				COALESCE(m.internal_scheme_code,'') AS internal_scheme_code,
-				COALESCE(m.old_internal_scheme_code,'') AS old_internal_scheme_code,
 				COALESCE(m.internal_risk_rating,'') AS internal_risk_rating,
-				COALESCE(m.old_internal_risk_rating,'') AS old_internal_risk_rating,
 				COALESCE(m.erp_gl_account,'') AS erp_gl_account,
-				COALESCE(m.old_erp_gl_account,'') AS old_erp_gl_account,
 				COALESCE(m.amfi_scheme_code,'') AS amfi_scheme_code,
-				COALESCE(m.old_amfi_scheme_code,'') AS old_amfi_scheme_code,
 				COALESCE(m.status,'') AS status,
-				COALESCE(m.old_status,'') AS old_status,
 				COALESCE(m.method,'') AS method,
-				COALESCE(m.old_method,'') AS old_method,
 				COALESCE(m.source,'') AS source,
 				COALESCE(m.is_deleted,false) AS is_deleted
 			FROM investment.auditactionscheme a
@@ -1007,16 +1073,18 @@ func GetDPAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.checker_ip,'') AS checker_ip,
 				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment,
-				COALESCE(a.old_values, '{}'::jsonb)::text AS old_values,
-				COALESCE(a.new_values, '{}'::jsonb)::text AS new_values,
+				COALESCE(a.old_dp_name,'') AS old_dp_name,
+				COALESCE(a.new_dp_name,'') AS new_dp_name,
+				COALESCE(a.old_dp_code,'') AS old_dp_code,
+				COALESCE(a.new_dp_code,'') AS new_dp_code,
+				COALESCE(a.old_depository,'') AS old_depository,
+				COALESCE(a.new_depository,'') AS new_depository,
+				COALESCE(a.old_status,'') AS old_status,
+				COALESCE(a.new_status,'') AS new_status,
 				COALESCE(m.dp_name,'') AS dp_name,
-				COALESCE(m.old_dp_name,'') AS old_dp_name,
 				COALESCE(m.dp_code,'') AS dp_code,
-				COALESCE(m.old_dp_code,'') AS old_dp_code,
 				COALESCE(m.depository,'') AS depository,
-				COALESCE(m.old_depository,'') AS old_depository,
 				COALESCE(m.status,'') AS status,
-				COALESCE(m.old_status,'') AS old_status,
 				COALESCE(m.source,'') AS source,
 				COALESCE(m.is_deleted,false) AS is_deleted
 			FROM investment.auditactiondp a
@@ -1181,22 +1249,30 @@ func GetDematAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.checker_ip,'') AS checker_ip,
 				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment,
-				COALESCE(a.old_values, '{}'::jsonb)::text AS old_values,
-				COALESCE(a.new_values, '{}'::jsonb)::text AS new_values,
+				COALESCE(a.old_entity_name,'') AS old_entity_name,
+				COALESCE(a.new_entity_name,'') AS new_entity_name,
+				COALESCE(a.old_dp_id,'') AS old_dp_id,
+				COALESCE(a.new_dp_id,'') AS new_dp_id,
+				COALESCE(a.old_depository,'') AS old_depository,
+				COALESCE(a.new_depository,'') AS new_depository,
+				COALESCE(a.old_demat_account_number,'') AS old_demat_account_number,
+				COALESCE(a.new_demat_account_number,'') AS new_demat_account_number,
+				COALESCE(a.old_depository_participant,'') AS old_depository_participant,
+				COALESCE(a.new_depository_participant,'') AS new_depository_participant,
+				COALESCE(a.old_client_id,'') AS old_client_id,
+				COALESCE(a.new_client_id,'') AS new_client_id,
+				COALESCE(a.old_default_settlement_account,'') AS old_default_settlement_account,
+				COALESCE(a.new_default_settlement_account,'') AS new_default_settlement_account,
+				COALESCE(a.old_status,'') AS old_status,
+				COALESCE(a.new_status,'') AS new_status,
 				COALESCE(m.entity_name,'') AS entity_name,
-				COALESCE(m.old_entity_name,'') AS old_entity_name,
+				COALESCE(m.dp_id,'') AS dp_id,
 				COALESCE(m.depository,'') AS depository,
-				COALESCE(m.old_depository,'') AS old_depository,
 				COALESCE(m.demat_account_number,'') AS demat_account_number,
-				COALESCE(m.old_demat_account_number,'') AS old_demat_account_number,
 				COALESCE(m.depository_participant,'') AS depository_participant,
-				COALESCE(m.old_depository_participant,'') AS old_depository_participant,
 				COALESCE(m.client_id,'') AS client_id,
-				COALESCE(m.old_client_id,'') AS old_client_id,
 				COALESCE(m.default_settlement_account,'') AS default_settlement_account,
-				COALESCE(m.old_default_settlement_account,'') AS old_default_settlement_account,
 				COALESCE(m.status,'') AS status,
-				COALESCE(m.old_status,'') AS old_status,
 				COALESCE(m.source,'') AS source,
 				COALESCE(m.is_deleted,false) AS is_deleted
 			FROM investment.auditactiondemat a
@@ -1272,22 +1348,33 @@ func GetCalendarAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.checker_ip,'') AS checker_ip,
 				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
 				COALESCE(a.checker_comment,'') AS checker_comment,
-				COALESCE(a.old_values, '{}'::jsonb)::text AS old_values,
-				COALESCE(a.new_values, '{}'::jsonb)::text AS new_values,
+				COALESCE(a.old_calendar_code,'') AS old_calendar_code,
+				COALESCE(a.new_calendar_code,'') AS new_calendar_code,
+				COALESCE(a.old_calendar_name,'') AS old_calendar_name,
+				COALESCE(a.new_calendar_name,'') AS new_calendar_name,
+				COALESCE(a.old_scope,'') AS old_scope,
+				COALESCE(a.new_scope,'') AS new_scope,
+				COALESCE(a.old_country,'') AS old_country,
+				COALESCE(a.new_country,'') AS new_country,
+				COALESCE(a.old_state,'') AS old_state,
+				COALESCE(a.new_state,'') AS new_state,
+				COALESCE(a.old_city,'') AS old_city,
+				COALESCE(a.new_city,'') AS new_city,
+				COALESCE(a.old_timezone,'') AS old_timezone,
+				COALESCE(a.new_timezone,'') AS new_timezone,
+				COALESCE(a.old_weekend_pattern,'') AS old_weekend_pattern,
+				COALESCE(a.new_weekend_pattern,'') AS new_weekend_pattern,
+				COALESCE(a.old_status,'') AS old_status,
+				COALESCE(a.new_status,'') AS new_status,
 				COALESCE(m.calendar_code,'') AS calendar_code,
-				COALESCE(m.old_calendar_code,'') AS old_calendar_code,
 				COALESCE(m.calendar_name,'') AS calendar_name,
-				COALESCE(m.old_calendar_name,'') AS old_calendar_name,
 				COALESCE(m.scope,'') AS scope,
-				COALESCE(m.old_scope,'') AS old_scope,
 				COALESCE(m.country,'') AS country,
-				COALESCE(m.old_country,'') AS old_country,
+				COALESCE(m.state,'') AS state,
+				COALESCE(m.city,'') AS city,
 				COALESCE(m.timezone,'') AS timezone,
-				COALESCE(m.old_timezone,'') AS old_timezone,
 				COALESCE(m.weekend_pattern,'') AS weekend_pattern,
-				COALESCE(m.old_weekend_pattern,'') AS old_weekend_pattern,
 				COALESCE(m.status,'') AS status,
-				COALESCE(m.old_status,'') AS old_status,
 				COALESCE(m.source,'') AS source,
 				TO_CHAR(m.eff_from,'YYYY-MM-DD') AS eff_from,
 				TO_CHAR(m.eff_to,'YYYY-MM-DD') AS eff_to,
@@ -1321,6 +1408,110 @@ func GetCalendarAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		api.LogInfo("Calendar AuditHistory: returned %d records", len(payload))
+		respondMasterAuditPayload(w, payload)
+	}
+}
+
+// ─── GetHolidayAuditHistory ──────────────────────────────────────────────────
+// POST /master/holiday/audit-history
+// Body: { user_id, holiday_id?, calendar_id? }
+//
+// Reads the dedicated holiday audit table investment.auditactionmasterholiday
+// (decoupled from the calendar audit). Returns the old_values/new_values jsonb
+// snapshots as text, alongside the current holiday row for context.
+
+type holidayAuditHistReq struct {
+	UserID     string `json:"user_id"`
+	HolidayID  string `json:"holiday_id"`
+	CalendarID string `json:"calendar_id"`
+}
+
+func GetHolidayAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+		var req holidayAuditHistReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
+			return
+		}
+		if !validateMasterAuditSession(r.Context()) {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		baseQ := `
+			SELECT
+				a.action_id,
+				a.holiday_id,
+				a.calendar_id,
+				a.actiontype,
+				a.processing_status,
+				COALESCE(a.reason,'') AS reason,
+				COALESCE(a.requested_by,'') AS requested_by,
+				COALESCE(a.requested_ip,'') AS requested_ip,
+				COALESCE(TO_CHAR((a.requested_at AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+				COALESCE(a.checker_by,'') AS checker_by,
+				COALESCE(a.checker_ip,'') AS checker_ip,
+				COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+				COALESCE(a.checker_comment,'') AS checker_comment,
+				COALESCE(TO_CHAR(a.old_holiday_date,'YYYY-MM-DD'),'') AS old_holiday_date,
+				COALESCE(TO_CHAR(a.new_holiday_date,'YYYY-MM-DD'),'') AS new_holiday_date,
+				COALESCE(a.old_holiday_name,'') AS old_holiday_name,
+				COALESCE(a.new_holiday_name,'') AS new_holiday_name,
+				COALESCE(a.old_holiday_type,'') AS old_holiday_type,
+				COALESCE(a.new_holiday_type,'') AS new_holiday_type,
+				COALESCE(a.old_recurrence_rule,'') AS old_recurrence_rule,
+				COALESCE(a.new_recurrence_rule,'') AS new_recurrence_rule,
+				COALESCE(a.old_notes,'') AS old_notes,
+				COALESCE(a.new_notes,'') AS new_notes,
+				COALESCE(a.old_status,'') AS old_status,
+				COALESCE(a.new_status,'') AS new_status,
+				COALESCE(TO_CHAR(m.holiday_date,'YYYY-MM-DD'),'') AS holiday_date,
+				COALESCE(m.holiday_name,'') AS holiday_name,
+				COALESCE(m.holiday_type,'') AS holiday_type,
+				COALESCE(m.recurrence_rule,'') AS recurrence_rule,
+				COALESCE(m.notes,'') AS notes,
+				COALESCE(m.status,'') AS status,
+				COALESCE(m.is_deleted,false) AS is_deleted
+			FROM investment.auditactionmasterholiday a
+			LEFT JOIN investment.masterholiday m ON m.holiday_id::text = a.holiday_id::text`
+
+		var (
+			q    string
+			args []interface{}
+		)
+		switch {
+		case strings.TrimSpace(req.HolidayID) != "":
+			q = baseQ + `
+			WHERE a.holiday_id = $1
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC`
+			args = append(args, req.HolidayID)
+		case strings.TrimSpace(req.CalendarID) != "":
+			q = baseQ + `
+			WHERE a.calendar_id = $1
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC`
+			args = append(args, req.CalendarID)
+		default:
+			q = baseQ + `
+			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+			LIMIT 1000`
+		}
+
+		rows, err := pgxPool.Query(ctx, q, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		payload, err := collectMasterPgxRows(rows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read holiday audit history")
+			return
+		}
+		api.LogInfo("Holiday AuditHistory: returned %d records", len(payload))
 		respondMasterAuditPayload(w, payload)
 	}
 }

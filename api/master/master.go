@@ -372,6 +372,19 @@ func NewMasterServer(db *sql.DB, port string) (*http.Server, *pgxpool.Pool, erro
 	mux.Handle("/master/calendar/years", midGlobalIndep(investmentMasters.GetPastYearsHolidays(pgxPool)))
 	mux.Handle("/master/calendar/audit-history", midGlobalIndep(investmentMasters.GetCalendarAuditHistory(pgxPool)))
 
+	// Holiday Master routes (dedicated pipeline — decoupled holiday audit).
+	// The legacy /master/calendar/holiday/* routes above remain as aliases to the
+	// same handlers so the current frontend keeps working during the FE cutover.
+	mux.Handle("/master/holiday/bulk-create", midGlobalIndep(investmentMasters.CreateHolidayBulk(pgxPool)))
+	mux.Handle("/master/holiday/upload", midGlobalIndep(investmentMasters.UploadHolidayBulk(pgxPool)))
+	mux.Handle("/master/holiday/update", midGlobalIndep(investmentMasters.UpdateHoliday(pgxPool)))
+	mux.Handle("/master/holiday/bulk-delete", midGlobalIndep(investmentMasters.DeleteHoliday(pgxPool)))
+	mux.Handle("/master/holiday/bulk-approve", midGlobalIndep(investmentMasters.BulkApproveHolidayActions(pgxPool)))
+	mux.Handle("/master/holiday/bulk-reject", midGlobalIndep(investmentMasters.BulkRejectHolidayActions(pgxPool)))
+	mux.Handle("/master/holiday/all", midGlobalIndep(investmentMasters.GetHolidaysWithAudit(pgxPool)))
+	mux.Handle("/master/holiday/approved-active", midGlobalIndep(investmentMasters.GetApprovedActiveHolidays(pgxPool)))
+	mux.Handle("/master/holiday/audit-history", midGlobalIndep(investmentMasters.GetHolidayAuditHistory(pgxPool)))
+
 	// Day Count Convention Master routes
 	mux.Handle("/master/day-count-convention/create", midInvestFD(investmentMasters.CreateDayCountConventionSingle(pgxPool)))
 	mux.Handle("/master/day-count-convention/bulk-create", midInvestFD(investmentMasters.CreateDayCountConvention(pgxPool)))
