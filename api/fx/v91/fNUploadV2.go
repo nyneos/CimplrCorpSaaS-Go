@@ -31,8 +31,9 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"golang.org/x/text/encoding/charmap"
 	"time"
+
+	"golang.org/x/text/encoding/charmap"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -956,10 +957,10 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				"Approved",              // exposure_creation_status
 				nil, nil, nil, nil, nil, // approval_comment, approved_by, delete_comment, requested_by, rejection_comment
 				nil, nil, // approved_at, rejected_by
-				nil,           // rejected_at
-				time.Now(),    // time_based
-				nil,           // amount_in_local_currency
-				postDate,      // posting_date
+				nil,                    // rejected_at
+				time.Now(),             // time_based
+				nil,                    // amount_in_local_currency
+				postDate,               // posting_date
 				textVal, glVal, refVal, // text, gl_account, reference
 				addtl,            // additional_header_details
 				exposureCategory, // exposure_category
@@ -2347,7 +2348,7 @@ func originalAmountFromMappedPayload(payload []byte) (decimal.Decimal, bool) {
 type stagingDocMeta struct {
 	Company, Party, Currency, Source  string
 	DocumentDate, PostingDate, NetDue string
-	MappedPayload                   []byte
+	MappedPayload                     []byte
 }
 
 func stagingMetaFromPayload(payload []byte) (docNum string, meta stagingDocMeta, ok bool) {
@@ -2366,13 +2367,13 @@ func stagingMetaFromPayload(payload []byte) (docNum string, meta stagingDocMeta,
 		return "", stagingDocMeta{}, false
 	}
 	meta = stagingDocMeta{
-		Company:      stringFromAny(mp["CompanyCode"]),
-		Party:        stringFromAny(mp["Party"]),
-		Currency:     strings.ToUpper(stringFromAny(mp["DocumentCurrency"])),
-		Source:       stringFromAny(mp["Source"]),
-		DocumentDate: normalizeStagingDate(stringFromAny(mp["DocumentDate"])),
-		PostingDate:  normalizeStagingDate(stringFromAny(mp["PostingDate"])),
-		NetDue:       normalizeStagingDate(stringFromAny(mp["NetDueDate"])),
+		Company:       stringFromAny(mp["CompanyCode"]),
+		Party:         stringFromAny(mp["Party"]),
+		Currency:      strings.ToUpper(stringFromAny(mp["DocumentCurrency"])),
+		Source:        stringFromAny(mp["Source"]),
+		DocumentDate:  normalizeStagingDate(stringFromAny(mp["DocumentDate"])),
+		PostingDate:   normalizeStagingDate(stringFromAny(mp["PostingDate"])),
+		NetDue:        normalizeStagingDate(stringFromAny(mp["NetDueDate"])),
 		MappedPayload: payload,
 	}
 	return docNum, meta, true
@@ -3865,18 +3866,18 @@ type UnallocatedRow struct {
 }
 
 type AllocationRow struct {
-	BaseDocumentID          string `json:"base_document_id"`
-	KnockoffDocumentID      string `json:"knockoff_document_id"`
-	AllocationAmount        string `json:"allocation_amount"`
-	AllocationAmountSigned  string `json:"allocation_amount_signed"`
-	AllocationCurrency      string `json:"allocation_currency"`
-	CompanyCode             string `json:"company_code,omitempty"`
-	CounterpartyCode        string `json:"counterparty_code,omitempty"`
-	Source                  string `json:"source,omitempty"`
-	PostingDate             string `json:"posting_date,omitempty"`
-	DocumentDate            string `json:"document_date,omitempty"`
-	NetDueDate              string `json:"net_due_date,omitempty"`
-	CreatedBy               string `json:"created_by,omitempty"`
+	BaseDocumentID         string `json:"base_document_id"`
+	KnockoffDocumentID     string `json:"knockoff_document_id"`
+	AllocationAmount       string `json:"allocation_amount"`
+	AllocationAmountSigned string `json:"allocation_amount_signed"`
+	AllocationCurrency     string `json:"allocation_currency"`
+	CompanyCode            string `json:"company_code,omitempty"`
+	CounterpartyCode       string `json:"counterparty_code,omitempty"`
+	Source                 string `json:"source,omitempty"`
+	PostingDate            string `json:"posting_date,omitempty"`
+	DocumentDate           string `json:"document_date,omitempty"`
+	NetDueDate             string `json:"net_due_date,omitempty"`
+	CreatedBy              string `json:"created_by,omitempty"`
 }
 
 type AdjustmentRow struct {
@@ -4290,8 +4291,8 @@ func GetBatchExposureAuditV91(pool *pgxpool.Pool) http.HandlerFunc {
 			var (
 				auditRowID, exposureHeaderID, documentID, actionType, processingStatus string
 				requestedBy, requestedIP, checkerBy, checkerIP, checkerComment, reason string
-				requestedAt, checkerAt                                                  sql.NullTime
-				oldVals, newVals, changeSummary                                         []byte
+				requestedAt, checkerAt                                                 sql.NullTime
+				oldVals, newVals, changeSummary                                        []byte
 			)
 			if scanErr := rows.Scan(&auditRowID, &exposureHeaderID, &documentID, &actionType, &processingStatus,
 				&requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP,
